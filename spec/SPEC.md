@@ -120,13 +120,16 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
 
 ### 5.1 Transport and identity
 - Base URL `https://mail-api.proton.me` [verified: proton-cal docs/crypto.md].
-- Client identity header `x-pm-appversion`: which values Proton accepts and
-  which scopes each yields is not settled. Sending the identity of an
-  official Proton client is accepted if nothing else gets calendar access
-  [decided 0008]; a truthful identity is preferred when it works. proton-cal uses `Other`, carbonate
-  reports a `linux-mail@…` value working, caloxide reports an `external-drive`
-  value losing calendar scope [assumed → E03]. The value is configuration,
-  not code, with a tested default.
+- Client identity header `x-pm-appversion`: `Other` is accepted and yields
+  calendar access [verified: E03 gate, R13 evidence; scopes pending]
+  (the author's proton-cal fork sends it and passed its live integration
+  suite, read and write, 2026-11-10); the other candidates and the scope list
+  are measured at the E03 live run (`spec/experiments/E03-client-identity.md`).
+  Sending the identity of an official Proton client is accepted if nothing
+  truthful gets calendar access [decided 0008]. carbonate reports a
+  `linux-mail@…` value working, caloxide an `external-drive` value losing
+  calendar scope [assumed → E03]. The value is configuration, not code, with
+  a tested default [decided 0011, provisional].
 - One token-bucket rate limiter per account, shared by all callers; honour
   `Retry-After`; exponential backoff with jitter on 429/5xx; a circuit
   breaker that pauses sync and raises a status alert after repeated

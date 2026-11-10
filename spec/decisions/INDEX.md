@@ -12,3 +12,4 @@
 | 0008 | An official client identity is acceptable if needed |
 | 0009 | Runs anywhere; exposure is a network matter |
 | 0010 | Login modes: password, password + TOTP |
+| 0011 | Client identity: Other by default (provisional) |

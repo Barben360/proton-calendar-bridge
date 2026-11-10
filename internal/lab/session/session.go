@@ -88,6 +88,7 @@ type Session struct {
 	Client *proton.Client
 
 	manager *proton.Manager
+	opts    Options
 }
 
 // Close releases the client and its manager.
@@ -180,7 +181,7 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 		m.Close()
 		return nil, loginError(o, err)
 	}
-	s := &Session{UID: auth.UID, Scopes: scopes(auth.Scope), Client: c, manager: m}
+	s := &Session{UID: auth.UID, Scopes: scopes(auth.Scope), Client: c, manager: m, opts: o}
 	if o.Recorder != nil {
 		o.Recorder.Forbid(auth.AccessToken)
 		o.Recorder.Forbid(auth.RefreshToken)
@@ -303,7 +304,7 @@ func Resume(ctx context.Context, o Options) (*Session, error) {
 			o.warn(err)
 		}
 	})
-	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m}, nil
+	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
 }
 
 var saveMu sync.Mutex

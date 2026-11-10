@@ -45,7 +45,7 @@ func execute(args []string, stdout, stderr io.Writer) exitcode.Code {
 	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
 	root.PersistentFlags().String("state-dir", "", "lab state directory (default $XDG_STATE_HOME/pcb-lab)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usage(err) })
-	root.AddCommand(loginCmd(), whoamiCmd())
+	root.AddCommand(loginCmd(), whoamiCmd(), probeCmd())
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -98,7 +98,8 @@ func options(cmd *cobra.Command) (session.Options, error) {
 	if err != nil {
 		return session.Options{}, err
 	}
-	return session.Options{AppVersion: os.Getenv("PCB_LAB_APPVERSION"), StateDir: dir}, nil
+	// PCB_LAB_BASEURL points the lab at a fake Proton in tests.
+	return session.Options{BaseURL: os.Getenv("PCB_LAB_BASEURL"), AppVersion: os.Getenv("PCB_LAB_APPVERSION"), StateDir: dir}, nil
 }
 
 // finish prints data (or the failure) the way the command's mode wants.
