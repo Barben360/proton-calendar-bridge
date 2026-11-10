@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -412,5 +414,193 @@ func TestRedactIDNeverReturnsTheWholeID(t *testing.T) {
 	}
 	if got := session.RedactID("5ad57d77-3c1c"); !strings.HasPrefix(got, "5ad5…") {
 		t.Errorf("RedactID = %q", got)
+	}
+}
+
+func TestConcurrentLoginsReachProtonOnce(t *testing.T) {
+	f := newFront(t, &front{})
+	o := opts(t, f)
+	const n = 8
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s, err := session.Login(ctx, o)
+			if s != nil {
+				s.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	ok, blocked := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case exitErr(t, err).Code == exitcode.Blocked:
+			blocked++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if f.authCalls != 1 || ok != 1 || blocked != n-1 {
+		t.Fatalf("/auth/v4 calls = %d, ok = %d, blocked = %d; want 1, 1, %d", f.authCalls, ok, blocked, n-1)
+	}
+}
+
+func TestLoginRefusedWhileLockHeld(t *testing.T) {
+	f := newFront(t, &front{})
+	o := opts(t, f)
+	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(o.StateDir, "login.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close() //nolint:errcheck // test file
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	_, err = session.Login(t.Context(), o)
+	e := exitErr(t, err)
+	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another pcb-lab login is running") {
+		t.Fatalf("got %v", err)
+	}
+	if f.requests != 0 {
+		t.Fatal("Proton reached while the lock was held")
+	}
+}
+
+func TestHVFileLifecycle(t *testing.T) {
+	f := newFront(t, &front{challenge: "T1"})
+	o := opts(t, f)
+	if _, err := session.Login(t.Context(), o); err == nil {
+		t.Fatal("expected the HV stop")
+	}
+	hv := filepath.Join(o.StateDir, "hv.json")
+	if _, err := os.Stat(hv); err != nil {
+		t.Fatalf("hv.json missing after the stop: %v", err)
+	}
+	// 61 s later the author retries with the solved token.
+	f.mu.Lock()
+	f.challenge = ""
+	f.mu.Unlock()
+	o.Now = func() time.Time { return t0.Add(61 * time.Second) }
+	o.CaptchaToken = "T1"
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	defer s.Close()
+	if _, err := os.Stat(hv); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hv.json still present after a successful login: %v", err)
+	}
+}
+
+func TestHVFileRemovedByPlainSuccessfulLogin(t *testing.T) {
+	f := newFront(t, &front{})
+	o := opts(t, f)
+	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hv := filepath.Join(o.StateDir, "hv.json")
+	if err := os.WriteFile(hv, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := os.Stat(hv); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale hv.json kept: %v", err)
+	}
+}
+
+func TestExistingStateDirTightenedTo0700(t *testing.T) {
+	f := newFront(t, &front{})
+	o := opts(t, f)
+	if err := os.MkdirAll(o.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(o.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	fi, _ := os.Stat(o.StateDir)
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("state dir mode = %o, want 700", got)
+	}
+}
+
+func TestResumeReportsFailedTokenWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	f := newFront(t, &front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err := os.Chmod(o.StateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(o.StateDir, 0o700) //nolint:errcheck // t.TempDir cleanup
+	r, err := session.Resume(t.Context(), o)
+	if err == nil {
+		r.Close()
+		t.Fatal("Resume succeeded although the rotated tokens could not be saved")
+	}
+	if !strings.Contains(err.Error(), "saving the rotated session tokens") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTOTPWaitsForTheNextPeriod(t *testing.T) {
+	f := newFront(t, &front{twoFA: true})
+	o := opts(t, f)
+	tp, err := otp.Parse(totpURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Creds.TOTP = tp
+	clock := t0.Add(27 * time.Second) // 3 s before the boundary
+	var slept time.Duration
+	o.Now = func() time.Time { return clock }
+	o.Sleep = func(_ context.Context, d time.Duration) error {
+		slept += d
+		clock = clock.Add(d)
+		return nil
+	}
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	next := tp.Code(t0.Add(30 * time.Second))
+	if slept != 3*time.Second {
+		t.Errorf("slept %s, want 3s", slept)
+	}
+	if len(f.codes) != 1 || f.codes[0] != next {
+		t.Fatalf("code sent = %q, want the next period's %s", f.codes, next)
+	}
+	if tp.Code(t0) == next {
+		t.Fatal("vacuous: both periods give the same code")
 	}
 }

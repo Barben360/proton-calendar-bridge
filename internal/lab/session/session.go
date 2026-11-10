@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,6 +47,31 @@ type Options struct {
 	Recorder     *record.Recorder // optional
 	StateDir     string
 	Now          func() time.Time // nil: time.Now; used for the guard and TOTP
+	// Sleep waits d or until ctx ends; nil: a real timer. Tests inject it.
+	Sleep func(ctx context.Context, d time.Duration) error
+	// Stderr receives the one-line warning when a rotated token cannot be
+	// saved in the background; nil: os.Stderr.
+	Stderr io.Writer
+}
+
+func (o Options) sleep(ctx context.Context, d time.Duration) error {
+	if o.Sleep != nil {
+		return o.Sleep(ctx, d)
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (o Options) warn(err error) {
+	w := o.Stderr
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "pcb-lab: cannot save the rotated session tokens: %v\n", err)
 }
 
 func (o Options) now() time.Time {
@@ -124,6 +150,11 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 	if err := ensureDir(o.StateDir); err != nil {
 		return nil, err
 	}
+	unlock, err := lockLogin(o.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := checkGuard(o.StateDir, o.now()); err != nil {
 		return nil, err
 	}
@@ -138,7 +169,6 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 	var (
 		c    *proton.Client
 		auth proton.Auth
-		err  error
 	)
 	if o.CaptchaToken != "" {
 		hv := &proton.APIHVDetails{Methods: []string{"captcha"}, Token: o.CaptchaToken}
@@ -167,10 +197,18 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 	}
 
 	st := stored{UID: auth.UID, AccessToken: auth.AccessToken, RefreshToken: auth.RefreshToken, Scopes: s.Scopes}
-	c.AddAuthHandler(func(a proton.Auth) { saveRotation(o.StateDir, &st, a) })
 	if err := save(o.StateDir, st); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("saving the session: %w", err)
+	}
+	c.AddAuthHandler(func(a proton.Auth) {
+		if err := saveRotation(o.StateDir, &st, a); err != nil {
+			o.warn(err)
+		}
+	})
+	// The challenge is solved: its file is stale.
+	if err := os.Remove(filepath.Join(o.StateDir, hvFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		o.warn(err)
 	}
 	return s, nil
 }
@@ -180,10 +218,8 @@ func sendTOTP(ctx context.Context, o Options, c *proton.Client) error {
 		return &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the test account has 2FA but no TOTP was given"), Hint: "set PCB_LAB_TOTP"}
 	}
 	if wait := o.Creds.TOTP.Wait(o.now()); wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := o.sleep(ctx, wait); err != nil {
+			return err
 		}
 	}
 	code := o.Creds.TOTP.Code(o.now())
@@ -257,16 +293,23 @@ func Resume(ctx context.Context, o Options) (*Session, error) {
 	if sc := scopes(auth.Scope); len(sc) > 0 {
 		st.Scopes = sc
 	}
-	saveRotation(o.StateDir, &st, auth)
-	c.AddAuthHandler(func(a proton.Auth) { saveRotation(o.StateDir, &st, a) })
+	if err := saveRotation(o.StateDir, &st, auth); err != nil {
+		c.Close()
+		m.Close()
+		return nil, fmt.Errorf("saving the rotated session tokens (the previous refresh token may no longer work): %w", err)
+	}
+	c.AddAuthHandler(func(a proton.Auth) {
+		if err := saveRotation(o.StateDir, &st, a); err != nil {
+			o.warn(err)
+		}
+	})
 	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m}, nil
 }
 
 var saveMu sync.Mutex
 
-// saveRotation persists tokens rotated by Proton. A failed write is
-// ignored: the next run falls back to a login.
-func saveRotation(dir string, st *stored, a proton.Auth) {
+// saveRotation persists tokens rotated by Proton and reports a failed write.
+func saveRotation(dir string, st *stored, a proton.Auth) error {
 	saveMu.Lock()
 	defer saveMu.Unlock()
 	if a.AccessToken != "" {
@@ -275,7 +318,7 @@ func saveRotation(dir string, st *stored, a proton.Auth) {
 	if a.RefreshToken != "" {
 		st.RefreshToken = a.RefreshToken
 	}
-	_ = save(dir, *st)
+	return save(dir, *st)
 }
 
 func save(dir string, st stored) error {
@@ -305,7 +348,10 @@ func ensureDir(dir string) error {
 	if dir == "" {
 		return errors.New("no state directory")
 	}
-	return os.MkdirAll(dir, 0o700)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700) // tighten a directory that already existed
 }
 
 // writeFile writes atomically with mode 0600.
@@ -323,10 +369,21 @@ func writeFile(path string, data []byte) error {
 		_ = f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil { // best effort
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // RedactID shortens an identifier for display: the first four characters
