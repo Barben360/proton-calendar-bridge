@@ -1,7 +1,10 @@
 package otp_test
 
 import (
+	"bytes"
 	"encoding/base32"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,15 @@ import (
 
 func b32(s string) string {
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(s))
+}
+
+func mustParse(t *testing.T, in string) *otp.TOTP {
+	t.Helper()
+	o, err := otp.Parse(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
 }
 
 func at(sec int64) time.Time { return time.Unix(sec, 0) }
@@ -67,12 +79,12 @@ func TestSecretCaseInsensitiveSpacedPadded(t *testing.T) {
 
 func TestCustomPeriod(t *testing.T) {
 	s := b32("12345678901234567890")
-	p60, _ := otp.Parse("otpauth://totp/x?period=60&secret=" + s)
+	p60 := mustParse(t, "otpauth://totp/x?period=60&secret="+s)
 	// counter 0 for both T=0 and T=59 with a 60 s period, so codes match
 	if p60.Code(at(0)) != p60.Code(at(59)) {
 		t.Fatal("period=60 must keep one code across 0..59")
 	}
-	p30, _ := otp.Parse("otpauth://totp/x?secret=" + s)
+	p30 := mustParse(t, "otpauth://totp/x?secret="+s)
 	if p30.Code(at(0)) == p30.Code(at(59)) {
 		t.Fatal("period=30 must change code between T=0 and T=59")
 	}
@@ -142,7 +154,7 @@ func TestErrorsNeverContainInput(t *testing.T) {
 }
 
 func TestWait(t *testing.T) {
-	o, _ := otp.Parse("otpauth://totp/x?secret=" + b32("12345678901234567890"))
+	o := mustParse(t, "otpauth://totp/x?secret="+b32("12345678901234567890"))
 	cases := []struct {
 		unix int64
 		want time.Duration
@@ -155,5 +167,30 @@ func TestWait(t *testing.T) {
 	// sub-second precision
 	if got := o.Wait(time.Unix(28, 500_000_000)); got != 1500*time.Millisecond {
 		t.Errorf("got %v", got)
+	}
+}
+
+func TestNeverPrintsSecretOrStaticCode(t *testing.T) {
+	const raw = "12345678901234567890"
+	cases := map[string]struct {
+		tp    *otp.TOTP
+		leaks []string
+	}{
+		"uri":    {mustParse(t, "otpauth://totp/x?secret="+b32(raw)), []string{b32(raw), raw}},
+		"static": {mustParse(t, "493827"), []string{"493827"}},
+	}
+	for name, c := range cases {
+		out := fmt.Sprintf("%v %+v %#v %s", c.tp, c.tp, c.tp, c.tp)
+		var buf bytes.Buffer
+		slog.New(slog.NewJSONHandler(&buf, nil)).Info("m", slog.Any("totp", c.tp))
+		out += buf.String()
+		for _, l := range c.leaks {
+			if strings.Contains(out, l) {
+				t.Errorf("%s: output leaks %q: %s", name, l, out)
+			}
+		}
+		if !strings.Contains(out, "otp.TOTP(redacted)") {
+			t.Errorf("%s: no redaction marker: %s", name, out)
+		}
 	}
 }

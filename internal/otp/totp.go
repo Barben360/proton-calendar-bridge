@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,7 +23,8 @@ import (
 const (
 	// minValidity is the least remaining validity Wait accepts for a code.
 	minValidity = 5 * time.Second
-	// maxPeriod bounds period so period*time.Second cannot overflow.
+	// maxPeriod bounds period (1..maxPeriod): it prevents period*time.Second
+	// overflowing and a zero period dividing by zero in Code and Wait.
 	maxPeriod = 366 * 24 * 3600
 )
 
@@ -83,7 +85,7 @@ func Parse(s string) (*TOTP, error) {
 	if p := q.Get("period"); p != "" {
 		n, err := strconv.ParseInt(p, 10, 64)
 		if err != nil || n <= 0 || n > maxPeriod {
-			return nil, errors.New("otp: period must be a positive number of seconds")
+			return nil, fmt.Errorf("otp: period must be between 1 and %d seconds", maxPeriod)
 		}
 		t.period = n
 	}
@@ -122,3 +124,14 @@ func (t *TOTP) Wait(now time.Time) time.Duration {
 	}
 	return 0
 }
+
+const redacted = "otp.TOTP(redacted)"
+
+// String hides the seed and static code from fmt.
+func (t *TOTP) String() string { return redacted }
+
+// GoString hides the seed and static code from %#v.
+func (t *TOTP) GoString() string { return redacted }
+
+// LogValue hides the seed and static code from slog.
+func (t *TOTP) LogValue() slog.Value { return slog.StringValue(redacted) }
