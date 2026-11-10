@@ -35,7 +35,7 @@ bin/pcb version
 
 ## Credits
 
-Nothing is reused yet. When logic from another project is reused it is
+`internal/otp` (TOTP) is inspired by the TOTP code in our fork Barben360/proton-cal (`pkg/auth/totp.go`), rewritten with its own tests. When logic from another project is reused it is
 audited, rewritten with our own tests and credited here. Reference projects
 (spec §20): cheeseandcereal/proton-cal (Unlicense) and our fork
 Barben360/proton-cal, develonrails/carbonate, jmdlab/cal-gateway,
