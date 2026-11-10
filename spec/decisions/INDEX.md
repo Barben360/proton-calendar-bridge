@@ -8,3 +8,7 @@
 | 0004 | Thunderbird is the reference client; AI agents are the main consumer |
 | 0005 | Live tests only on a dedicated test account |
 | 0006 | JSCalendar (RFC 8984) as the internal model |
+| 0007 | Scope: a connectable CalDAV interface, nothing more |
+| 0008 | An official client identity is acceptable if needed |
+| 0009 | Runs anywhere; exposure is a network matter |
+| 0010 | Login modes: password, password + TOTP |

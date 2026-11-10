@@ -1,4 +1,4 @@
-# proton-calendar-bridge — specification (draft v1, 2026-11-10)
+# proton-calendar-bridge — specification (draft v2, 2026-11-10)
 
 Status markers used below:
 - **[decided]** the author decided it (see `decisions/`).
@@ -11,21 +11,23 @@ Status markers used below:
 
 The calendar counterpart of Proton Mail Bridge. A daemon logs into a Proton
 account, keeps an up-to-date, decrypted view of Proton Calendar, and serves
-it through standard and agent-friendly adapters. Proton Calendar is
-end-to-end encrypted and has no public API, no CalDAV, and no official
-bridge [verified: proton.me/support/subscribe-to-external-calendar,
-2026-11-10].
+it as a CalDAV server. Proton Calendar is end-to-end encrypted and has no
+public API, no CalDAV, and no official bridge [verified:
+proton.me/support/subscribe-to-external-calendar, 2026-11-10].
+
+**Scope of this spec: a connectable CalDAV interface, nothing more**
+[decided 0007]. Other adapters (REST, MCP, `.ics` feeds) are not planned;
+the architecture only keeps the door open for them (§4).
 
 Success means:
 1. Thunderbird shows every calendar of the account, and two-way edits
    (create, move, edit one occurrence, delete) show up in the Proton web app
-   within the sync interval, and back [decided: Thunderbird is the reference
-   client].
-2. An AI agent reads and writes the calendars it is allowed to, through MCP,
-   with no access to the others [decided: agents are the long-term main
-   consumer].
-3. Everything, install to uninstall, is done from a terminal, including on
-   a server without a display [decided].
+   within the sync interval, and back [decided 0004].
+2. It runs the same way on a desktop (blackwater) and as a headless
+   container on a server (morpheus), like the author's Proton Mail Bridge
+   setup today [decided 0009]; where it is exposed is a network
+   configuration, not a code path.
+3. Everything, install to uninstall, is done from a terminal [decided 0001].
 4. An expired session repairs itself with no human, unless Proton demands a
    CAPTCHA; then one URL to solve from any device and one command resume it.
 5. No silent data loss: an event that cannot be represented faithfully is
@@ -50,49 +52,44 @@ Success means:
 - **Good citizen** [call]. One process per account, one shared rate limiter,
   backoff on 429/5xx, no busy polling, a truthful client identity (§5.1).
   A flagged or banned Proton account is a failure even if the code works.
-- **Agent-drivable CLI** (backsight conventions) [call]: `--json` envelope,
+- **Scriptable CLI** (backsight conventions) [call]: `--json` envelope,
   `--plan`, `--non-interactive`, fixed exit codes (§13).
 
 ## 3. Goals, non-goals, anti-goals
 
-Goals (v1): CalDAV read/write for owned calendars; read-only for subscribed
-and holidays calendars (the author's account has 1 owned, 1 holidays, 2
-subscribed and no shared calendars [verified: `calendars` listing
-2026-11-10]; shared calendars are phase 3 with E10/E14 and a second test
-account); a REST API documented with OpenAPI
-3.1; an MCP server; a complete CLI; `.ics` read-only feeds; install, update,
-doctor, uninstall as commands; Linux (amd64, arm64) and a container image.
+Goals: CalDAV read/write for owned calendars; read-only for subscribed and
+holidays calendars; login with password, or password + TOTP [decided
+0010]; a CLI for everything about the bridge itself (install, service,
+login, status, doctor, CalDAV client credentials, uninstall); a container
+image; Linux amd64 and arm64.
 
-Non-goals (v1): GUIs, CardDAV/contacts, mail, macOS/Windows service
-management (the binary may run there, unsupported), FIDO2 login, sending or
-answering invitations (phase 3, §18), Proton sharing management (inviting
-members), booking pages, "this and following" series splits (refused, §8.4).
+Not planned (not designed here): REST API, MCP, `.ics` feeds, event
+commands in the CLI (Thunderbird is the client), GUIs, updates/signed
+releases (while private), shared calendars, invitations, two-password mode,
+FIDO2, CardDAV, macOS/Windows service management.
 
 Anti-goals (failure even if it works):
 - Plaintext calendar data or reusable credentials on disk unsealed.
-- A listener reachable from the network by default.
-- An agent able to read a calendar it was not granted, or to widen its own
-  grants.
+- A listener reachable beyond loopback without TLS and authentication.
 - Behaviour that gets the Proton account flagged (login storms, CAPTCHA
   loops, unbounded polling).
-- Silent lossy round-trips (an edit in Thunderbird that drops attendees,
-  alarms or exceptions in Proton).
+- Silent lossy round-trips (an edit in Thunderbird that drops alarms or
+  exceptions in Proton).
 
 ## 4. Architecture
 
 ```
-                 ┌──────────────── pcb daemon (one per account) ────────────────┐
- Thunderbird ──▶ │ A1 CalDAV ─┐                                    ┌── A2 .ics  │
- scripts/CLI ──▶ │ A3 REST ───┼──▶ C3 service (use cases, policy) ◀┼── A4 MCP   │
- AI agents ───▶  │            │        │            │              │            │
-                 │            │   C4 sync engine   C5 access       │            │
-                 │            │        │            policy           │            │
-                 │            │   C2 store (cache, state, sealed secrets)        │
-                 │            │        │                                         │
-                 │            └── C1 proton (transport, auth, keys, calendar API,│
-                 │                      change feed, codecs: model ⇄ Proton)     │
-                 └──────────────────────────────────────────────────────────────┘
- CLI (A5) talks to the daemon over the control socket (A3 on a unix socket).
+                 ┌──────────────── pcb daemon (one per account) ─────────────────┐
+ Thunderbird ──▶ │ A1 CalDAV ──▶ C3 service (use cases, access checks)            │
+                 │                    │                                           │
+ pcb CLI ──────▶ │ control API ──────▶│   C4 sync engine                          │
+ (unix socket)   │ (internal)         │        │                                  │
+                 │               C2 store (cache, state, sealed secrets)          │
+                 │                    │                                           │
+                 │               C1 proton (transport, auth, keys, calendar API,  │
+                 │                    change feed, codecs: model ⇄ Proton)        │
+                 └───────────────────────────────────────────────────────────────┘
+ Later adapters (REST, MCP, .ics) would plug into C3 like A1; not planned.
 ```
 
 Binary name: `pcb` [call; short, no "proton" in it, rename-proof].
@@ -106,9 +103,10 @@ Blocks and their contracts:
 | C2 store | SQLite cache of ciphertext rows and sync state; sealed secret store | `store.Cache`, `store.Secrets` | modernc.org/sqlite (pure Go) [call], C0 |
 | C3 service | Use cases: list/get/search/create/update/delete events, calendars, free-busy (local), login flows; applies C5 | `service.API` (Go interface, the only thing adapters call) | C1, C2, C4, C5 |
 | C4 sync | Initial and incremental sync, write queue, conflict detection, backoff | `sync.Engine` | C1, C2 |
-| C5 policy | Clients (CalDAV users, API tokens, MCP agents), per-client calendar grants, disabled operations, audit log | `policy.Decide(client, op, calendar)` | C2 |
+| C5 access | CalDAV client credentials (app passwords), read-only enforcement for subscribed/holidays calendars; per-client grants designed but not built | `access.Check(client, op, calendar)` | C2 |
 | C6 daemon | Process lifecycle, listeners, config, logs, metrics, health | `pcb serve` | all |
-| A1–A5 | Adapters (§9–§12) | protocols | C3 only |
+| A1 | CalDAV adapter (§9) | CalDAV | C3 only |
+| CTL | Control API for the CLI: JSON over HTTP on a unix socket, internal, versioned, not a public API | `pcb` subcommands | C3, C6 |
 
 Rule: adapters never import C1, C2 or C4; they only call `service.API`. A
 second account is a second `service` instance in the same daemon [call;
@@ -123,7 +121,9 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
 ### 5.1 Transport and identity
 - Base URL `https://mail-api.proton.me` [verified: proton-cal docs/crypto.md].
 - Client identity header `x-pm-appversion`: which values Proton accepts and
-  which scopes each yields is not settled. proton-cal uses `Other`, carbonate
+  which scopes each yields is not settled. Sending the identity of an
+  official Proton client is accepted if nothing else gets calendar access
+  [decided 0008]; a truthful identity is preferred when it works. proton-cal uses `Other`, carbonate
   reports a `linux-mail@…` value working, caloxide reports an `external-drive`
   value losing calendar scope [assumed → E03]. The value is configuration,
   not code, with a tested default.
@@ -141,8 +141,8 @@ ready ──refresh fails (auth)──▶ relogin (unattended, if allowed) ─�
 needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locked
 ```
 
-- SRP via go-srp; TOTP; two-password mode; FIDO2 refused with a clear
-  message [verified: proton-cal pkg/auth].
+- SRP via go-srp; password only, or password + TOTP [decided 0010];
+  two-password mode and FIDO2 refused with a clear message for now.
 - Human verification (CAPTCHA): the challenge token can be solved on any
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
   login retried with it [verified: interactive login 2026-11-10]. Whether the
@@ -156,14 +156,9 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   how often the daemon refreshes and when it must relogin.
 - Locked ("password") scope for salts and calendar deletion via SRP to
   `/core/v4/users/unlock` [verified: proton-cal docs/overview.md].
-- Admin channel [call]: anything that changes access or identity (login,
-  grants, clients, config) needs an admin credential: the control socket
-  checks the peer UID (SO_PEERCRED) **and** an admin token sealed in C2 that
-  the CLI reads; grant changes additionally need a confirmation typed at a
-  terminal unless `--non-interactive` comes with the admin token in a file
-  descriptor. Agents never use the control socket: `pcb mcp stdio` connects
-  with the agent's own client token. Rationale: an agent may run as the
-  same OS user (§19).
+- Control channel [call]: the CLI talks to the daemon over a unix socket
+  (0600) that checks the peer UID (SO_PEERCRED). CalDAV clients never use
+  it; they authenticate with their own app password (§9).
 - Credential inputs, in priority order: `--answer`/stdin for non-secrets;
   secrets only from a terminal prompt, a file descriptor (`--password-fd`),
   or environment (`PCB_PASSWORD`, `PCB_TOTP`, … for `pass-cli run`); never
@@ -176,10 +171,9 @@ docs/crypto.md, Proton security-model blog]. Unlocked keys live in memory
 only; the salted key passphrase is sealed in C2.
 
 Signature policy [call]: verify every signed part; a bad or missing
-signature marks the event `integrity: unverified` (visible in REST/MCP as a
-field, in CalDAV as `X-PCB-INTEGRITY`), never silently accepted or dropped.
-Which parts are signed by whom, and whether shared-calendar parts verify
-with the organiser's address key [assumed → E10].
+signature marks the event `integrity: unverified` (in CalDAV as
+`X-PCB-INTEGRITY: unverified`, and in `pcb status`), never silently
+accepted or dropped. Which parts are signed by which key [assumed → E10].
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
@@ -221,8 +215,8 @@ properties assumed → E13]. The codec has a round-trip property test: model
   `proton` extension object (IDs, calendar ID, member ID, part signatures,
   integrity, sequence, raw unknown iCal properties) [decided: JSCalendar;
   call: the extension's content].
-- Codecs: iCalendar ⇄ model (RFC 5545 + RFC 7986 color), JSCalendar JSON
-  (the REST/MCP wire format, RFC 8984 + our extension).
+- Codecs: iCalendar ⇄ model (RFC 5545 + RFC 7986 color). A JSCalendar JSON
+  codec is not needed while CalDAV is the only adapter.
 - Recurrence: expansion for time-range queries and free-busy; library choice
   after an audit of candidates (teambition/rrule-go used by proton-cal) or
   our own on the RFC 5545 rules [call; audit → E16].
@@ -284,10 +278,10 @@ other users' free-busy is phase 3.
 ### 8.4 Fidelity rules
 A mapping table (`spec/mapping.md`, written during block C0/C1) lists every
 iCalendar/JSCalendar property as: preserved, transformed, stripped with a
-warning, or refused. Refused writes (CalDAV 403 with a precondition, REST
-422 with a reason) [call]:
+warning, or refused. Refused writes (CalDAV 403 with a precondition and a
+human-readable reason) [call]:
 - "this and following" splits (RANGE=THISANDFUTURE);
-- attendee changes that would need invitations (until phase 3);
+- attendee changes that would need invitations (not planned);
 - writes to read-only calendars;
 - recurrence forms Proton cannot store [which → E12].
 
@@ -310,41 +304,21 @@ warning, or refused. Refused writes (CalDAV 403 with a precondition, REST
 
 ## 10. A2 — `.ics` feeds
 
-Read-only `GET /ics/<token>/<calendar>.ics` per granted calendar, token per
-client, for clients that only subscribe. Same listener as REST [call].
+Not planned [decided 0007].
 
 ## 11. A3 — REST API
 
-- OpenAPI 3.1 document in `api/openapi.yaml`, source of truth; server stubs
-  and the CLI client generated from it (oapi-codegen or ogen after a short
-  comparison [call → E18]); the document is served at `/v1/openapi.yaml`.
-- Resources: `/v1/accounts`, `/v1/accounts/{id}/login` (start, answer:
-  2FA, captcha, mailbox password), `/v1/calendars`, `/v1/calendars/{id}/events`
-  (JSCalendar JSON, time-range and text search), `/v1/events/{id}`
-  (occurrence addressing by recurrence ID), `/v1/freebusy`, `/v1/clients`,
-  `/v1/status`, `/v1/health`.
-- Errors: RFC 9457 problem details.
-- Auth: bearer tokens per client (§12 shares them); the control socket
-  (unix, 0600) needs none.
-- Concurrency: ETag/If-Match like CalDAV.
+Not planned [decided 0007]. The control API (CTL, §4) is internal: JSON
+over HTTP on a unix socket (0600, peer UID checked), versioned
+(`/ctl/v1/…`), used only by `pcb`. It is documented in code, not in
+OpenAPI, and may change between versions.
 
 ## 12. A4 — MCP adapter
 
-- MCP over streamable HTTP (and stdio via `pcb mcp stdio` that proxies to
-  the daemon) [call], with the official Go SDK
-  (modelcontextprotocol/go-sdk) after audit.
-- Tools map to service use cases: list calendars, search/list events in a
-  range, get event, create, update (incl. one occurrence), delete, free-busy.
-  Output is JSCalendar-shaped JSON plus a short text summary.
-- Safety [decided: agents must not reach ungranted calendars; call: the
-  rest]:
-  - grants per agent client (read / write per calendar), default none;
-  - destructive tools off unless granted;
-  - every field that comes from outside (title, description, location,
-    attendee names) is returned inside a marked untrusted-data envelope,
-    and invitations from outside the account are flagged — calendar
-    content is a prompt-injection channel;
-  - an audit log of every agent call (client, tool, calendar, result).
+Not planned [decided 0007]. Notes kept for whoever designs it later:
+calendar content is a prompt-injection channel (mark external text as
+untrusted, flag outside invitations), grants per agent with none by
+default, agents never on the control socket, audit log of every call.
 
 ## 13. A5 — CLI and ops
 
@@ -355,36 +329,34 @@ naming what is missing; exit codes `0` done, `2` bad invocation, `10` you
 must act, `20` blocked by the machine, `30` failed and rolled back, `40`
 partly done and resumable.
 
-Command tree (v1):
+Command tree:
 ```
 pcb install [--system|--user] [--plan]     # unit files, dirs, config; no root needed for --user
 pcb uninstall [--delete-data] [--plan]
-pcb update check | apply [--plan]           # signed releases, migrations, rollback on failed health
 pcb doctor                                  # every check, with the fix to apply
-pcb serve                                   # the daemon (what the unit runs)
+pcb serve                                   # the daemon (what the unit and the container run)
 pcb service start|stop|restart|status|logs
-pcb account add|list|remove
-pcb login [--account] [--password-fd N] [--unattended-relogin]
+pcb login [--password-fd N] [--unattended-relogin]
 pcb login resume --captcha-token T | --totp CODE
 pcb logout
 pcb status                                  # login state, sync state, listeners, alerts
-pcb calendar list|get|create|update|delete
-pcb event list|get|search|create|update|delete [--occurrence] [--from --to]
-pcb event export|import (.ics)
-pcb client add|list|remove|grant|revoke     # CalDAV users, API tokens, MCP agents
-pcb mcp stdio                               # MCP over stdio, proxied to the daemon
+pcb calendar list                           # what Thunderbird will see, with read-only flags
+pcb client add|list|remove                  # CalDAV credentials (app passwords, printed once)
 pcb config get|set|validate
 pcb version
 ```
+One account per daemon in v1 [call]; the data model keeps an account ID so a
+second one is an addition, not a migration.
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
 
 While the repository is private [call]: install from source (`make
-install` in a clone) or `gh release download` (authenticated) of a
-CI-built release; the container image goes to a private GHCR package.
-Public signed releases come when the repository goes public.
+install` in a clone, then `pcb install`), or the container image from a
+private GHCR package (`pcb serve` as entrypoint, state in one volume, the
+same model as the author's headless Proton Mail Bridge container). Updates
+and signed releases are not planned yet.
 
-Installation (public): `install.sh` downloads a signed release (minisign, as
+Later, when public: `install.sh` downloads a signed release (minisign, as
 backsight [call]), verifies it, places the binary, then runs `pcb install`.
 Services: systemd `--user` unit (with lingering instructions) or system unit
 with a dedicated user [call]; container image with the same binary and
@@ -393,9 +365,8 @@ with a dedicated user [call]; container image with the same binary and
 ## 14. Configuration
 
 One TOML file, strict decoding (unknown keys and empty lists refused —
-lesson from the proton-cal fork audit). Policy (grants) lives in the store
-and is managed by `pcb client grant/revoke`, not hand-edited [call], so the
-CLI validates every change.
+lesson from the proton-cal fork audit). CalDAV client credentials live in
+the store (hashed) and are managed by `pcb client`, not hand-edited [call].
 
 ## 15. Observability
 
@@ -437,11 +408,11 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E11 | Does Thunderbird need VTIMEZONE? | C0 | E08 traces |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity | write each RRULE form, read back |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec | write X- and standard extras, read back |
-| E14 | Member `Permissions` values for view-only vs edit shares | C5, A1 | share a calendar from a second test account |
+| E14 | Member `Permissions` values for view-only vs edit shares (not planned: shared calendars) | – | – |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on morpheus-like Debian 13 |
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | read, run against E08 traces |
-| E18 | OpenAPI generator choice (oapi-codegen vs ogen) | A3 | build the same small API with both |
+| E18 | (dropped: no REST API planned) | – | – |
 
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
 raw results (redacted), conclusion, and the decision it feeds.
@@ -450,31 +421,28 @@ raw results (redacted), conclusion, and the decision it feeds.
 
 | Milestone | Blocks | Done when |
 |---|---|---|
-| M0 Foundations | **E03 first (go/no-go: a client identity that gets calendar scope, per OPEN.md Q1)**, then repo, CI, conventions, E01, E02, E15 | experiments written up; skeleton `pcb version`, `doctor` |
-| M1 Proton core, read | C0 (read side), C1 auth + keys + read endpoints, C2 secrets | `pcb login` (incl. captcha resume, unattended relogin) and `pcb event list` against the test account |
+| M0 Foundations | **E03 first** (client identity with calendar scope), then repo layout, CI, conventions, E01, E02, E15; synthetic data set on the test account (years of events, recurrences, exceptions, all-day, time zones) | experiments written up; `pcb version`, `pcb doctor` skeleton |
+| M1 Proton core, read | C0 (read side), C1 auth + keys + read endpoints, C2 secrets, `pcb login` (password, TOTP, CAPTCHA resume, unattended relogin) | `pcb calendar list` against the test account |
 | M2 Store and sync | C2 cache, C4 initial + incremental (E04–E07, E09) | cache follows edits made in the Proton web app |
-| M3 CalDAV read | A1 read, E08, E11, E17 | Thunderbird shows all calendars and stays in sync |
-| M4 Writes | C1 codec write path, C4 writes, A1 writes, fidelity table (E12, E13) | Thunderbird two-way edits, incl. single occurrences |
-| M5 Daemon and ops | C6, A5 complete, install/update/uninstall/doctor, signed releases, container | install from scratch on a fresh Debian with only the terminal |
-| M6 REST API | A3 + OpenAPI, A2 feeds, E18 | CLI fully on the REST API; OpenAPI published |
-| M7 Agents | A4 MCP, C5 grants, audit log | an agent with a grant on one calendar sees only it |
-| Phase 3 | invitations in/out, shared calendars (E10 for shares, E14, second test account), other users' free-busy, JMAP adapter, GUIs | later |
+| M3 CalDAV read | A1 read, client credentials, TLS for non-loopback binds, E08, E11, E17 | Thunderbird (local and over the network) shows all calendars and stays in sync |
+| M4 CalDAV writes | C1 codec write path, A1 writes, fidelity table (E12, E13) | Thunderbird two-way edits, incl. single occurrences |
+| M5 Daemon and ops | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only |
+
+Nothing after M5 is planned [decided 0007].
 
 ## 19. Security model (summary)
 
 Assets: Proton session and key passphrase (account takeover), decrypted
 events (privacy), the ability to write (integrity). Adversaries: other local
-users, network peers, malicious calendar content (invites), over-reaching
-agents, a compromised client token. Controls: sealed secrets (§7.3), no
-plaintext cache (§7.2), loopback by default and TLS otherwise (§9), per-
-client credentials and grants (§12, §14), untrusted-content envelope for
-agents (§12), signature verification (§5.3), audit log, no secrets in argv
-or logs. Same-user agents [call]: an agent running as the daemon's OS user could
-read a key file and unseal everything, so the recommended deployment when
-agents share the user's account is the system service under a dedicated
-`pcb` user (§13), and `doctor` warns when the sealing key is readable by
-the user agents run as. Residual risk, stated in the docs: the bridge holds the decrypted
-calendar in memory, like Mail Bridge does for mail.
+users, network peers, malicious calendar content, a leaked CalDAV app
+password. Controls: sealed secrets (§7.3), no plaintext cache (§7.2),
+loopback by default, TLS and authentication on any other bind (§9), per-
+client app passwords stored hashed, signature verification (§5.3), no
+secrets in argv or logs, state directory 0700. On a server, the daemon runs
+as a dedicated `pcb` user (system service) or in its container [call].
+Residual risk, stated in the docs: the bridge holds the decrypted calendar
+in memory, like Mail Bridge does for mail; whoever can unseal the store
+owns the Proton session (and the account, if unattended relogin is on).
 
 ## 20. Prior art and credits
 
