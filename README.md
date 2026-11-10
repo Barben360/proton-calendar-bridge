@@ -18,3 +18,26 @@ Reference material, not copied wholesale: `cheeseandcereal/proton-cal` and the
 `Barben360/proton-cal` fork (reverse-engineered API docs, login and policy
 work, audit findings), plus the community bridges carbonate, cal-gateway and
 caloxide.
+
+## Status
+
+Design phase, milestone M0 (foundations): the CLI skeleton exists
+(`pcb version`, the `--json` envelope, exit codes); there is no bridge yet.
+The design is in `spec/SPEC.md`.
+
+## Build
+
+```sh
+make build        # bin/pcb
+make lint test    # gofmt, go vet, golangci-lint, go test -race
+bin/pcb version
+```
+
+## Credits
+
+Nothing is reused yet. When logic from another project is reused it is
+audited, rewritten with our own tests and credited here. Reference projects
+(spec §20): cheeseandcereal/proton-cal (Unlicense) and our fork
+Barben360/proton-cal, develonrails/carbonate, jmdlab/cal-gateway,
+WentTheFox/caloxide. ProtonMail/WebClients (GPL-3.0) is read for
+understanding only, never copied.
