@@ -21,6 +21,29 @@ import (
 // (string, number, object or array) is replaced.
 var secretKeys = map[string]bool{}
 
+// secretFragments: any key whose lowercased name contains one of these is
+// secret (fail closed: RefreshTokenExpiry, SrpSalt, ...).
+var secretFragments = []string{
+	"token", "secret", "pass", "proof", "salt", "cookie", "signature",
+	"armored", "keypacket", "sessionkey", "privatekey",
+}
+
+func isSecretKey(key string) bool {
+	l := strings.ToLower(key)
+	if secretKeys[l] {
+		return true
+	}
+	if l == "code" || l == "error" || keepsByKey(key) {
+		return false
+	}
+	for _, f := range secretFragments {
+		if strings.Contains(l, f) {
+			return true
+		}
+	}
+	return false
+}
+
 func init() {
 	for _, k := range []string{
 		"AccessToken", "RefreshToken", "UID", "ServerProof", "ClientProof",
@@ -28,6 +51,7 @@ func init() {
 		"Passphrase", "Token", "HumanVerificationToken", "SessionKey",
 		"KeyPacket", "SharedKeyPacket", "CalendarKeyPacket", "Data",
 		"Signature", "Armored", "TOTP", "Password", "Email", "Address",
+		"Username", "TwoFactorCode", "Secret", "Cookie",
 	} {
 		secretKeys[strings.ToLower(k)] = true
 	}
@@ -36,7 +60,7 @@ func init() {
 var (
 	armorRe = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
 	jwtRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$`)
-	b64Re   = regexp.MustCompile(`^[A-Za-z0-9+/_-]{40,}={0,2}$`)
+	tokenRe = regexp.MustCompile(`^[A-Za-z0-9+/_=-]{20,}$`)
 )
 
 // JSON returns raw with secrets replaced by "<redacted:len=N>", re-encoded
@@ -64,7 +88,7 @@ func JSON(raw []byte) ([]byte, error) {
 }
 
 func walk(v any, key string, hasKey bool) any {
-	if hasKey && secretKeys[strings.ToLower(key)] {
+	if hasKey && isSecretKey(key) {
 		return redactWhole(v)
 	}
 	switch t := v.(type) {
@@ -77,8 +101,8 @@ func walk(v any, key string, hasKey bool) any {
 	case []any:
 		out := make([]any, len(t))
 		for i, child := range t {
-			// Array elements inherit the key so {"Token":[...]} stays covered
-			// by the key rule above; here the key is not secret.
+			// Array elements carry no key of their own; an array under a
+			// secret key was already replaced whole above.
 			out[i] = walk(child, "", false)
 		}
 		return out
@@ -111,7 +135,7 @@ func looksSecret(s string) bool {
 	}
 	// Line-wrapped base64 is still one value: test it without whitespace.
 	compact := strings.Join(strings.Fields(s), "")
-	return b64Re.MatchString(compact)
+	return tokenRe.MatchString(compact)
 }
 
 func redactWhole(v any) any {

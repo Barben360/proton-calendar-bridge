@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/redact"
@@ -65,6 +66,10 @@ type document struct {
 func (r *Recorder) Save(name string, e Exchange) (string, error) {
 	if !nameRe.MatchString(name) {
 		return "", fmt.Errorf("record: unsafe name %q", name)
+	}
+	if lp := strings.ToLower(e.Path); strings.ContainsAny(e.Path, "?#") ||
+		strings.Contains(lp, "%3f") || strings.Contains(lp, "%23") {
+		return "", errors.New("record: path must not contain a query or fragment; use Query")
 	}
 	q := e.Query
 	if q == nil {

@@ -199,3 +199,45 @@ func TestRedactMultilineValueIsOneValue(t *testing.T) {
 		t.Errorf("leaked: %s", out)
 	}
 }
+
+func TestRedactFailClosedKeysAndValues(t *testing.T) {
+	hex32 := "9f86d081884c7d659a2feaa0c55ad015"
+	doc := map[string]any{
+		"Foo": hex32, "Username": "jane", "TwoFactorCode": "123456", "Secret": "s",
+		"Cookie": "c", "RefreshTokenExpiry": "short", "SrpSalt": "x", "MyPassword2": "y",
+		"Code": 1000, "Error": "Invalid access token", "CalendarID": "cal-1",
+		"Armory": "-----BEGIN PGP MESSAGE-----\n\nabc\n=abcd\n-----END PGP MESSAGE-----",
+		"Crc":    "=abcd=efgh=ijkl=mnop=qrst",
+		"Plain":  "short text", "Num": 7,
+	}
+	m := parse(t, func() []byte {
+		o, err := JSON(mustJSON(t, doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}())
+	for _, k := range []string{"Foo", "Username", "TwoFactorCode", "Secret", "Cookie", "RefreshTokenExpiry", "SrpSalt", "MyPassword2", "Armory", "Crc"} {
+		if s, _ := m[k].(string); !strings.HasPrefix(s, "<redacted:len=") {
+			t.Errorf("%s not redacted: %v", k, m[k])
+		}
+	}
+	for k, want := range map[string]any{"Code": float64(1000), "Error": "Invalid access token", "CalendarID": "cal-1", "Plain": "short text", "Num": float64(7)} {
+		if m[k] != want {
+			t.Errorf("%s = %v, want %v", k, m[k], want)
+		}
+	}
+}
+
+func TestRedactTwentyCharThreshold(t *testing.T) {
+	m := parse(t, func() []byte {
+		o, err := JSON([]byte(`{"A":"` + strings.Repeat("a", 20) + `","B":"` + strings.Repeat("a", 19) + `","XID":"` + strings.Repeat("a", 30) + `"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}())
+	if !strings.HasPrefix(m["A"].(string), "<redacted") || m["B"] != strings.Repeat("a", 19) || m["XID"] != strings.Repeat("a", 30) {
+		t.Errorf("got %v", m)
+	}
+}

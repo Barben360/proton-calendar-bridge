@@ -167,3 +167,22 @@ func TestRecorderRejectsUnsafeNames(t *testing.T) {
 		t.Errorf("files: %v", n)
 	}
 }
+
+func TestRecorderRefusesQueryInPath(t *testing.T) {
+	for _, p := range []string{"/a?Token=zzz-short", "/a%3fToken=x", "/a%3FToken=x", "/a#frag", "/a%23x"} {
+		dir := t.TempDir()
+		e := ex(`{}`)
+		e.Path = p
+		if _, err := (&Recorder{Dir: dir}).Save("p", e); err == nil {
+			t.Errorf("path %q accepted", p)
+		}
+		if n := readOnly(t, dir); len(n) != 0 {
+			t.Errorf("%q: files %v", p, n)
+		}
+	}
+	e := ex(`{}`)
+	e.Path = "/calendar/v1/ABC/events"
+	if _, err := (&Recorder{Dir: t.TempDir()}).Save("p", e); err != nil {
+		t.Errorf("clean path refused: %v", err)
+	}
+}
