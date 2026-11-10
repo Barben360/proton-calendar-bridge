@@ -93,3 +93,14 @@ func TestDoctorTextShowsFix(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }
+
+func TestDoctorReportsUnresolvableDirs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	code, out, _ := run("doctor")
+	if code != exitcode.Blocked || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
+		!strings.Contains(out, "fix: set HOME") {
+		t.Fatalf("code=%d stdout=%q", code, out)
+	}
+}

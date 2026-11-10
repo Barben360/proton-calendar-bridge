@@ -67,7 +67,7 @@ func TestRunKeepsOrderAndWorst(t *testing.T) {
 		doctor.PlatformCheck{GOOS: "linux", GOARCH: "amd64"},
 		doctor.PlatformCheck{GOOS: "plan9", GOARCH: "386"},
 	}
-	res := doctor.Run(context.Background(), checks)
+	res := doctor.Run(context.Background(), checks, nil)
 	if len(res) != 2 || res[0].Status != doctor.StatusOK || res[1].Status != doctor.StatusWarn {
 		t.Fatalf("got %+v", res)
 	}
@@ -87,5 +87,52 @@ func TestRunKeepsOrderAndWorst(t *testing.T) {
 		if got := doctor.Worst(rs); got != tt.want {
 			t.Errorf("Worst(%v) = %s, want %s", tt.in, got, tt.want)
 		}
+	}
+}
+
+type gatedCheck struct {
+	name string
+	gate chan struct{} // nil: no wait
+}
+
+func (c gatedCheck) Name() string { return c.name }
+func (c gatedCheck) Run(context.Context) doctor.Result {
+	if c.gate != nil {
+		<-c.gate
+	}
+	return doctor.Result{Name: c.name, Status: doctor.StatusOK}
+}
+
+func TestRunStreamsEachResult(t *testing.T) {
+	release := make(chan struct{})
+	seen := make(chan string)
+	done := make(chan []doctor.Result)
+	go func() {
+		done <- doctor.Run(context.Background(),
+			[]doctor.Check{gatedCheck{name: "first"}, gatedCheck{name: "second", gate: release}},
+			func(r doctor.Result) { seen <- r.Name })
+	}()
+	// The second check is still blocked: the first result must already be out.
+	if got := <-seen; got != "first" {
+		t.Fatalf("first streamed result = %q", got)
+	}
+	select {
+	case r := <-done:
+		t.Fatalf("Run returned before the second check was released: %+v", r)
+	default:
+	}
+	close(release)
+	if got := <-seen; got != "second" {
+		t.Fatalf("second streamed result = %q", got)
+	}
+	if res := <-done; len(res) != 2 || res[0].Name != "first" || res[1].Name != "second" {
+		t.Fatalf("results = %+v", res)
+	}
+}
+
+func TestFailedCheck(t *testing.T) {
+	got := doctor.FailedCheck{Label: "config dir", Message: "boom", Fix: "set HOME"}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Name != "config dir" || got.Fix != "set HOME" {
+		t.Fatalf("got %+v", got)
 	}
 }

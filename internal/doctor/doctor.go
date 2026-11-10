@@ -29,10 +29,16 @@ type Check interface {
 }
 
 // Run runs the checks in order and returns their results in the same order.
-func Run(ctx context.Context, checks []Check) []Result {
+// onResult, when not nil, is called with each result as soon as its check
+// returns, before the next check starts.
+func Run(ctx context.Context, checks []Check, onResult func(Result)) []Result {
 	results := make([]Result, 0, len(checks))
 	for _, c := range checks {
-		results = append(results, c.Run(ctx))
+		r := c.Run(ctx)
+		if onResult != nil {
+			onResult(r)
+		}
+		results = append(results, r)
 	}
 	return results
 }

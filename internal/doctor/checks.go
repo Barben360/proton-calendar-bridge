@@ -62,3 +62,18 @@ func modeString(m fs.FileMode) string {
 	const digits = "01234567"
 	return string([]byte{digits[m>>6&7], digits[m>>3&7], digits[m&7]})
 }
+
+// FailedCheck reports a check that could not even be set up, as an error.
+type FailedCheck struct {
+	Label   string
+	Message string
+	Fix     string
+}
+
+// Name implements Check.
+func (c FailedCheck) Name() string { return c.Label }
+
+// Run implements Check.
+func (c FailedCheck) Run(context.Context) Result {
+	return Result{Name: c.Label, Status: StatusError, Message: c.Message, Fix: c.Fix}
+}
