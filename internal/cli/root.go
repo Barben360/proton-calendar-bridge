@@ -30,7 +30,7 @@ func NewRoot() *cobra.Command {
 	}
 	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError(err) })
-	root.AddCommand(newVersion())
+	root.AddCommand(newVersion(), newDoctor())
 	return root
 }
 
@@ -45,10 +45,14 @@ func Execute(args []string, stdout, stderr io.Writer) exitcode.Code {
 	if err == nil {
 		return exitcode.OK
 	}
-	if wantsJSON(args) {
+	var reported *reportedError
+	switch {
+	case errors.As(err, &reported):
+		// The command already printed its envelope.
+	case wantsJSON(args):
 		// A failed write has nowhere left to be reported.
 		_ = output.Write(stdout, cmd.Name(), nil, err)
-	} else {
+	default:
 		fmt.Fprintf(stderr, "Error: %s\n", err)
 		var e *exitcode.Error
 		if errors.As(err, &e) && e.Hint != "" {
