@@ -24,9 +24,10 @@ caloxide.
 Design phase, milestone M2 (store and sync): `pcb login` (password, TOTP,
 CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status`,
 `pcb calendar list`, `pcb sync` and `pcb event list` are built and tested
-against a fake Proton; there is no bridge (daemon, CalDAV) yet. The live session against the test account
-is deferred until the author can solve a CAPTCHA (`spec/HUMAN-CHECKS.md`,
-"M1 live session"). The design is in `spec/SPEC.md`.
+against a fake Proton; there is no bridge (daemon, CalDAV) yet. The live
+session against the test account is deferred until the author can solve a
+CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session"). The design is in
+`spec/SPEC.md`.
 
 ## Usage
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -52,6 +54,8 @@ func mapError(err error, keyFile string) error {
 		return ee
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
+	case cacheFailure(err) != nil:
+		return cacheFailure(err)
 	case errors.Is(err, auth.ErrBadCredentials):
 		return mustAct("wrong Proton username or password", "check them, then run pcb login again (Proton allows one attempt per minute)")
 	case errors.Is(err, auth.ErrTOTPRejected):
@@ -148,4 +152,22 @@ func keysError(err error) string {
 		return protonDown(ae).Error()
 	}
 	return "the calendar keys do not unlock with the account keys"
+}
+
+// cacheFailure classifies a failure of the event cache by type, or returns
+// nil when err is not one: a newer schema needs a newer pcb; a file that is
+// not a database needs a person to remove it (MustAct, so a watch stops);
+// a path error (permissions, disk) is Blocked with the operating system's
+// reason and no advice to remove anything.
+func cacheFailure(err error) *exitcode.Error {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, cache.ErrNewerSchema):
+		return fail(exitcode.Blocked, "the event cache was written by a newer pcb", "upgrade pcb (or remove pcb.db from the state directory and run pcb sync --full)")
+	case errors.Is(err, cache.ErrCorrupt):
+		return fail(exitcode.MustAct, "the event cache is damaged", "remove pcb.db (and its -wal and -shm files) from the state directory, then run pcb sync --full")
+	case errors.As(err, &pe):
+		return fail(exitcode.Blocked, "the event cache cannot be used: "+pe.Err.Error(), "check the permissions and the free space of the state directory")
+	}
+	return nil
 }

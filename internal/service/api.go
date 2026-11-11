@@ -26,8 +26,8 @@ type API interface {
 	// failed is in the result, and the error is a Partial *exitcode.Error.
 	Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
 	// WatchSync repeats Sync every interval (0: DefaultWatchInterval) until
-	// ctx ends or a person is needed, calling onPass after every pass with
-	// its result and error. It always returns an error.
+	// ctx ends (nil: a normal stop) or a person is needed (that error), calling
+	// onPass after every pass with its result and error.
 	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(SyncResult, error)) error
 	// Events lists a calendar's cached events, without any network call.
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
@@ -106,6 +106,8 @@ type Status struct {
 // SyncStatus is what the event cache holds, per calendar.
 type SyncStatus struct {
 	Calendars []CalendarStatus `json:"calendars"`
+	// Error is set when a cache exists but cannot be read (secret-free).
+	Error string `json:"error,omitempty"`
 }
 
 // CalendarStatus is one cached calendar. SyncedAt is its last successful
@@ -146,21 +148,32 @@ type CalendarSync struct {
 
 // EventsRequest selects cached events: Calendar is an ID or an exact name;
 // From and To keep the events overlapping [From, To), and the recurring
-// masters starting before To whatever From says.
+// masters starting before To whatever From says. Timed events and all-day
+// events with no date bound are compared as instants. FromDate and ToDate
+// (YYYY-MM-DD) are the same bounds as dates: when set they replace From and
+// To for all-day events, which Proton stores as UTC midnights of their
+// dates, so a bound written as a date in a zone west of UTC does not shift
+// an all-day event by a day.
 type EventsRequest struct {
 	Calendar string     `json:"calendar"`
 	From     *time.Time `json:"from,omitempty"`
 	To       *time.Time `json:"to,omitempty"`
+	FromDate string     `json:"from_date,omitempty"`
+	ToDate   string     `json:"to_date,omitempty"`
 }
 
 // Event is a cached event row (its content stays encrypted in the cache).
 type Event struct {
-	ID           string     `json:"id"`
-	UID          string     `json:"uid"`
-	CalendarID   string     `json:"calendar_id"`
-	Start        time.Time  `json:"start"`
-	End          time.Time  `json:"end"`
-	AllDay       bool       `json:"all_day"`
+	ID         string    `json:"id"`
+	UID        string    `json:"uid"`
+	CalendarID string    `json:"calendar_id"`
+	Start      time.Time `json:"start"`
+	End        time.Time `json:"end"`
+	AllDay     bool      `json:"all_day"`
+	// StartDate and EndDate (YYYY-MM-DD, from the UTC instants) are set for
+	// an all-day event; EndDate is exclusive: the day after its last day.
+	StartDate    string     `json:"start_date,omitempty"`
+	EndDate      string     `json:"end_date,omitempty"`
 	Recurring    bool       `json:"recurring"`
 	RecurrenceID *time.Time `json:"recurrence_id,omitempty"`
 	LastEdit     time.Time  `json:"last_edit"`

@@ -349,9 +349,8 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 			cancel()
 		}
 	})
-	ee := wantExit(t, err, exitcode.Blocked)
-	if ee.Hint != "run the command again" {
-		t.Errorf("hint = %q", ee.Hint)
+	if err != nil {
+		t.Errorf("WatchSync after the caller cancelled = %v, want nil (a normal stop)", err)
 	}
 	if len(modes) != 2 || modes[0] != "initial" || modes[1] != "incremental" {
 		t.Errorf("modes = %v", modes)
@@ -391,4 +390,128 @@ func TestWatchRefusesShortInterval(t *testing.T) {
 	if n := e.f.Calls("", "/"); n != calls {
 		t.Errorf("a refused watch made %d requests", n-calls)
 	}
+}
+
+func TestLogoutDeletesCacheEvenWhenCancelled(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	e.sync(t, false)
+	path := cache.Path(e.dirs.State)
+	for _, p := range []string{path + "-wal", path + "-shm"} { // leftovers of a crashed writer
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := e.svc.Logout(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived a cancelled logout: %v", p, err)
+		}
+	}
+}
+
+// The read paths never create, migrate or empty the cache.
+func TestReadPathsLeaveTheStateDirectoryAlone(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	before := dirNames(t, e.dirs.State)
+	_, _ = e.svc.Status(t.Context())
+	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	_ = wantExit(t, err, exitcode.MustAct)
+	if after := dirNames(t, e.dirs.State); after != before {
+		t.Errorf("state directory changed: %q -> %q", before, after)
+	}
+}
+
+func dirNames(t *testing.T, dir string) string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return strings.Join(names, ",")
+}
+
+func TestStatusReportsAnUnreadableCache(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	e.sync(t, false)
+	if err := os.WriteFile(cache.Path(e.dirs.State), []byte(strings.Repeat("not sqlite ", 100)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Sync == nil || st.Sync.Error == "" || len(st.Sync.Calendars) != 0 {
+		t.Fatalf("status = %+v, %v; want a sync error", st.Sync, err)
+	}
+	_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, "pcb sync --full") {
+		t.Errorf("hint = %q", ee.Hint)
+	}
+	// A watch stops on it: a person must remove the file.
+	err = e.svc.WatchSync(t.Context(), service.SyncRequest{}, 0, nil)
+	_ = wantExit(t, err, exitcode.MustAct)
+}
+
+func TestEventsWindowAllDayByDate(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	d := func(day int) int64 { return time.Date(2027, 1, day, 0, 0, 0, 0, time.UTC).Unix() }
+	ids := map[string]string{
+		"jan15":  e.f.AddEvent(cal, protontest.Event{UID: "15", Start: d(15), End: d(16), FullDay: true}),
+		"jan16":  e.f.AddEvent(cal, protontest.Event{UID: "16", Start: d(16), End: d(17), FullDay: true}),
+		"jan17":  e.f.AddEvent(cal, protontest.Event{UID: "17", Start: d(17), End: d(19), FullDay: true}),
+		"master": e.f.AddEvent(cal, protontest.Event{UID: "m", Start: d(1), End: d(2), FullDay: true, RRule: "FREQ=WEEKLY"}),
+	}
+	e.login(t, e.req())
+	e.sync(t, false)
+	keep := func(req service.EventsRequest) map[string]bool {
+		req.Calendar = "Work"
+		got := map[string]bool{}
+		for _, ev := range e.events(t, req) {
+			got[ev.ID] = true
+		}
+		return got
+	}
+	// Window [Jan 16, Jan 17): only the 16th, and the master.
+	got := keep(service.EventsRequest{FromDate: "2027-01-16", ToDate: "2027-01-17"})
+	for name, want := range map[string]bool{"jan15": false, "jan16": true, "jan17": false, "master": true} {
+		if got[ids[name]] != want {
+			t.Errorf("date window: %s kept = %v, want %v", name, got[ids[name]], want)
+		}
+	}
+	// A multi-day event overlapping from the 18th.
+	got = keep(service.EventsRequest{FromDate: "2027-01-18"})
+	if got[ids["jan16"]] || !got[ids["jan17"]] {
+		t.Errorf("From 2027-01-18: %v", got)
+	}
+	// An RFC 3339 bound compares instants, even for all-day events.
+	to := time.Date(2027, 1, 16, 12, 0, 0, 0, time.UTC)
+	got = keep(service.EventsRequest{To: &to})
+	if !got[ids["jan16"]] || got[ids["jan17"]] {
+		t.Errorf("To noon Jan 16: %v", got)
+	}
+	// Dates are reported for all-day rows, the end being exclusive.
+	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work"}) {
+		if ev.ID == ids["jan17"] && (!ev.AllDay || ev.StartDate != "2027-01-17" || ev.EndDate != "2027-01-19") {
+			t.Errorf("jan17 = %+v", ev)
+		}
+	}
+	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work", FromDate: "01/16/2027"})
+	_ = wantExit(t, err, exitcode.Usage)
 }

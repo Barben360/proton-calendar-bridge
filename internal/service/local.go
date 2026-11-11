@@ -229,7 +229,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 	if l.waiting.Load() {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
 	}
-	s.Sync = l.syncStatus(st.AccountID)
+	s.Sync = l.syncStatus()
 	return s, nil
 }
 

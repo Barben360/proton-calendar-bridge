@@ -86,6 +86,34 @@ func (s *eventsStub) Events(_ context.Context, req service.EventsRequest) ([]ser
 	return nil, nil
 }
 
+// All-day events are stored as UTC midnights: a date bound must compare
+// dates, not shift the event by a day in a zone west of UTC. Not parallel:
+// it sets the process's local zone.
+func TestEventListAllDayWestOfUTC(t *testing.T) {
+	old := time.Local
+	time.Local = time.FixedZone("PST", -8*3600)
+	defer func() { time.Local = old }()
+	r, cal := syncRig(t)
+	utc := func(d int) int64 { return time.Date(2027, 1, d, 0, 0, 0, 0, time.UTC).Unix() }
+	r.f.AddEvent(cal, protontest.Event{UID: "d15", Start: utc(15), End: utc(16), FullDay: true})
+	d16 := r.f.AddEvent(cal, protontest.Event{UID: "d16", Start: utc(16), End: utc(17), FullDay: true})
+	r.f.AddEvent(cal, protontest.Event{UID: "d17", Start: utc(17), End: utc(18), FullDay: true})
+	r.want(exitcode.OK, "sync")
+	r.want(exitcode.OK, "event", "list", "--calendar", "Work", "--from", "2027-01-16", "--to", "2027-01-17", "--json")
+	var data struct {
+		Events []service.Event `json:"events"`
+	}
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if len(data.Events) != 1 || data.Events[0].ID != d16 || data.Events[0].StartDate != "2027-01-16" || data.Events[0].EndDate != "2027-01-17" {
+		t.Fatalf("events = %+v, want only Jan 16", data.Events)
+	}
+	r.want(exitcode.OK, "event", "list", "--calendar", "Work", "--from", "2027-01-16", "--to", "2027-01-17")
+	lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
+	if len(lines) != 2 || strings.Join(strings.Fields(lines[1]), " ") != "2027-01-16 2027-01-17 yes no "+d16 {
+		t.Errorf("text = %q, want dates for the all-day row", r.out.String())
+	}
+}
+
 func TestEventListNeverSyncedMustAct(t *testing.T) {
 	t.Parallel()
 	r, _ := syncRig(t)

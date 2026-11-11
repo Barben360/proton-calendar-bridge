@@ -57,7 +57,10 @@ func statusText(s service.Status) string {
 	optional("last_login", at(s.LastLogin))
 	optional("last_relogin", at(s.LastRelogin))
 	if s.Sync != nil {
-		if len(s.Sync.Calendars) == 0 {
+		if s.Sync.Error != "" {
+			line("sync", "cache unreadable: "+s.Sync.Error)
+		}
+		if len(s.Sync.Calendars) == 0 && s.Sync.Error == "" {
 			line("sync", "no calendars cached")
 		}
 		for _, c := range s.Sync.Calendars {

@@ -34,10 +34,10 @@ func (a *app) newEventList() *cobra.Command {
 			}
 			req := service.EventsRequest{Calendar: calendar}
 			var err error
-			if req.From, err = parseWhen("--from", from); err != nil {
+			if req.From, req.FromDate, err = parseWhen("--from", from); err != nil {
 				return err
 			}
-			if req.To, err = parseWhen("--to", to); err != nil {
+			if req.To, req.ToDate, err = parseWhen("--to", to); err != nil {
 				return err
 			}
 			svc, err := a.service(cmd)
@@ -56,29 +56,33 @@ func (a *app) newEventList() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&calendar, "calendar", "", "the calendar's ID or exact name (required)")
-	c.Flags().StringVar(&from, "from", "", "only events ending after this time: RFC 3339, or YYYY-MM-DD for local midnight")
-	c.Flags().StringVar(&to, "to", "", "only events starting before this time (recurring events always kept): RFC 3339, or YYYY-MM-DD for local midnight")
+	c.Flags().StringVar(&from, "from", "", "only events ending after this: RFC 3339 (instants), or YYYY-MM-DD (local midnight; all-day events are compared by date)")
+	c.Flags().StringVar(&to, "to", "", "only events starting before this (recurring events always kept): RFC 3339 (instants), or YYYY-MM-DD (local midnight; all-day events are compared by date)")
 	return c
 }
 
-// parseWhen reads an RFC 3339 time or a YYYY-MM-DD date (midnight in the
-// local time zone); "" is no bound.
-func parseWhen(flag, v string) (*time.Time, error) {
+// parseWhen reads an RFC 3339 time or a YYYY-MM-DD date; "" is no bound. A
+// date is local midnight for timed events and is also returned as the date
+// itself, which all-day events (stored as UTC dates) are compared with.
+func parseWhen(flag, v string) (t *time.Time, date string, err error) {
 	if v == "" {
-		return nil, nil
+		return nil, "", nil
 	}
-	t, err := time.Parse(time.RFC3339, v)
+	parsed, err := time.Parse(time.RFC3339, v)
 	if err != nil {
-		t, err = time.ParseInLocation(time.DateOnly, v, time.Local)
+		if parsed, err = time.ParseInLocation(time.DateOnly, v, time.Local); err == nil {
+			date = v
+		}
 	}
 	if err != nil {
-		return nil, &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%s %q is neither RFC 3339 nor YYYY-MM-DD", flag, v),
+		return nil, "", &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%s %q is neither RFC 3339 nor YYYY-MM-DD", flag, v),
 			Hint: "write 2026-11-11T09:00:00Z, or 2026-11-11 for local midnight"}
 	}
-	return &t, nil
+	return &parsed, date, nil
 }
 
-// eventTable renders the events as aligned columns, times in the local zone.
+// eventTable renders the events as aligned columns: times in the local
+// zone, all-day events as dates (the end date is exclusive).
 func eventTable(evs []service.Event) string {
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
@@ -90,7 +94,11 @@ func eventTable(evs []service.Event) string {
 		return "no"
 	}
 	for _, e := range evs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.Start.Local().Format(time.RFC3339), e.End.Local().Format(time.RFC3339), yn(e.AllDay), yn(e.Recurring), e.ID)
+		start, end := e.Start.Local().Format(time.RFC3339), e.End.Local().Format(time.RFC3339)
+		if e.AllDay {
+			start, end = e.StartDate, e.EndDate
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", start, end, yn(e.AllDay), yn(e.Recurring), e.ID)
 	}
 	_ = w.Flush() // a strings.Builder does not fail
 	return strings.TrimSuffix(b.String(), "\n")

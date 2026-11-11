@@ -126,6 +126,17 @@ func (s *watchStub) WatchSync(_ context.Context, _ service.SyncRequest, iv time.
 	return s.err
 }
 
+// Ctrl-C ends a watch normally: exit 0, no envelope, nothing on stderr.
+func TestSyncWatchCancelledIsExitZero(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, nil)
+	r.svc = &watchStub{}
+	r.want(exitcode.OK, "sync", "--watch")
+	if strings.Contains(r.errb.String(), "Error") {
+		t.Errorf("stderr = %q", r.errb.String())
+	}
+}
+
 func TestSyncWatchPrintsAPassLineEach(t *testing.T) {
 	t.Parallel()
 	s := &watchStub{err: &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the operation was cancelled or timed out"), Hint: "run the command again"}}

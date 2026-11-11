@@ -497,3 +497,130 @@ func TestOpenMissingDirectory(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestOpenErrorsAreTyped(t *testing.T) {
+	c, path := openNew(t)
+	if _, err := c.db.ExecContext(bg, `PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	if _, err := Open(path, "acct-1"); !errors.Is(err, ErrNewerSchema) {
+		t.Errorf("newer schema: err = %v, want ErrNewerSchema", err)
+	}
+	bad := Path(t.TempDir())
+	if err := os.WriteFile(bad, []byte(strings.Repeat("definitely not sqlite ", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(bad, "a"); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("not a database: err = %v, want ErrCorrupt", err)
+	}
+	if _, err := OpenReadOnly(bad, "a"); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("read-only, not a database: err = %v, want ErrCorrupt", err)
+	}
+	if _, err := OpenReadOnly(path, "acct-1"); !errors.Is(err, ErrNewerSchema) {
+		t.Errorf("read-only, newer schema: err = %v, want ErrNewerSchema", err)
+	}
+}
+
+func listing(t *testing.T, dir string) string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range ents {
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(e.Name() + " " + strconv.FormatInt(fi.Size(), 10) + " " + fi.ModTime().String() + "\n")
+	}
+	return b.String()
+}
+
+func TestOpenReadOnlyReadsAndChangesNothing(t *testing.T) {
+	for _, withWriter := range []bool{false, true} {
+		dir := t.TempDir()
+		path := Path(dir)
+		w := openAt(t, path, "acct-1")
+		if err := w.PutCalendar(bg, Calendar{ID: "cal", Name: "Work"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.ReplaceCalendar(bg, "cal", "cur", []Row{row("e1", 1)}, time.Unix(1731000000, 0)); err != nil {
+			t.Fatal(err)
+		}
+		if !withWriter {
+			_ = w.Close() // no -wal left: the immutable path
+		}
+		before := listing(t, dir)
+		ro, err := OpenReadOnly(path, "acct-1")
+		if err != nil {
+			t.Fatalf("writer open %v: %v", withWriter, err)
+		}
+		cals, err := ro.Calendars(bg)
+		if err != nil || len(cals) != 1 || cals[0].Events != 1 {
+			t.Fatalf("Calendars = %+v, %v", cals, err)
+		}
+		if evs, err := ro.Events(bg, "cal"); err != nil || len(evs) != 1 {
+			t.Fatalf("Events = %+v, %v", evs, err)
+		}
+		// Writes must fail, not silently succeed.
+		if err := ro.PutCalendar(bg, Calendar{ID: "x", Name: "X"}); err == nil {
+			t.Error("PutCalendar on a read-only handle succeeded")
+		}
+		if _, err := ro.ReplaceCalendar(bg, "cal", "c2", nil, time.Unix(1731000100, 0)); err == nil {
+			t.Error("ReplaceCalendar on a read-only handle succeeded")
+		}
+		if err := ro.DropCalendar(bg, "cal"); err == nil {
+			t.Error("DropCalendar on a read-only handle succeeded")
+		}
+		_ = ro.Close()
+		if after := listing(t, dir); after != before {
+			t.Errorf("writer open %v: the directory changed:\nbefore %safter %s", withWriter, before, after)
+		}
+		if cals, _ := w.Calendars(bg); withWriter && len(cals) != 1 {
+			t.Errorf("a refused write changed the data: %+v", cals)
+		}
+	}
+}
+
+func TestOpenReadOnlyNoCache(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := OpenReadOnly(Path(dir), "acct-1"); !errors.Is(err, ErrNoCache) {
+		t.Fatalf("missing file: err = %v, want ErrNoCache", err)
+	}
+	if _, err := os.Stat(Path(dir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("OpenReadOnly created the file: %v", err)
+	}
+	if len(listing(t, dir)) != 0 {
+		t.Errorf("directory not empty: %q", listing(t, dir))
+	}
+	// An empty file is no cache and stays empty.
+	if err := os.WriteFile(Path(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenReadOnly(Path(dir), "acct-1"); !errors.Is(err, ErrNoCache) {
+		t.Errorf("empty file: err = %v, want ErrNoCache", err)
+	}
+	if fi, _ := os.Stat(Path(dir)); fi.Size() != 0 {
+		t.Error("OpenReadOnly wrote into an empty file")
+	}
+}
+
+// A cache recorded for another account is "no cache", never emptied.
+func TestOpenReadOnlyOtherAccountIsKept(t *testing.T) {
+	dir := t.TempDir()
+	w := openAt(t, Path(dir), "acct-1")
+	if _, err := w.ReplaceCalendar(bg, "cal", "cur", []Row{row("e1", 1)}, time.Unix(1731000000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	if _, err := OpenReadOnly(Path(dir), "acct-2"); !errors.Is(err, ErrNoCache) {
+		t.Fatalf("err = %v, want ErrNoCache", err)
+	}
+	again := openAt(t, Path(dir), "acct-1")
+	if evs, err := again.Events(bg, "cal"); err != nil || len(evs) != 1 {
+		t.Errorf("the other account's read emptied the cache: %v, %v", evs, err)
+	}
+}

@@ -23,6 +23,18 @@ import (
 // ErrNotFound is returned by Raw for an unknown event.
 var ErrNotFound = errors.New("cache: event not found")
 
+// Typed failures of opening a cache file, for callers to classify with
+// errors.Is.
+var (
+	// ErrNoCache: OpenReadOnly found no cache file for the account (none, an
+	// empty one, or one recorded for another account).
+	ErrNoCache = errors.New("cache: no cache for this account")
+	// ErrCorrupt: the file is not a usable SQLite database.
+	ErrCorrupt = errors.New("cache: file is not a usable SQLite database")
+	// ErrNewerSchema: the file's schema is newer than this build knows.
+	ErrNewerSchema = errors.New("cache: schema is newer than this pcb supports")
+)
+
 // Row is one event row as Proton returned it; Raw is the row's JSON, kept
 // byte for byte. Times are Unix seconds.
 type Row struct {
@@ -111,12 +123,12 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 	if err := c.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		var se *sqlite.Error
 		if errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
-			return fmt.Errorf("cache: %s is not a usable SQLite database: remove it (and its -wal and -shm files), then run `pcb sync --full`: %w", path, err)
+			return fmt.Errorf("cache: %s is not a usable SQLite database: remove it (and its -wal and -shm files), then run `pcb sync --full`: %w: %w", path, ErrCorrupt, err)
 		}
 		return fmt.Errorf("cache: read %s: %w", path, err)
 	}
 	if version > schemaVersion {
-		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`", path, version, schemaVersion)
+		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`: %w", path, version, schemaVersion, ErrNewerSchema)
 	}
 	if version < schemaVersion {
 		err := c.tx(ctx, func(tx *sql.Tx) error {
@@ -173,6 +185,67 @@ func (c *Cache) account(ctx context.Context, q querier) (string, error) {
 
 // Close closes the cache.
 func (c *Cache) Close() error { return c.db.Close() }
+
+// OpenReadOnly opens the existing cache at path for reading only: it never
+// creates, migrates or empties anything, so it is safe beside a writer and
+// after a logout removed the file. A missing or empty file, or one recorded
+// for another account, is ErrNoCache; a file that is not a database is
+// ErrCorrupt; a newer schema is ErrNewerSchema. Writing through the handle
+// fails.
+func OpenReadOnly(path, accountID string) (*Cache, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(abs); errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoCache
+	} else if err != nil {
+		return nil, fmt.Errorf("cache: %w", err)
+	}
+	// A read-only open of a WAL database needs its -shm; with no -wal there
+	// is no writer and nothing pending, so read the file as immutable.
+	query := "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	if _, err := os.Stat(abs + "-wal"); errors.Is(err, os.ErrNotExist) {
+		query = "immutable=1&_pragma=query_only(1)"
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: query}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, fmt.Errorf("cache: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	c := &Cache{db: db}
+	if err := c.checkReadOnly(context.Background(), abs, accountID); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
+	var version int
+	if err := c.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		var se *sqlite.Error
+		if errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
+			return fmt.Errorf("cache: %s is not a usable SQLite database: %w: %w", path, ErrCorrupt, err)
+		}
+		return fmt.Errorf("cache: read %s: %w", path, err)
+	}
+	switch {
+	case version > schemaVersion:
+		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: %w", path, version, schemaVersion, ErrNewerSchema)
+	case version < schemaVersion:
+		return ErrNoCache // empty file: nothing was ever stored
+	}
+	got, err := c.account(ctx, c.db)
+	if err != nil {
+		return fmt.Errorf("cache: %w", err)
+	}
+	if got != account {
+		return ErrNoCache
+	}
+	return nil
+}
 
 // Remove deletes the cache file with its -wal and -shm; missing is fine.
 func Remove(path string) error {

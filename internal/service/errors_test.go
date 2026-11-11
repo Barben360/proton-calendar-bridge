@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -48,6 +50,9 @@ func TestMapError(t *testing.T) {
 		{"network", &net.OpError{Op: "dial", Err: errors.New("refused")}, exitcode.Blocked, "network", "reach Proton"},
 		{"no key", fmt.Errorf("%w: %s", seal.ErrNoKey, keyFile), exitcode.Blocked, "restore", keyFile},
 		{"corrupt store", seal.ErrCorrupt, exitcode.Blocked, "pcb logout", keyFile},
+		{"cache newer schema", fmt.Errorf("reading the cache: %w", cache.ErrNewerSchema), exitcode.Blocked, "upgrade pcb", "newer pcb"},
+		{"cache corrupt", fmt.Errorf("x: %w", cache.ErrCorrupt), exitcode.MustAct, "pcb sync --full", "damaged"},
+		{"cache permission", fmt.Errorf("x: %w", &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}), exitcode.Blocked, "permissions", "permission denied"},
 		{"cancelled", context.Canceled, exitcode.Blocked, "", ""},
 		{"unexpected", errors.New("secret-looking detail hunter2"), exitcode.Blocked, "", "unexpected"},
 	}

@@ -94,6 +94,9 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 			return errors.As(err, &ee) && ee.Code == exitcode.MustAct
 		},
 	})
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil // the caller stopped the watch: a normal end
+	}
 	return l.fail(err)
 }
 
@@ -163,58 +166,52 @@ func calendarError(ctx context.Context, err error) string {
 	return "the calendar could not be synced"
 }
 
+// cacheError maps a failure to open or read the cache.
 func cacheError(err error) error {
 	var ee *exitcode.Error
 	if errors.As(err, &ee) || errors.Is(err, context.Canceled) {
 		return err
 	}
-	return blocked("the event cache cannot be opened", "run pcb doctor; if the cache is damaged, remove pcb.db from the state directory and run pcb sync --full")
-}
-
-// cachePath is the cache file when it exists, else "".
-func (l *Local) cachePath() string {
-	p := cache.Path(l.o.Dirs.State)
-	if _, err := os.Stat(p); err != nil {
-		return ""
+	if f := cacheFailure(err); f != nil {
+		return f
 	}
-	return p
+	return blocked("the event cache cannot be opened", "run pcb doctor to see what is wrong with it")
 }
 
-// openCache opens the existing cache of the logged account without ever
-// creating or emptying it; the cache is nil when there is none for this account.
+// openCache opens the cache of the logged account for reading only. The
+// cache is nil (and err nil) when there is none for this account.
 func (l *Local) openCache() (*cache.Cache, error) {
 	st, err := store.LoadState(l.o.Dirs.State)
 	if err != nil {
 		return nil, stateError(err)
 	}
-	p := l.cachePath()
-	if st.AccountID == "" || p == "" {
+	if st.AccountID == "" {
 		return nil, nil
 	}
-	info, err := cache.Inspect(p)
-	if err != nil || info.Account != st.AccountID {
+	db, err := cache.OpenReadOnly(cache.Path(l.o.Dirs.State), st.AccountID)
+	if errors.Is(err, cache.ErrNoCache) {
 		return nil, nil
 	}
-	db, err := cache.Open(p, st.AccountID)
 	if err != nil {
 		return nil, cacheError(err)
 	}
 	return db, nil
 }
 
-// syncStatus is the Status section: nil when there is no usable cache.
-func (l *Local) syncStatus(accountID string) *SyncStatus {
-	if accountID == "" {
-		return nil
-	}
+// syncStatus is the Status section: nil when there is no cache for the
+// account, with Error set when there is one that cannot be read.
+func (l *Local) syncStatus() *SyncStatus {
 	db, err := l.openCache()
-	if err != nil || db == nil {
+	if err != nil {
+		return &SyncStatus{Calendars: []CalendarStatus{}, Error: err.Error()}
+	}
+	if db == nil {
 		return nil
 	}
 	defer func() { _ = db.Close() }()
 	cals, err := db.Calendars(context.Background())
 	if err != nil {
-		return nil
+		return &SyncStatus{Calendars: []CalendarStatus{}, Error: cacheError(err).Error()}
 	}
 	out := &SyncStatus{Calendars: make([]CalendarStatus, 0, len(cals))}
 	for _, c := range cals {
@@ -237,6 +234,10 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 	}
 	if strings.TrimSpace(req.Calendar) == "" {
 		return nil, usage("a calendar is required", "pass the calendar's ID or exact name (pcb calendar list)")
+	}
+	win, err := newWindow(req)
+	if err != nil {
+		return nil, err
 	}
 	db, err := l.openCache()
 	if err != nil {
@@ -267,7 +268,7 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
-		if !inWindow(r, req.From, req.To) {
+		if !win.keeps(r) {
 			continue
 		}
 		ev := Event{
@@ -275,6 +276,9 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 			Start: time.Unix(r.Start, 0).UTC(), End: time.Unix(r.End, 0).UTC(),
 			AllDay: r.FullDay, Recurring: r.RRule != "",
 			LastEdit: time.Unix(r.LastEditTime, 0).UTC(), ETag: r.ETag,
+		}
+		if r.FullDay {
+			ev.StartDate, ev.EndDate = dayOf(r.Start), dayOf(allDayEnd(r))
 		}
 		if r.RecurrenceID != nil {
 			t := time.Unix(*r.RecurrenceID, 0).UTC()
@@ -311,16 +315,57 @@ func pickCalendar(cals []cache.Calendar, ref string) (cache.Calendar, error) {
 		"pass the calendar's ID instead of its name")
 }
 
-// inWindow keeps the rows overlapping [from, to) and the recurring masters
-// starting before to, whatever from says.
-func inWindow(r cache.Event, from, to *time.Time) bool {
+const dateLayout = time.DateOnly
+
+func dayOf(unix int64) string { return time.Unix(unix, 0).UTC().Format(dateLayout) }
+
+// allDayEnd is an all-day row's exclusive end: a row ending at or before its
+// start still covers its one day.
+func allDayEnd(r cache.Event) int64 {
+	if r.End <= r.Start {
+		return r.Start + 24*3600
+	}
+	return r.End
+}
+
+// window is an EventsRequest's bounds.
+type window struct {
+	from, to       *time.Time
+	fromDay, toDay string
+}
+
+func newWindow(req EventsRequest) (window, error) {
+	for _, d := range []string{req.FromDate, req.ToDate} {
+		if _, err := time.Parse(dateLayout, d); d != "" && err != nil {
+			return window{}, usage(fmt.Sprintf("%q is not a YYYY-MM-DD date", d), "write dates as YYYY-MM-DD")
+		}
+	}
+	return window{req.From, req.To, req.FromDate, req.ToDate}, nil
+}
+
+// keeps reports whether the row overlaps [from, to), and always keeps a
+// recurring master starting before to. All-day rows use the date bounds
+// when there are any, compared as dates; everything else is compared as
+// instants.
+func (w window) keeps(r cache.Event) bool {
 	start := time.Unix(r.Start, 0)
-	if to != nil && !start.Before(*to) {
+	switch {
+	case r.FullDay && w.toDay != "":
+		if dayOf(r.Start) >= w.toDay {
+			return false
+		}
+	case w.to != nil && !start.Before(*w.to):
 		return false
 	}
-	if from == nil || (r.RRule != "" && r.RecurrenceID == nil) {
+	if r.RRule != "" && r.RecurrenceID == nil {
 		return true
 	}
-	end := time.Unix(r.End, 0)
-	return end.After(*from) || (!end.After(start) && !start.Before(*from))
+	switch {
+	case r.FullDay && w.fromDay != "":
+		return dayOf(allDayEnd(r)) > w.fromDay
+	case w.from != nil:
+		end := time.Unix(r.End, 0)
+		return end.After(*w.from) || (!end.After(start) && !start.Before(*w.from))
+	}
+	return true
 }
