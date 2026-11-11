@@ -45,7 +45,7 @@ func execute(args []string, stdout, stderr io.Writer) exitcode.Code {
 	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
 	root.PersistentFlags().String("state-dir", "", "lab state directory (default $XDG_STATE_HOME/pcb-lab)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usage(err) })
-	root.AddCommand(loginCmd(), whoamiCmd(), probeCmd())
+	root.AddCommand(loginCmd(), whoamiCmd(), probeCmd(), seedCmd())
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
