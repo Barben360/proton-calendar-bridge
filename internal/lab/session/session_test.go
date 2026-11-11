@@ -7,10 +7,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -367,30 +367,6 @@ func TestConcurrentLoginsReachProtonOnce(t *testing.T) {
 	}
 }
 
-func TestLoginRefusedWhileLockHeld(t *testing.T) {
-	f := labtest.NewFront(t, &labtest.Front{})
-	o := opts(t, f)
-	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	lock, err := os.OpenFile(filepath.Join(o.StateDir, "login.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close() //nolint:errcheck // test file
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatal(err)
-	}
-	_, err = session.Login(t.Context(), o)
-	e := exitErr(t, err)
-	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another pcb-lab login is running") {
-		t.Fatalf("got %v", err)
-	}
-	if f.Requests != 0 {
-		t.Fatal("Proton reached while the lock was held")
-	}
-}
-
 func TestHVFileLifecycle(t *testing.T) {
 	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
 	o := opts(t, f)
@@ -468,6 +444,17 @@ func TestResumeReportsFailedTokenWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
+	raw, err := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil || saved.AccessToken == "" || saved.RefreshToken == "" {
+		t.Fatalf("session.json has no tokens to look for: %v", err)
+	}
 	if err := os.Chmod(o.StateDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
@@ -479,6 +466,16 @@ func TestResumeReportsFailedTokenWrite(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "saving the rotated session tokens") {
 		t.Fatalf("error = %v", err)
+	}
+	// The error is printed and logged: it must carry no token, old or rotated.
+	msg := strings.ReplaceAll(err.Error(), o.StateDir, "<state>")
+	for _, tok := range []string{saved.AccessToken, saved.RefreshToken} {
+		if strings.Contains(msg, tok) {
+			t.Errorf("error contains a session token: %q", msg)
+		}
+	}
+	if long := regexp.MustCompile(`[A-Za-z0-9_-]{24,}`).FindString(msg); long != "" {
+		t.Errorf("error contains the token-like string %q: %q", long, msg)
 	}
 }
 

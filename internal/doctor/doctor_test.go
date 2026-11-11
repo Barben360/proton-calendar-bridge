@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 )
@@ -21,6 +22,21 @@ func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
 	got := doctor.DirModeCheck{Label: "config dir", Path: dir, Want: 0o700}.Run(context.Background())
 	if got.Status != doctor.StatusError || !strings.Contains(got.Fix, "chmod 700 "+dir) {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDirModeCheckFixQuotesThePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my dir's")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.DirModeCheck{Label: "config dir", Path: dir, Want: 0o700}.Run(context.Background())
+	want := "chmod 700 '" + strings.ReplaceAll(dir, "'", `'\''`) + "'"
+	if got.Fix != want {
+		t.Fatalf("fix = %q, want %q", got.Fix, want)
 	}
 }
 
@@ -103,6 +119,18 @@ func (c gatedCheck) Run(context.Context) doctor.Result {
 	return doctor.Result{Name: c.name, Status: doctor.StatusOK}
 }
 
+// recv receives from ch, failing the test instead of hanging when nothing comes.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Run")
+		panic("unreachable")
+	}
+}
+
 func TestRunStreamsEachResult(t *testing.T) {
 	release := make(chan struct{})
 	seen := make(chan string)
@@ -113,7 +141,7 @@ func TestRunStreamsEachResult(t *testing.T) {
 			func(r doctor.Result) { seen <- r.Name })
 	}()
 	// The second check is still blocked: the first result must already be out.
-	if got := <-seen; got != "first" {
+	if got := recv(t, seen); got != "first" {
 		t.Fatalf("first streamed result = %q", got)
 	}
 	select {
@@ -122,10 +150,10 @@ func TestRunStreamsEachResult(t *testing.T) {
 	default:
 	}
 	close(release)
-	if got := <-seen; got != "second" {
+	if got := recv(t, seen); got != "second" {
 		t.Fatalf("second streamed result = %q", got)
 	}
-	if res := <-done; len(res) != 2 || res[0].Name != "first" || res[1].Name != "second" {
+	if res := recv(t, done); len(res) != 2 || res[0].Name != "first" || res[1].Name != "second" {
 		t.Fatalf("results = %+v", res)
 	}
 }
