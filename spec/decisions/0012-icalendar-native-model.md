@@ -4,7 +4,7 @@
 - **Decided by**: agent (controller ruling M3-R2), author to confirm
 - **Status**: provisional until the author confirms; supersedes 0006 for v1
 
-The bridge keeps events in iCalendar from end to end in v1. A decrypted Proton event is a set of iCalendar fragments (the card parts, `internal/proton/cards`); the CalDAV adapter merges them into one VEVENT line by line and serves it, keeping every property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte. There is no JSCalendar (RFC 8984) layer in v1.
+The bridge keeps events in iCalendar from end to end in v1. A decrypted Proton event is a set of iCalendar fragments (the card parts, `internal/proton/cards`); the iCalendar codec (`internal/ical`) merges them into one VEVENT line by line, keeping every property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte, and the CalDAV adapter serves the result. There is no JSCalendar (RFC 8984) layer in v1.
 
 Why:
 - CalDAV is the only adapter (0007), and Proton itself stores iCalendar fragments: a JSCalendar model would sit between two iCalendar ends.

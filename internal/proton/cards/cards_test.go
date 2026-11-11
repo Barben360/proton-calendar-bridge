@@ -162,8 +162,8 @@ func TestOpenDecryptsEveryPart(t *testing.T) {
 		{cards.Attendees, []string{"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;X-PM-TOKEN=tokA:mailto:ann@pcb.test", "ATTENDEE;CN=Bob;PARTSTAT=TENTATIVE;X-PM-TOKEN=tokB:mailto:bob@pcb.test"}},
 		{cards.Personal, []string{"BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT10M\r\nDESCRIPTION:Soon\r\nEND:VALARM"}},
 	}
-	if len(ev.Parts) != len(want) {
-		t.Fatalf("%d parts, want %d", len(ev.Parts), len(want))
+	if len(ev.Parts) != len(want) || ev.SkippedParts != 0 {
+		t.Fatalf("%d parts, %d skipped; want %d, 0", len(ev.Parts), ev.SkippedParts, len(want))
 	}
 	for i, w := range want {
 		p := ev.Parts[i]
@@ -216,7 +216,20 @@ func TestOpenVerifiesOwnSignatures(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	raw := r.add(t, protontest.Event{UID: "v@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	// Signed with the address key, but named as someone not ours.
 	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, Author: "stranger@pcb.test"}).Raw
+	// Named as ours, signed with another key.
+	forged := r.add(t, protontest.Event{UID: "f@pcb.test", Start: 1, End: 2, Card: fullCard, ForeignKey: true}).Raw
+	other, err := crypto.GenerateKey("Other", "other@pcb.test", "x25519", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKR, err := crypto.NewKeyRing(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Our address keys are at hand: they must be used through own only.
+	addrs := map[string]*crypto.KeyRing{"addr1": r.addr}
 
 	type want map[cards.Kind]bool // kind → Verified; kinds absent: true
 	cases := []struct {
@@ -240,12 +253,30 @@ func TestOpenVerifiesOwnSignatures(t *testing.T) {
 		{name: "part without Author falls back to the row's", raw: editRaw(t, raw, func(m map[string]any) {
 			delete(partsOf(m, "SharedEvents")[0].(map[string]any), "Author")
 		}), own: r.own},
+		{name: "signature by another key over the same text", raw: editRaw(t, raw, func(m map[string]any) {
+			sig, err := otherKR.SignDetached(crypto.NewPlainMessage([]byte(field(m, "SharedEvents", 0, "Data"))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			armored, err := sig.GetArmored()
+			if err != nil {
+				t.Fatal(err)
+			}
+			setField(m, "SharedEvents", 0, "Signature", armored)
+		}), own: r.own, want: want{cards.SharedSigned: false}},
+		{name: "every part signed by another key", raw: forged, own: r.own, all: true},
+		{name: "part Author not ours, row Author ours", raw: editRaw(t, raw, func(m map[string]any) {
+			setField(m, "SharedEvents", 0, "Author", "stranger@pcb.test")
+		}), own: r.own, want: want{cards.SharedSigned: false}},
+		{name: "part Author ours, row Author not ours", raw: editRaw(t, raw, func(m map[string]any) {
+			m["Author"] = "stranger@pcb.test"
+		}), own: r.own},
 		{name: "author not ours", raw: stranger, own: r.own, all: true},
 		{name: "no own function", raw: raw, own: nil, all: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ev, err := cards.Open(c.raw, r.calKR, nil, c.own)
+			ev, err := cards.Open(c.raw, r.calKR, addrs, c.own)
 			if err != nil {
 				t.Fatalf("Open: %v (a bad signature is not an error)", err)
 			}
@@ -322,7 +353,6 @@ func TestOpenBrokenPartNamesThePart(t *testing.T) {
 		{protontest.SharedEncryptedPart, cards.SharedEncrypted, "SharedEvents", 1},
 		{protontest.CalendarEncryptedPart, cards.CalendarEncrypted, "CalendarEvents", 1},
 		{protontest.AttendeesPart, cards.Attendees, "AttendeesEvents", 0},
-		{protontest.PersonalPart, cards.Personal, "PersonalEvents", 0},
 	}
 	for _, c := range cases {
 		row := r.add(t, protontest.Event{UID: "b@pcb.test", Start: 1, End: 2, Card: fullCard, BrokenPart: c.broken})
@@ -361,6 +391,28 @@ func TestOpenBrokenPartNamesThePart(t *testing.T) {
 		if err := open(); !errors.Is(err, cards.ErrUndecryptable) || !strings.Contains(err.Error(), "shared encrypted part") {
 			t.Errorf("%s: %v, want ErrUndecryptable naming the shared encrypted part", name, err)
 		}
+	}
+}
+
+// TestOpenSkipsUndecryptablePersonalPart: ruling M3-R7, a personal part that
+// does not decrypt is left out and counted, never fatal.
+func TestOpenSkipsUndecryptablePersonalPart(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	ev, err := cards.Open(r.add(t, protontest.Event{UID: "p@pcb.test", Start: 1, End: 2, Card: fullCard, BrokenPart: protontest.PersonalPart}).Raw, r.calKR, nil, r.own)
+	if err != nil {
+		t.Fatalf("Open: %v, want the event without its personal part", err)
+	}
+	if ev.SkippedParts != 1 || len(ev.Parts) != 5 {
+		t.Fatalf("SkippedParts %d, %d parts; want 1, 5", ev.SkippedParts, len(ev.Parts))
+	}
+	for _, p := range ev.Parts {
+		if p.Kind == cards.Personal {
+			t.Error("the undecryptable personal part must be left out")
+		}
+	}
+	if !has(part(t, ev, cards.SharedEncrypted).Text, "SUMMARY:Lunch") {
+		t.Error("the other parts must still open")
 	}
 }
 
@@ -518,7 +570,6 @@ func BenchmarkOpen(b *testing.B) {
 		b.Fatalf("ListAll: %d rows, %v", len(rows), err)
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
 	for i := 0; b.Loop(); i++ {
 		if _, err := cards.Open(rows[i%n].Raw, r.calKR, nil, r.own); err != nil {
 			b.Fatal(err)

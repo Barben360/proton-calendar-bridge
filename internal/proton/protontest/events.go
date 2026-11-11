@@ -23,10 +23,14 @@ type Event struct {
 	// card from UID, Start, End, FullDay, RRule and RecurrenceID. A card
 	// without UID gets UID's.
 	Card string
-	// Author signs the parts (always with the address key); empty: the
-	// email of the calendar's address.
+	// Author names the parts' signer; empty: the email of the calendar's
+	// address. The parts are signed with the address key whatever the
+	// Author, unless ForeignKey.
 	Author string
-	Color  string // "" serves null
+	// ForeignKey signs the parts with an unrelated key (one per test binary)
+	// instead of the address key: a signature that must not verify.
+	ForeignKey bool
+	Color      string // "" serves null
 	// Notifications: nil serves null (the calendar's defaults), an empty
 	// slice [] (none).
 	Notifications []Notification

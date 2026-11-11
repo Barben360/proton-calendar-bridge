@@ -17,7 +17,8 @@ import (
 // CRLF-separated with no CRLF after the last one [inferred]; cleartext parts
 // carry a detached signature, encrypted parts a SEIPD packet under a session
 // key whose PKESK is the row's key packet, and a detached signature over the
-// plaintext. Every signature is made by the address key (AddressKeyRing).
+// plaintext. Every signature is made by the address key (AddressKeyRing), or
+// by an unrelated key with Event.ForeignKey.
 
 // Part names a part that Event.BrokenPart makes undecryptable.
 type Part int
@@ -52,6 +53,15 @@ var signer = sync.OnceValues(func() (*crypto.KeyRing, error) {
 		return nil, err
 	}
 	key, err := locked.Unlock(pass)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.NewKeyRing(key)
+})
+
+// stranger is an unrelated key, for Event.ForeignKey.
+var stranger = sync.OnceValues(func() (*crypto.KeyRing, error) {
+	key, err := crypto.GenerateKey("Stranger", "stranger@protontest.invalid", "x25519", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -240,6 +250,12 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
+	signKR := addrKR
+	if r.ev.ForeignKey {
+		if signKR, err = stranger(); err != nil {
+			return nil, err
+		}
+	}
 	author := r.ev.Author
 	if author == "" {
 		author = cal.owner + "@" + f.backend.GetDomain()
@@ -249,7 +265,7 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 	}
 	var errs []error
 	sign := func(text string) string {
-		sig, err := addrKR.SignDetached(crypto.NewPlainMessage([]byte(text)))
+		sig, err := signKR.SignDetached(crypto.NewPlainMessage([]byte(text)))
 		if err != nil {
 			errs = append(errs, err)
 			return ""

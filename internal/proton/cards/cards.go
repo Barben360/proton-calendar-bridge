@@ -84,6 +84,10 @@ type Event struct {
 	Color         string
 	Attendees     []AttendeeStatus
 	RecurrenceID  *int64
+	// SkippedParts counts the personal parts left out because they do not
+	// decrypt (ruling M3-R7): alarms come from Notifications, and another
+	// member's personal part may be present.
+	SkippedParts int
 }
 
 // ErrUndecryptable means a part of the row does not decrypt with the keys
@@ -118,7 +122,8 @@ type wireRow struct {
 // only for an AddressKeyPacket), own returns our keyring for an email that is
 // one of our addresses and nil otherwise (nil own: nothing is verified). A
 // signature that does not verify is not an error (Verified false); a part
-// that does not decrypt is (ErrUndecryptable, naming the part kind).
+// that does not decrypt is (ErrUndecryptable, naming the part kind), except a
+// personal part, which is skipped and counted (Event.SkippedParts).
 func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.KeyRing, own func(email string) *crypto.KeyRing) (Event, error) {
 	var w wireRow
 	if err := json.Unmarshal(raw, &w); err != nil {
@@ -152,11 +157,12 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 			switch {
 			case wp.Type&typeEncrypted == 0:
 				p.Text = []byte(wp.Data)
-			case g.key == nil:
+			case g.key == nil: // personal: skipped, never fatal (M3-R7)
 				p.Kind = g.enc
 				text, err := o.armored(wp.Data)
 				if err != nil {
-					return Event{}, o.fail(p.Kind, err)
+					ev.SkippedParts++
+					continue
 				}
 				p.Text = text
 			default:
@@ -211,6 +217,9 @@ func (o *opener) sharedKey(kind Kind) (*crypto.SessionKey, error) {
 	}
 	err := errNoKeyPacket
 	if o.row.AddressKeyPacket != "" {
+		// The row's address first only saves attempts: the result is the
+		// same in any order, so no test can tell (and under the fake's
+		// fastKeys every address has the same key anyway).
 		var rings []*crypto.KeyRing
 		if kr := o.addrs[o.row.AddressID]; kr != nil {
 			rings = append(rings, kr)

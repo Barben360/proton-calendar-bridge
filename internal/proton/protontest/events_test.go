@@ -439,14 +439,14 @@ func TestFakePartsStayUntilAnEdit(t *testing.T) {
 		t.Fatal("two reads of an unchanged row differ")
 	}
 	f.UpdateEvent(cal, id, protontest.Event{UID: "u1", Start: 1, End: 2, Card: "SUMMARY:x"})
-	after, _ := getParts(t, f, tk, cal, id)
-	before, _ := getParts(t, f, tk, cal, id)
-	if before.SharedEvents[1].Data != after.SharedEvents[1].Data {
+	edited, _ := getParts(t, f, tk, cal, id)
+	editedAgain, _ := getParts(t, f, tk, cal, id)
+	if editedAgain.SharedEvents[1].Data != edited.SharedEvents[1].Data {
 		t.Fatal("reads after the edit differ")
 	}
 	var old servedParts
 	_ = json.Unmarshal(first, &old)
-	if old.SharedEvents[1].Data == after.SharedEvents[1].Data {
+	if old.SharedEvents[1].Data == edited.SharedEvents[1].Data {
 		t.Error("an edit must re-encrypt the parts")
 	}
 }
