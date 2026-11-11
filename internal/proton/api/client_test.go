@@ -641,3 +641,35 @@ func TestResponseTooLarge(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// A redirect is never followed: it would carry the session headers to
+// another URL. It is answered as a failure.
+func TestRedirectIsNeverFollowed(t *testing.T) {
+	for name, hc := range map[string]*http.Client{
+		"default client":  nil,
+		"caller's client": {Timeout: 5 * time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var reached atomic.Int32
+			elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached.Add(1)
+				reply(w, 200, `{"Code":1000}`)
+			}))
+			t.Cleanup(elsewhere.Close)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, elsewhere.URL+"/stolen", http.StatusFound)
+			}))
+			t.Cleanup(srv.Close)
+			c := api.New(tok, api.Options{BaseURL: srv.URL, HTTP: hc, Limiter: rate.NewLimiter(rate.Inf, 1),
+				Sleep: func(context.Context, time.Duration) error { return nil }})
+			err := c.Get(t.Context(), "/core/v4/users", nil, nil)
+			var e *api.Error
+			if !errors.As(err, &e) || e.Status != http.StatusFound {
+				t.Errorf("err = %v, want the 302 as an *api.Error", err)
+			}
+			if n := reached.Load(); n != 0 {
+				t.Errorf("the redirect was followed (%d requests elsewhere)", n)
+			}
+		})
+	}
+}

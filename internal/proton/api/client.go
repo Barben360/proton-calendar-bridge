@@ -40,7 +40,7 @@ type Options struct {
 	BaseURL    string
 	AppVersion string       // x-pm-appversion; default "Other"
 	UserAgent  string       // default "pcb/<buildinfo.Version>"
-	HTTP       *http.Client // default: 30 s timeout
+	HTTP       *http.Client // default: 30 s timeout; redirects are never followed
 	// Refresh exchanges stale tokens for new ones. It should wrap
 	// ErrSessionEnded when the refresh token is no longer usable. Without it,
 	// a 401 ends the session. It runs under the client's lock and detached
@@ -63,6 +63,12 @@ func New(t Tokens, o Options) *Client {
 	if o.HTTP == nil {
 		o.HTTP = &http.Client{Timeout: defaultTimeout}
 	}
+	// A followed redirect would send the session headers to another URL; the
+	// 3xx is answered as a failure instead. Set on a copy: the caller's client
+	// is left as it was.
+	hc := *o.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	o.HTTP = &hc
 	if o.Limiter == nil {
 		o.Limiter = rate.NewLimiter(rate.Every(250*time.Millisecond), 8)
 	}
