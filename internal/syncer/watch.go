@@ -11,8 +11,8 @@ import (
 const (
 	DefaultInterval = 30 * time.Second
 	MinInterval     = 10 * time.Second // a shorter Interval is raised to it
-	MaxBackoff      = 10 * time.Minute
-	jitter          = 0.10 // ± fraction of a backoff wait
+	MaxBackoff      = 10 * time.Minute // or Interval when longer
+	jitter          = 0.10             // ± fraction of a backoff wait
 )
 
 // WatchOptions tune Watch. The zero value runs passes every 30 s and never
@@ -28,7 +28,8 @@ type WatchOptions struct {
 // Watch runs pass until ctx ends or Stop accepts a pass error, which it
 // returns (ctx.Err() otherwise). After a successful pass it waits Interval;
 // after a failed one Interval doubled per consecutive failure, capped at
-// MaxBackoff, ±10 %. A pass that fails because ctx ended is not reported.
+// the longer of MaxBackoff and Interval (a failure never polls faster than a
+// success), ±10 %. A pass that fails because ctx ended is not reported.
 func Watch(ctx context.Context, pass func(context.Context) (Report, error), o WatchOptions) error {
 	if o.Interval == 0 {
 		o.Interval = DefaultInterval
@@ -71,14 +72,15 @@ func Watch(ctx context.Context, pass func(context.Context) (Report, error), o Wa
 	}
 }
 
-// backoff is interval × 2^(failures-1), capped at MaxBackoff, scaled by
-// 1 ± jitter according to r in [0, 1).
+// backoff is interval × 2^(failures-1), capped at max(MaxBackoff,
+// interval), scaled by 1 ± jitter according to r in [0, 1).
 func backoff(interval time.Duration, failures int, r float64) time.Duration {
+	limit := max(MaxBackoff, interval)
 	d := interval
-	for i := 1; i < failures && d < MaxBackoff; i++ {
+	for i := 1; i < failures && d < limit; i++ {
 		d *= 2
 	}
-	d = min(d, MaxBackoff)
+	d = min(d, limit)
 	return time.Duration(math.Round(float64(d) * (1 - jitter + 2*jitter*r)))
 }
 

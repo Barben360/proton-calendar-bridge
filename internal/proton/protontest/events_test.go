@@ -300,7 +300,9 @@ func TestFakeOnListPageRunsBeforeThePageIsSent(t *testing.T) {
 		t.Fatalf("hook ran for pages %v (added %q), want once for page 0", pages, added)
 	}
 	out = listing{}
-	rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100", &out)
+	if st, _ := rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100", &out); st != 200 {
+		t.Fatalf("second list: HTTP %d", st)
+	}
 	if len(out.Events) != 2 || len(pages) != 1 {
 		t.Errorf("after removing the hook: %d rows, hook calls %v; want 2 rows, no new call", len(out.Events), pages)
 	}

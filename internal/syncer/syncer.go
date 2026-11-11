@@ -1,7 +1,8 @@
 // Package syncer is C4: it brings the cache up to date with Proton, one pass
 // over every calendar, and repeats passes in a watch loop. A calendar is
 // listed in full when it was never synced, when Proton asks, when its cursor
-// is refused, or when its last listing is older than FullEvery; otherwise its
+// or one of its rows is refused (at most once per FallbackGap), or when its
+// last listing is older than FullEvery; otherwise its
 // change feed is read and every changed ID re-read. A cursor is only stored
 // in the transaction that stores the rows read up to it, so a failure never
 // loses a change: the next pass reads it again. Nothing is decrypted, keys
@@ -23,6 +24,21 @@ import (
 
 // DefaultFullEvery is how old a calendar's last full listing may get.
 const DefaultFullEvery = 24 * time.Hour
+
+// FallbackGap is the shortest time between a calendar's last full listing and
+// a fallback one (Refresh, refused cursor, refused row read): a calendar
+// whose feed keeps failing is not listed on every pass (good citizen).
+const FallbackGap = 5 * time.Minute
+
+// ResyncDeferredError is a calendar's error when it needed a fallback full
+// listing less than FallbackGap after its last one: it was skipped this pass
+// with its cursor kept.
+type ResyncDeferredError struct{ Until time.Time }
+
+// Error implements error.
+func (e *ResyncDeferredError) Error() string {
+	return "Proton asked for a full resync again; retrying after " + e.Until.UTC().Format(time.RFC3339)
+}
 
 // Modes of a calendar's sync in a pass.
 const (
@@ -140,6 +156,11 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 			return r
 		}
 		r.Mode = ModeFull
+		if next := prev.FullAt.Add(FallbackGap); now.Before(next) {
+			// Keep the cursor: the next pass after next reads the feed again.
+			r.Err = &ResyncDeferredError{Until: next}
+			return r
+		}
 	}
 	r.Changes, r.Err = full(ctx, c, db, calID, now)
 	return r
@@ -170,9 +191,11 @@ func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now
 
 // incremental applies the feed after cursor. resync is true when the
 // calendar must be listed instead: Proton asked (Refresh, or too many
-// pages), or refused the cursor with a 4xx other than 429. Every listed ID
-// is re-read: a row Proton says is gone is deleted, whatever the feed said.
-// Nothing is stored unless every row was read.
+// pages), refused the cursor with a 4xx other than 429, or refused to read a
+// row with an error neither session-wide nor gone (ruling R8: listing beats
+// holding the cursor forever). Every listed ID is re-read: a row Proton says
+// is gone is deleted, whatever the feed said. Nothing is stored unless every
+// row was read.
 func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cursor string, now time.Time) (ch cache.Changes, resync bool, err error) {
 	d, err := events.Changes(ctx, c, calID, cursor)
 	if err != nil {
@@ -189,7 +212,7 @@ func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cur
 		case errors.Is(err, events.ErrGone):
 			gone = append(gone, id)
 		case err != nil:
-			return cache.Changes{}, false, fmt.Errorf("event %s: %w", id, err)
+			return cache.Changes{}, !api.SessionWide(ctx, err), fmt.Errorf("event %s: %w", id, err)
 		default:
 			upserts = append(upserts, toCache(row))
 		}

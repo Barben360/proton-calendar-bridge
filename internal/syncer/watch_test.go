@@ -110,6 +110,8 @@ func TestWatchInterval(t *testing.T) {
 		{0, []time.Duration{30 * s, 30 * s, 60 * s}},           // default
 		{45 * s, []time.Duration{45 * s, 45 * s, 90 * s}},      // as given
 		{time.Second, []time.Duration{10 * s, 10 * s, 20 * s}}, // raised to the 10 s floor
+		// Above the 10 min cap: a failure never polls faster than a success.
+		{15 * time.Minute, []time.Duration{15 * time.Minute, 15 * time.Minute, 15 * time.Minute}},
 	} {
 		p, _ := script(t, nil, errFlaky, errFlaky, errStop)
 		var waits []time.Duration

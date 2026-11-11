@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -289,7 +290,7 @@ func TestExpiredCursorTriggersFullResync(t *testing.T) {
 	f.AddEvent(a, protontest.Event{UID: "new", Start: 5, End: 6})
 	f.ExpireFeed(a) // 422/2001
 	list0 := listCalls(f, a)
-	r := report(t, pass(t, c, db, at(t0.Add(time.Minute))), a)
+	r := report(t, pass(t, c, db, at(t0.Add(10*time.Minute))), a)
 	if r.Mode != "full" || r.Err != nil || r.Changes != (cache.Changes{Added: 1}) || listCalls(f, a)-list0 != 1 {
 		t.Errorf("expired cursor: report %+v, %d listings; want full, 1 added, 1 listing", r, listCalls(f, a)-list0)
 	}
@@ -297,13 +298,13 @@ func TestExpiredCursorTriggersFullResync(t *testing.T) {
 
 	cur := cached(t, db, a).Cursor
 	f.FailNext("GET", "/calendar/v1/"+a+"/modelevents/"+cur, http.StatusForbidden, 2011, 0)
-	r = report(t, pass(t, c, db, at(t0.Add(2*time.Minute))), a)
+	r = report(t, pass(t, c, db, at(t0.Add(20*time.Minute))), a)
 	if r.Mode != "full" || r.Err != nil {
 		t.Errorf("feed answering 403: report %+v, want full, no error", r)
 	}
 
 	late := f.AddEvent(a, protontest.Event{UID: "late", Start: 1, End: 2})
-	r = report(t, pass(t, c, db, at(t0.Add(3*time.Minute))), a)
+	r = report(t, pass(t, c, db, at(t0.Add(30*time.Minute))), a)
 	if r.Mode != "incremental" || r.Changes != (cache.Changes{Added: 1}) || etags(t, db, a)[late] == "" {
 		t.Errorf("after the resync: report %+v, want incremental adding %s", r, late)
 	}
@@ -486,4 +487,145 @@ func TestNewCalendarGetsInitialSync(t *testing.T) {
 		t.Errorf("new calendar cached %+v, want named with a cursor", cb)
 	}
 	matches(t, c, db, b)
+}
+
+// Ruling R8: a row Proton refuses to read (neither gone nor session-wide)
+// makes the calendar fall back to a full listing in the same pass, rather
+// than holding its cursor forever.
+func TestRefusedRowReadTriggersFullResync(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ids := addEvents(f, a, 2)
+	pass(t, c, db, at(t0))
+	f.UpdateEvent(a, ids[0], protontest.Event{UID: "u0", Start: 7, End: 8})
+	f.FailNext("GET", "/calendar/v1/"+a+"/events/"+ids[0], http.StatusForbidden, 2011, 0)
+	list0 := listCalls(f, a)
+	t1 := t0.Add(time.Hour)
+	r := report(t, pass(t, c, db, at(t1)), a)
+	if r.Mode != "full" || r.Err != nil || r.Changes != (cache.Changes{Updated: 1}) || listCalls(f, a)-list0 != 1 {
+		t.Errorf("report %+v, %d listings; want full, 1 updated, no error, 1 listing", r, listCalls(f, a)-list0)
+	}
+	if cal := cached(t, db, a); cal.Error != "" || !cal.FullAt.Equal(t1) {
+		t.Errorf("cached %+v, want no Error, FullAt %v", cal, t1)
+	}
+	matches(t, c, db, a) // the refused row is cached as listed
+}
+
+// A fallback full resync (Refresh, refused cursor, R8) runs at most once per
+// calendar per 5 minutes; the first listing, Options.Full and the FullEvery
+// age are not limited.
+func TestFallbackResyncIsRateLimited(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	addEvents(f, a, 1)
+	pass(t, c, db, at(t0))
+
+	// Refresh 4 min after the listing: skipped, cursor kept, error recorded.
+	before := cached(t, db, a)
+	f.AddEvent(a, protontest.Event{UID: "new", Start: 5, End: 6})
+	f.ForceRefresh(a)
+	list0 := listCalls(f, a)
+	rep, err := syncer.Pass(t.Context(), c, db, at(t0.Add(4*time.Minute)))
+	if err != nil {
+		t.Fatalf("Pass: %v, want the skip reported on the calendar", err)
+	}
+	r := report(t, rep, a)
+	wantErr := "Proton asked for a full resync again; retrying after " + t0.Add(5*time.Minute).UTC().Format(time.RFC3339)
+	var deferred *syncer.ResyncDeferredError
+	if !errors.As(r.Err, &deferred) || !deferred.Until.Equal(t0.Add(5*time.Minute)) {
+		t.Errorf("4 min after a listing: Err %v, want a ResyncDeferredError until %v", r.Err, t0.Add(5*time.Minute))
+	}
+	if r.Err == nil || r.Err.Error() != wantErr || r.Changes != (cache.Changes{}) || listCalls(f, a) != list0 {
+		t.Errorf("4 min after a listing: report %+v, %d listings; want Err %q, no change, no listing", r, listCalls(f, a)-list0, wantErr)
+	}
+	if after := cached(t, db, a); after.Cursor != before.Cursor || after.Error != wantErr || !after.SyncedAt.Equal(t0) {
+		t.Errorf("cached %+v, want cursor %q kept, Error %q, SyncedAt %v", after, before.Cursor, wantErr, t0)
+	}
+
+	// 5 min after it: the resync runs and clears the error.
+	f.ForceRefresh(a)
+	r = report(t, pass(t, c, db, at(t0.Add(5*time.Minute))), a)
+	if r.Mode != "full" || r.Err != nil || r.Changes != (cache.Changes{Added: 1}) || listCalls(f, a)-list0 != 1 {
+		t.Errorf("5 min after the listing: report %+v, want full adding 1", r)
+	}
+	if cal := cached(t, db, a); cal.Error != "" {
+		t.Errorf("Error %q after the resync, want none", cal.Error)
+	}
+
+	// Not limited: Options.Full and the FullEvery age, right after a listing.
+	t6 := t0.Add(6 * time.Minute)
+	if r := report(t, pass(t, c, db, syncer.Options{Now: func() time.Time { return t6 }, Full: true}), a); r.Mode != "full" || r.Err != nil {
+		t.Errorf("Full 1 min after a listing: %+v, want full, no error", r)
+	}
+	t8 := t0.Add(8 * time.Minute)
+	if r := report(t, pass(t, c, db, syncer.Options{Now: func() time.Time { return t8 }, FullEvery: time.Minute}), a); r.Mode != "full" || r.Err != nil {
+		t.Errorf("FullEvery 1 min, listed 2 min ago: %+v, want full, no error", r)
+	}
+	if cal := cached(t, db, a); !cal.FullAt.Equal(t8) {
+		t.Errorf("FullAt %v, want %v", cal.FullAt, t8)
+	}
+}
+
+// More than events.MaxFeedPages feed pages: the calendar is listed instead.
+func TestLongFeedTriggersFullResync(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	addEvents(f, a, 1)
+	pass(t, c, db, at(t0))
+	f.SetFeedPageSize(1)
+	addEvents(f, a, events.MaxFeedPages+2)
+	feed0, get0, list0 := feedCalls(f, a), getCalls(f, a), listCalls(f, a)
+	r := report(t, pass(t, c, db, at(t0.Add(time.Hour))), a)
+	if r.Mode != "full" || r.Err != nil || r.Changes.Added != events.MaxFeedPages+2 {
+		t.Errorf("report %+v, want full adding %d", r, events.MaxFeedPages+2)
+	}
+	// 50 feed pages, then latest; no row read; one listing.
+	if feed, gets, lists := feedCalls(f, a)-feed0, getCalls(f, a)-get0, listCalls(f, a)-list0; feed != events.MaxFeedPages+1 || gets != 0 || lists != 1 {
+		t.Errorf("requests: %d feed, %d row reads, %d listings; want %d, 0, 1", feed, gets, lists, events.MaxFeedPages+1)
+	}
+	matches(t, c, db, a)
+}
+
+// A delta spanning feed pages whose second page fails stores nothing: the
+// first page's rows would be stored with a cursor past the unread ones.
+func TestFeedSecondPageFailureKeepsOldCursor(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	addEvents(f, a, 1)
+	pass(t, c, db, at(t0))
+	before := cached(t, db, a)
+	rows := etags(t, db, a)
+	f.SetFeedPageSize(2)
+	addEvents(f, a, 4)
+	// The fake's cursor is "<salt>-<position>": page 1 ends 2 entries on.
+	i := strings.LastIndex(before.Cursor, "-")
+	pos, err := strconv.Atoi(before.Cursor[i+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := before.Cursor[:i+1] + strconv.Itoa(pos+2)
+	for range 3 { // the client retries a GET's 5xx three times
+		f.FailNext("GET", "/calendar/v1/"+a+"/modelevents/"+second, http.StatusServiceUnavailable, 0, 0)
+	}
+	feed0 := feedCalls(f, a)
+	rep, err := syncer.Pass(t.Context(), c, db, at(t0.Add(time.Hour)))
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Status != http.StatusServiceUnavailable || len(rep.Calendars) != 0 {
+		t.Fatalf("Pass = %+v, %v; want the 503, no report", rep, err)
+	}
+	if n := feedCalls(f, a) - feed0; n != 4 { // page 1, then page 2 three times
+		t.Fatalf("%d feed requests, want 4: the failure did not hit the second page", n)
+	}
+	if after := cached(t, db, a); after.Cursor != before.Cursor || len(etags(t, db, a)) != len(rows) {
+		t.Errorf("after the failure: cursor %q, %d rows; want %q, %d", after.Cursor, len(etags(t, db, a)), before.Cursor, len(rows))
+	}
+	r := report(t, pass(t, c, db, at(t0.Add(2*time.Hour))), a)
+	if r.Mode != "incremental" || r.Err != nil || r.Changes != (cache.Changes{Added: 4}) {
+		t.Errorf("next pass %+v, want incremental adding 4", r)
+	}
+	matches(t, c, db, a)
 }

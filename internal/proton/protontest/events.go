@@ -185,6 +185,10 @@ func (f *Fake) SetFeedPageSize(n int) {
 // (page 0-based) has been read from the calendar and before it is sent: a
 // row fn adds is not on that page, and the client sees the page only after
 // fn returns. fn may call the fake (AddEvent…); nil removes the hook.
+// fn runs on the server's handler goroutine, not the test's: it must not
+// call t.Fatal or t.FailNow, and what it writes is visible to the test after
+// the listing answer arrives and OnListPage (which takes the fake's lock) is
+// called again.
 func (f *Fake) OnListPage(fn func(calID string, page int)) {
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
