@@ -104,7 +104,7 @@ var stranger = sync.OnceValues(func() (*crypto.KeyRing, error) {
 	if err != nil {
 		return nil, err
 	}
-	return crypto.NewKeyRing(key)
+	return crypto.NewKeyRing(warm(key))
 })
 
 // AddressKeyRing returns a copy of the unlocked key of every account's first
