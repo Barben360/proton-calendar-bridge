@@ -124,6 +124,27 @@ func (f *Fake) AddEvent(calID string, e Event) (id string) {
 	return id
 }
 
+// AddEventAt is AddEvent placing the row at position pos of the listing
+// (0: first) instead of last, as if Proton's listing order put it there: a
+// row inserted before a page already served shifts the later pages.
+func (f *Fake) AddEventAt(calID string, pos int, e Event) (id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	s := f.calendarForEvents(calID).events()
+	if pos < 0 || pos > len(s.rows) {
+		f.t.Fatalf("protontest: position %d outside the %d rows of calendar %q", pos, len(s.rows), calID)
+	}
+	now := f.tick()
+	id = "ev" + hex.EncodeToString(random(f.t, 8)) + "=="
+	s.rows = slices.Insert(s.rows, pos, &eventRec{
+		id: id, sharedID: "sev" + hex.EncodeToString(random(f.t, 8)) + "==",
+		ev: e, createTime: now, lastEdit: now, modify: now,
+	})
+	s.record(id, actionCreate)
+	return id
+}
+
 // UpdateEvent replaces the row's fields, bumps its LastEditTime and appends
 // it to the feed.
 func (f *Fake) UpdateEvent(calID, id string, e Event) {

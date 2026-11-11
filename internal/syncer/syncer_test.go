@@ -584,9 +584,10 @@ func TestLongFeedTriggersFullResync(t *testing.T) {
 	if r.Mode != "full" || r.Err != nil || r.Changes.Added != events.MaxFeedPages+2 {
 		t.Errorf("report %+v, want full adding %d", r, events.MaxFeedPages+2)
 	}
-	// 50 feed pages, then latest; no row read; one listing.
-	if feed, gets, lists := feedCalls(f, a)-feed0, getCalls(f, a)-get0, listCalls(f, a)-list0; feed != events.MaxFeedPages+1 || gets != 0 || lists != 1 {
-		t.Errorf("requests: %d feed, %d row reads, %d listings; want %d, 0, 1", feed, gets, lists, events.MaxFeedPages+1)
+	// 50 feed pages, then latest before and after the listing; no row read;
+	// one listing.
+	if feed, gets, lists := feedCalls(f, a)-feed0, getCalls(f, a)-get0, listCalls(f, a)-list0; feed != events.MaxFeedPages+2 || gets != 0 || lists != 1 {
+		t.Errorf("requests: %d feed, %d row reads, %d listings; want %d, 0, 1", feed, gets, lists, events.MaxFeedPages+2)
 	}
 	matches(t, c, db, a)
 }
@@ -732,4 +733,79 @@ func TestDeferredResyncNamesItsCauseAndSkipsTheFeed(t *testing.T) {
 	if r := report(t, pass(t, c, db, at(listedAt.Add(time.Minute))), a); r.Mode != "incremental" || r.Err != nil {
 		t.Errorf("after the last resync: %+v, want incremental", r)
 	}
+}
+
+func latestCalls(f *protontest.Fake, cal string) int {
+	return f.Calls("GET", "/calendar/v1/"+cal+"/modelevents/latest")
+}
+
+// The listing pages by offset: a row deleted or inserted before a page
+// already served shifts the later pages, so one unchanged row is skipped
+// (or one read twice). A cached row missing from such a listing is re-read
+// before it is tombstoned; a quiet listing costs no extra row read.
+func TestListingShiftedByAConcurrentEditKeepsUnchangedRows(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ids := addEvents(f, a, 150) // two pages
+	pass(t, c, db, at(t0))
+	full := func(now time.Time) syncer.Options {
+		return syncer.Options{Now: func() time.Time { return now }, Full: true}
+	}
+
+	// Quiet: two pages, latest before and after, no row read.
+	list0, latest0, get0 := listCalls(f, a), latestCalls(f, a), getCalls(f, a)
+	if r := report(t, pass(t, c, db, full(t0.Add(time.Hour))), a); r.Err != nil || r.Changes != (cache.Changes{}) {
+		t.Errorf("quiet listing: %+v, want no change", r)
+	}
+	if lists, latests, gets := listCalls(f, a)-list0, latestCalls(f, a)-latest0, getCalls(f, a)-get0; lists != 2 || latests != 2 || gets != 0 {
+		t.Errorf("quiet listing: %d pages, %d latest, %d row reads; want 2, 2, 0", lists, latests, gets)
+	}
+
+	// Deleted while page 0 is served (after its rows were read): page 1
+	// starts one row later, so ids[100] is in neither page.
+	hook := func(fn func()) {
+		done := false
+		f.OnListPage(func(calID string, page int) {
+			if calID == a && page == 0 && !done {
+				done = true
+				fn()
+			}
+		})
+	}
+	hook(func() { f.DeleteEvent(a, ids[0]) })
+	get0 = getCalls(f, a)
+	r := report(t, pass(t, c, db, full(t0.Add(2*time.Hour))), a)
+	f.OnListPage(nil)
+	if r.Err != nil || r.Changes != (cache.Changes{}) || r.Events != 150 {
+		t.Errorf("delete during the listing: %+v, want no change, 150 events", r)
+	}
+	if got := etags(t, db, a); got[ids[100]] == "" {
+		t.Errorf("delete during the listing: the unchanged row %s skipped by the shift was tombstoned", ids[100])
+	}
+	if n := getCalls(f, a) - get0; n != 1 {
+		t.Errorf("%d row reads, want 1: the cached row missing from the listing", n)
+	}
+	// The delete is after the baseline: the feed brings it.
+	if r := report(t, pass(t, c, db, at(t0.Add(2*time.Hour+time.Minute))), a); r.Mode != "incremental" || r.Changes != (cache.Changes{Deleted: 1}) {
+		t.Errorf("next pass: %+v, want incremental deleting %s", r, ids[0])
+	}
+	matches(t, c, db, a)
+
+	// Inserted at the front while page 0 is served: page 1 repeats the last
+	// row of page 0; the head moved, but no cached row is missing, so
+	// nothing is re-read and nothing changes.
+	var front string
+	hook(func() { front = f.AddEventAt(a, 0, protontest.Event{UID: "front", Start: 1, End: 2}) })
+	get0 = getCalls(f, a)
+	r = report(t, pass(t, c, db, full(t0.Add(3*time.Hour))), a)
+	f.OnListPage(nil)
+	if r.Err != nil || r.Changes != (cache.Changes{}) || r.Events != 149 || getCalls(f, a) != get0 {
+		t.Errorf("insert during the listing: %+v, %d row reads; want no change, 149 events, none", r, getCalls(f, a)-get0)
+	}
+	// The inserted row is after the baseline: the feed brings it.
+	if r := report(t, pass(t, c, db, at(t0.Add(4*time.Hour))), a); r.Mode != "incremental" || r.Changes != (cache.Changes{Added: 1}) {
+		t.Errorf("next pass: %+v, want incremental adding %s", r, front)
+	}
+	matches(t, c, db, a)
 }

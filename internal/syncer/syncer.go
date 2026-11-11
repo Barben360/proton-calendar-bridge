@@ -229,25 +229,68 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 
 // full lists the calendar and makes the listing its content. The baseline
 // cursor is the feed head read before the listing: a change made while the
-// listing runs is then read again from the feed, never skipped.
+// listing runs is then read again from the feed, never skipped. The listing
+// pages by offset, so such a change can also shift a page and skip an
+// unchanged row: when the head moved during the listing, or the listing
+// holds fewer or more unique rows than its Total, every cached row missing
+// from it is re-read before it is tombstoned (gone: tombstoned; found:
+// kept). A row created and skipped that way is not cached yet: the next
+// listing finds it.
 func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now time.Time) (cache.Changes, error) {
 	head, err := events.Latest(ctx, c, calID)
 	if err != nil {
 		return cache.Changes{}, err
 	}
-	rows, err := events.ListAll(ctx, c, calID)
+	l, err := events.List(ctx, c, calID)
 	if err != nil {
 		return cache.Changes{}, err
 	}
-	out := make([]cache.Row, len(rows))
-	for i, row := range rows {
-		out[i] = toCache(row)
+	after, err := events.Latest(ctx, c, calID)
+	if err != nil {
+		return cache.Changes{}, err
+	}
+	out := make([]cache.Row, 0, len(l.Rows))
+	listed := make(map[string]bool, len(l.Rows))
+	for _, row := range l.Rows {
+		out = append(out, toCache(row))
+		listed[row.ID] = true
+	}
+	if after != head || (l.Total >= 0 && len(l.Rows) != l.Total) {
+		kept, err := missing(ctx, c, db, calID, listed)
+		if err != nil {
+			return cache.Changes{}, err
+		}
+		out = append(out, kept...)
 	}
 	ch, err := db.ReplaceCalendar(ctx, calID, head, out, now)
 	if err != nil {
 		return cache.Changes{}, storeErr("storing calendar %s: %w", calID, err)
 	}
 	return ch, nil
+}
+
+// missing re-reads the cached rows of calID absent from listed and returns
+// those Proton still has.
+func missing(ctx context.Context, c *api.Client, db *cache.Cache, calID string, listed map[string]bool) ([]cache.Row, error) {
+	cached, err := db.Events(ctx, calID)
+	if err != nil {
+		return nil, storeErr("reading calendar %s: %w", calID, err)
+	}
+	var kept []cache.Row
+	for _, e := range cached {
+		if listed[e.ID] {
+			continue
+		}
+		row, err := events.Get(ctx, c, calID, e.ID)
+		switch {
+		case errors.Is(err, events.ErrGone):
+		case err != nil:
+			return nil, fmt.Errorf("event %s: %w", e.ID, err)
+		default:
+			kept = append(kept, toCache(row))
+		}
+	}
+	return kept, nil
 }
 
 // incremental applies the feed after cursor. cause is set (one of the Cause

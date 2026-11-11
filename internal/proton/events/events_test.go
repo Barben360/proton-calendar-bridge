@@ -160,3 +160,36 @@ func TestPathsEscaped(t *testing.T) {
 		t.Errorf("the ID must travel as one escaped segment (decoded path seen %d times, want 1)", n)
 	}
 }
+
+// A row inserted before a page already served makes the next page repeat a
+// row: List keeps one copy (counting it twice would hide a skipped row from
+// the caller's Total check), and its Total is the first page's.
+func TestListDedupesAShiftedPage(t *testing.T) {
+	t.Parallel()
+	f, c, cal := setup(t)
+	for i := range 150 {
+		f.AddEvent(cal, protontest.Event{UID: "uid" + strconv.Itoa(i), Start: 1, End: 2})
+	}
+	done := false
+	f.OnListPage(func(calID string, page int) {
+		if page == 0 && !done {
+			done = true
+			f.AddEventAt(cal, 0, protontest.Event{UID: "front", Start: 1, End: 2})
+		}
+	})
+	l, err := events.List(t.Context(), c, cal)
+	f.OnListPage(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range l.Rows {
+		if seen[r.ID] {
+			t.Errorf("row %s listed twice", r.ID)
+		}
+		seen[r.ID] = true
+	}
+	if len(l.Rows) != 150 || l.Total != 150 {
+		t.Errorf("%d unique rows, Total %d; want 150, 150 (the inserted row is not listed)", len(l.Rows), l.Total)
+	}
+}

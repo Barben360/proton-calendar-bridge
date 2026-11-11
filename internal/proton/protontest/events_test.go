@@ -307,3 +307,24 @@ func TestFakeOnListPageRunsBeforeThePageIsSent(t *testing.T) {
 		t.Errorf("after removing the hook: %d rows, hook calls %v; want 2 rows, no new call", len(out.Events), pages)
 	}
 }
+
+func TestFakeAddEventAtPlacesTheRowInTheListing(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	a := f.AddEvent(cal, protontest.Event{UID: "a", Start: 1, End: 2})
+	b := f.AddEvent(cal, protontest.Event{UID: "b", Start: 1, End: 2})
+	head := latest(t, f, tk, cal)
+	mid := f.AddEventAt(cal, 1, protontest.Event{UID: "m", Start: 1, End: 2})
+	var out struct{ Events []struct{ ID string } }
+	if st, _ := rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100", &out); st != 200 {
+		t.Fatalf("list: HTTP %d", st)
+	}
+	if len(out.Events) != 3 || out.Events[0].ID != a || out.Events[1].ID != mid || out.Events[2].ID != b {
+		t.Errorf("listing = %+v, want %s, %s, %s", out.Events, a, mid, b)
+	}
+	if ans, _, _ := feed(t, f, tk, cal, head); len(ans.CalendarEvents) != 1 || ans.CalendarEvents[0].ID != mid || ans.CalendarEvents[0].Action != 1 {
+		t.Errorf("feed after the head = %+v, want the create of %s", ans, mid)
+	}
+}

@@ -66,11 +66,33 @@ func parseRow(raw json.RawMessage) (Row, error) {
 	return r, nil
 }
 
-// ListAll returns every row of the calendar: pages of PageSize from page 0
+// Listing is a calendar's full listing.
+type Listing struct {
+	// Rows are unique by ID, in first-appearance order; a row served twice
+	// (the listing shifted while it was read) keeps its later copy.
+	Rows []Row
+	// Total is the row count the first page announced, -1 when it had none.
+	// Rows shorter than Total means the listing shifted under a concurrent
+	// edit and may have skipped a row.
+	Total int
+}
+
+// ListAll returns every row of the calendar (List's rows).
+func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
+	l, err := List(ctx, c, calID)
+	return l.Rows, err
+}
+
+// List reads every row of the calendar: pages of PageSize from page 0
 // until a page shorter than PageSize, or until Total rows when the answer
 // carries it. A server that never ends is cut off after maxPages pages.
-func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
-	var rows []Row
+// Pages are offsets, so a row created or deleted while the listing runs can
+// make a later page repeat a row or skip one: the caller checks Total and
+// the feed head.
+func List(ctx context.Context, c *api.Client, calID string) (Listing, error) {
+	l := Listing{Total: -1}
+	at := map[string]int{} // ID -> index in l.Rows
+	served := 0
 	for page := 0; page < maxPages; page++ {
 		var out struct {
 			Events []json.RawMessage
@@ -78,20 +100,29 @@ func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
 		}
 		q := url.Values{"Page": {strconv.Itoa(page)}, "PageSize": {strconv.Itoa(PageSize)}}
 		if err := c.Get(ctx, "/calendar/v1/"+url.PathEscape(calID)+"/events", q, &out); err != nil {
-			return nil, fmt.Errorf("listing events (page %d): %w", page, err)
+			return Listing{}, fmt.Errorf("listing events (page %d): %w", page, err)
+		}
+		if page == 0 && out.Total != nil {
+			l.Total = *out.Total
 		}
 		for _, raw := range out.Events {
 			r, err := parseRow(raw)
 			if err != nil {
-				return nil, err
+				return Listing{}, err
 			}
-			rows = append(rows, r)
+			served++
+			if i, dup := at[r.ID]; dup {
+				l.Rows[i] = r
+				continue
+			}
+			at[r.ID] = len(l.Rows)
+			l.Rows = append(l.Rows, r)
 		}
-		if len(out.Events) < PageSize || (out.Total != nil && len(rows) >= *out.Total) {
-			return rows, nil
+		if len(out.Events) < PageSize || (out.Total != nil && served >= *out.Total) {
+			return l, nil
 		}
 	}
-	return nil, fmt.Errorf("listing events: more than %d pages, giving up", maxPages)
+	return Listing{}, fmt.Errorf("listing events: more than %d pages, giving up", maxPages)
 }
 
 // maxPages bounds ListAll (a variable for the tests): 10000 pages is a million

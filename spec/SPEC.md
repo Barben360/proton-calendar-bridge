@@ -207,6 +207,12 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
 - Baseline cursor = `latest` read before the full listing; the cursor a feed
   read returns is stored in the same transaction as the row changes it
   produced [assumed → E04].
+- The listing pages by offset, so a concurrent create or delete can shift a
+  page [assumed → E04]: rows are deduped by ID, `latest` is read again after
+  the listing, and when it moved or the unique count differs from the first
+  page's `Total`, every cached row missing from the listing is re-read before
+  it is tombstoned (gone: tombstoned; found: kept). A quiet listing costs one
+  extra `latest` and no row read.
 - Full resync of a calendar when: never synced; `Refresh != 0`; the feed
   answers a 4xx other than 429 (cursor unusable); more than 50 pages in one
   pass; the last full sync is older than 24 h; a row re-read answers a
