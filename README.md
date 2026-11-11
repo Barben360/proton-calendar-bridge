@@ -35,9 +35,10 @@ bin/pcb version
 
 ## Credits
 
-`internal/otp` (TOTP) is inspired by the TOTP code in our fork Barben360/proton-cal (`pkg/auth/totp.go`), rewritten with its own tests. `internal/lab/session` (SRP login, TOTP, human-verification stop and resume, the httptest front over go-proton-api's in-memory server) is inspired by `pkg/auth` in the same fork, audited and rewritten with its own tests. When logic from another project is reused it is
-audited, rewritten with our own tests and credited here. Reference projects
-(spec §20): cheeseandcereal/proton-cal (Unlicense) and our fork
-Barben360/proton-cal, develonrails/carbonate, jmdlab/cal-gateway,
-WentTheFox/caloxide. ProtonMail/WebClients (GPL-3.0) is read for
-understanding only, never copied.
+Logic reused from another project is audited, rewritten with our own tests and credited here (decision 0002). Nothing below was copied.
+
+- **cheeseandcereal/proton-cal** (Unlicense) and our fork **Barben360/proton-cal**: the reverse-engineered API and crypto documentation. `internal/otp` (TOTP) is inspired by the fork's `pkg/auth/totp.go`. `internal/lab/session` (SRP login, TOTP, human-verification stop and resume) is inspired by `pkg/auth` in the fork. The fork's CLI is also run as an external tool by the data-set seeder (`internal/lab/seed`).
+- **go-proton-api** (MIT): the in-memory test server pattern behind our shared test fake (`internal/lab/labtest`, an httptest front over its server).
+- **develonrails/carbonate**, **WentTheFox/caloxide**, **ProtonMail/WebClients** (GPL-3.0): read only for the client identity strings tried in experiment E03 (`spec/experiments/E03-client-identity.md`). No code from any of them; WebClients is never copied.
+- **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
+- jmdlab/cal-gateway and the other prior art listed in spec §20: design references only; nothing from them is used in this repository so far.

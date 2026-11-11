@@ -36,7 +36,7 @@ About 370 writes, so roughly 12 minutes at 2 s each.
 
 ## Pending live run
 
-Not run yet: proton-cal's own login on the test account would hit the same pending CAPTCHA as `pcb-lab login` (HUMAN-CHECKS step 1). After the CAPTCHA is solved:
+Not run yet: proton-cal's own login on the test account would hit the same pending CAPTCHA as `pcb-lab login` (HUMAN-CHECKS step 4, after steps 1 to 3). After the CAPTCHA is solved:
 
 ```
 cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0

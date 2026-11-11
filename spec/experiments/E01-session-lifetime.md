@@ -25,7 +25,7 @@ Tested offline against the shared fake (`internal/lab/probe/session_test.go`, `c
 
 No live measurement yet (the test account's CAPTCHA is pending, HUMAN-CHECKS step 1).
 
-## Pending live run (HUMAN-CHECKS step 1)
+## Pending live run (HUMAN-CHECKS steps 2 and 3)
 
 Two steps inside the sequence of `E03-client-identity.md` (build once: `cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0 && go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`).
 

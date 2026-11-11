@@ -31,7 +31,7 @@ Tested offline against the shared fake (`internal/lab/labtest`): `internal/lab/p
 
 Existing evidence only (above). No live measurement on the test account yet.
 
-## Pending live run (HUMAN-CHECKS step 1)
+## Pending live run (HUMAN-CHECKS steps 1 and 2)
 
 Blocked on the test account's CAPTCHA (first login 2026-11-10 23:47 UTC answered Proton 9001; `hv.json` holds the challenge). After the author solves it, from `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0` with `pcb-lab` built, in this order. Every login is at least 60 s after the previous one (the guard refuses sooner with exit 20); probes use the saved session and are not logins.
 

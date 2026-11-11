@@ -27,7 +27,7 @@ Single-process interactive fallback: whatever E02 finds, M1 keeps the flow where
 
 Row 1 was recorded by hand: this HV happened before `hv-log.jsonl` existed (first `pcb-lab login` on blackwater, Proton code 9001; `hv.json` holds the challenge). The author's delay before solving it is the first E02 measurement: if Proton accepts the hours-old token in a new process, a solved token outlives its process and a long delay.
 
-## Pending live run (HUMAN-CHECKS step 1)
+## Pending live run (HUMAN-CHECKS steps 1 and 2)
 
 After the author solves the pending challenge and says when:
 
