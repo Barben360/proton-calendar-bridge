@@ -1,3 +1,4 @@
+# EXCERPTS (trimmed, anonymised) of the command outputs, not full logs
 # morpheus, 2026-11-11, over ssh (no TTY, no desktop session, not inside a systemd user service)
 $ systemctl --version | head -1
 systemd 257 (257.13-1~deb13u1)

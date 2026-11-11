@@ -38,14 +38,14 @@ Y = protects, N = does not. Statements marked (man) come from systemd-creds(1) a
 
 | Backend | Offline disk theft, no FDE | Offline theft, with FDE | Another local user | Same-user process / malware | Local root | Backup/snapshot of the data volume only | Casual disclosure (logs, `cat` of data) |
 |---|---|---|---|---|---|---|---|
-| Secret Service (unlocked login keyring) | Y (keyring encrypted with login password) | Y | Y | N (any process of the session can ask the unlocked keyring) | N (can read the session's memory/bus) | Y | Y |
-| systemd-creds user scope, host key | N (key file on same disk; attacker with the disk has both) | Y (FDE covers both) | Y (UID bound, host key root-only) | N (user can decrypt its own credentials) | N (root has the host key) | Y if the backup excludes `/var/lib/systemd` | Y |
-| systemd-creds system scope, host key | N | Y | Y | Y only if the service runs as a different user than the attacker; N for the service's own user | N | Y if the backup excludes `/var/lib/systemd` | Y |
-| systemd-creds system scope, TPM2 | Y (man, untested) | Y (man, untested) | Y | N for the service's own user | N (root can ask the TPM to unseal) | Y | Y |
+| Secret Service (unlocked login keyring) | partial (untested; depends on login-password strength: reasoned, the keyring file is encrypted under a key derived from the login password) | Y (reasoned) | Y (reasoned) | N (any process of the session can ask the unlocked keyring) | N (can read the session's memory/bus) | Y (reasoned) | Y (reasoned) |
+| systemd-creds user scope, host key | N (key file on same disk; attacker with the disk has both) | Y (reasoned: FDE covers both) | Y (man: UID bound, host key root-only) | N (user can decrypt its own credentials) | N (root has the host key) | Y if the backup excludes `/var/lib/systemd` | Y |
+| systemd-creds system scope, host key | N | Y | Y | Y (man) only if the service runs as a different user than the attacker; N for the service's own user | N | Y if the backup excludes `/var/lib/systemd` (reasoned) | Y |
+| systemd-creds system scope, TPM2 | Y (man, untested) | Y (man, untested) | Y (man, untested) | N for the service's own user | N (root can ask the TPM to unseal) | Y | Y |
 | Key file 0600 | N | Y | Y | N | N | Y only if the key lives on a different volume than the data | Y |
 | Compose secret file (`/run/secrets/x`, from a host file) | N (host file) | Y | Y | N for any process with the same mount | N | Y (key is not in the data volume) | Y |
 
-Plain reading: host-key credentials are no stronger than a 0600 key file against root or a same-user process. They help against casual disclosure and data-only backups, which a key file on a separate path also does. Only TPM2 binding changes offline theft without FDE, and it is untested here.
+Plain reading: host-key credentials are no stronger than a 0600 key file against root or a same-user process. They help against casual disclosure and data-only backups, which a key file on a separate path also does. Only TPM2 binding, or a keyring encrypted under a strong login password (both untested here), helps against offline theft without FDE.
 
 ### Container (reasoned, no container run)
 
@@ -57,11 +57,11 @@ Plain reading: host-key credentials are no stronger than a 0600 key file against
 
 Verified: user-scope systemd-creds works (systemd 262 and 257, interactive/SSH context), Secret Service is present on blackwater in an interactive session only, none on morpheus, system-scope systemd-creds works on morpheus. Untested: TPM2 sealing anywhere, desktop (blackwater) system scope, any systemd-service-context run, any container.
 
-One order per environment, justified by the table (the only differences between backends are offline theft without FDE, same-user access and backups):
+One order per environment, justified by the table (the differences between backends are offline theft without FDE, which only TPM2 or a keyring under a strong login password could change, and backups):
 
 | Environment | Order | Why |
 |---|---|---|
-| Desktop user service (blackwater) | 1. Secret Service (needs the unlocked keyring of an interactive login); 2. user-scope systemd-creds; 3. key file 0600 | Secret Service is the only backend whose key is not on the disk in clear, so it alone covers offline theft without FDE. A boot/linger service finds it locked, so it falls to user-scope creds, which equal a key file but are bound to UID and machine. |
+| Desktop user service (blackwater) | 1. Secret Service (needs the unlocked keyring of an interactive login); 2. user-scope systemd-creds; 3. key file 0600 | Secret Service keeps its key out of the disk in clear (derived from the login password), so it may help against offline theft without FDE, depending on the password's strength (untested). A boot/linger service finds it locked, so it falls to user-scope creds, which equal a key file but are bound to UID and machine. |
 | Server system service (morpheus) | 1. system-scope systemd-creds (host key); 2. key file 0600 on a separate path, `doctor` warns | No Secret Service headless. Host-key creds equal a key file for root and same-user attackers, but integrate with `LoadCredentialEncrypted=` and keep the key out of the service's data tree. TPM2 is not in the order until tested. |
 | Container (morpheus deployment) | 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600 on a volume separate from the data | No systemd, no Secret Service in the container. A key on another volume defends data-volume backups only. |
 

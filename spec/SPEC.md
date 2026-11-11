@@ -257,8 +257,8 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
 - Container: 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600
   on a volume separate from the data.
 `doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
-a key file against root or a same-user process; only TPM2 binding changes offline
-theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
+a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
+under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).

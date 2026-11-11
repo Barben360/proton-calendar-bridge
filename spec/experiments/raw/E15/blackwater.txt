@@ -1,3 +1,4 @@
+# EXCERPTS (trimmed, anonymised) of the command outputs, not full logs
 # blackwater, 2026-11-11, interactive shell (not inside a systemd user service)
 $ systemctl --version | head -1
 systemd 262 (262.1-1-arch)
