@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -49,9 +51,18 @@ func doctorChecks() []doctor.Check {
 			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix("XDG_CONFIG_HOME")},
 			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix("XDG_STATE_HOME")})
 	}
-	return append(checks,
+	checks = append(checks,
 		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
-		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700})
+		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700},
+		doctor.ConfigCheck{Path: config.Path(dirs), Dirs: dirs})
+	cfg, err := config.Load(config.Path(dirs), dirs)
+	if err != nil { // ConfigCheck already reports it
+		return checks
+	}
+	return append(checks,
+		doctor.FileModeCheck{Label: "key file", Path: cfg.Secrets.KeyFile, Want: 0o600},
+		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
+		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile})
 }
 
 var marks = map[doctor.Status]string{

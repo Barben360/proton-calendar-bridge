@@ -45,6 +45,7 @@ func paths(f *labtest.Front, from int) []string {
 }
 
 func TestCalendarAccessProbesTheThreeEndpointsAndReportsCodes(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Replies: map[string]labtest.Reply{
 		"GET /calendar/v1":                labtest.R(200, `{"Code":1000,"Calendars":[{"ID":"calA"},{"ID":"calB"}]}`),
 		"GET /calendar/v1/calA/bootstrap": labtest.R(403, `{"Code":9100,"Error":"Access token does not have sufficient scope"}`),
@@ -86,6 +87,7 @@ func TestCalendarAccessProbesTheThreeEndpointsAndReportsCodes(t *testing.T) {
 }
 
 func TestCalendarAccessWithoutScopeSkipsBootstrapButKeepsGoing(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Replies: map[string]labtest.Reply{
 		"GET /calendar/v1":       labtest.R(403, `{"Code":9100,"Error":"Access token does not have sufficient scope"}`),
 		"GET /settings/calendar": labtest.R(200, `{"Code":1000}`),
@@ -114,6 +116,7 @@ func TestCalendarAccessWithoutScopeSkipsBootstrapButKeepsGoing(t *testing.T) {
 }
 
 func TestCalendarAccessRecordsEachAnswerRedacted(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Replies: map[string]labtest.Reply{
 		"GET /calendar/v1":                labtest.R(200, `{"Code":1000,"Calendars":[{"ID":"calA"}],"Token":"SECRETSECRETSECRETSECRETSECRET"}`),
 		"GET /calendar/v1/calA/bootstrap": labtest.R(200, `{"Code":1000}`),

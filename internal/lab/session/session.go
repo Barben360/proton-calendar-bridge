@@ -17,8 +17,10 @@ import (
 
 	proton "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/record"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 )
 
@@ -152,17 +154,11 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 	if err := ensureDir(o.StateDir); err != nil {
 		return nil, err
 	}
-	unlock, err := lockLogin(o.StateDir)
+	release, err := loginguard.Acquire(o.StateDir, loginguard.MinInterval, o.now())
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
-	if err := checkGuard(o.StateDir, o.now()); err != nil {
-		return nil, err
-	}
-	if err := stampLogin(o.StateDir, o.now()); err != nil {
-		return nil, fmt.Errorf("recording the login time: %w", err)
-	}
+	defer release()
 	if o.Recorder != nil {
 		o.Recorder.Forbid(o.Creds.Password)
 	}
@@ -272,7 +268,7 @@ func loginError(o Options, err error) error {
 		verifyURL := "https://verify.proton.me/?methods=captcha&token=" + url.QueryEscape(d.Token)
 		info := hvInfo{Token: d.Token, URL: verifyURL, At: o.now().UTC().Format(time.RFC3339)}
 		if b, merr := json.MarshalIndent(info, "", "  "); merr == nil {
-			_ = writeFile(filepath.Join(o.StateDir, hvFile), b)
+			_ = atomicfile.Write(filepath.Join(o.StateDir, hvFile), b)
 		}
 		return &exitcode.Error{
 			Code: exitcode.MustAct,
@@ -354,7 +350,7 @@ func save(dir string, st stored) error {
 	if err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(dir, sessionFile), b)
+	return atomicfile.Write(filepath.Join(dir, sessionFile), b)
 }
 
 func load(dir string) (stored, error) {
@@ -380,38 +376,6 @@ func ensureDir(dir string) error {
 		return err
 	}
 	return os.Chmod(dir, 0o700) // tighten a directory that already existed
-}
-
-// writeFile writes atomically with mode 0600.
-func writeFile(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // gone after a successful rename
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	if d, err := os.Open(filepath.Dir(path)); err == nil { // best effort
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
 }
 
 // RedactID shortens an identifier for display: the first four characters

@@ -1,0 +1,335 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/rand/v2"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
+)
+
+const (
+	defaultTimeout = 30 * time.Second
+	maxAttempts    = 3
+	maxRetryAfter  = 60 * time.Second
+	maxResponse    = 32 << 20
+	// A Retry-After above this is clamped; it is far over maxRetryAfter, so
+	// the request is not retried and the duration cannot overflow.
+	maxRetryAfterHeader = time.Hour
+	refreshTimeout      = 30 * time.Second
+	defaultAppVersion   = "Other"
+)
+
+var errTooLarge = errors.New("response too large")
+
+// Options configures a Client. BaseURL is required (Do refuses to send
+// without it); the other zero fields take the documented defaults.
+type Options struct {
+	BaseURL    string
+	AppVersion string       // x-pm-appversion; default "Other"
+	UserAgent  string       // default "pcb/<buildinfo.Version>"
+	HTTP       *http.Client // default: 30 s timeout; redirects are never followed
+	// Refresh exchanges stale tokens for new ones. It should wrap
+	// ErrSessionEnded when the refresh token is no longer usable. Without it,
+	// a 401 ends the session. It runs under the client's lock and detached
+	// from the requester's cancellation (30 s timeout, since refresh tokens
+	// are single-use), so it must not call the Client.
+	Refresh func(ctx context.Context, stale Tokens) (Tokens, error)
+	Limiter *rate.Limiter // default: one request per 250 ms, burst 8
+	Sleep   func(ctx context.Context, d time.Duration) error
+}
+
+// Client sends authenticated requests. It is safe for concurrent use.
+type Client struct {
+	o  Options
+	mu sync.Mutex // guards tok and serialises refreshes
+	tk Tokens
+}
+
+// New returns a Client holding t.
+func New(t Tokens, o Options) *Client {
+	if o.HTTP == nil {
+		o.HTTP = &http.Client{Timeout: defaultTimeout}
+	}
+	// A followed redirect would send the session headers to another URL; the
+	// 3xx is answered as a failure instead. Set on a copy: the caller's client
+	// is left as it was.
+	hc := *o.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	o.HTTP = &hc
+	if o.Limiter == nil {
+		o.Limiter = rate.NewLimiter(rate.Every(250*time.Millisecond), 8)
+	}
+	if o.AppVersion == "" {
+		o.AppVersion = defaultAppVersion
+	}
+	if o.UserAgent == "" {
+		o.UserAgent = "pcb/" + buildinfo.Version
+	}
+	if o.Sleep == nil {
+		o.Sleep = sleep
+	}
+	o.BaseURL = strings.TrimRight(o.BaseURL, "/")
+	return &Client{o: o, tk: t}
+}
+
+// Tokens returns the current tokens (they change after a refresh).
+func (c *Client) Tokens() Tokens {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tk
+}
+
+// Get sends a GET, decoding the JSON answer into out (may be nil).
+func (c *Client) Get(ctx context.Context, path string, query url.Values, out any) error {
+	return c.Do(ctx, http.MethodGet, path, query, nil, out)
+}
+
+// Put sends a PUT with a JSON body.
+func (c *Client) Put(ctx context.Context, path string, body, out any) error {
+	return c.Do(ctx, http.MethodPut, path, nil, body, out)
+}
+
+// Delete sends a DELETE.
+func (c *Client) Delete(ctx context.Context, path string, out any) error {
+	return c.Do(ctx, http.MethodDelete, path, nil, nil, out)
+}
+
+// Do sends one request and decodes the JSON answer into out (may be nil).
+//
+// Policy: a 401 triggers one refresh and one retry; a 429 waits Retry-After
+// (at most 60 s, at most 3 attempts; any method, because Proton rejects a
+// rate-limited request before processing it); 5xx and network errors are retried for GET only, 3 attempts
+// with 1 s then 2 s backoff and ±20 % jitter. Errors never contain the body,
+// the query or any header value.
+//
+// path must start with "/" and be already escaped: callers url.PathEscape
+// every ID they put in it. Paths with "?", "#", "..", a backslash or control
+// characters are refused without sending anything.
+func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	target, err := c.target(path, query)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	var payload []byte
+	if body != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
+			return fmt.Errorf("%s %s: encode body: %w", method, path, err)
+		}
+	}
+	where := method + " " + path
+	var refreshed bool
+	var limited, failed int
+	for {
+		if err := c.o.Limiter.Wait(ctx); err != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			return fmt.Errorf("%s: %w", where, err)
+		}
+		sent := c.Tokens()
+		status, hdr, data, err := c.send(ctx, method, target, payload, sent)
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("%s: %w", where, ctx.Err())
+			}
+			failed++
+			if method == http.MethodGet && failed < maxAttempts && !errors.Is(err, errTooLarge) {
+				if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+					return fmt.Errorf("%s: %w", where, err)
+				}
+				continue
+			}
+			return fmt.Errorf("%s: %w", where, err)
+		}
+		if status >= 200 && status < 300 {
+			perr := parse(method, path, status, hdr, data)
+			if perr == nil {
+				return decode(where, data, out)
+			}
+			return perr
+		}
+		perr := parse(method, path, status, hdr, data)
+		switch {
+		case status == http.StatusUnauthorized:
+			if refreshed {
+				return fmt.Errorf("%s: %w: %w", where, ErrSessionEnded, perr)
+			}
+			refreshed = true
+			if err := c.refresh(ctx, sent); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+		case status == http.StatusTooManyRequests:
+			limited++
+			wait := perr.RetryAfter
+			if wait == 0 {
+				wait = backoff(limited)
+			}
+			if wait > maxRetryAfter || limited >= maxAttempts {
+				return perr
+			}
+			if err := c.o.Sleep(ctx, wait); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+		case status >= 500 && method == http.MethodGet:
+			failed++
+			if failed >= maxAttempts {
+				return perr
+			}
+			if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+		default:
+			return perr
+		}
+	}
+}
+
+// refresh rotates the tokens unless another goroutine already did.
+func (c *Client) refresh(ctx context.Context, stale Tokens) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tk.AccessToken != stale.AccessToken {
+		return nil
+	}
+	if c.o.Refresh == nil {
+		return fmt.Errorf("%w: no refresh available", ErrSessionEnded)
+	}
+	// Refresh tokens are single use: once started, a refresh must finish and
+	// be recorded even if the requester gives up.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
+	fresh, err := c.o.Refresh(rctx, c.tk)
+	if err != nil {
+		return fmt.Errorf("refresh tokens: %w", err)
+	}
+	c.tk = fresh
+	return nil
+}
+
+// send makes one HTTP round trip. Transport errors are reduced to their
+// cause: *url.Error would echo the full URL, query included.
+func (c *Client) send(ctx context.Context, method, target string, payload []byte, t Tokens) (int, http.Header, []byte, error) {
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, rd)
+	if err != nil {
+		return 0, nil, nil, errors.New("build request")
+	}
+	req.Header.Set("x-pm-uid", t.UID)
+	req.Header.Set("Authorization", "Bearer "+t.AccessToken)
+	req.Header.Set("x-pm-appversion", c.o.AppVersion)
+	req.Header.Set("User-Agent", c.o.UserAgent)
+	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.o.HTTP.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-only body
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(data) > maxResponse {
+		return 0, nil, nil, errTooLarge
+	}
+	return resp.StatusCode, resp.Header, data, nil
+}
+
+// parse returns an *Error for a non-2xx answer or a 2xx whose Code is not
+// 1000/1001, nil otherwise.
+func parse(method, path string, status int, hdr http.Header, data []byte) *Error {
+	var env struct {
+		Code  int
+		Error string
+	}
+	_ = json.Unmarshal(data, &env) // a non-JSON body leaves the zero value
+	ok := status >= 200 && status < 300
+	if ok && (env.Code == CodeOK || env.Code == CodeMulti) {
+		return nil
+	}
+	e := &Error{Method: method, Path: path, Status: status, Code: env.Code, Message: env.Error}
+	if e.Message == "" {
+		e.Message = http.StatusText(status)
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(hdr.Get("Retry-After")), 10, 64)
+	var ne *strconv.NumError
+	switch {
+	case errors.As(err, &ne) && errors.Is(ne.Err, strconv.ErrRange):
+		e.RetryAfter = maxRetryAfterHeader
+	case err == nil && secs > 0:
+		e.RetryAfter = min(time.Duration(min(secs, 3600))*time.Second, maxRetryAfterHeader)
+	}
+	return e
+}
+
+func decode(where string, data []byte, out any) error {
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("%s: decode response: %w", where, err)
+	}
+	return nil
+}
+
+// backoff is 1 s, 2 s, 4 s… for attempt 1, 2, 3… with ±20 % jitter.
+func backoff(attempt int) time.Duration {
+	base := time.Second << (attempt - 1)
+	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// target builds the request URL from the base, a validated path and the query.
+func (c *Client) target(path string, query url.Values) (string, error) {
+	if c.o.BaseURL == "" {
+		return "", errors.New("api: no BaseURL configured")
+	}
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\\") || strings.Contains(path, "..") {
+		return "", errors.New("invalid request path")
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New("invalid request path")
+		}
+	}
+	u, err := url.Parse(c.o.BaseURL)
+	if err != nil {
+		return "", errors.New("api: invalid BaseURL")
+	}
+	u = u.JoinPath(path)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}

@@ -21,9 +21,27 @@ caloxide.
 
 ## Status
 
-Design phase, milestone M0 (foundations): the CLI skeleton exists
-(`pcb version`, the `--json` envelope, exit codes); there is no bridge yet.
-The design is in `spec/SPEC.md`.
+Design phase, milestone M1 (Proton core, read): `pcb login` (password, TOTP,
+CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status` and
+`pcb calendar list` are built and tested against a fake Proton; there is no
+bridge (daemon, sync, CalDAV) yet. The live session against the test account
+is deferred until the author can solve a CAPTCHA (`spec/HUMAN-CHECKS.md`,
+"M1 live session"). The design is in `spec/SPEC.md`.
+
+## Usage
+
+```sh
+pcb login                              # prompts for what is missing; or set PCB_USERNAME, PCB_PASSWORD, PCB_TOTP
+pcb login --username alice             # the username may be a flag (default: $PCB_USERNAME, else asked)
+pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
+pcb login --unattended-relogin         # store the credentials so pcb can log in again without you
+pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
+pcb status                             # the login state, no network call
+pcb calendar list [--json]
+pcb logout
+```
+
+Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
 
 ## Build
 
@@ -37,8 +55,9 @@ bin/pcb version
 
 Logic reused from another project is audited, rewritten with our own tests and credited here (decision 0002). Nothing below was copied.
 
-- **cheeseandcereal/proton-cal** (Unlicense) and our fork **Barben360/proton-cal**: the reverse-engineered API and crypto documentation. `internal/otp` (TOTP) is inspired by the fork's `pkg/auth/totp.go`. `internal/lab/session` (SRP login, TOTP, human-verification stop and resume) is inspired by `pkg/auth` in the fork. The fork's CLI is also run as an external tool by the data-set seeder (`internal/lab/seed`).
-- **go-proton-api** (MIT): the in-memory test server pattern behind our shared test fake (`internal/lab/labtest`, an httptest front over its server).
+- **cheeseandcereal/proton-cal** (Unlicense): the reverse-engineered API and crypto documentation (`docs/api.md`, `docs/crypto.md`, `docs/overview.md`): the key chain, the locked scope and Proton code 9101, member-level calendar metadata, the v2 bootstrap and the default-calendar setting. Used by `internal/proton/auth`, `keys` and `calendar`.
+- **Barben360/proton-cal**, our fork: the two-step CAPTCHA login, the env/TOTP login, and the refresh-token race lesson (one refresh at a time across processes, behind `internal/proton/api` and the token store). Sources audited and rewritten: `pkg/auth` (`auth.go`, `unlock.go`, `loginopts.go`) for `internal/lab/session` and `internal/proton/auth` (SRP login, CAPTCHA stop and resume, TOTP, locked-scope unlock with server-proof check, lock) and `internal/proton/keys` (salts with scope elevation, salted key passphrase check, key unlock); `pkg/calendar` (`calendar.go`, `keys.go`) for `internal/proton/calendar` (calendar list, default calendar, bootstrap, member passphrase decryption, calendar key unlock); `pkg/auth/totp.go` for `internal/otp`. The fork's CLI is also run as an external tool by the data-set seeder (`internal/lab/seed`).
+- **go-proton-api**, **go-srp**, **gopenpgp** (MIT, used as libraries). go-proton-api's in-memory test server pattern is the model for and the engine behind our shared fake Proton (`internal/proton/protontest`, an httptest front over its server, which the lab's `internal/lab/labtest` builds on).
 - **develonrails/carbonate**, **WentTheFox/caloxide**, **ProtonMail/WebClients** (GPL-3.0): read only for the client identity strings tried in experiment E03 (`spec/experiments/E03-client-identity.md`). No code from any of them; WebClients is never copied.
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
 - jmdlab/cal-gateway and the other prior art listed in spec §20: design references only; nothing from them is used in this repository so far.

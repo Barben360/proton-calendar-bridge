@@ -15,6 +15,7 @@ import (
 )
 
 func TestLoginRefusedWhileLockHeld(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
@@ -30,7 +31,7 @@ func TestLoginRefusedWhileLockHeld(t *testing.T) {
 	}
 	_, err = session.Login(t.Context(), o)
 	e := exitErr(t, err)
-	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another pcb-lab login is running") {
+	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another login is running") {
 		t.Fatalf("got %v", err)
 	}
 	if f.Requests != 0 {

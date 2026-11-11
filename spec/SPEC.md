@@ -150,13 +150,13 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
   login retried with it [verified: interactive login 2026-11-10]. Whether the
   solved token survives across processes and for how long [assumed → E02];
-  the design relies on it for `pcb login resume --captcha-token`.
+  the design relies on it for `pcb login resume --captcha-token`. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session").
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies
   (whoever unseals the store owns the account).
 - Session lifetime and refresh-token rotation rules [assumed → E01]: decide
-  how often the daemon refreshes and when it must relogin.
+  how often the daemon refreshes and when it must relogin. M1 refreshes on demand, once across processes; the Proton answers it classifies as "session ended" or "credentials refused" are all `[assumed]` until the live session lists them (`HUMAN-CHECKS.md`, "signals to confirm").
 - Locked ("password") scope for salts and calendar deletion via SRP to
   `/core/v4/users/unlock` [verified: proton-cal docs/overview.md].
 - Control channel [call]: the CLI talks to the daemon over a unix socket
@@ -261,6 +261,8 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
+Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5, see "M5 carry-overs" in §18).
+Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 
@@ -341,7 +343,7 @@ envelope `{schema_version, command, ok, data | error}`); state-changing
 setup commands have `--plan`; `--non-interactive` never prompts and exits 10
 naming what is missing; exit codes `0` done, `2` bad invocation, `10` you
 must act, `20` blocked by the machine, `30` failed and rolled back, `40`
-partly done and resumable.
+partly done and resumable. Credential and verification failures (wrong password, 2FA code rejected, CAPTCHA not accepted) exit 10, not 20: the user must act. A user cancel (Ctrl-C at a prompt) exits 20 with the hint "run the command again".
 
 Command tree:
 ```
@@ -350,8 +352,8 @@ pcb uninstall [--delete-data] [--plan]
 pcb doctor                                  # every check, with the fix to apply
 pcb serve                                   # the daemon (what the unit and the container run)
 pcb service start|stop|restart|status|logs
-pcb login [--password-fd N] [--unattended-relogin]
-pcb login resume --captcha-token T | --totp CODE
+pcb login [--username U] [--password-fd N] [--unattended-relogin]
+pcb login resume --captcha-token T          # (--totp CODE moves to M5: the daemon must hold the half-authenticated session; until then the 2FA code comes from PCB_TOTP or a prompt in the same process)
 pcb logout
 pcb status                                  # login state, sync state, listeners, alerts
 pcb calendar list                           # what Thunderbird will see, with read-only flags
@@ -450,6 +452,13 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M5 Daemon and ops | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only |
 
 Nothing after M5 is planned [decided 0007].
+
+M5 carry-overs (known gaps left by M1, to close with the daemon work):
+- R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.
+- R8m: a pending login holds the password in memory with no timeout in M1; the daemon gives it a TTL (about 5 min).
+- R10m: a leaf state-file lock (held only for load-and-write) on every writer of `state.json`, to close the rare spurious `needs-login` overwrite.
+- R17 (needed before M4, not M5): member-passphrase signature verification (E10) must be settled before M4 encrypts to a calendar key.
+- R16: `pcb login resume --totp CODE`.
 
 ## 19. Security model (summary)
 
