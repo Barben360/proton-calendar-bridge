@@ -120,13 +120,16 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
 
 ### 5.1 Transport and identity
 - Base URL `https://mail-api.proton.me` [verified: proton-cal docs/crypto.md].
-- Client identity header `x-pm-appversion`: which values Proton accepts and
-  which scopes each yields is not settled. Sending the identity of an
-  official Proton client is accepted if nothing else gets calendar access
-  [decided 0008]; a truthful identity is preferred when it works. proton-cal uses `Other`, carbonate
-  reports a `linux-mail@…` value working, caloxide reports an `external-drive`
-  value losing calendar scope [assumed → E03]. The value is configuration,
-  not code, with a tested default.
+- Client identity header `x-pm-appversion`: `Other` is accepted and yields
+  calendar access [verified: E03 gate, R13 evidence; scopes pending]
+  (the author's proton-cal fork sends it and passed its live integration
+  suite, read and write, 2026-11-10); the other candidates and the scope list
+  are measured at the E03 live run (`spec/experiments/E03-client-identity.md`).
+  Sending the identity of an official Proton client is accepted if nothing
+  truthful gets calendar access [decided 0008]. carbonate reports a
+  `linux-mail@…` value working, caloxide an `external-drive` value losing
+  calendar scope [assumed → E03]. The value is configuration, not code, with
+  a tested default [decided 0011, provisional].
 - One token-bucket rate limiter per account, shared by all callers; honour
   `Retry-After`; exponential backoff with jitter on 429/5xx; a circuit
   breaker that pauses sync and raises a status alert after repeated
@@ -221,7 +224,8 @@ properties assumed → E13]. The codec has a round-trip property test: model
   after an audit of candidates (teambition/rrule-go used by proton-cal) or
   our own on the RFC 5545 rules [call; audit → E16].
 - Time zones: IANA names; VTIMEZONE generated from tzdata for CalDAV output
-  (Thunderbird's need for it [assumed → E11]); floating and all-day handled
+  (Thunderbird does not need it, it uses its own timezone database
+  [verified: E08 source]; other clients may); floating and all-day handled
   as in RFC 8984.
 - Fuzz tests on every parser; golden files from real Proton, Thunderbird and
   Apple exports.
@@ -245,11 +249,18 @@ files 0600; `doctor` checks them.
   [assumed → E09] decides whether we need a sealed decrypted index later.
 
 ### 7.3 Secrets
-Sealed with a data key held by, in order of preference [call]:
-1. systemd credentials (`systemd-creds`, TPM2 when present) for services;
-2. the Secret Service (desktop keyring) when a session bus has one;
-3. a key file 0600 on a separate path (headless fallback, `doctor` warns).
-Availability on a headless Debian/morpheus-like host [assumed → E15].
+Sealed with a data key held by, in order, per environment (what each backend
+protects against: `spec/experiments/E15-secret-sealing.md`):
+- Desktop user service: 1. Secret Service (unlocked keyring of an interactive
+  login); 2. user-scope `systemd-creds`; 3. key file 0600.
+- Server system service: 1. system-scope `systemd-creds` (host key); 2. key
+  file 0600 on a separate path, `doctor` warns.
+- Container: 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600
+  on a volume separate from the data.
+`doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
+a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
+under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
+(interactive session), key file; TPM2 and desktop system scope untested]
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 
@@ -292,8 +303,11 @@ human-readable reason) [call]:
   calendar-query / calendar-multiget / free-busy-query, RFC 6638 scheduling
   advertised only if a client needs it (Apple does per cal-gateway; to
   re-verify) [call].
-- Thunderbird is the reference client: its exact requests and failure modes
-  [assumed → E08], recorded as replayable traces used in our tests.
+- Thunderbird is the reference client: its requests and failure modes read
+  from its source [verified: E08 source, no live session yet]; its server
+  requirements list (`spec/experiments/E08-thunderbird-caldav.md`) is the
+  contract for our CalDAV tests. Replayable live traces wait for the human
+  check (`spec/HUMAN-CHECKS.md`).
 - Library: emersion/go-webdav after an audit (carbonate and caloxide had to
   patch its replies) or our own handlers on its XML types [call; audit →
   E17].
@@ -383,7 +397,7 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
   redacted fixtures from the test account; the same contract tests run
   against the fake (every CI) and the live test account (nightly canary +
   on demand) so a drift in Proton shows as a failing canary.
-- **CalDAV**: replayed Thunderbird traces (E08), a scripted client suite
+- **CalDAV**: contract tests from E08's requirements list (live Thunderbird traces to be added after the human check), a scripted client suite
   (python-caldav or vdirsyncer in CI [call]), and a manual Thunderbird
   checklist per release.
 - **Codecs**: round-trip property tests, fuzzing, golden files.
@@ -402,10 +416,10 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E05 | Core event loop for calendar list / membership changes | C4 sync | same |
 | E06 | Rate limits and 429 behaviour | C1, C4 | controlled bursts on the test account |
 | E07 | What changes in a row on edit (modify time, sequence, parts) | ETags | edit fields one at a time |
-| E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | proxy a real Thunderbird against a reference server (Radicale) and record |
+| E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | read Thunderbird's source (done, `E08-thunderbird-caldav.md`); live capture against a reference server deferred to the human check |
 | E09 | Decrypt cost per 1 000 events; cold-start time | C2 design | benchmark on synthetic + test-account data |
 | E10 | Signature verification of each part, own and shared calendars | C1 keys | verify on test-account events, incl. a shared calendar |
-| E11 | Does Thunderbird need VTIMEZONE? | C0 | E08 traces |
+| E11 | Does Thunderbird need VTIMEZONE? | C0 | E08 source: **no** [verified: E08 source]; live check with the human Thunderbird session |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity | write each RRULE form, read back |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec | write X- and standard extras, read back |
 | E14 | Member `Permissions` values for view-only vs edit shares (not planned: shared calendars) | – | – |
@@ -413,6 +427,13 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | read, run against E08 traces |
 | E18 | (dropped: no REST API planned) | – | – |
+
+Status at the close of M0 (2026-11-11):
+- E03: gate passed on the fork's evidence (R13); scope list and other candidates pending the live run.
+- E15: done (user-scope systemd-creds, Secret Service presence, key file verified; TPM2 and desktop system scope untested).
+- E08, E11: answered from Thunderbird's source; live Thunderbird session pending.
+- E01, E02: probes built and tested offline, no live measurement yet (the test account's CAPTCHA is unsolved); their markers in §5.2 stay `[assumed]`.
+- Live runs, in order: `spec/HUMAN-CHECKS.md`.
 
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
 raw results (redacted), conclusion, and the decision it feeds.
@@ -458,6 +479,8 @@ piece of logic is reused:
   VTIMEZONE generation, fidelity matrix, RSVP endpoint.
 - WentTheFox/caloxide (from protoxide/ferroxide/hydroxide): unattended
   relogin, CAPTCHA page, shared rate limiter, encrypted cache.
+- Thunderbird's CalDAV provider (mozilla/releases-comm-central, MPL-2.0): read for
+  understanding only (E08), no code copied.
 - ProtonMail/WebClients (GPL-3.0 [verified: GitHub licence 2026-11-10]:
   read for understanding only, never copy code), go-proton-api, gopenpgp,
   go-srp, go-webdav, rrule-go (MIT, candidate dependencies),

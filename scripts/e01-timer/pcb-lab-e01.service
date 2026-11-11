@@ -1,0 +1,11 @@
+[Unit]
+Description=E01 session lifetime sample (one authenticated GET, refreshing only when rejected)
+
+[Service]
+Type=oneshot
+# Install the lab binary first: go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab
+# %S/pcb-lab-e01 (= $XDG_STATE_HOME/pcb-lab-e01) holds a session created for
+# this probe alone by `pcb-lab login --state-dir ...`. Nothing else may use
+# that state dir: a session shared with other probes would not measure the
+# lifetime of a 6-hourly refreshed session.
+ExecStart=%h/.local/bin/pcb-lab probe alive --state-dir %S/pcb-lab-e01

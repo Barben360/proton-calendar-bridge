@@ -1,0 +1,6 @@
+/bin/
+/pcb
+*.test
+*.out
+coverage.*
+.superpowers/

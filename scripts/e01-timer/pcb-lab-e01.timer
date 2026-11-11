@@ -1,0 +1,12 @@
+[Unit]
+Description=E01 session lifetime sample every 6 hours (stops sampling after 14 days)
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+# Catch up a run missed while the machine slept.
+Persistent=true
+AccuracySec=1min
+Unit=pcb-lab-e01.service
+
+[Install]
+WantedBy=timers.target
