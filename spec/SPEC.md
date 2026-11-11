@@ -201,7 +201,7 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
   gives `{CalendarModelEventID}`; `GET /calendar/v1/{cal}/modelevents/{cursor}`
   gives `{CalendarModelEventID, More, Refresh, CalendarEvents:[{ID, Action, Event?}]}`.
   One feed per calendar [assumed → E04].
-- **Action and Event are ignored** (M2 ruling R3): every listed ID is re-read
+- **Action and Event are ignored** (M2-R3): every listed ID is re-read
   with `GET /calendar/v1/{cal}/events/{id}`; 404, or 422 with code 2501, means
   gone. Robust to unknown Action values and create-then-delete.
 - Baseline cursor = `latest` read before the full listing; the cursor a feed
@@ -211,7 +211,7 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
   page [assumed → E04]: rows are deduped by ID and `latest` is read again
   after each listing. A listing is stable when `latest` did not move during
   it and its unique count equals the first page's `Total`; an unstable one is
-  listed again, at most twice (R17), and the first stable listing is the
+  listed again, at most twice (M2-R17), and the first stable listing is the
   content. When none of the 3 is stable, the content is their union, and
   every cached row missing from all of them is re-read before it is
   tombstoned (gone: tombstoned; found: kept; unreadable: kept as cached, the
@@ -220,13 +220,13 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
 - Full resync of a calendar when: never synced; `Refresh != 0`; the feed
   answers a 4xx other than 429 (cursor unusable); more than 50 pages in one
   pass; the last full sync is older than 24 h; a row re-read answers a
-  non-gone 4xx other than 429/401 (R8, so one unreadable row cannot stall the
-  feed). Fallback resyncs (Refresh, refused cursor, R8, more than 50 pages)
-  are limited to one per calendar per 5 min (R10); initial, `--full` and the
+  non-gone 4xx other than 429/401 (M2-R8, so one unreadable row cannot stall the
+  feed). Fallback resyncs (Refresh, refused cursor, M2-R8, more than 50 pages)
+  are limited to one per calendar per 5 min (M2-R10); initial, `--full` and the
   24 h resync are not. A deferred calendar keeps its cursor, its feed is not
   read again until the gap is over (the pending cause is kept in the cache),
   then it is listed at once.
-- Core event loop `/core/v4/events/{id}`: **not used in M2** (R2). Whether it
+- Core event loop `/core/v4/events/{id}`: **not used in M2** (M2-R2). Whether it
   carries calendar list/membership changes is unverified in every source
   [assumed → E05]; the calendar list is re-read on every pass instead (one
   request).
@@ -277,7 +277,7 @@ What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 1 in
 cache records its account in `meta` and is emptied when opened for another):
 - `meta`: the account ID, the change counter and its epoch: 128 random bits
   (hex) drawn when the file is created and again when it is emptied for
-  another account (R14). The counter restarts only under a new epoch, so M3's
+  another account (M2-R14). The counter restarts only under a new epoch, so M3's
   CTags and sync tokens are `epoch:seq` and never recur with another content,
   even after `pcb logout` removed the file.
 - `calendars`: ID, name, type, feed cursor, last full sync time, last sync
@@ -288,12 +288,12 @@ cache records its account in `meta` and is emptied when opened for another):
   plaintext fields). Plus `tombstones` (deleted IDs with the row's UID and their
   sequence, indexed by calendar and sequence) so a later sync-token read can
   report deletions; M3's CalDAV resources are per UID, so a deletion is
-  reported as a 404 for the UID's href (R16). `Changes(calendar, since)`
+  reported as a 404 for the UID's href (M2-R16). `Changes(calendar, since)`
   reads the writes and tombstones after a sequence number, in order.
 - Not stored in M2: members, settings, key material (the key chain stays in
   M1's sealed store and is re-derived per session).
 - **Nothing decrypted is ever written.** Event decryption, the JSCalendar model
-  and E09 (decrypt cost per 1 000 events, cold start) move to M3 (ruling R1),
+  and E09 (decrypt cost per 1 000 events, cold start) move to M3 (M2-R1),
   where CalDAV first needs content; E09 decides there whether a sealed
   decrypted index is needed. Decrypted events live in an in-memory LRU,
   rebuilt on demand.
@@ -304,7 +304,7 @@ cache records its account in `meta` and is emptied when opened for another):
   a normal shared-lock reader instead.
 - Errors: a corrupt cache is "you must act" (exit 10, hint: remove `pcb.db`,
   then `pcb sync --full`); a permission or disk error is blocked (exit 20)
-  with the OS reason (R13), whether at open or during any read or write
+  with the OS reason (M2-R13), whether at open or during any read or write
   (SQLite's result code is classified on every operation). A cache failure
   during a sync stops the whole pass, never just one calendar.
   `pcb doctor` checks the file and its mode.
@@ -336,7 +336,7 @@ relogin credentials, client tokens (hashed, never stored in clear).
   reading `latest`, then follow the feed (rules in §5.5).
 - Incremental (delivered in M2): `pcb sync` is one pass; `pcb sync --watch`
   repeats every `--interval` (default 30 s, at least 10 s, a smaller value is
-  refused with exit 2) until Ctrl-C (exit 0, R12) or until only a person can
+  refused with exit 2) until Ctrl-C (exit 0, M2-R12) or until only a person can
   fix what failed: log in again or a damaged cache (exit 10), a cache written
   by a newer pcb or a system without file locks (exit 20). Session-wide
   failures (429, 5xx, network, session ended) stop the pass and, in watch,
@@ -349,7 +349,7 @@ relogin credentials, client tokens (hashed, never stored in clear).
   reported but does not back off (the other calendars keep the interval). A calendar deferred by the
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
-  long) and when it retries (R11). All requests go through the one per-account client and its
+  long) and when it retries (M2-R11). All requests go through the one per-account client and its
   limiter. The idle slow-down (5 min) and tuning after E06 are M5 (daemon).
   `--full` lists every calendar again (with `--watch`, until one pass gets
   through, then the feed is read); a re-read row whose ETag is unchanged
@@ -367,7 +367,7 @@ relogin credentials, client tokens (hashed, never stored in clear).
 
 ### 8.2 ETags and conflicts
 ETag = `"v1-"` + the first 32 hex characters of the sha256 of the canonical
-JSON of the whole raw row (numbers kept as written, keys sorted) (R4): every
+JSON of the whole raw row (numbers kept as written, keys sorted) (M2-R4): every
 field counts, so an edit that does not move `LastEditTime` (notification-only,
 colour-only: unknown) is still seen [assumed → E07]; `v1` is the render
 version, bumped when our rendering changes so clients re-download. Writes
@@ -507,11 +507,11 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E02 | Is a solved CAPTCHA token valid in another process, and for how long? | C1 auth, CLI resume | trigger HV on the test account, solve, retry from a new process after delays |
 | E03 | Accepted `x-pm-appversion` values and resulting scopes | C1 transport | try candidates, record scopes and calendar access |
 | E04 | Calendar modelevents semantics (cursor, payload, gaps); push stream status | C4 sync | test account: edit events, read the feed (`pcb-lab probe feed`; source-based write-up `E04-calendar-feed.md`, live run pending) |
-| E05 | Core event loop for calendar list / membership changes | C4 sync | same (`E05-core-events.md`; not used in M2, R2) |
+| E05 | Core event loop for calendar list / membership changes | C4 sync | same (`E05-core-events.md`; not used in M2, M2-R2) |
 | E06 | Rate limits and 429 behaviour | C1, C4 | controlled bursts on the test account |
 | E07 | What changes in a row on edit (modify time, sequence, parts) | ETags | edit fields one at a time (`E07-row-changes.md`, source-based, live run pending) |
 | E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | read Thunderbird's source (done, `E08-thunderbird-caldav.md`); live capture against a reference server deferred to the human check |
-| E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, R1) | benchmark on synthetic + test-account data |
+| E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, M2-R1) | benchmark on synthetic + test-account data |
 | E10 | Signature verification of each part, own and shared calendars | C1 keys | verify on test-account events, incl. a shared calendar |
 | E11 | Does Thunderbird need VTIMEZONE? | C0 | E08 source: **no** [verified: E08 source]; live check with the human Thunderbird session |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity | write each RRULE form, read back |
@@ -531,7 +531,7 @@ Status at the close of M0 (2026-11-11):
 
 Status at the close of M2 (2026-11-11):
 - E04, E05, E07: source-based write-ups (`E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md`; evidence `raw/m2-feed-research.md`), every marker stays `[assumed]`; the live run is deferred ("M2 live session" in `spec/HUMAN-CHECKS.md`, recorded with `pcb-lab probe feed`).
-- E09: moved to M3 with event decryption (R1); the M2 cache stores ciphertext only.
+- E09: moved to M3 with event decryption (M2-R1); the M2 cache stores ciphertext only.
 - E06 (rate limits): not started; M2 relies on the client's limiter and on honouring `Retry-After`.
 
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
@@ -550,7 +550,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 
 Nothing after M5 is planned [decided 0007].
 
-M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (R2, until E05); event decryption, the JSCalendar model, the iCalendar codec and E09 (M3, R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: R1 decrypt/E09 to M3; R2 no core loop; R3 Action ignored; R4 ETag over the canonical row; R8 a refused row read makes the calendar resync in full; R10 fallback gap 5 min; R11 deferred counts as partial; R12 Ctrl-C of watch exits 0; R13 cache error classes.
+M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (M2-R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (M2-R2, until E05); event decryption, the JSCalendar model, the iCalendar codec and E09 (M3, M2-R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: M2-R1 decrypt/E09 to M3; M2-R2 no core loop; M2-R3 Action ignored; M2-R4 ETag over the canonical row; M2-R8 a refused row read makes the calendar resync in full; M2-R10 fallback gap 5 min; M2-R11 deferred counts as partial; M2-R12 Ctrl-C of watch exits 0; M2-R13 cache error classes.
 
 M5 carry-overs (known gaps left by M1, to close with the daemon work):
 - R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.

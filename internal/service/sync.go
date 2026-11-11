@@ -204,7 +204,7 @@ func cacheError(err error) error {
 	if f := cacheFailure(err); f != nil {
 		return f
 	}
-	return blocked("the event cache cannot be opened", "run pcb doctor to see what is wrong with it")
+	return blocked("the event cache cannot be opened", "run pcb sync (it updates an older cache), then pcb doctor if it persists")
 }
 
 // openCache opens the cache of the logged account for reading only. The
@@ -336,7 +336,10 @@ func (l *Local) notCached(ctx context.Context, ref string) error {
 		cals, err = calendar.List(ctx, c)
 		return err
 	})
+	var ee *exitcode.Error
 	switch {
+	case errors.Is(err, context.Canceled), errors.As(err, &ee) && ee.Code == exitcode.MustAct:
+		return err // Ctrl-C, or a person is needed (log in again): not a naming problem
 	case err != nil:
 		return usage(fmt.Sprintf("no calendar named %q in the event cache", ref),
 			"pcb calendar list shows your calendars; one added since the last sync needs pcb sync first")

@@ -18,7 +18,7 @@ Does `/core/v4/events/{id}` carry calendar-level changes (calendar created or de
 
 No source captured a real core event carrying calendar data.
 
-## What the engine assumes (ruling R2)
+## What the engine assumes (M2-R2)
 
 M2 runs **no core event loop**. The calendar list is re-read on every pass (one request: `GET /calendar/v1`), so a new, renamed or removed calendar is seen within one interval whatever the core loop does. Cost if wrong: one extra request per pass until this experiment is settled.
 

@@ -685,3 +685,27 @@ func TestWatchRetryAfterAndCachesNoRetryFixes(t *testing.T) {
 		t.Errorf("the watch ran %d passes on a damaged cache, want it to stop after 1", len(passes))
 	}
 }
+
+// A calendar missing from the cache makes Events ask Proton which case it is;
+// when the session has ended or the caller cancelled, that is what Events
+// reports, never "no calendar named".
+func TestEventsNotCachedKeepsSessionAndCancelErrors(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	e.sync(t, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := e.svc.Events(ctx, service.EventsRequest{Calendar: "Nope"})
+	if ee := wantExit(t, err, exitcode.Blocked); strings.Contains(ee.Error(), "no calendar named") {
+		t.Errorf("cancelled: %q, want the cancellation", ee.Error())
+	}
+
+	e.f.RevokeSessions() // no unattended relogin: a person must log in
+	_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Nope"})
+	if ee := wantExit(t, err, exitcode.MustAct); strings.Contains(ee.Error(), "no calendar named") {
+		t.Errorf("session ended: %q, want the login error", ee.Error())
+	}
+}

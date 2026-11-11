@@ -29,7 +29,8 @@ type API interface {
 	// ctx ends (nil: a normal stop) or a person is needed (that error), calling
 	// onPass after every pass.
 	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass)) error
-	// Events lists a calendar's cached events, without any network call.
+	// Events lists a calendar's cached events. It calls Proton only when the
+	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error

@@ -19,9 +19,9 @@ Which edits (title, time, description, notification only, colour only, RSVP, mov
 | Notification-only and colour-only edits: whether `LastEditTime` moves, whether a feed entry is emitted | no source; notifications are a plaintext row field, a personal-only endpoint exists (`PUT .../events/{id}/personal`) | unknown |
 | An edited occurrence is a separate row (same UID, `RecurrenceID` set); deleting a master does not cascade | jmdlab/carbonate; cheeseandcereal `docs/api.md:381` | [source] |
 
-## What the engine assumes (ruling R4)
+## What the engine assumes (M2-R4)
 
-ETag = `"v1-"` + first 32 hex of sha256 of the canonical JSON of the **whole raw row** (every field, keys sorted, numbers kept as written). Any change to any field changes the ETag, so a notification-only or colour-only edit that leaves `LastEditTime` alone is still seen, provided the row is re-read (every listed feed ID is, R3). An unchanged re-read changes nothing. Cost if wrong: a spurious client re-download when a field changes that does not matter.
+ETag = `"v1-"` + first 32 hex of sha256 of the canonical JSON of the **whole raw row** (every field, keys sorted, numbers kept as written). Any change to any field changes the ETag, so a notification-only or colour-only edit that leaves `LastEditTime` alone is still seen, provided the row is re-read (every listed feed ID is, M2-R3). An unchanged re-read changes nothing. Cost if wrong: a spurious client re-download when a field changes that does not matter.
 
 Still open if the feed does not list a personal-only edit at all: the cache would miss it until the next full resync (24 h).
 
@@ -42,4 +42,4 @@ Keep the whole-row ETag (cheap, safe) or narrow it to named fields. If a categor
 
 ## E09 (decrypt cost)
 
-Not part of M2 (ruling R1): the cache stores ciphertext rows only, so decrypt cost cannot change the M2 schema. Event decryption, the JSCalendar model and E09 move to M3, where CalDAV first needs content. Source figure for the record: caloxide's README claims about 1 ms per event (`README.md:162-166`, author's claim, hardware unstated, signature verification off); network, not CPU, dominated in every client.
+Not part of M2 (M2-R1): the cache stores ciphertext rows only, so decrypt cost cannot change the M2 schema. Event decryption, the JSCalendar model and E09 move to M3, where CalDAV first needs content. Source figure for the record: caloxide's README claims about 1 ms per event (`README.md:162-166`, author's claim, hardware unstated, signature verification off); network, not CPU, dominated in every client.
