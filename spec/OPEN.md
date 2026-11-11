@@ -1,6 +1,6 @@
 # Open questions and pending items
 
-State at the close of M0 (2026-11-11).
+State at the close of M2 (2026-11-11).
 
 ## Answered
 
@@ -29,4 +29,6 @@ State at the close of M0 (2026-11-11).
 - Live Thunderbird session against the bridge (E08 live confirmation): after the M3 CalDAV adapter (`spec/HUMAN-CHECKS.md`, step 6).
 - TPM2 sealing is untested everywhere (morpheus lacks libtss2; installing was out of scope), as is system-scope `systemd-creds` on blackwater (sudo is interactive, ruling R18), any run inside a systemd service, and any container (E15).
 - E10 (signature verification of calendar key parts) must be settled before M4 encrypts to a calendar key (ruling R17).
-- E04 to E07, E09, E12 to E14, E16, E17 are not started (SPEC §17).
+- M2 live session (E04, E05, E07): `pcb-lab probe feed` is built; the experiments are source-based until the run (`spec/HUMAN-CHECKS.md`, "M2 live session"). Markers on the feed, cursors, ETag stay `[assumed]` until then.
+- E09 (decrypt cost) moved to M3 with event decryption (ruling R1 of M2).
+- E06, E12 to E14, E16, E17 are not started (SPEC §17).
