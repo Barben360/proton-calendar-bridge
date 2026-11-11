@@ -124,7 +124,7 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 	return true, 0
 }
 
-// touchTimeout bounds a background touch waiting for the clients lock.
+// defaultTouchTimeout bounds a background touch waiting for the clients lock.
 const defaultTouchTimeout = 10 * time.Second
 
 // touch notes the client's last use off the request path (ruling M3-R21): a
