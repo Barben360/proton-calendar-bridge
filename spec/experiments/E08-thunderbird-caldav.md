@@ -1,6 +1,6 @@
 # E08 — What Thunderbird's CalDAV provider sends and expects
 
-Status: **source-verified; live Thunderbird session pending (HUMAN-CHECKS)**. Feeds the M3/M4 CalDAV adapter (A1), SPEC §9, E11 (SPEC §17).
+Status: **source-verified; implemented in M3 and covered by contract tests ("What the bridge does (M3)"); live Thunderbird session pending (HUMAN-CHECKS step 6, after M4, ruling M3-R1)**. Feeds the M3/M4 CalDAV adapter (A1), SPEC §9, E11 (SPEC §17).
 
 ## Question
 
@@ -405,7 +405,7 @@ What Thunderbird chokes on (summary of failure modes seen above):
 
 ## Conclusion
 
-Server requirements for Thunderbird, from the source above. Not yet exercised against a live Thunderbird (HUMAN-CHECKS) nor against the bridge (the CalDAV adapter does not exist yet).
+Server requirements for Thunderbird, from the source above. Not yet exercised against a live Thunderbird (HUMAN-CHECKS). Since M3 the bridge's adapter implements them and the tests below assert them against Thunderbird's wire shapes, not against Thunderbird.
 
 ### MUST
 1. Answer unauthenticated requests with `401` + `WWW-Authenticate: Basic realm="..."` (Digest works but adds a synchronous `OPTIONS` that must return exactly 200). Do not use 403 for "not logged in".
@@ -471,6 +471,41 @@ Server requirements for Thunderbird, from the source above. Not yet exercised ag
 - **E11, does Thunderbird need VTIMEZONE in server responses?** No (§6.3 above): it resolves a `TZID` by name through its own ICU-based timezone database. A `VTIMEZONE` for a known IANA TZID is harmless; a non-IANA TZID (Windows names) triggers an alert and a phantom zone. Thunderbird itself always writes a generated `VTIMEZONE` in its PUT bodies. Source-verified only.
 - **§9 Thunderbird as reference client**: its exact requests and failure modes are now documented from source (sections 1 to 8); replayable traces from a live session are still pending.
 
+## What the bridge does (M3)
+
+Server behaviour per MUST/SHOULD/AVOID item, with the contract test that asserts it (`internal/caldav/contract_test.go` on a stub service, `report_test.go` on the real service over the fake Proton). All [verified: the named test]; every one is a test of our server against the shapes read above, none is a Thunderbird run. Deviations from the list are marked and ruled.
+
+| Item | Bridge behaviour | Test |
+|---|---|---|
+| MUST 1 | 401 with `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"` for missing or wrong credentials, never 403; a blocked IP (5 failures per minute) gets 503 + `Retry-After` in whole seconds, **not** 429 (M3-R26: a 4xx on the first PROPFIND disables the calendar) | `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`, `TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter` |
+| MUST 2 | `/.well-known/caldav` behind auth, 308 to the principal | `TestMust02WellKnownRedirectsToThePrincipal` |
+| MUST 3 | Depth 0 on `/`, the entered URL and the principal: `resourcetype` always, `current-user-principal`, `calendar-home-set`, matched by namespace | `TestMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet` (+ the go-webdav client, E17: `TestGoWebdavClientDiscoversAndReads`) |
+| MUST 4 | home set Depth 1 lists every calendar: collection + calendar, name, privileges, colour; 503 + `Retry-After` while every calendar is pending (M3-R30) | `TestMust04HomeSetDepth1ListsEveryCalendar`, `TestHomeSetIs503WhileEveryCalendarIsPending` |
+| MUST 5 | calendar Depth 0: `supported-report-set` is exactly sync-collection + calendar-multiget (no calendar-query: it is not implemented), VEVENT only, `getctag`, `owner`, `current-user-principal` | `TestMust05CalendarDepth0CarriesTheServerInfo` |
+| MUST 6 | OPTIONS on any path: 200 + `DAV: 1, 3, calendar-access`, **without auth** (M3-R23: it reveals nothing, and Digest-style probes need it) | `TestMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth` |
+| MUST 7 | sync-collection: empty token lists everything with a token; delta; deletions as response-level 404 per UID; a new token even when nothing changed; an invalid token is 403 with `<D:error><D:valid-sync-token/></D:error>`, never the bare `<D:error/>`; no 507 paging (listings carry only href and ETag, M3-R23) | `TestMust07SyncCollectionWithAnEmptyTokenListsEverything`, `TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404`, `TestMust07InvalidSyncTokenIs403ValidSyncToken`, `TestSyncCollectionReportsDeletionsPerUID`, `TestSyncTokenOfAnotherEpochIsRefused`, `TestSyncLevelMustBe1OrInfinite` |
+| MUST 8 | multiget: one response per href, missing ones response-level 404, percent-encoded hrefs decoded exactly; more than 1 000 hrefs is 413 (not 403) | `TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404`, `TestMust08MultigetRefusesMoreThan1000Hrefs`, `TestHrefNamesDecodeExactly`, `TestPathVariantsResolveExactly` |
+| MUST 9 | one `<uid>.ics` per UID directly under its calendar; the href escapes the UID (M3-R13) | `TestMust09ObjectsAreICSResourcesDirectlyUnderTheirCalendar`, `TestHrefNamesDecodeExactly` |
+| MUST 10, 11 | **M3 refuses writes**: PUT and DELETE answer 403 `DAV:need-privileges`; HEAD answers 200/404. Writes arrive in M4 | `TestMust10And11WritesAreRefusedUntilM4AndHeadAnswers` |
+| MUST 12 | ETags identical in listings, multiget and GET, and changing with content | `TestMust12ETagsAgreeAcrossListingsAndReads`, `TestMust12ETagsChangeWithContentAndAgree` |
+| MUST 13 | iCalendar bytes served as rendered (CRLF, `X-MOZ-*` kept) | `TestMust13CalendarDataIsServedByteForByte` |
+| MUST 14 | `text/xml` bodies and Thunderbird's `Accept` headers accepted | `TestMust14AcceptsTextXMLBodiesAndThunderbirdHeaders` |
+| SHOULD privileges | owned normal calendars advertise read + write although writes are refused (M3-R1: Thunderbird keeps its read-only flag from subscription, E08 §5, so no one subscribes to an M3-only server read-only); other calendars read only. M4 must derive this from member permissions (M3-R15) | `TestShouldPrivilegesFollowReadOnly` |
+| SHOULD content type, Depth 1 fallback | `getcontenttype` and `getetag` on every object; Depth 1 on a calendar works, with `calendar-data` when asked | `TestShouldDepth1ListingCarriesContentTypeAndETagOnEveryObject`, `TestDepth1ListingServesCalendarDataWhenAsked` |
+| AVOID scheduling | no `calendar-schedule` / `calendar-auto-schedule` in `DAV:` | `TestMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth` |
+| AVOID 403 | 403 only for genuine refusals (writes, infinite Depth `propfind-finite-depth`, unknown REPORT `supported-report`, invalid token) | `TestAvoid403OutsideGenuineRefusals`, `TestPropfindDepthInfinityIs403FiniteDepth`, `TestAvoidUnsupportedReportsAre403SupportedReport` |
+| AVOID 4xx on first sync / OPTIONS / Depth 0 | service unavailable (logged out, no cache, Proton 5xx) is 503 + `Retry-After` 30 (M3-R22); a pending calendar is 503 and left out of the home set (M3-R25); unknown calendars 404 | `TestAvoid4xxWhenTheServiceIsUnavailable`, `TestPendingCalendarsAre503AndLeftOutOfTheHomeSet`, `TestPendingCalendarIs503UntilTheFirstPassReachesIt`, `TestUnknownCalendarsAre404`, `TestCancelledRequestsAreNotReportedAsFailures` |
+| AVOID normalising iCalendar | merge keeps unknown properties byte for byte (M3 `internal/ical`); an undecryptable or unparsable event is a placeholder VEVENT (`X-PCB-PLACEHOLDER:1`) and never fails a report (M3-R4) | `TestMust13CalendarDataIsServedByteForByte`, `TestUndecryptableEventDoesNotFailTheReport` |
+| AVOID whitespace in leaves | no indentation in XML | `TestAvoidWhitespaceInLeafElements` |
+| AVOID unclassifiable sync responses | every sync item has etag + type or is a 404 | `TestAvoidUnclassifiableSyncResponses` |
+| AVOID error text in bodies | bodies carry no error text, Proton text or other users' IDs | `TestAvoidErrorTextInBodies` |
+| AVOID calendar-query, PROPPATCH, MKCALENDAR | PROPPATCH and MKCALENDAR 405 with `Allow`; calendar-query, free-busy-query 403 `supported-report` | `TestAvoidProppatchAndMkcalendarAre405`, `TestAvoidUnsupportedReportsAre403SupportedReport` |
+| Hardening beyond the list | bodies over 8 MiB 413; XML with a DOCTYPE refused; at most 64 property names and 64 attributes per element; fuzzed parsers | `TestBodiesOver8MiBAre413`, `TestXMLWithADoctypeIsRefused`, `TestPropertyListsOver64NamesAre400`, `TestElementsWithOver64AttributesAre400`, `TestXMLElementAndDepthLimits`, `FuzzReportBody`, `FuzzPropfindBody` |
+
+Not covered by a test of ours: VTIMEZONE is not served (none, E11 answered from source); the SHOULD "fast depth-0 and OPTIONS" has no timing test; the `getcontenttype` property carries `text/calendar; charset=utf-8; component=vevent` and GET answers `text/calendar; charset=utf-8` [source: internal/caldav/propfind.go:220, server.go:207; no test asserts the suffix].
+
+Still to confirm live (research list, HUMAN-CHECKS step 6): preemptive Basic after the first challenge, 308 versus 301 on detection, `readOnly` persistence when M4 changes the privileges, the self-signed exception flow over the network, non-IANA TZIDs and orphan exceptions from real data, VALARM rendering from `Notifications`, first-sync cost on thousands of events, shared calendars.
+
 ## Feeds
 
-M3 CalDAV read and M4 CalDAV writes (A1 adapter: SPEC §9; the MUST/SHOULD/AVOID list above becomes its contract tests, with `MOCK` as the wire-shape reference), E11 (VTIMEZONE), E17 (go-webdav audit run against these requirements), SPEC §16 CalDAV test plan.
+M3 CalDAV read and M4 CalDAV writes (A1 adapter: SPEC §9; the MUST/SHOULD/AVOID list above becomes its contract tests, with `MOCK` as the wire-shape reference), E11 (VTIMEZONE, answered below), E17 (go-webdav audit, done: `E17-go-webdav-audit.md`), SPEC §16 CalDAV test plan.

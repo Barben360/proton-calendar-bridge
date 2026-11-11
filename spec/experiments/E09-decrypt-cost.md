@@ -28,6 +28,10 @@ So about **0.2–0.4 s of CPU per 1 000 events, on one goroutine**, signatures c
 - Real rows often carry fewer parts (no calendar encrypted, attendees or personal part on a plain event), so the decrypt share is an upper figure; RSA-4096 authors would raise the verification share.
 - Synthetic content is ~1 KB per row; long descriptions or attachments only add AES time, which is ~3 % here.
 
+## M3 as built
+
+`service.Local.Serve` renders rows on demand through `cards.Open` and the `internal/ical` merge, into an in-memory LRU of rendered objects (default 2 000, ruling in the M3 plan); nothing decrypted reaches the disk [verified: `TestUndecryptableEventDoesNotFailTheReport` serves a report through the real service over the fake Proton; the LRU size and the no-disk rule are [claim]: no test of their own in this task]. No new timing was taken: `BenchmarkOpen` above is the only measurement, and no benchmark covers the merge, the render or a whole cold start. A cold-start figure (login to the first full render of every calendar) needs the live half.
+
 ## Live half (pending)
 
 With the test account (`spec/HUMAN-CHECKS.md`, after the CAPTCHA step): time `cards.Open` over the account's real cached rows, and the cold start (login, key unlock, calendar bootstrap, first full render of every calendar). Record the address key algorithm and the parts mix per row.

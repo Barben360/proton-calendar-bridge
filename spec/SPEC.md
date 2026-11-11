@@ -98,7 +98,7 @@ Blocks and their contracts:
 
 | Block | Owns | Exposes | Depends on |
 |---|---|---|---|
-| C0 model | Internal event model (JSCalendar, RFC 8984), iCalendar codec (RFC 5545), recurrence expansion, time zones | Go types + pure functions | stdlib, a vetted RRULE lib or our own |
+| C0 model | iCalendar-native event model (decision 0012), iCalendar codec (RFC 5545), recurrence expansion, time zones | Go types + pure functions | stdlib, a vetted RRULE lib or our own |
 | C1 proton | HTTP transport, client identity, rate limit, auth (SRP, 2FA, human verification, two-password, scopes), key hierarchy, calendar endpoints, change feed, Proton card codec (model ⇄ encrypted parts) | `proton.Session`, `proton.Calendars`, `proton.Feed` interfaces | go-proton-api, gopenpgp, go-srp, C0 |
 | C2 store | SQLite cache of ciphertext rows and sync state; sealed secret store | `store.Cache`, `store.Secrets` | modernc.org/sqlite (pure Go) [call], C0 |
 | C3 service | Use cases: list/get/search/create/update/delete events, calendars, free-busy (local), login flows; applies C5 | `service.API` (Go interface, the only thing adapters call) | C1, C2, C4, C5 |
@@ -245,23 +245,33 @@ properties assumed → E13]. The codec has a round-trip property test: model
 
 ## 6. C0 — Model block
 
-- Internal model: JSCalendar (RFC 8984) `Event` with `recurrenceRules`,
-  `recurrenceOverrides`, `excludedRecurrenceRules`, `participants`, `alerts`,
-  `timeZone`, `locations`, `virtualLocations`, `color`, plus a
-  `proton` extension object (IDs, calendar ID, member ID, part signatures,
-  integrity, sequence, raw unknown iCal properties) [decided: JSCalendar;
-  call: the extension's content].
-- Codecs: iCalendar ⇄ model (RFC 5545 + RFC 7986 color). A JSCalendar JSON
-  codec is not needed while CalDAV is the only adapter.
-- Recurrence: expansion for time-range queries and free-busy; library choice
-  after an audit of candidates (teambition/rrule-go used by proton-cal) or
-  our own on the RFC 5545 rules [call; audit → E16].
-- Time zones: IANA names; VTIMEZONE generated from tzdata for CalDAV output
-  (Thunderbird does not need it, it uses its own timezone database
-  [verified: E08 source]; other clients may); floating and all-day handled
-  as in RFC 8984.
-- Fuzz tests on every parser; golden files from real Proton, Thunderbird and
-  Apple exports.
+Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
+**iCalendar-native**; there is no JSCalendar layer in v1.
+
+- A decrypted Proton event is a set of iCalendar fragments (`internal/proton/cards`:
+  shared signed, shared encrypted, calendar signed, calendar encrypted, attendees,
+  personal). `internal/ical` merges them into one VEVENT line by line and keeps every
+  property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte
+  [claim: `internal/ical` has round-trip and fuzz tests, not re-listed here; the merge rules come from proton-cal and are live-verified only by its author [claim]].
+  Row-level data joins in: `Color` to `COLOR`, `Notifications` to VALARMs (a `null`
+  list means the calendar's default notifications), attendee `Status` to `PARTSTAT`
+  [claim: `internal/service` render tests, names not re-checked].
+- One CalDAV object per UID: master first, then exceptions by RecurrenceID; duplicate
+  masters resolved to the most recently edited one, the others left out and counted
+  (M3-R3). An event that cannot be decrypted or parsed is served as a placeholder
+  VEVENT (`X-PCB-PLACEHOLDER:1`) rather than failing a report (M3-R4)
+  [verified: `TestUndecryptableEventDoesNotFailTheReport`].
+- VCALENDAR: `VERSION:2.0`, `PRODID:-//pcb//proton-calendar-bridge//EN`,
+  `CALSCALE:GREGORIAN`, CRLF, lines folded at 75 octets, **no VTIMEZONE** emitted:
+  Thunderbird resolves TZIDs from its own database [verified: E08 source, E11]; other
+  clients may want generated VTIMEZONEs, which stay unbuilt [call].
+- JSCalendar (0006) returns with the first adapter that is not iCalendar-native, as a
+  codec over this model. Cost if wrong: that layer is added later.
+- Recurrence: no expansion in M3 (no `calendar-query`, no free-busy); library choice
+  after the audit E16 when time-range queries or free-busy are needed [call].
+- Fuzz tests on every parser (`internal/ical`, `internal/caldav` request bodies)
+  [verified: `FuzzReportBody`, `FuzzPropfindBody`]; golden files from real Proton,
+  Thunderbird and Apple exports are not yet collected.
 
 ## 7. C2 — Store block
 
@@ -292,11 +302,12 @@ cache records its account in `meta` and is emptied when opened for another):
   reads the writes and tombstones after a sequence number, in order.
 - Not stored in M2: members, settings, key material (the key chain stays in
   M1's sealed store and is re-derived per session).
-- **Nothing decrypted is ever written.** Event decryption, the JSCalendar model
-  and E09 (decrypt cost per 1 000 events, cold start) move to M3 (M2-R1),
-  where CalDAV first needs content; E09 decides there whether a sealed
-  decrypted index is needed. Decrypted events live in an in-memory LRU,
-  rebuilt on demand.
+- **Nothing decrypted is ever written.** Event decryption, the iCalendar merge
+  and E09 (decrypt cost per 1 000 events, cold start) moved to M3 (M2-R1).
+  E09's offline measurement (0.2 to 0.4 ms per event, signatures checked
+  [verified: `BenchmarkOpen`]) says no sealed decrypted index is needed.
+  Rendered objects live in an in-memory LRU (2 000 by default), rebuilt on
+  demand; the live cold-start figure is pending.
 - Read-only opens (`pcb status`, `pcb event list`) never create or migrate
   the file; with no `-wal` present they read it as `immutable=1`, which may
   return a stale or inconsistent snapshot if a writer starts meanwhile. Fine
@@ -390,28 +401,73 @@ human-readable reason) [call]:
 
 ## 9. A1 — CalDAV adapter
 
-- RFC 4791 core (MKCALENDAR off in v1 [call]), RFC 6764 discovery
-  (`/.well-known/caldav`), RFC 6578 sync-collection, ctag, ETags, REPORT
-  calendar-query / calendar-multiget / free-busy-query, RFC 6638 scheduling
-  advertised only if a client needs it (Apple does per cal-gateway; to
-  re-verify) [call].
-- Thunderbird is the reference client: its requests and failure modes read
-  from its source [verified: E08 source, no live session yet]; its server
-  requirements list (`spec/experiments/E08-thunderbird-caldav.md`) is the
-  contract for our CalDAV tests. Replayable live traces wait for the human
-  check (`spec/HUMAN-CHECKS.md`).
-- Library: emersion/go-webdav after an audit (carbonate and caloxide had to
-  patch its replies) or our own handlers on its XML types [call; audit →
-  E17].
-- Auth: HTTP Basic with per-client app passwords generated by `pcb client
-  add` (like Mail Bridge's bridge password) [call].
-- Listener: `127.0.0.1:1080` by default [call]; TLS (self-signed generated
-  or user certificate) required for any non-loopback bind, decided on the
-  bound address [built M3: `pcb serve`, `[caldav]` in §14; TLS ≥ 1.2; the
-  generated certificate is ECDSA P-256, 825 days, in `<state>/tls/` (key
-  0600), SANs = hostnames + `localhost` + bind IP (every interface IP for
-  0.0.0.0/[::]), replaced when a hostname is no longer covered or < 30 days
-  remain; its SHA-256 fingerprint printed by `pcb serve` and `pcb doctor`].
+As built in M3 (`internal/caldav`, our own handler on `net/http` and `encoding/xml`;
+it imports `service` and the standard library only [verified:
+`TestCalDAVImportsOnlyTheServiceAndTheStandardLibrary`]). Read-only: writes are M4.
+
+- Surface: `/.well-known/caldav` 308 to the principal (behind auth); PROPFIND Depth 0
+  and 1 (infinity: 403 `propfind-finite-depth`); REPORT `sync-collection` and
+  `calendar-multiget`; GET and HEAD on `<uid>.ics`; OPTIONS on any path with
+  `DAV: 1, 3, calendar-access` (never the scheduling classes). PUT and DELETE: 403
+  `DAV:need-privileges` until M4; PROPPATCH and MKCALENDAR: 405. Not built:
+  `calendar-query`, `free-busy-query` (403 `supported-report`), RFC 6638 scheduling,
+  507 paging [verified: the contract tests listed in E08, "What the bridge does (M3)"].
+- Thunderbird is the reference client: its requests and failure modes were read from
+  its source [verified: E08 source]; the MUST/SHOULD/AVOID list of
+  `spec/experiments/E08-thunderbird-caldav.md` is the contract and every item maps to
+  a test there. No live session yet: it runs after M4 (M3-R1,
+  `spec/HUMAN-CHECKS.md` step 6) [claim: Thunderbird behaves as the source says].
+- Identifiers (rulings M3-R9, R11, R12, R16): object ETag
+  `"v1-" + hex32(sha256(render version, sorted (row ID, row ETag), the calendar settings
+  used))`; CTag `<epoch>:<calendar max seq>:<settings hash>`; sync token
+  `urn:pcb:sync:1:<epoch>:<seq>:<gen>`, where `gen` hashes the render version, the
+  calendar ID, the settings and the key IDs with their lock state. A token of another
+  epoch, above the current sequence or below the calendar's floor is refused with 403
+  `<D:valid-sync-token/>`; a valid token with another `gen` yields every live UID as
+  changed plus the deletions (one full refetch) [verified:
+  `TestSyncTokenOfAnotherEpochIsRefused`, `TestMust07InvalidSyncTokenIs403ValidSyncToken`;
+  the gen rule: `TestObjectChanges/TokenOfAnotherCalendarListsInFull`, `/KeyRotationChangesETagsAndGeneration`, `/KeyReactivationChangesETagsAndGeneration` in `internal/service/render_test.go`]. Deletions are response-level
+  404 per UID (M2-R16) [verified: `TestSyncCollectionReportsDeletionsPerUID`].
+- Privileges (M3-R1): owned normal calendars advertise read and write although writes
+  are refused until M4; subscribed, holiday and other calendars read only. M4 must
+  derive writability from member permissions (M3-R15, `OPEN.md`) [verified:
+  `TestShouldPrivilegesFollowReadOnly`].
+- Availability (M3-R22, R25, R26, R30): while the service cannot answer (logged out, no
+  cache yet, Proton 5xx), a calendar is not yet synced, or an IP is rate limited, the
+  answer is 503 + `Retry-After`, never 4xx: a 4xx on the first PROPFIND, OPTIONS or
+  empty-token sync disables the calendar in Thunderbird (E08) [verified:
+  `TestAvoid4xxWhenTheServiceIsUnavailable`,
+  `TestPendingCalendarsAre503AndLeftOutOfTheHomeSet`,
+  `TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter`].
+- Auth (M3-R17 to R21): HTTP Basic, any username; the password is an app password from
+  `pcb client add NAME` (24 random bytes, base64url, printed once), stored as a salted
+  SHA-256 in `<state>/clients.json` (0600), compared in constant time, reloaded when the
+  file changes so `pcb client remove` bites at once; 401 with
+  `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"`; 5 failures per minute per IP
+  (IPv4 /32, IPv6 /64) then 503. OPTIONS is answered without auth (M3-R23)
+  [verified: `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`; the client
+  store and limiter: `internal/access` tests, e.g. `TestAddedPasswordChecksAndIsNeverStored`, `TestRemovedClientIsRefused`].
+- Limits: request bodies 8 MiB, XML names and attributes capped, multiget 1 000 hrefs,
+  `ReadHeaderTimeout` 10 s, no error text, Proton text or other users' IDs in bodies
+  [verified: `TestBodiesOver8MiBAre413`, `TestPropertyListsOver64NamesAre400`,
+  `TestAvoidErrorTextInBodies`].
+- Library (E17, M3-R5): our own server. emersion/go-webdav v0.7.0 has no server-side
+  sync-collection, `getctag` or `supported-report-set`, hard-codes privileges and
+  re-encodes iCalendar (so it cannot serve it verbatim); it is used as an independent
+  **test client only**, never in the binary [verified: `go version -m` of a build lists
+  no go-webdav; `TestGoWebdavAndGoICalAreTestOnly`;
+  `spec/experiments/E17-go-webdav-audit.md`].
+- Listener: `127.0.0.1:1080` by default; TLS (self-signed generated or user
+  certificate) required for any non-loopback bind, decided on the resolved bind address;
+  built in `pcb serve`, `[caldav]` in §14: TLS 1.2 or later; the generated certificate
+  is ECDSA P-256, 825 days, in `<state>/tls/` (directory 0700, key 0600, checked at each
+  start), SANs = hostnames + `localhost` + bind IP (every interface IP for
+  0.0.0.0/[::]), replaced when a hostname or specific bind IP is no longer covered or
+  under 30 days remain; its SHA-256 fingerprint is printed by `pcb serve` and
+  `pcb doctor` for the exception dialog (M3-R29, R31, R32) [claim: Thunderbird offers
+  the exception over the network, E08 §2.3, live check pending; the certificate rules
+  are tested in `internal/tlsutil` and `internal/cli` [claim: test names not listed here]].
+- Plain HTTP inside a container behind a reverse proxy: not built (M5, `OPEN.md`).
 
 ## 10. A2 — `.ics` feeds
 
@@ -445,7 +501,7 @@ Command tree:
 pcb install [--system|--user] [--plan]     # unit files, dirs, config; no root needed for --user
 pcb uninstall [--delete-data] [--plan]
 pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients)
-pcb serve [--listen HOST:PORT]              # sync loop + CalDAV listener in one process (M3, foreground; the unit and the container run it); not with --json
+pcb serve [--listen HOST:PORT]              # sync loop (30 s) + CalDAV listener in one process (M3, foreground; the unit and the container run it); not with --json. Refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20); prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0; stops with Proton's error code when the session ends (M3-R28)
 pcb service start|stop|restart|status|logs
 pcb login [--username U] [--password-fd N] [--unattended-relogin]
 pcb login resume --captcha-token T          # (--totp CODE moves to M5: the daemon must hold the half-authenticated session; until then the 2FA code comes from PCB_TOTP or a prompt in the same process)
@@ -454,7 +510,7 @@ pcb status                                  # login state, sync state, listeners
 pcb calendar list                           # what Thunderbird will see, with read-only flags
 pcb sync [--full] [--watch [--interval 30s]] # M2: fill/refresh the event cache (--watch not with --json)
 pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no network call
-pcb client add|list|remove                  # CalDAV credentials (app passwords, printed once)
+pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords, printed once; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
 pcb config get|set|validate
 pcb version
 ```
@@ -523,15 +579,15 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E06 | Rate limits and 429 behaviour | C1, C4 | controlled bursts on the test account |
 | E07 | What changes in a row on edit (modify time, sequence, parts) | ETags | edit fields one at a time (`E07-row-changes.md`, source-based, live run pending) |
 | E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | read Thunderbird's source (done, `E08-thunderbird-caldav.md`); live capture against a reference server deferred to the human check |
-| E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, M2-R1) | benchmark on synthetic + test-account data |
+| E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, M2-R1) | offline: 0.2 to 0.4 ms per event, signatures checked [verified: `BenchmarkOpen`], `E09-decrypt-cost.md`; live half (test-account rows, cold start) pending |
 | E10 | Signature verification of each part, own and shared calendars | C1 keys | verify on test-account events, incl. a shared calendar |
-| E11 | Does Thunderbird need VTIMEZONE? | C0 | E08 source: **no** [verified: E08 source]; live check with the human Thunderbird session |
+| E11 | Does Thunderbird need VTIMEZONE? | C0 | answered from source inside E08 (§6.3, "Answers to SPEC questions"; no E11 file): **no** [source: E08]; the bridge emits none; live check pending with the Thunderbird session |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity | write each RRULE form, read back |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec | write X- and standard extras, read back |
 | E14 | Member `Permissions` values for view-only vs edit shares (not planned: shared calendars) | – | – |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on morpheus-like Debian 13 |
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
-| E17 | go-webdav audit: fit, bugs, client compatibility | A1 | read, run against E08 traces |
+| E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
 | E18 | (dropped: no REST API planned) | – | – |
 
 Status at the close of M0 (2026-11-11):
@@ -546,6 +602,10 @@ Status at the close of M2 (2026-11-11):
 - E09: moved to M3 with event decryption (M2-R1); the M2 cache stores ciphertext only.
 - E06 (rate limits): not started; M2 relies on the client's limiter and on honouring `Retry-After`.
 
+Status at the close of M3 (2026-11-11):
+- E08: implemented and contract-tested ("What the bridge does (M3)" in `E08-thunderbird-caldav.md`); live Thunderbird session after M4 (`spec/HUMAN-CHECKS.md` step 6).
+- E09: offline measured, live half pending. E11: answered from source in E08, live check pending. E17: done.
+
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
 raw results (redacted), conclusion, and the decision it feeds.
 
@@ -556,13 +616,15 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M0 Foundations | **E03 first** (client identity with calendar scope), then repo layout, CI, conventions, E01, E02, E15; synthetic data set on the test account (years of events, recurrences, exceptions, all-day, time zones) | experiments written up; `pcb version`, `pcb doctor` skeleton |
 | M1 Proton core, read | C0 (read side), C1 auth + keys + read endpoints, C2 secrets, `pcb login` (password, TOTP, CAPTCHA resume, unattended relogin) | `pcb calendar list` against the test account |
 | M2 Store and sync | C2 cache, C4 initial + incremental (E04, E05, E07; E09 moved to M3) | cache follows edits made in the Proton web app |
-| M3 CalDAV read | A1 read, client credentials, TLS for non-loopback binds, E08, E11, E17 | Thunderbird (local and over the network) shows all calendars and stays in sync |
+| M3 CalDAV read (built, live session after M4) | A1 read, client credentials, TLS for non-loopback binds, E08, E11, E17 | Thunderbird (local and over the network) shows all calendars and stays in sync: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
 | M4 CalDAV writes | C1 codec write path, A1 writes, fidelity table (E12, E13) | Thunderbird two-way edits, incl. single occurrences |
 | M5 Daemon and ops | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only |
 
 Nothing after M5 is planned [decided 0007].
 
 M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (M2-R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (M2-R2, until E05); event decryption, the JSCalendar model, the iCalendar codec and E09 (M3, M2-R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: M2-R1 decrypt/E09 to M3; M2-R2 no core loop; M2-R3 Action ignored; M2-R4 ETag over the canonical row; M2-R8 a refused row read makes the calendar resync in full; M2-R10 fallback gap 5 min; M2-R11 deferred counts as partial; M2-R12 Ctrl-C of watch exits 0; M2-R13 cache error classes.
+
+M3 delivered (2026-11-11, branch m3-caldav-read): event decryption and the iCalendar merge (`internal/proton/cards`, `internal/ical`), the render and sync-token layer in `service.Local.Serve`, `internal/caldav` (read-only CalDAV), `pcb client`, `pcb serve` with generated or user TLS, the doctor checks for listener, certificate and clients, E08 contract tests, E09 (offline), E17. Deferred: the live Thunderbird session and the live halves of E08/E09/E11 (after M4); writes (M4); the daemon behaviours (M5). Rulings recorded: M3-R1 privileges read+write on owned calendars, live session after M4; R2 iCalendar-native (decision 0012); R3 duplicate masters; R4 placeholders; R5 own server; R6 serve reads on the writer's handle; R9 to R12, R16 tokens and ETags; R15 writability from member permissions parked to M4; R17 to R21 client store and limiter; R22 to R26, R30 503 rather than 4xx; R28 to R32 `pcb serve` and TLS.
 
 M5 carry-overs (known gaps left by M1, to close with the daemon work):
 - R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.
@@ -603,11 +665,12 @@ piece of logic is reused:
 - WentTheFox/caloxide (from protoxide/ferroxide/hydroxide): unattended
   relogin, CAPTCHA page, shared rate limiter, encrypted cache. M2 takes from
   it the feed's endpoint shapes and the 30 s / backoff cadence.
+- emersion/go-webdav (MIT): audited in E17; used as a test client only (M3-R5).
 - Thunderbird's CalDAV provider (mozilla/releases-comm-central, MPL-2.0): read for
   understanding only (E08), no code copied.
 - ProtonMail/WebClients (GPL-3.0 [verified: GitHub licence 2026-11-10]:
   read for understanding only, never copy code), go-proton-api, gopenpgp,
-  go-srp, go-webdav, rrule-go (MIT, candidate dependencies),
+  go-srp, rrule-go (MIT, candidate dependencies),
   modelcontextprotocol/go-sdk (MIT moving to Apache-2.0, both fine for an
   MIT project as a dependency).
 

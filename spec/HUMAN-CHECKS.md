@@ -54,9 +54,50 @@ At least 60 s after step 3's login. Commands and the wipe/reseed notes: `DATASET
 
 Update `E01`, `E02`, `E03`, `DATASET.md`, SPEC §5.1/§5.2 markers, `spec/OPEN.md`, commit on a branch. The E01 14-day window keeps running after this; its close-out is a separate, later commit.
 
-## 6. Later: Thunderbird against the bridge (author, GUI; after the M3 CalDAV adapter exists)
+## 6. Thunderbird against the bridge (author, GUI; M3 adapter built, run after M4)
 
-Placeholder, to be written when the adapter exists. Scope: a real Thunderbird (local, then over the network) subscribes to the bridge, shows every calendar and stays in sync; confirms the E08 source findings live (discovery through `/.well-known/caldav`, Basic 401 challenge, `sync-collection` with the empty token, `calendar-multiget`, PUT/DELETE precondition handling, no VTIMEZONE needed in responses, dismissed alarms not re-firing after an edit). Needs the author because it is a GUI client. Source-based expectations: `spec/experiments/E08-thunderbird-caldav.md`.
+Per ruling M3-R1 the live session runs **after M4**, so nobody subscribes Thunderbird to a server that refuses writes. Until then the M3 behaviour rests on the contract tests (`spec/experiments/E08-thunderbird-caldav.md`, "What the bridge does (M3)"). **Test account only**: the cache `pcb` serves must come from the test account's login (steps 2 to 5), never the author's. Use a fresh Thunderbird profile, so no earlier calendar or certificate exception interferes. The agent prepares and watches the logs; the author drives Thunderbird.
+
+**6.1 Prepare (agent).** With the test account logged in and the cache filled (`pcb sync`):
+```sh
+pcb client add Thunderbird
+```
+Expect `Client "Thunderbird" added (id ...)`, a line `Password (shown once, not stored): <32 characters>`, and the Thunderbird hints. Hand the password to the author out of band; it is not stored anywhere. Then, in a terminal kept open:
+```sh
+pcb serve
+```
+Expect, on stdout, `Thunderbird URL: http://localhost:1080/` and, over TLS, also `TLS certificate SHA-256 fingerprint: AA:BB:...:FF (check it in Thunderbird's certificate exception dialog)`; logs go to stderr (IDs only). It refuses to start logged out (exit 10, `pcb login`) or while `pcb sync` runs (exit 20).
+
+**6.2 Local, plain HTTP (author).** In Thunderbird: Calendar > New Calendar > On the Network. Location `http://localhost:1080/`, username anything (the account email works), password from 6.1, then "Find Calendars". Expect every calendar of the test account listed, each with its name and colour; subscribe to all. Events appear within seconds. Before the dialog, the agent can check the two entry points with curl (any username):
+```sh
+curl -si -u me:PASSWORD http://localhost:1080/.well-known/caldav | head -3   # 308, Location: /dav/principals/me/
+curl -si -u me:PASSWORD -X PROPFIND -H 'Depth: 0' http://localhost:1080/ | head -1   # HTTP/1.1 207
+curl -si -X PROPFIND http://localhost:1080/ | head -1                            # HTTP/1.1 401, WWW-Authenticate: Basic realm="pcb"
+```
+Then repeat the Thunderbird dialog once with the bare URL and once with `http://localhost:1080/.well-known/caldav`: both must find the same calendars.
+
+**6.3 Over the network, TLS (agent, then author).** Stop `pcb serve`, set in `config.toml` (`[caldav]`): `listen = "0.0.0.0:8443"` and `hostnames = ["<the host's LAN name>"]`, run `pcb serve` again. Expect `Thunderbird URL: https://<hostname>:8443/` and the fingerprint line. `pcb doctor` shows the same fingerprint. On the other machine, repeat 6.2 with that URL. Thunderbird shows the certificate exception dialog: **compare the SHA-256 fingerprint in the dialog with the one `pcb serve` printed, character by character; confirm the exception only if they match.** Record: whether the dialog appears in the creation flow or the certificate had to be added first under Settings > Certificates, and whether the IP-literal URL works (E08 §2.3).
+
+**6.4 Round trips (author edits in the web app on the test account, agent notes the time).**
+1. Edit an event's title in the web app: it shows in Thunderbird within one refresh (`pcb serve` syncs every 30 s; Thunderbird's own poll is 30 min by default, so use right-click > Synchronize Calendars).
+2. Delete an event in the web app: it disappears in Thunderbird after the same refresh.
+3. Edit the same event again after Thunderbird showed an alarm for it, dismiss the alarm, refresh: it must not re-fire (E08 AVOID normalising).
+4. Stop `pcb serve`, restart Thunderbird: the calendars still show their cached events; start `pcb serve`, refresh: no error, no duplicated calendar.
+5. In Thunderbird, try to edit an event: M3 refuses with a generic error (403); after M4 this step becomes a real edit and the web app must show it.
+
+**6.5 Revoked client (agent).** `pcb client remove Thunderbird`, then in Thunderbird refresh: the calendars report an authentication failure and ask for a password (401); the `curl -si -u me:PASSWORD http://localhost:1080/ -X PROPFIND` of 6.2 now answers `401`. `pcb client add Thunderbird` again gives a new password; the old one stays refused. `pcb client list` never prints a password.
+
+**6.6 What to record (agent writes it up in `E08-thunderbird-caldav.md`, "Live results").** One line each, with [verified: live] or what differed:
+1. Detection through `/.well-known/caldav` (308), `/` and the principal; whether Basic credentials are sent preemptively.
+2. `sync-collection` end to end: empty token, delta, a deletion, and a 403 `valid-sync-token` reset (stop `pcb serve`, remove `pcb.db` and `pcb sync --full`, restart: a new epoch).
+3. Multiget with a UID containing `@`, space or non-ASCII.
+4. `readOnly`: with M4 enabled, whether Thunderbird writes after M3-era subscriptions (E08 §5).
+5. The self-signed exception flow and the certificate validity (825 days) accepted.
+6. Real data: non-IANA TZIDs, orphan exceptions, duplicate masters, placeholder events (`pcb status` counts them).
+7. Alarms from `Notifications`: shown once, no re-fire after a refresh.
+8. First-sync time and memory with the test data set (E09 live half), Thunderbird's startup refresh.
+9. `getcontenttype` with `;component=vevent`, and a calendar rename or recolour not reaching an existing subscription (E08 §1.3).
+10. Another member's shared calendar: signatures, and invites keyed by address key (needs a second test account, otherwise skipped and said so).
 
 ## M1 live session (after steps 1 to 5; agent-run except three author actions)
 
