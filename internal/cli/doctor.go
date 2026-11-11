@@ -11,7 +11,6 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
-	"github.com/Barben360/proton-calendar-bridge/internal/output"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
@@ -23,11 +22,10 @@ func newDoctor() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that this machine can run pcb",
-		Args:  noArgs,
+		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			asJSON, _ := cmd.Flags().GetBool("json")
 			var stream func(doctor.Result)
-			if !asJSON {
+			if !JSONMode(cmd) {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
 			results := doctor.Run(cmd.Context(), doctorChecks(), stream)
@@ -35,15 +33,7 @@ func newDoctor() *cobra.Command {
 			if doctor.Worst(results) == doctor.StatusError {
 				failure = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("doctor found errors")}
 			}
-			if asJSON {
-				if err := output.Write(cmd.OutOrStdout(), "doctor", doctorData{results}, failure); err != nil {
-					return err
-				}
-				if failure != nil {
-					return &reportedError{failure}
-				}
-			}
-			return failure
+			return Finish(cmd, doctorData{results}, "", failure)
 		},
 	}
 }
@@ -54,10 +44,10 @@ func doctorChecks() []doctor.Check {
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(os.Getenv)
 	if err != nil {
-		fix := "set HOME or XDG_CONFIG_HOME and XDG_STATE_HOME to absolute paths"
+		fix := func(env string) string { return "set HOME or " + env + " to an absolute path" }
 		return append(checks,
-			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix},
-			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix})
+			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix("XDG_CONFIG_HOME")},
+			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix("XDG_STATE_HOME")})
 	}
 	return append(checks,
 		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
@@ -76,9 +66,3 @@ func printResult(w io.Writer, r doctor.Result) {
 		_, _ = fmt.Fprintf(w, "   fix: %s\n", r.Fix)
 	}
 }
-
-// reportedError marks a failure whose JSON envelope the command already
-// printed, so Execute must not print a second one.
-type reportedError struct{ error }
-
-func (e *reportedError) Unwrap() error { return e.error }

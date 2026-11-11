@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
 
 // PlatformCheck reports whether pcb is supported on GOOS/GOARCH
@@ -50,7 +52,7 @@ func (c DirModeCheck) Run(context.Context) Result {
 		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
 			r.Status = StatusError
 			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
-			r.Fix = "chmod " + modeString(c.Want) + " " + c.Path
+			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
 		} else {
 			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
 		}
