@@ -19,7 +19,7 @@ type Event struct {
 	RecurrenceID *int64
 	// Card is the VEVENT body (content lines, CRLF or LF separated; folded
 	// lines and nested components stay with their property), split into
-	// Proton's parts per the merge table (see splitCard). Empty: a minimal
+	// Proton's parts per the write table (see splitCard). Empty: a minimal
 	// card from UID, Start, End, FullDay, RRule and RecurrenceID. A card
 	// without UID gets UID's.
 	Card string
@@ -40,6 +40,10 @@ type Event struct {
 	AddressKeyPacket bool
 	BrokenPart       Part // that part is encrypted under an unrelated session key
 	Unsigned         Part // that part is served without a signature (see unsign)
+	// PersonalAlarms puts the card's VALARMs in a personal part, the shape
+	// of rows from before alarms moved to Notifications; without it a VALARM
+	// goes to no part, as Proton's writers do (research B.1, D).
+	PersonalAlarms bool
 }
 
 // Feed actions, as the change feed names them.
@@ -57,11 +61,58 @@ const defaultFeedPageSize = 50
 // eventRec is one stored row.
 type eventRec struct {
 	id, sharedID                 string
-	ev                           Event
 	createTime, lastEdit, modify int64
-	// parts are the crypto fields, built on the row's first read after each
-	// edit and kept, so a row reads the same until edited.
+	cols                         columns
+	// ev describes a seeded row (AddEvent, UpdateEvent); a written row (the
+	// sync endpoint) has none.
+	ev Event
+	// parts are the crypto fields: a seeded row's are built on its first read
+	// after each edit and kept, so a row reads the same until edited; a
+	// written row's are the ones sent.
 	parts map[string]any
+}
+
+// columns are a row's plaintext fields: a seeded row's from its Event, a
+// written row's parsed from its shared signed part (research C).
+type columns struct {
+	UID                      string
+	Start, End               int64 // unix seconds
+	StartTZ, EndTZ           string
+	FullDay                  bool
+	RRule                    string // "" serves null
+	RecurrenceID             *int64
+	Exdates                  []int64
+	Sequence                 int    // the card's SEQUENCE (not served)
+	Color                    string // "" serves null
+	Notifications            []Notification
+	IsOrganizer, Permissions int
+}
+
+// seedColumns are the columns of a seeded row: e's, with the card's EXDATE
+// and SEQUENCE.
+func seedColumns(e Event) columns {
+	c := columns{
+		UID: e.UID, Start: e.Start, End: e.End, StartTZ: "UTC", EndTZ: "UTC", FullDay: e.FullDay,
+		RRule: e.RRule, RecurrenceID: e.RecurrenceID, Color: e.Color, Notifications: e.Notifications,
+		IsOrganizer: 1, Permissions: 127,
+	}
+	for _, u := range cardUnits(e.Card) {
+		p, err := parseProperty(u)
+		if err != nil {
+			continue
+		}
+		switch p.name {
+		case "EXDATE":
+			for _, v := range strings.Split(p.value, ",") {
+				if t, _, _, err := instant(p, v); err == nil {
+					c.Exdates = append(c.Exdates, t.Unix())
+				}
+			}
+		case "SEQUENCE":
+			c.Sequence, _ = strconv.Atoi(p.value)
+		}
+	}
+	return c
 }
 
 // feedEntry is one change in a calendar's feed; seq is its position.
@@ -73,7 +124,8 @@ type feedEntry struct {
 
 // eventState is a calendar's rows and feed, guarded by calendars.mu.
 type eventState struct {
-	rows []*eventRec // creation order, deleted rows removed
+	rows []*eventRec     // creation order, deleted rows removed
+	gone map[string]bool // deleted row IDs: an edit of one answers 2501
 	feed []feedEntry
 	seq  int    // position of the newest change (0: none yet)
 	salt string // from the full calendar ID: a cursor of another calendar is unknown here
@@ -84,7 +136,7 @@ type eventState struct {
 
 func (c *calendarRec) events() *eventState {
 	if c.ev == nil {
-		c.ev = &eventState{salt: "mev" + hex.EncodeToString([]byte(c.id)), expired: -1}
+		c.ev = &eventState{salt: "mev" + hex.EncodeToString([]byte(c.id)), expired: -1, gone: map[string]bool{}}
 	}
 	return c.ev
 }
@@ -132,6 +184,15 @@ func (f *Fake) tick() int64 {
 	return 1700000000 + f.cal.clock
 }
 
+// newRow is a new row with fresh IDs, created now. Caller holds f.cal.mu.
+func (f *Fake) newRow(cols columns) *eventRec {
+	now := f.tick()
+	return &eventRec{
+		id: "ev" + hex.EncodeToString(random(f.t, 8)) + "==", sharedID: "sev" + hex.EncodeToString(random(f.t, 8)) + "==",
+		createTime: now, lastEdit: now, modify: now, cols: cols,
+	}
+}
+
 // AddEvent adds a row to the calendar, appends it to the calendar's change
 // feed and returns the row ID.
 func (f *Fake) AddEvent(calID string, e Event) (id string) {
@@ -139,14 +200,11 @@ func (f *Fake) AddEvent(calID string, e Event) (id string) {
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
 	s := f.calendarForEvents(calID).events()
-	now := f.tick()
-	id = "ev" + hex.EncodeToString(random(f.t, 8)) + "=="
-	s.rows = append(s.rows, &eventRec{
-		id: id, sharedID: "sev" + hex.EncodeToString(random(f.t, 8)) + "==",
-		ev: e, createTime: now, lastEdit: now, modify: now,
-	})
-	s.record(id, actionCreate)
-	return id
+	r := f.newRow(seedColumns(e))
+	r.ev = e
+	s.rows = append(s.rows, r)
+	s.record(r.id, actionCreate)
+	return r.id
 }
 
 // AddEventAt is AddEvent placing the row at position pos of the listing
@@ -160,14 +218,11 @@ func (f *Fake) AddEventAt(calID string, pos int, e Event) (id string) {
 	if pos < 0 || pos > len(s.rows) {
 		f.t.Fatalf("protontest: position %d outside the %d rows of calendar %q", pos, len(s.rows), calID)
 	}
-	now := f.tick()
-	id = "ev" + hex.EncodeToString(random(f.t, 8)) + "=="
-	s.rows = slices.Insert(s.rows, pos, &eventRec{
-		id: id, sharedID: "sev" + hex.EncodeToString(random(f.t, 8)) + "==",
-		ev: e, createTime: now, lastEdit: now, modify: now,
-	})
-	s.record(id, actionCreate)
-	return id
+	r := f.newRow(seedColumns(e))
+	r.ev = e
+	s.rows = slices.Insert(s.rows, pos, r)
+	s.record(r.id, actionCreate)
+	return r.id
 }
 
 // UpdateEvent replaces the row's fields, bumps its LastEditTime and appends
@@ -182,7 +237,8 @@ func (f *Fake) UpdateEvent(calID, id string, e Event) {
 		f.t.Fatalf("protontest: no event %q in calendar %q", id, calID)
 	}
 	now := f.tick()
-	s.rows[i].ev, s.rows[i].lastEdit, s.rows[i].modify, s.rows[i].parts = e, now, now, nil
+	r := s.rows[i]
+	r.ev, r.cols, r.lastEdit, r.modify, r.parts = e, seedColumns(e), now, now, nil
 	s.record(id, actionUpdate)
 }
 
@@ -197,6 +253,7 @@ func (f *Fake) DeleteEvent(calID, id string) {
 		f.t.Fatalf("protontest: no event %q in calendar %q", id, calID)
 	}
 	s.rows = slices.Delete(s.rows, i, i+1)
+	s.gone[id] = true
 	s.record(id, actionDelete)
 }
 
@@ -260,6 +317,10 @@ func (f *Fake) serveEvents(w http.ResponseWriter, r *http.Request, u *userCalend
 	cal := u.list[i]
 	s := cal.events()
 	switch {
+	case r.Method == http.MethodPut && len(segs) == 3 && segs[1] == "events" && segs[2] == "sync":
+		f.serveSync(w, r, cal)
+	case r.Method != http.MethodGet:
+		reply(w, http.StatusBadRequest, 2000, "fake: route not implemented")
 	case len(segs) == 2 && segs[1] == "events":
 		f.listEvents(w, r.URL.Query(), cal, s)
 	case len(segs) == 3 && segs[1] == "events":
@@ -284,6 +345,9 @@ func (f *Fake) serveEvents(w http.ResponseWriter, r *http.Request, u *userCalend
 	}
 }
 
+// listEvents answers a listing page: every row, or with UID= the rows of
+// that UID (research L.1: ListByUID). More says whether a later page has
+// rows.
 func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec, s *eventState) {
 	page, size := 0, maxListPageSize
 	var err error
@@ -303,10 +367,15 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 		reply(w, http.StatusBadRequest, 2021, "PageSize is too large")
 		return
 	}
-	lo := min(page*size, len(s.rows))
-	hi := min(lo+size, len(s.rows))
+	all := s.rows
+	if q.Has("UID") {
+		uid := q.Get("UID")
+		all = slices.DeleteFunc(slices.Clone(all), func(r *eventRec) bool { return r.cols.UID != uid })
+	}
+	lo := min(page*size, len(all))
+	hi := min(lo+size, len(all))
 	rows := make([]any, 0, hi-lo)
-	for _, r := range s.rows[lo:hi] {
+	for _, r := range all[lo:hi] {
 		row, ok := f.rowJSON(cal, r)
 		if !ok {
 			reply(w, http.StatusInternalServerError, 0, "fake: cannot build the event parts")
@@ -314,14 +383,17 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 		}
 		rows = append(rows, row)
 	}
-	total := len(s.rows)
+	total, more := len(all), 0
+	if hi < total {
+		more = 1
+	}
 	if fn := f.cal.onList; fn != nil {
 		// The caller holds f.cal.mu; fn may need it (AddEvent).
 		f.cal.mu.Unlock()
 		fn(cal.id, page)
 		f.cal.mu.Lock()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": total, "More": more})
 }
 
 func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {
@@ -356,40 +428,55 @@ func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {
 	})
 }
 
+// ensureParts builds a seeded row's parts if its last edit has not been read
+// yet. Caller holds f.cal.mu.
+func (f *Fake) ensureParts(cal *calendarRec, r *eventRec) error {
+	if r.parts != nil {
+		return nil
+	}
+	parts, err := f.buildParts(cal, r)
+	if err != nil {
+		return err
+	}
+	r.parts = parts
+	return nil
+}
+
 // rowJSON is the row as the API serves it: the plaintext columns of the
 // research's field set and real parts (see buildParts). It reports false,
 // after failing the test, when the parts cannot be built. Caller holds
 // f.cal.mu.
 func (f *Fake) rowJSON(cal *calendarRec, r *eventRec) (map[string]any, bool) {
-	if r.parts == nil {
-		parts, err := f.buildParts(cal, r)
-		if err != nil {
-			f.t.Errorf("protontest: event parts: %v", err) // a handler goroutine: no Fatal
-			return nil, false
-		}
-		r.parts = parts
+	if err := f.ensureParts(cal, r); err != nil {
+		f.t.Errorf("protontest: event parts: %v", err) // a handler goroutine: no Fatal
+		return nil, false
 	}
+	c := r.cols
 	var recurrence, rrule, color any
-	if r.ev.RecurrenceID != nil {
-		recurrence = *r.ev.RecurrenceID
+	if c.RecurrenceID != nil {
+		recurrence = *c.RecurrenceID
 	}
-	if r.ev.RRule != "" {
-		rrule = r.ev.RRule
+	if c.RRule != "" {
+		rrule = c.RRule
 	}
-	if r.ev.Color != "" {
-		color = r.ev.Color
+	if c.Color != "" {
+		color = c.Color
 	}
 	fullDay := 0
-	if r.ev.FullDay {
+	if c.FullDay {
 		fullDay = 1
+	}
+	exdates := c.Exdates
+	if exdates == nil {
+		exdates = []int64{}
 	}
 	row := map[string]any{
 		"ID": r.id, "CalendarID": cal.id, "SharedEventID": r.sharedID,
 		"CreateTime": r.createTime, "ModifyTime": r.modify, "LastEditTime": r.lastEdit,
-		"StartTime": r.ev.Start, "EndTime": r.ev.End, "StartTimezone": "UTC", "EndTimezone": "UTC",
-		"FullDay": fullDay, "UID": r.ev.UID, "IsOrganizer": 1,
-		"RecurrenceID": recurrence, "Exdates": []int64{}, "RRule": rrule,
-		"Permissions": 127, "Color": color, "Notifications": r.ev.Notifications,
+		"StartTime": c.Start, "EndTime": c.End, "StartTimezone": c.StartTZ, "EndTimezone": c.EndTZ,
+		"FullDay": fullDay, "UID": c.UID, "IsOrganizer": c.IsOrganizer,
+		"RecurrenceID": recurrence, "Exdates": exdates, "RRule": rrule,
+		"Permissions": c.Permissions, "Color": color, "Notifications": c.Notifications,
 	}
 	for k, v := range r.parts {
 		row[k] = v

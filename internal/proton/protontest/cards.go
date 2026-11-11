@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +27,9 @@ import (
 // Event.Unsigned serves without a signature.
 type Part int
 
-// The parts Event.BrokenPart can break: the encrypted ones. Event.Unsigned
-// takes any but PersonalPart, and SharedSignedPart (the cleartext one).
+// The parts Event.BrokenPart can break: the encrypted ones (a row has a
+// PersonalPart with Event.PersonalAlarms only). Event.Unsigned takes any but
+// PersonalPart, and SharedSignedPart (the cleartext one).
 const (
 	NoPart Part = iota
 	SharedEncryptedPart
@@ -87,20 +91,37 @@ func (f *Fake) AddressKeyRing() *crypto.KeyRing {
 	return c
 }
 
-// CalendarKeyRing returns a copy of the calendar's unlocked key.
+// CalendarKeyRing returns a copy of the calendar's primary key, unlocked:
+// the key new rows' key packets go to (bootstrap Flags 3).
 func (f *Fake) CalendarKeyRing(calID string) *crypto.KeyRing {
 	f.t.Helper()
+	return f.calendarKeyCopy(calID, (*calendarRec).primaryKey)
+}
+
+// RetiredCalendarKeyRing returns a copy of the calendar's retired key,
+// unlocked: listed with Flags 1, it opens but takes no new key packet.
+func (f *Fake) RetiredCalendarKeyRing(calID string) *crypto.KeyRing {
+	f.t.Helper()
+	return f.calendarKeyCopy(calID, func(c *calendarRec) *crypto.Key { return c.retired })
+}
+
+func (f *Fake) calendarKeyCopy(calID string, pick func(*calendarRec) *crypto.Key) *crypto.KeyRing {
+	f.t.Helper()
 	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
 	rec := f.cal.byID[calID]
-	f.cal.mu.Unlock()
 	if rec == nil {
 		f.t.Fatalf("protontest: unknown calendar %q", calID)
 	}
-	c, err := rec.ring.Copy()
+	key, err := pick(rec).Copy()
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	return c
+	kr, err := crypto.NewKeyRing(key)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return kr
 }
 
 // cardParts are the content lines of each part, a folded property or a
@@ -112,15 +133,22 @@ type cardParts struct {
 }
 
 // splitCard routes e's card (or a minimal one from its columns) per the
-// merge table: structural properties to the shared signed part,
-// STATUS/TRANSP/EXDATE to the calendar signed part, COMMENT to the calendar
-// encrypted part, ATTENDEE to the attendees part, VALARM to the personal
-// part, everything else to the shared encrypted part.
-func splitCard(e Event) cardParts {
+// write table (research B.1): structural properties to the shared signed
+// part, EXDATE to both signed parts, STATUS and TRANSP to the calendar
+// signed part, COMMENT to the calendar encrypted part, ATTENDEE to the
+// attendees part, everything else to the shared encrypted part. DURATION is
+// served as DTEND. A VALARM goes to no part (alarms are the row's
+// Notifications, research D), or to the personal part with
+// Event.PersonalAlarms.
+func splitCard(e Event) (cardParts, error) {
 	var p cardParts
 	units := cardUnits(e.Card)
 	if e.Card == "" {
 		units = minimalCard(e)
+	}
+	units, err := durationToEnd(units)
+	if err != nil {
+		return cardParts{}, err
 	}
 	hasUID := false
 	for _, u := range units {
@@ -128,9 +156,12 @@ func splitCard(e Event) cardParts {
 		case "UID", "DTSTAMP":
 			hasUID = hasUID || name == "UID"
 			p.common = append(p.common, u)
-		case "DTSTART", "DTEND", "DURATION", "RRULE", "RECURRENCE-ID", "SEQUENCE", "ORGANIZER", "X-PM-CONFERENCE-ID":
+		case "DTSTART", "DTEND", "RRULE", "RECURRENCE-ID", "SEQUENCE", "ORGANIZER", "X-PM-CONFERENCE-ID":
 			p.sharedSigned = append(p.sharedSigned, u)
-		case "STATUS", "TRANSP", "EXDATE":
+		case "EXDATE":
+			p.sharedSigned = append(p.sharedSigned, u)
+			p.calSigned = append(p.calSigned, u)
+		case "STATUS", "TRANSP":
 			p.calSigned = append(p.calSigned, u)
 		case "COMMENT":
 			p.calEnc = append(p.calEnc, u)
@@ -138,10 +169,11 @@ func splitCard(e Event) cardParts {
 			p.attendees = append(p.attendees, u)
 		case "BEGIN":
 			first, _, _ := strings.Cut(u, "\r\n")
-			if strings.EqualFold(strings.TrimSpace(first[len("BEGIN:"):]), "VALARM") {
-				p.personal = append(p.personal, u)
-			} else {
+			switch {
+			case !strings.EqualFold(strings.TrimSpace(first[len("BEGIN:"):]), "VALARM"):
 				p.sharedEnc = append(p.sharedEnc, u)
+			case e.PersonalAlarms:
+				p.personal = append(p.personal, u)
 			}
 		default:
 			p.sharedEnc = append(p.sharedEnc, u)
@@ -150,7 +182,57 @@ func splitCard(e Event) cardParts {
 	if !hasUID {
 		p.common = append([]string{"UID:" + e.UID}, p.common...)
 	}
-	return p
+	return p, nil
+}
+
+// durationToEnd replaces a DURATION with the DTEND it means, in DTSTART's
+// form: a DATE, a UTC time or a local time of the same TZID (days and weeks
+// nominal, the rest exact, as RFC 5545 counts them).
+func durationToEnd(units []string) ([]string, error) {
+	start, dur := -1, -1
+	for i, u := range units {
+		switch propName(u) {
+		case "DTSTART":
+			start = i
+		case "DURATION":
+			dur = i
+		case "DTEND":
+			return units, nil
+		}
+	}
+	if dur < 0 {
+		return units, nil
+	}
+	if start < 0 {
+		return nil, errors.New("protontest: a DURATION without DTSTART")
+	}
+	p, err := parseProperty(units[start])
+	if err != nil {
+		return nil, err
+	}
+	t, date, _, err := instant(p, p.value)
+	if err != nil {
+		return nil, err
+	}
+	d, err := parseProperty(units[dur])
+	if err != nil {
+		return nil, err
+	}
+	days, exact, err := parseDuration(d.value)
+	if err != nil {
+		return nil, err
+	}
+	end := t.AddDate(0, 0, days).Add(exact)
+	out := slices.Clone(units)
+	switch tzid, local := p.params["TZID"]; {
+	case date:
+		out[dur] = "DTEND;VALUE=DATE:" + end.Format(dateLayout)
+	case local:
+		out[dur] = "DTEND;TZID=" + tzid + ":" + end.Format(localLayout)
+	default:
+		out[dur] = "DTEND:" + end.UTC().Format(utcLayout)
+	}
+	return out, nil
 }
 
 // cardUnits splits a card into its properties (continuation lines joined back
@@ -203,6 +285,97 @@ func minimalCard(e Event) []string {
 	return out
 }
 
+// The iCalendar date and date-time forms.
+const (
+	dateLayout  = "20060102"
+	localLayout = "20060102T150405"
+	utcLayout   = "20060102T150405Z"
+)
+
+// property is a content line, unfolded: its upper-cased name, its parameters
+// (names upper-cased, values unquoted) and its value.
+type property struct {
+	name   string
+	params map[string]string
+	value  string
+}
+
+// parseProperty reads one property (a unit of cardUnits). A ':' or ';' in a
+// quoted parameter value does not end the name or the parameter.
+func parseProperty(unit string) (property, error) {
+	line := strings.NewReplacer("\r\n ", "", "\r\n\t", "").Replace(unit)
+	var fields []string
+	quoted, from := false, 0
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '"':
+			quoted = !quoted
+		case c == ';' && !quoted:
+			fields, from = append(fields, line[from:i]), i+1
+		case c == ':' && !quoted:
+			fields = append(fields, line[from:i])
+			p := property{name: strings.ToUpper(fields[0]), params: map[string]string{}, value: line[i+1:]}
+			for _, f := range fields[1:] {
+				k, v, ok := strings.Cut(f, "=")
+				if !ok {
+					return property{}, fmt.Errorf("a parameter without value in %s", p.name)
+				}
+				p.params[strings.ToUpper(k)] = strings.Trim(v, `"`)
+			}
+			if p.name == "" {
+				return property{}, errors.New("a property without name")
+			}
+			return p, nil
+		}
+	}
+	return property{}, errors.New("a content line without ':'")
+}
+
+// instant reads one value of a DTSTART-like property p: the instant, whether
+// it is a DATE (midnight UTC, as Proton stores full-day times) and its zone
+// name ("UTC" for a UTC time or a DATE). A floating time and a TZID the tz
+// database lacks are errors, as Proton refuses them (research I).
+func instant(p property, value string) (t time.Time, date bool, zone string, err error) {
+	tzid, local := p.params["TZID"]
+	switch {
+	case p.params["VALUE"] == "DATE":
+		t, err = time.Parse(dateLayout, value)
+		return t, true, "UTC", err
+	case local:
+		if tzid == "" || tzid == "Local" {
+			return time.Time{}, false, "", fmt.Errorf("TZID %q", tzid)
+		}
+		loc, lerr := time.LoadLocation(tzid)
+		if lerr != nil {
+			return time.Time{}, false, "", fmt.Errorf("TZID %q is not in the tz database", tzid)
+		}
+		t, err = time.ParseInLocation(localLayout, value, loc)
+		return t, false, tzid, err
+	case strings.HasSuffix(value, "Z"):
+		t, err = time.Parse(utcLayout, value)
+		return t, false, "UTC", err
+	}
+	return time.Time{}, false, "", fmt.Errorf("a floating %s", p.name)
+}
+
+var durationRE = regexp.MustCompile(`^([+-]?)P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$`)
+
+// parseDuration reads an iCalendar duration: its nominal days (weeks
+// included) and its exact part.
+func parseDuration(s string) (days int, exact time.Duration, err error) {
+	m := durationRE.FindStringSubmatch(s)
+	if m == nil || s == "P" || strings.HasSuffix(s, "T") {
+		return 0, 0, fmt.Errorf("duration %q", s)
+	}
+	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	days = 7*n(2) + n(3)
+	exact = time.Duration(n(4))*time.Hour + time.Duration(n(5))*time.Minute + time.Duration(n(6))*time.Second
+	if m[1] == "-" {
+		days, exact = -days, -exact
+	}
+	return days, exact, nil
+}
+
 // propName is the upper-cased name of a property line.
 func propName(line string) string {
 	if i := strings.IndexAny(line, ";:"); i >= 0 {
@@ -245,11 +418,25 @@ func attendeeRows(rowID string, lines []string) []any {
 	return out
 }
 
+// author is the email the calendar's parts are signed as: the calendar
+// address's, the owner's first address until the calendar is materialized.
+// Caller holds f.cal.mu.
+func (f *Fake) author(cal *calendarRec) string {
+	if cal.ready {
+		return cal.address.Email
+	}
+	return cal.owner + "@" + f.backend.GetDomain()
+}
+
 // buildParts makes the row's crypto fields and the columns derived from its
-// card. Author defaults to the email of the calendar's address (the owner's
-// first address until the calendar is materialized). Caller holds f.cal.mu.
+// card. Author defaults to the calendar's (see author). Caller holds
+// f.cal.mu.
 func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error) {
 	addrKR, err := signer()
+	if err != nil {
+		return nil, err
+	}
+	calKR, err := cal.primaryRing()
 	if err != nil {
 		return nil, err
 	}
@@ -261,10 +448,7 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 	}
 	author := r.ev.Author
 	if author == "" {
-		author = cal.owner + "@" + f.backend.GetDomain()
-		if cal.ready {
-			author = cal.address.Email
-		}
+		author = f.author(cal)
 	}
 	var errs []error
 	sign := func(text string) string {
@@ -296,7 +480,10 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 		return base64.StdEncoding.EncodeToString(kp)
 	}
 
-	p := splitCard(r.ev)
+	p, err := splitCard(r.ev)
+	if err != nil {
+		return nil, err
+	}
 	brk := r.ev.BrokenPart
 	sharedSK, err := crypto.GenerateSessionKey()
 	if err != nil {
@@ -310,7 +497,7 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 		out["AddressKeyPacket"] = wrap(addrKR, sharedSK)
 		out["AddressID"] = cal.address.ID
 	} else {
-		out["SharedKeyPacket"] = wrap(cal.ring, sharedSK)
+		out["SharedKeyPacket"] = wrap(calKR, sharedSK)
 	}
 	out["SharedEvents"] = []any{
 		clearPart(vcalendar(p.common, p.sharedSigned)),
@@ -322,7 +509,7 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 		if err != nil {
 			return nil, err
 		}
-		out["CalendarKeyPacket"] = wrap(cal.ring, calSK)
+		out["CalendarKeyPacket"] = wrap(calKR, calSK)
 		calendarParts = append(calendarParts, sealed(vcalendar(p.common, p.calEnc), calSK, brk == CalendarEncryptedPart))
 	}
 	out["CalendarEvents"] = calendarParts
@@ -331,7 +518,7 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 	}
 	if len(p.personal) > 0 {
 		text := vcalendar(p.common, p.personal)
-		data, err := personalData(cal.ring, text, brk == PersonalPart)
+		data, err := personalData(calKR, text, brk == PersonalPart)
 		errs = append(errs, err)
 		out["PersonalEvents"] = []any{map[string]any{"Type": 3, "Data": data, "Signature": sign(text), "Author": author, "MemberID": cal.memberID}}
 	}

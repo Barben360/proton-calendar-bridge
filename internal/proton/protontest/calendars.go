@@ -23,8 +23,11 @@ type Calendar struct {
 	LegacyTopLevel           bool // name, description and colour at the top level, not on the member
 	ToSecondAddress          bool // the member passphrase is encrypted to the user's second address key only
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
-	ExtraLockedKey           bool // a second calendar key no passphrase opens, listed first
+	ExtraLockedKey           bool // another calendar key, no passphrase opens it, listed first
 	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
+	// Permissions is our member's bitmask (research H: 8 is Write); 0
+	// serves 127, every bit, as for an owned calendar.
+	Permissions int
 	// The calendar's default reminders, as its bootstrap serves them; nil:
 	// one DISPLAY reminder, -PT1H for part-day events and -PT15H for full-day
 	// ones (see SetDefaultNotifications).
@@ -39,6 +42,7 @@ type calendars struct {
 	clock    int64                        // fake timestamps issued (see tick)
 	feedPage int                          // SetFeedPageSize, 0: default
 	onList   func(calID string, page int) // OnListPage, nil: none
+	syncs    []syncRecord                 // every sync request, in order (SyncCalls)
 }
 
 // user returns username's state, creating it. Caller holds mu.
@@ -61,35 +65,73 @@ type calendarRec struct {
 	owner      string // username
 	def        Calendar
 	passphrase string
-	ring       *crypto.KeyRing // unlocked calendar key
-	armored    []string        // calendar keys as served
-	extra      *crypto.Key     // the key no passphrase opens (ExtraLockedKey), unlocked
+	memberID   string
+	// keys are the calendar keys in the bootstrap's order, unlocked here:
+	// with ExtraLockedKey the key no passphrase opens, then the retired
+	// key, then the primary one, then any key a rotation added.
+	keys    []calendarKey
+	retired *crypto.Key // a former key: listed, opens, takes no new key packet
+	extra   *crypto.Key // the key no passphrase opens (ExtraLockedKey)
 	// Filled on the first request of the user, from the address list.
-	ready    bool
-	memberID string
-	address  gpa.Address
-	encPass  string
-	foreign  foreignMember // set with ForeignMemberFirst
-	ev       *eventState   // rows and feed, see events.go
+	ready   bool
+	address gpa.Address
+	encPass string
+	passSig string        // detached signature of the passphrase
+	foreign foreignMember // set with ForeignMemberFirst
+	ev      *eventState   // rows and feed, see events.go
+}
+
+// calendarKey is one calendar key: unlocked, and as the bootstrap serves it.
+type calendarKey struct {
+	key     *crypto.Key
+	armored string // locked
+	primary bool   // Flags 3 (active and primary), else 1 (active)
 }
 
 // foreignMember is another member of a shared calendar.
-type foreignMember struct{ id, encPass string }
+type foreignMember struct{ id, encPass, passSig string }
 
-// AddCalendar adds a calendar for username and returns its ID. The calendar
-// key (x25519) is locked with a random base64 passphrase; that passphrase is
-// encrypted, on the user's first calendar request, to the public key of the
-// first address (the second with ToSecondAddress, an unrelated key with
-// BrokenPassphrase).
-func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
+// primaryKey is the key new key packets must go to. Caller holds mu.
+func (c *calendarRec) primaryKey() *crypto.Key {
+	for _, k := range c.keys {
+		if k.primary {
+			return k.key
+		}
+	}
+	panic("protontest: a calendar without a primary key")
+}
+
+// primaryRing is the primary key alone in a keyring. Caller holds mu.
+func (c *calendarRec) primaryRing() (*crypto.KeyRing, error) {
+	return crypto.NewKeyRing(c.primaryKey())
+}
+
+// permissions is our member's bitmask.
+func (c *calendarRec) permissions() int {
+	if c.def.Permissions == 0 {
+		return 127
+	}
+	return c.def.Permissions
+}
+
+// writable says whether our member may write events: a normal calendar and
+// the Write bit (research H).
+func (c *calendarRec) writable() bool { return c.def.Type == 0 && c.permissions()&8 != 0 }
+
+// newCalendarKey generates a calendar key (x25519) locked with pass.
+func (f *Fake) newCalendarKey(name string, pass []byte) calendarKey {
 	f.t.Helper()
-	id = "cal" + hex.EncodeToString(random(f.t, 8)) + "=="
-	pass := base64.StdEncoding.EncodeToString(random(f.t, 32))
-	key, err := crypto.GenerateKey("Calendar key", "", "x25519", 0)
+	key, err := crypto.GenerateKey(name, "", "x25519", 0)
 	if err != nil {
 		f.t.Fatalf("protontest: calendar key: %v", err)
 	}
-	locked, err := key.Lock([]byte(pass))
+	return calendarKey{key: key, armored: f.lockedArmor(key, pass)}
+}
+
+// lockedArmor is key locked with pass and armored, as the bootstrap serves it.
+func (f *Fake) lockedArmor(key *crypto.Key, pass []byte) string {
+	f.t.Helper()
+	locked, err := key.Lock(pass)
 	if err != nil {
 		f.t.Fatalf("protontest: lock calendar key: %v", err)
 	}
@@ -97,26 +139,30 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	ring, err := crypto.NewKeyRing(key)
-	if err != nil {
-		f.t.Fatal(err)
+	return armored
+}
+
+// AddCalendar adds a calendar for username and returns its ID. It has two
+// calendar keys (x25519), a retired one and the primary one, locked with a
+// random base64 passphrase; that passphrase is encrypted, on the user's
+// first calendar request, to the public key of the first address (the
+// second with ToSecondAddress, an unrelated key with BrokenPassphrase) and
+// signed by the address key.
+func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
+	f.t.Helper()
+	id = "cal" + hex.EncodeToString(random(f.t, 8)) + "=="
+	pass := base64.StdEncoding.EncodeToString(random(f.t, 32))
+	retired := f.newCalendarKey("Retired calendar key", []byte(pass))
+	primary := f.newCalendarKey("Calendar key", []byte(pass))
+	primary.primary = true
+	rec := &calendarRec{
+		id: id, owner: username, def: c, passphrase: pass, memberID: "mem" + hex.EncodeToString(random(f.t, 6)) + "==",
+		keys: []calendarKey{retired, primary}, retired: retired.key,
 	}
-	rec := &calendarRec{id: id, owner: username, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
 	if c.ExtraLockedKey {
-		other, err := crypto.GenerateKey("Old calendar key", "", "x25519", 0)
-		if err != nil {
-			f.t.Fatal(err)
-		}
-		lockedOther, err := other.Lock(random(f.t, 16))
-		if err != nil {
-			f.t.Fatal(err)
-		}
-		a, err := lockedOther.Armor()
-		if err != nil {
-			f.t.Fatal(err)
-		}
-		rec.armored = []string{a, armored}
-		rec.extra = other
+		extra := f.newCalendarKey("Old calendar key", random(f.t, 16))
+		rec.keys = append([]calendarKey{extra}, rec.keys...)
+		rec.extra = extra.key
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
@@ -124,6 +170,19 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 	u.list = append(u.list, rec)
 	f.cal.byID[id] = rec
 	return id
+}
+
+// MemberID returns our member's ID in the calendar, as the bootstrap lists
+// it and a sync body names it.
+func (f *Fake) MemberID(calID string) string {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[calID]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", calID)
+	}
+	return rec.memberID
 }
 
 // SetDefaultCalendar makes id the default calendar of username.
@@ -134,29 +193,22 @@ func (f *Fake) SetDefaultCalendar(username, id string) {
 }
 
 // RotateCalendarKey adds a new calendar key, locked with the calendar's
-// passphrase and listed last, as a key rotation does; the rows keep their
-// key packets to the former key, which stays listed.
+// passphrase, listed last and primary, as a key rotation does; the rows
+// keep their key packets to the former key, which stays listed.
 func (f *Fake) RotateCalendarKey(id string) {
 	f.t.Helper()
-	key, err := crypto.GenerateKey("Calendar key", "", "x25519", 0)
-	if err != nil {
-		f.t.Fatalf("protontest: calendar key: %v", err)
-	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
 	rec := f.cal.byID[id]
 	if rec == nil {
 		f.t.Fatalf("protontest: unknown calendar %q", id)
 	}
-	locked, err := key.Lock([]byte(rec.passphrase))
-	if err != nil {
-		f.t.Fatal(err)
+	key := f.newCalendarKey("Calendar key", []byte(rec.passphrase))
+	key.primary = true
+	for i := range rec.keys {
+		rec.keys[i].primary = false
 	}
-	armored, err := locked.Armor()
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	rec.armored = append(rec.armored, armored)
+	rec.keys = append(rec.keys, key)
 }
 
 // ReactivateCalendarKey locks the calendar's extra key (ExtraLockedKey) with
@@ -170,15 +222,7 @@ func (f *Fake) ReactivateCalendarKey(id string) {
 	if rec == nil || rec.extra == nil {
 		f.t.Fatalf("protontest: calendar %q has no extra key", id)
 	}
-	locked, err := rec.extra.Lock([]byte(rec.passphrase))
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	armored, err := locked.Armor()
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	rec.armored[0] = armored
+	rec.keys[0].armored = f.lockedArmor(rec.extra, []byte(rec.passphrase))
 }
 
 // RemoveCalendar takes the calendar out of username's list, as if deleted
@@ -209,17 +253,11 @@ func (f *Fake) SetDefaultNotifications(id string, partDay, fullDay []Notificatio
 	rec.def.PartDayNotifications, rec.def.FullDayNotifications = partDay, fullDay
 }
 
-// EncryptToCalendar encrypts plaintext to the calendar's key and returns the
-// armored message.
+// EncryptToCalendar encrypts plaintext to the calendar's primary key and
+// returns the armored message.
 func (f *Fake) EncryptToCalendar(id string, plaintext []byte) string {
 	f.t.Helper()
-	f.cal.mu.Lock()
-	rec := f.cal.byID[id]
-	f.cal.mu.Unlock()
-	if rec == nil {
-		f.t.Fatalf("protontest: unknown calendar %q", id)
-	}
-	msg, err := rec.ring.Encrypt(crypto.NewPlainMessage(plaintext), nil)
+	msg, err := f.CalendarKeyRing(id).Encrypt(crypto.NewPlainMessage(plaintext), nil)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -258,11 +296,8 @@ func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
 	defer f.cal.mu.Unlock()
 	u := f.cal.user(name)
 	if segs, ok := eventSegments(r); ok {
-		// Rows and the feed need no address keys, so a Session works here.
-		if r.Method != http.MethodGet {
-			reply(w, http.StatusBadRequest, 2000, "fake: route not implemented")
-			return
-		}
+		// Rows, writes and the feed need no address keys, so a Session works
+		// here.
 		f.serveEvents(w, r, u, segs)
 		return
 	}
@@ -353,7 +388,6 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 			return false
 		}
 		rec.address = out.Addresses[idx]
-		rec.memberID = "mem" + hex.EncodeToString(random(f.t, 6)) + "=="
 		pub, err := recipientRing(rec)
 		if err != nil {
 			f.t.Errorf("protontest: recipient keys: %v", err)
@@ -365,6 +399,10 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 			return false
 		}
 		if rec.encPass, err = msg.GetArmored(); err != nil {
+			return false
+		}
+		if rec.passSig, err = signPassphrase([]byte(rec.passphrase), f.o.BadPassphraseSignature); err != nil {
+			f.t.Errorf("protontest: sign passphrase: %v", err)
 			return false
 		}
 		if rec.def.ForeignMemberFirst {
@@ -380,10 +418,32 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 			if rec.foreign.encPass, err = m.GetArmored(); err != nil {
 				return false
 			}
+			// The inviter's key signed it: not one of ours.
+			if rec.foreign.passSig, err = signPassphrase([]byte("not-the-passphrase"), true); err != nil {
+				return false
+			}
 		}
 		rec.ready = true
 	}
 	return true
+}
+
+// signPassphrase is the detached signature of a member passphrase (its
+// plaintext, binary mode) by the address key (research G), or by an
+// unrelated key when foreign.
+func signPassphrase(pass []byte, foreign bool) (string, error) {
+	kr, err := signer()
+	if foreign {
+		kr, err = stranger()
+	}
+	if err != nil {
+		return "", err
+	}
+	sig, err := kr.SignDetached(crypto.NewPlainMessage(pass))
+	if err != nil {
+		return "", err
+	}
+	return sig.GetArmored()
 }
 
 // recipientRing is the public keyring the passphrase is encrypted to.
@@ -423,7 +483,7 @@ func recipientRing(rec *calendarRec) (*crypto.KeyRing, error) {
 func (c *calendarRec) member() map[string]any {
 	m := map[string]any{
 		"ID": c.memberID, "CalendarID": c.id, "AddressID": c.address.ID, "Email": c.address.Email,
-		"Display": 1, "Permissions": 127, "Flags": 1,
+		"Display": 1, "Permissions": c.permissions(), "Flags": 1,
 		"Name": c.def.Name, "Description": c.def.Description, "Color": c.def.Color,
 	}
 	if c.def.LegacyTopLevel {
@@ -443,11 +503,11 @@ func (c *calendarRec) members() []any {
 }
 
 func (c *calendarRec) memberPassphrases() []any {
-	ours := map[string]any{"MemberID": c.memberID, "Passphrase": c.encPass, "Signature": ""}
+	ours := map[string]any{"MemberID": c.memberID, "Passphrase": c.encPass, "Signature": c.passSig}
 	if !c.def.ForeignMemberFirst {
 		return []any{ours}
 	}
-	return []any{map[string]any{"MemberID": c.foreign.id, "Passphrase": c.foreign.encPass, "Signature": ""}, ours}
+	return []any{map[string]any{"MemberID": c.foreign.id, "Passphrase": c.foreign.encPass, "Signature": c.foreign.passSig}, ours}
 }
 
 func (c *calendarRec) listEntry() map[string]any {
@@ -459,16 +519,19 @@ func (c *calendarRec) listEntry() map[string]any {
 }
 
 func (c *calendarRec) bootstrap() map[string]any {
-	keys := make([]any, 0, len(c.armored))
-	for i, a := range c.armored {
-		keys = append(keys, map[string]any{"ID": "key" + strconv.Itoa(i), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": a, "Flags": 3})
+	keys := make([]any, 0, len(c.keys))
+	for i, k := range c.keys {
+		flags := 1 // active
+		if k.primary {
+			flags = 3 // active and primary
+		}
+		keys = append(keys, map[string]any{"ID": "key" + strconv.Itoa(i), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": k.armored, "Flags": flags})
 	}
 	return map[string]any{
 		"Code": 1000,
 		"Keys": keys,
 		"Passphrase": map[string]any{
 			"ID": "pass1", "Flags": 1,
-			// Signature is left empty: the client does not verify it in M1.
 			"MemberPassphrases": c.memberPassphrases(),
 		},
 		"Members": c.members(),

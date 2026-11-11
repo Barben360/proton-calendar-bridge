@@ -450,3 +450,67 @@ func TestFakePartsStayUntilAnEdit(t *testing.T) {
 		t.Error("an edit must re-encrypt the parts")
 	}
 }
+
+// TestFakeRoutesLikeProtonsWriters: research B.1, a seeded card follows the
+// write table. EXDATE goes to both signed parts and to Exdates, DURATION is
+// served as DTEND, and a VALARM goes to no part unless PersonalAlarms.
+func TestFakeRoutesLikeProtonsWriters(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "A"})
+	alarm := "\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM"
+	series := f.AddEvent(cal, protontest.Event{UID: "r@x", Start: 1762938000, End: 1762943400,
+		Card: "DTSTART:20261112T090000Z\r\nDURATION:PT1H30M\r\nRRULE:FREQ=DAILY\r\nEXDATE:20261113T090000Z,20261114T090000Z\r\nSUMMARY:x" + alarm})
+	p, raw := getParts(t, f, tk, cal, series)
+	signed, calSigned := p.SharedEvents[0].Data, p.CalendarEvents[0].Data
+	for _, l := range []string{"\r\nDTEND:20261112T103000Z\r\n", "\r\nEXDATE:20261113T090000Z,20261114T090000Z\r\n"} {
+		if !strings.Contains(signed, l) {
+			t.Errorf("shared signed part lacks %q:\n%q", l, signed)
+		}
+	}
+	if strings.Contains(signed, "DURATION") || !strings.Contains(calSigned, "\r\nEXDATE:20261113T090000Z,20261114T090000Z\r\n") {
+		t.Errorf("want DURATION gone and EXDATE in the calendar signed part too:\n%q\n%q", signed, calSigned)
+	}
+	var cols struct{ Exdates []int64 }
+	if err := json.Unmarshal(raw, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if len(cols.Exdates) != 2 || cols.Exdates[0] != 1794560400 || cols.Exdates[1] != 1794646800 {
+		t.Errorf("Exdates = %v, want [1794560400 1794646800] (13 and 14 Nov 2026, 09:00 UTC)", cols.Exdates)
+	}
+	kp, err := base64.StdEncoding.DecodeString(*p.SharedKeyPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := f.CalendarKeyRing(cal).DecryptSessionKey(kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := base64.StdEncoding.DecodeString(p.SharedEvents[1].Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := sk.Decrypt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.PersonalEvents) != 0 || strings.Contains(string(enc.GetBinary()), "VALARM") {
+		t.Errorf("a VALARM must reach no part by default: %d personal parts, shared encrypted %q", len(p.PersonalEvents), enc.GetBinary())
+	}
+
+	for card, want := range map[string]string{
+		"DTSTART;TZID=Europe/Paris:20261112T090000\r\nDURATION:P1D": "\r\nDTEND;TZID=Europe/Paris:20261113T090000\r\n",
+		"DTSTART;VALUE=DATE:20261224\r\nDURATION:P2D":               "\r\nDTEND;VALUE=DATE:20261226\r\n",
+	} {
+		p, _ := getParts(t, f, tk, cal, f.AddEvent(cal, protontest.Event{UID: "d@x", Start: 1, End: 2, Card: card}))
+		if !strings.Contains(p.SharedEvents[0].Data, want) {
+			t.Errorf("%q: shared signed part %q lacks %q", card, p.SharedEvents[0].Data, want)
+		}
+	}
+
+	withAlarms, _ := getParts(t, f, tk, cal, f.AddEvent(cal, protontest.Event{UID: "a@x", Start: 1, End: 2, Card: "SUMMARY:y" + alarm, PersonalAlarms: true}))
+	if len(withAlarms.PersonalEvents) != 1 {
+		t.Errorf("PersonalAlarms: %d personal parts, want 1", len(withAlarms.PersonalEvents))
+	}
+}

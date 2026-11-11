@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,7 +26,8 @@ import (
 // me is the author the cheap tests sign as; own knows it.
 const me = "me@pcb.test"
 
-// fullCard holds a property of every part, each line written once.
+// fullCard holds a property of every part, each line written once; its
+// VALARM reaches the personal part with PersonalAlarms only.
 const fullCard = "UID:full@pcb.test\r\n" +
 	"DTSTAMP:20261111T090000Z\r\n" +
 	"DTSTART:20261112T090000Z\r\n" +
@@ -142,7 +144,7 @@ func setField(m map[string]any, group string, i int, name string, v any) {
 func TestOpenDecryptsEveryPart(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	raw := r.add(t, protontest.Event{UID: "full@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	raw := r.add(t, protontest.Event{UID: "full@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true}).Raw
 	// Proton's array order is not promised: the encrypted part listed first
 	// still comes after the signed one.
 	ev := r.open(t, editRaw(t, raw, func(m map[string]any) {
@@ -155,7 +157,7 @@ func TestOpenDecryptsEveryPart(t *testing.T) {
 		kind  cards.Kind
 		lines []string
 	}{
-		{cards.SharedSigned, []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "RRULE:FREQ=WEEKLY", "SEQUENCE:2", "ORGANIZER;CN=Me:mailto:me@pcb.test"}},
+		{cards.SharedSigned, []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "RRULE:FREQ=WEEKLY", "SEQUENCE:2", "ORGANIZER;CN=Me:mailto:me@pcb.test", "EXDATE:20261119T090000Z"}},
 		{cards.SharedEncrypted, []string{"SUMMARY:Lunch", `DESCRIPTION:Bring the\nnotes`, "LOCATION:Canteen", "X-MOZ-GENERATION:3"}},
 		{cards.CalendarSigned, []string{"STATUS:CONFIRMED", "TRANSP:OPAQUE", "EXDATE:20261119T090000Z"}},
 		{cards.CalendarEncrypted, []string{"COMMENT:private note"}},
@@ -181,13 +183,14 @@ func TestOpenDecryptsEveryPart(t *testing.T) {
 				t.Errorf("%s lacks %q in\n%q", p.Kind, l, p.Text)
 			}
 		}
-		// Every line lives in its own part only.
+		// Every line lives in its own part only; EXDATE, in both signed
+		// parts (research B.1), is listed in each.
 		for j, o := range want {
 			if j == i {
 				continue
 			}
 			for _, l := range o.lines {
-				if has(p.Text, l) {
+				if has(p.Text, l) && !slices.Contains(w.lines, l) {
 					t.Errorf("%s holds %q, a line of the %s", p.Kind, l, o.kind)
 				}
 			}
@@ -215,11 +218,11 @@ func TestOpenCardlessEvent(t *testing.T) {
 func TestOpenVerifiesOwnSignatures(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	raw := r.add(t, protontest.Event{UID: "v@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	raw := r.add(t, protontest.Event{UID: "v@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true}).Raw
 	// Signed with the address key, but named as someone not ours.
-	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, Author: "stranger@pcb.test"}).Raw
+	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, Author: "stranger@pcb.test"}).Raw
 	// Named as ours, signed with another key.
-	forged := r.add(t, protontest.Event{UID: "f@pcb.test", Start: 1, End: 2, Card: fullCard, ForeignKey: true}).Raw
+	forged := r.add(t, protontest.Event{UID: "f@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, ForeignKey: true}).Raw
 	other, err := crypto.GenerateKey("Other", "other@pcb.test", "x25519", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +310,7 @@ func TestOpenVerifiesOwnSignatures(t *testing.T) {
 func TestOpenAddressKeyPacket(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	raw := r.add(t, protontest.Event{UID: "inv@pcb.test", Start: 1, End: 2, Card: fullCard, AddressKeyPacket: true}).Raw
+	raw := r.add(t, protontest.Event{UID: "inv@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, AddressKeyPacket: true}).Raw
 	var keysOf struct{ SharedKeyPacket, AddressKeyPacket *string }
 	if err := json.Unmarshal(raw, &keysOf); err != nil {
 		t.Fatal(err)
@@ -334,7 +337,7 @@ func TestOpenAddressKeyPacket(t *testing.T) {
 
 	// Both packets served: an address packet that does not open falls back
 	// to the shared packet and the calendar key.
-	plain := r.add(t, protontest.Event{UID: "p@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	plain := r.add(t, protontest.Event{UID: "p@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true}).Raw
 	both := editRaw(t, plain, func(m map[string]any) { m["AddressKeyPacket"] = "bm90IGEga2V5IHBhY2tldA==" })
 	if _, err := cards.Open(both, r.calKR, map[string]*crypto.KeyRing{"addr1": r.addr}, r.own); err != nil {
 		t.Errorf("an address packet that does not open must fall back to the shared packet: %v", err)
@@ -355,7 +358,7 @@ func TestOpenBrokenPartNamesThePart(t *testing.T) {
 		{protontest.AttendeesPart, cards.Attendees, "AttendeesEvents", 0},
 	}
 	for _, c := range cases {
-		row := r.add(t, protontest.Event{UID: "b@pcb.test", Start: 1, End: 2, Card: fullCard, BrokenPart: c.broken})
+		row := r.add(t, protontest.Event{UID: "b@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, BrokenPart: c.broken})
 		t.Run(c.kind.String(), func(t *testing.T) {
 			_, err := cards.Open(row.Raw, r.calKR, nil, r.own)
 			if !errors.Is(err, cards.ErrUndecryptable) {
@@ -376,7 +379,7 @@ func TestOpenBrokenPartNamesThePart(t *testing.T) {
 		})
 	}
 
-	raw := r.add(t, protontest.Event{UID: "k@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	raw := r.add(t, protontest.Event{UID: "k@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true}).Raw
 	for name, open := range map[string]func() error{
 		"no calendar key": func() error { _, err := cards.Open(raw, nil, nil, r.own); return err },
 		"another calendar key": func() error {
@@ -399,7 +402,7 @@ func TestOpenBrokenPartNamesThePart(t *testing.T) {
 func TestOpenSkipsUndecryptablePersonalPart(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	ev, err := cards.Open(r.add(t, protontest.Event{UID: "p@pcb.test", Start: 1, End: 2, Card: fullCard, BrokenPart: protontest.PersonalPart}).Raw, r.calKR, nil, r.own)
+	ev, err := cards.Open(r.add(t, protontest.Event{UID: "p@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, BrokenPart: protontest.PersonalPart}).Raw, r.calKR, nil, r.own)
 	if err != nil {
 		t.Fatalf("Open: %v, want the event without its personal part", err)
 	}
@@ -447,7 +450,7 @@ func TestOpenRowFields(t *testing.T) {
 	r := newRig(t)
 	rid := int64(1762851600)
 	ev := r.open(t, r.add(t, protontest.Event{
-		UID: "f@pcb.test", Start: 1, End: 2, Card: fullCard, RecurrenceID: &rid, Color: "#EC3E7C",
+		UID: "f@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, RecurrenceID: &rid, Color: "#EC3E7C",
 		Notifications: []protontest.Notification{{Type: 1, Trigger: "-PT15M"}},
 	}).Raw)
 	if ev.Color != "#EC3E7C" || ev.RecurrenceID == nil || *ev.RecurrenceID != rid {
@@ -535,8 +538,8 @@ func TestOpenWithLoggedInKeys(t *testing.T) {
 	}
 
 	for i, e := range []protontest.Event{
-		{UID: "l0@pcb.test", Start: 1, End: 2, Card: fullCard},
-		{UID: "l1@pcb.test", Start: 1, End: 2, Card: fullCard, AddressKeyPacket: true},
+		{UID: "l0@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true},
+		{UID: "l1@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, AddressKeyPacket: true},
 	} {
 		row, err := events.Get(t.Context(), c, calID, f.AddEvent(calID, e))
 		if err != nil {
@@ -562,7 +565,7 @@ func BenchmarkOpen(b *testing.B) {
 	const n = 1000
 	for i := range n {
 		uid := "bench" + strconv.Itoa(i) + "@pcb.test"
-		r.f.AddEvent(r.cal, protontest.Event{UID: uid, Start: 1, End: 2, Author: me,
+		r.f.AddEvent(r.cal, protontest.Event{UID: uid, Start: 1, End: 2, Author: me, PersonalAlarms: true,
 			Card: strings.Replace(fullCard, "UID:full@pcb.test", "UID:"+uid, 1)})
 	}
 	rows, err := events.ListAll(b.Context(), r.c, r.cal)
@@ -583,9 +586,9 @@ func BenchmarkOpen(b *testing.B) {
 func TestOpenTellsOwnAuthoredParts(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	raw := r.add(t, protontest.Event{UID: "o@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
-	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, Author: "stranger@pcb.test"}).Raw
-	unsigned := r.add(t, protontest.Event{UID: "u@pcb.test", Start: 1, End: 2, Card: fullCard, Unsigned: protontest.SharedSignedPart}).Raw
+	raw := r.add(t, protontest.Event{UID: "o@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true}).Raw
+	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, Author: "stranger@pcb.test"}).Raw
+	unsigned := r.add(t, protontest.Event{UID: "u@pcb.test", Start: 1, End: 2, Card: fullCard, PersonalAlarms: true, Unsigned: protontest.SharedSignedPart}).Raw
 	addrs := map[string]*crypto.KeyRing{"addr1": r.addr}
 	for _, c := range []struct {
 		name string
