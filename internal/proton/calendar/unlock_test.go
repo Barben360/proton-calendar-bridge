@@ -11,7 +11,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 )
 
-func decrypts(t *testing.T, a *calendar.Access, armored, want string) {
+func decrypts(t *testing.T, a *calendar.Access, armored string) {
 	t.Helper()
 	msg, err := crypto.NewPGPMessageFromArmored(armored)
 	if err != nil {
@@ -21,8 +21,8 @@ func decrypts(t *testing.T, a *calendar.Access, armored, want string) {
 	if err != nil {
 		t.Fatalf("decrypt with the calendar keyring: %v", err)
 	}
-	if got := string(plain.GetBinary()); got != want {
-		t.Fatalf("decrypted %q, want %q", got, want)
+	if got := string(plain.GetBinary()); got != "probe" {
+		t.Fatalf("decrypted %q, want probe", got)
 	}
 }
 
@@ -45,7 +45,7 @@ func TestUnlockDecryptsWithCalendarKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")), "probe")
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 	if a.CalendarID != id || a.MemberID != cal.MemberID || a.AddressID != cal.AddressID {
 		t.Errorf("identity = %+v", a)
 	}
@@ -110,7 +110,7 @@ func TestUnlockPassphraseToSecondAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")), "probe")
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 	if a.AddressID != u.Addresses[1].ID {
 		t.Errorf("AddressID = %q, want the second address %q", a.AddressID, u.Addresses[1].ID)
 	}
@@ -128,7 +128,7 @@ func TestUnlockSkipsUndecryptableKey(t *testing.T) {
 	if n := a.KR.CountEntities(); n != 1 {
 		t.Fatalf("keyring holds %d keys, want 1", n)
 	}
-	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")), "probe")
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 }
 
 func TestUnlockBrokenPassphraseErrors(t *testing.T) {
@@ -189,7 +189,7 @@ func TestUnlockChoosesOurMemberPassphrase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")), "probe")
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 }
 
 func TestUnlockUnknownMemberNeverFallsBack(t *testing.T) {
