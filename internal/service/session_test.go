@@ -412,3 +412,126 @@ func TestReloginAdoptsSessionOfAnotherProcess(t *testing.T) {
 		t.Error("the sealed session is not alive")
 	}
 }
+
+// The loop's limiter and refreshed tokens live in the client: every call on
+// the same stored session must get the same one.
+func TestSessionClientIsReused(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.login(t, e.req())
+	c1, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.f.ExpireAccessTokens()
+	for range 2 {
+		if got := e.calendars(t); len(got) != 1 {
+			t.Fatalf("calendars = %+v", got)
+		}
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Errorf("%d refreshes, want 1", n)
+	}
+	c2, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 != c2 {
+		t.Fatal("a second call built a new client")
+	}
+	if got, want := c2.Tokens(), tokensOf(e.account(t)); got != want {
+		t.Errorf("client tokens differ from the sealed ones")
+	}
+}
+
+// Another process rotated and sealed the tokens: the reused client adopts
+// them rather than spending its own stale refresh token.
+func TestSessionClientAdoptsTokensSealedMeanwhile(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.login(t, e.req())
+	c1, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := c1.Tokens()
+	e.f.ExpireAccessTokens()
+	if _, err := e.open(t).Calendars(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sealed := tokensOf(e.account(t))
+	if sealed == stale {
+		t.Fatal("the other process did not rotate the tokens")
+	}
+	c2, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 != c1 {
+		t.Error("the client was replaced")
+	}
+	if c2.Tokens() != sealed {
+		t.Error("the reused client kept its stale tokens")
+	}
+	if got := e.calendars(t); len(got) != 1 {
+		t.Fatalf("calendars = %+v", got)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Errorf("%d refreshes, want 1 (the other process's)", n)
+	}
+}
+
+// A new login is a new session (new UID): the client of the old one is gone.
+func TestReloginDropsClient(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.login(t, e.req())
+	c1, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldUID := c1.Tokens().UID
+	e.clk.advance(time.Hour) // past the login guard
+	e.login(t, e.req())
+	newUID := e.account(t).UID
+	if newUID == oldUID {
+		t.Fatal("the second login kept the session")
+	}
+	c2, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 == c1 || c2.Tokens().UID != newUID {
+		t.Errorf("client uid = %q, want a new client on %q", c2.Tokens().UID, newUID)
+	}
+	if got := e.calendars(t); len(got) != 1 {
+		t.Fatalf("calendars = %+v", got)
+	}
+}
+
+// Logout drops the client too: a login of the same Local afterwards must not
+// find it (the sealed UID differs anyway; this guards the explicit drop).
+func TestLogoutDropsClient(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	c1, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(time.Hour)
+	e.login(t, e.req())
+	c2, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 == c2 {
+		t.Error("the client survived a logout")
+	}
+}

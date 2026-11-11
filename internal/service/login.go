@@ -11,6 +11,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -28,6 +29,21 @@ type pendingLogin struct {
 	tries      int         // 2FA codes Proton rejected so far
 	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
 	last       store.State // state.json when the login began
+	live       *api.Client // the client of the key calls; its tokens outlive p.Tokens after a refresh
+}
+
+// abort revokes the login's session and closes it. After a refresh during
+// the key calls the session lives on the client's current tokens, which
+// go-proton-api's client does not know: those are the ones revoked.
+func (l *Local) abort(ctx context.Context, pl *pendingLogin) {
+	if pl.live == nil {
+		pl.p.Abort(ctx)
+		return
+	}
+	pl.p.Close()
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	_ = auth.Logout(rctx, pl.live)
 }
 
 // maxTOTPTries is how many 2FA codes a login may submit in all (R7m).
@@ -130,7 +146,7 @@ func (l *Local) dropPending(ctx context.Context) {
 	if l.pending == nil {
 		return
 	}
-	l.pending.p.Abort(ctx)
+	l.abort(ctx, l.pending)
 	clear(l.pending.password)
 	l.pending = nil
 	l.waiting.Store(false)
@@ -190,13 +206,13 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 			return LoginResult{}, mustAct("the 2FA code was rejected by Proton",
 				fmt.Sprintf("enter the current code again (%d tries left)", maxTOTPTries-pl.tries))
 		}
-		pl.p.Abort(ctx)
+		l.abort(ctx, pl)
 		clear(pl.password)
 		return LoginResult{}, mustAct("the 2FA code was rejected "+strconv.Itoa(maxTOTPTries)+" times and the login was cancelled",
 			"run pcb login again")
 	}
 	if !pl.sealed {
-		pl.p.Abort(ctx)
+		l.abort(ctx, pl)
 	}
 	clear(pl.password)
 	return LoginResult{}, l.fail(err)
@@ -216,6 +232,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		}
 	}
 	c := l.client(p.Tokens)
+	pl.live = c
 	scope := auth.Scope{M: l.mgr, C: c, Username: pl.username, Password: pl.password}
 	salts, err := keys.FetchSalts(ctx, c, scope)
 	if err != nil {
@@ -251,6 +268,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		return LoginResult{}, storeError(err, l.keyFile())
 	}
 	pl.sealed = true
+	l.dropClient()
 	// LastLogin is a person's last login; an unattended relogin only moves
 	// LastRelogin.
 	st := store.State{

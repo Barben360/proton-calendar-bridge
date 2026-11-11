@@ -92,6 +92,15 @@ func (c *Client) Tokens() Tokens {
 	return c.tk
 }
 
+// SetTokens replaces the tokens: the caller learned of newer ones (another
+// process rotated and stored them). Requests already in flight finish with
+// the tokens they started with.
+func (c *Client) SetTokens(t Tokens) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tk = t
+}
+
 // Get sends a GET, decoding the JSON answer into out (may be nil).
 func (c *Client) Get(ctx context.Context, path string, query url.Values, out any) error {
 	return c.Do(ctx, http.MethodGet, path, query, nil, out)

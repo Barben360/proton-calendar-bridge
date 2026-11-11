@@ -71,7 +71,27 @@ func (l *Local) session(ctx context.Context) (*api.Client, store.Account, store.
 	if err != nil {
 		return nil, store.Account{}, store.State{}, err
 	}
-	return l.newClient(tokensOf(acc), l.refreshStored(acc.ID)), acc, st, nil
+	return l.storedClient(acc), acc, st, nil
+}
+
+// storedClient returns the one client of acc's session. A client built for
+// another account or UID is replaced. A reused client adopts the sealed
+// tokens when they differ (another process rotated them); the sealed tokens
+// are never older than the client's, since a refresh seals before it
+// returns. The lock is held for memory work only.
+func (l *Local) storedClient(acc store.Account) *api.Client {
+	sealed := tokensOf(acc)
+	l.cmu.Lock()
+	defer l.cmu.Unlock()
+	if cc := l.cached; cc != nil && cc.accountID == acc.ID && cc.uid == acc.UID {
+		if cc.c.Tokens() != sealed {
+			cc.c.SetTokens(sealed)
+		}
+		return cc.c
+	}
+	c := l.newClient(sealed, l.refreshStored(acc.ID))
+	l.cached = &cachedClient{accountID: acc.ID, uid: acc.UID, c: c}
+	return c
 }
 
 func tokensOf(a store.Account) api.Tokens {
@@ -229,7 +249,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 	pl := &pendingLogin{p: p, username: acc.Username, password: password, unattended: true, relogin: true, totpURI: acc.Relogin.TOTPURI, last: st}
 	if _, err := l.complete(ctx, pl, totp, now); err != nil {
 		if !pl.sealed {
-			p.Abort(ctx)
+			l.abort(ctx, pl)
 		}
 		return l.humanNeeded(st, l.fail(err))
 	}

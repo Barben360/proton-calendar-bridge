@@ -50,6 +50,23 @@ type Local struct {
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
 	closed  atomic.Bool
+
+	cmu    sync.Mutex // guards cached; never held across a network call
+	cached *cachedClient
+}
+
+// cachedClient is the one API client of a stored session, so its limiter and
+// refreshed tokens last across calls.
+type cachedClient struct {
+	accountID, uid string
+	c              *api.Client
+}
+
+// dropClient forgets the cached session client (login, logout, Close).
+func (l *Local) dropClient() {
+	l.cmu.Lock()
+	l.cached = nil
+	l.cmu.Unlock()
 }
 
 var _ API = (*Local)(nil)
@@ -128,6 +145,7 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, errClosed()
 	}
 	l.dropPending(ctx)
+	l.dropClient()
 	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
 	defer cancel()
 	var res LogoutResult
@@ -218,6 +236,7 @@ func (l *Local) Close() error {
 		return nil
 	}
 	l.dropPending(context.Background())
+	l.dropClient()
 	l.mgr.Close()
 	return nil
 }
