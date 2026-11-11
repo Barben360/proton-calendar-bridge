@@ -534,7 +534,7 @@ func TestFallbackResyncIsRateLimited(t *testing.T) {
 		t.Fatalf("Pass: %v, want the skip reported on the calendar", err)
 	}
 	r := report(t, rep, a)
-	wantErr := "Proton asked for a full resync again; retrying after " + t0.Add(5*time.Minute).UTC().Format(time.RFC3339)
+	wantErr := "Proton asked to refresh the feed; retrying with a full listing after " + t0.Add(5*time.Minute).UTC().Format(time.RFC3339)
 	var deferred *syncer.ResyncDeferredError
 	if !errors.As(r.Err, &deferred) || !deferred.Until.Equal(t0.Add(5*time.Minute)) {
 		t.Errorf("4 min after a listing: Err %v, want a ResyncDeferredError until %v", r.Err, t0.Add(5*time.Minute))
@@ -662,5 +662,74 @@ func TestCacheWriteFailureStopsThePass(t *testing.T) {
 	}
 	if n := listCalls(f, b); n != 0 {
 		t.Errorf("the pass went on to the second calendar (%d listings) after the cache refused a write", n)
+	}
+}
+
+func feedPageCalls(f *protontest.Fake, cal string) int {
+	return feedCalls(f, cal) - f.Calls("GET", "/calendar/v1/"+cal+"/modelevents/latest")
+}
+
+// A deferred fallback resync names its cause, and while it waits for the
+// FallbackGap the calendar's feed is not read again (it would only fail
+// again, up to 50 pages a pass); once the gap is over the calendar is listed
+// straight away.
+func TestDeferredResyncNamesItsCauseAndSkipsTheFeed(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ids := addEvents(f, a, 1)
+	pass(t, c, db, at(t0))
+	listedAt := t0
+	for _, step := range []struct {
+		cause string
+		make  func()
+	}{
+		{"Proton asked to refresh the feed", func() { f.ForceRefresh(a) }},
+		{"Proton refused the feed cursor", func() { f.ExpireFeed(a) }},
+		{"Proton refused to read a changed row", func() {
+			f.UpdateEvent(a, ids[0], protontest.Event{UID: "u0", Start: 3, End: 4})
+			f.FailNext("GET", "/calendar/v1/"+a+"/events/"+ids[0], http.StatusForbidden, 2011, 0)
+		}},
+		{"the feed holds more than 50 pages", func() {
+			f.SetFeedPageSize(1)
+			addEvents(f, a, events.MaxFeedPages+1)
+		}},
+	} {
+		step.make()
+		until := listedAt.Add(syncer.FallbackGap)
+		want := step.cause + "; retrying with a full listing after " + until.UTC().Format(time.RFC3339)
+		r := report(t, pass(t, c, db, at(listedAt.Add(time.Minute))), a)
+		var de *syncer.ResyncDeferredError
+		if !errors.As(r.Err, &de) || r.Err.Error() != want {
+			t.Fatalf("%s: Err %v, want %q", step.cause, r.Err, want)
+		}
+		if got := cached(t, db, a).Error; got != want {
+			t.Errorf("%s: cached Error %q, want %q", step.cause, got, want)
+		}
+		// Within the gap: nothing is read for this calendar.
+		feed0, get0, list0 := feedPageCalls(f, a), getCalls(f, a), listCalls(f, a)
+		r = report(t, pass(t, c, db, at(listedAt.Add(2*time.Minute))), a)
+		if !errors.As(r.Err, &de) || r.Err.Error() != want {
+			t.Errorf("%s, still within the gap: Err %v, want %q", step.cause, r.Err, want)
+		}
+		if feed, gets, lists := feedPageCalls(f, a)-feed0, getCalls(f, a)-get0, listCalls(f, a)-list0; feed+gets+lists != 0 {
+			t.Errorf("%s, within the gap: %d feed pages, %d row reads, %d listings; want none", step.cause, feed, gets, lists)
+		}
+		// After it: listed at once, without reading the feed first.
+		listedAt = until
+		r = report(t, pass(t, c, db, at(listedAt)), a)
+		if r.Mode != "full" || r.Err != nil || feedPageCalls(f, a) != feed0 || listCalls(f, a)-list0 != 1 {
+			t.Errorf("%s, after the gap: report %+v, %d feed pages, %d listings; want full, no error, 0, 1",
+				step.cause, r, feedPageCalls(f, a)-feed0, listCalls(f, a)-list0)
+		}
+		if cal := cached(t, db, a); cal.Error != "" || !cal.FullAt.Equal(listedAt) {
+			t.Errorf("%s, after the resync: cached %+v, want no Error, FullAt %v", step.cause, cal, listedAt)
+		}
+		matches(t, c, db, a)
+	}
+	// The resync is not pending any more: the next pass reads the feed.
+	f.SetFeedPageSize(0)
+	if r := report(t, pass(t, c, db, at(listedAt.Add(time.Minute))), a); r.Mode != "incremental" || r.Err != nil {
+		t.Errorf("after the last resync: %+v, want incremental", r)
 	}
 }

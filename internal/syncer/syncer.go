@@ -1,8 +1,9 @@
 // Package syncer is C4: it brings the cache up to date with Proton, one pass
 // over every calendar, and repeats passes in a watch loop. A calendar is
 // listed in full when it was never synced, when Proton asks, when its cursor
-// or one of its rows is refused (at most once per FallbackGap), or when its
-// last listing is older than FullEvery; otherwise its
+// or one of its rows is refused, or its feed is too long (at most once per
+// FallbackGap: meanwhile the calendar is skipped and its feed left unread),
+// or when its last listing is older than FullEvery; otherwise its
 // change feed is read and every changed ID re-read. A cursor is only stored
 // in the transaction that stores the rows read up to it, so a failure never
 // loses a change: the next pass reads it again. Nothing is decrypted, keys
@@ -30,14 +31,38 @@ const DefaultFullEvery = 24 * time.Hour
 // whose feed keeps failing is not listed on every pass (good citizen).
 const FallbackGap = 5 * time.Minute
 
+// Why a calendar needs a fallback full listing (stored in the cache while
+// it is deferred).
+const (
+	CauseRefresh = "refresh" // the feed answered Refresh
+	CauseCursor  = "cursor"  // the feed refused the cursor (a 4xx other than 429)
+	CauseRow     = "row"     // a changed row could not be read (ruling R8)
+	CauseTooLong = "long"    // the feed ran past events.MaxFeedPages
+)
+
+var causeText = map[string]string{
+	CauseRefresh: "Proton asked to refresh the feed",
+	CauseCursor:  "Proton refused the feed cursor",
+	CauseRow:     "Proton refused to read a changed row",
+	CauseTooLong: fmt.Sprintf("the feed holds more than %d pages", events.MaxFeedPages),
+}
+
 // ResyncDeferredError is a calendar's error when it needed a fallback full
-// listing less than FallbackGap after its last one: it was skipped this pass
-// with its cursor kept.
-type ResyncDeferredError struct{ Until time.Time }
+// listing less than FallbackGap after its last one: it is skipped, cursor
+// kept and feed unread, until Until, then listed. Cause is one of the
+// Cause constants.
+type ResyncDeferredError struct {
+	Cause string
+	Until time.Time
+}
 
 // Error implements error.
 func (e *ResyncDeferredError) Error() string {
-	return "Proton asked for a full resync again; retrying after " + e.Until.UTC().Format(time.RFC3339)
+	why, ok := causeText[e.Cause]
+	if !ok {
+		why = "the calendar needs a full listing"
+	}
+	return why + "; retrying with a full listing after " + e.Until.UTC().Format(time.RFC3339)
 }
 
 // StoreError is a failure of the cache itself during a pass (reading or
@@ -160,22 +185,34 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID string, prev cache.Calendar, o Options) CalendarReport {
 	now := o.Now()
 	var r CalendarReport
+	next := prev.FullAt.Add(FallbackGap)
 	switch {
 	case prev.Cursor == "":
 		r.Mode = ModeInitial
 	case o.Full || now.Sub(prev.FullAt) > o.FullEvery:
 		r.Mode = ModeFull
+	case prev.Resync != "":
+		// A fallback listing is pending: the feed is not read again.
+		r.Mode = ModeFull
+		if now.Before(next) {
+			r.Err = &ResyncDeferredError{Cause: prev.Resync, Until: next}
+			return r
+		}
 	default:
 		r.Mode = ModeIncremental
-		ch, resync, err := incremental(ctx, c, db, calID, prev.Cursor, now)
-		if !resync {
+		ch, cause, err := incremental(ctx, c, db, calID, prev.Cursor, now)
+		if cause == "" {
 			r.Changes, r.Err = ch, err
 			return r
 		}
 		r.Mode = ModeFull
-		if next := prev.FullAt.Add(FallbackGap); now.Before(next) {
-			// Keep the cursor: the next pass after next reads the feed again.
-			r.Err = &ResyncDeferredError{Until: next}
+		if now.Before(next) {
+			// Keep the cursor; list once the gap is over.
+			if err := db.DeferResync(ctx, calID, cause); err != nil {
+				r.Err = storeErr("deferring the listing of calendar %s: %w", calID, err)
+				return r
+			}
+			r.Err = &ResyncDeferredError{Cause: cause, Until: next}
 			return r
 		}
 	}
@@ -206,20 +243,27 @@ func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now
 	return ch, nil
 }
 
-// incremental applies the feed after cursor. resync is true when the
-// calendar must be listed instead: Proton asked (Refresh, or too many
-// pages), refused the cursor with a 4xx other than 429, or refused to read a
-// row with an error neither session-wide nor gone (ruling R8: listing beats
-// holding the cursor forever). Every listed ID is re-read: a row Proton says
-// is gone is deleted, whatever the feed said. Nothing is stored unless every
-// row was read.
-func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cursor string, now time.Time) (ch cache.Changes, resync bool, err error) {
+// incremental applies the feed after cursor. cause is set (one of the Cause
+// constants) when the calendar must be listed instead: Proton asked
+// (Refresh), the feed is too long, Proton refused the cursor with a 4xx
+// other than 429, or refused to read a row with an error neither
+// session-wide nor gone (ruling R8: listing beats holding the cursor
+// forever). Every listed ID is re-read: a row Proton says is gone is
+// deleted, whatever the feed said. Nothing is stored unless every row was
+// read.
+func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cursor string, now time.Time) (ch cache.Changes, cause string, err error) {
 	d, err := events.Changes(ctx, c, calID, cursor)
 	if err != nil {
-		return cache.Changes{}, !api.SessionWide(ctx, err) && cursorRefused(err), err
+		if !api.SessionWide(ctx, err) && cursorRefused(err) {
+			return cache.Changes{}, CauseCursor, err
+		}
+		return cache.Changes{}, "", err
 	}
-	if d.Refresh {
-		return cache.Changes{}, true, nil
+	switch {
+	case d.TooLong:
+		return cache.Changes{}, CauseTooLong, nil
+	case d.Refresh:
+		return cache.Changes{}, CauseRefresh, nil
 	}
 	var upserts []cache.Row
 	var gone []string
@@ -229,16 +273,19 @@ func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cur
 		case errors.Is(err, events.ErrGone):
 			gone = append(gone, id)
 		case err != nil:
-			return cache.Changes{}, !api.SessionWide(ctx, err), fmt.Errorf("event %s: %w", id, err)
+			if api.SessionWide(ctx, err) {
+				return cache.Changes{}, "", fmt.Errorf("event %s: %w", id, err)
+			}
+			return cache.Changes{}, CauseRow, fmt.Errorf("event %s: %w", id, err)
 		default:
 			upserts = append(upserts, toCache(row))
 		}
 	}
 	ch, err = db.ApplyDelta(ctx, calID, d.Cursor, upserts, gone, now)
 	if err != nil {
-		return cache.Changes{}, false, storeErr("storing calendar %s: %w", calID, err)
+		return cache.Changes{}, "", storeErr("storing calendar %s: %w", calID, err)
 	}
-	return ch, false, nil
+	return ch, "", nil
 }
 
 // cursorRefused reports whether the feed answered a 4xx other than 429 (and

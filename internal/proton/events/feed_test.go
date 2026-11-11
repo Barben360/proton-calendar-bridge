@@ -82,8 +82,8 @@ func TestChangesRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Refresh {
-		t.Errorf("Refresh = false, want true: %+v", d)
+	if !d.Refresh || d.TooLong {
+		t.Errorf("Refresh %v, TooLong %v; want Proton's Refresh, not a long feed: %+v", d.Refresh, d.TooLong, d)
 	}
 }
 
@@ -141,8 +141,8 @@ func TestChangesTooManyPagesMeansRefresh(t *testing.T) {
 	if n := f.Calls("GET", "/calendar/v1/"+cal+"/modelevents/") - before; n != 50 {
 		t.Errorf("%d feed requests, want the cap of 50", n)
 	}
-	if !d.Refresh {
-		t.Error("more than 50 pages must set Refresh")
+	if !d.Refresh || !d.TooLong {
+		t.Errorf("more than 50 pages must set Refresh and TooLong: %+v", d)
 	}
 }
 
@@ -158,7 +158,7 @@ func TestChangesExactly50PagesIsNotRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Refresh || len(d.IDs) != 50 {
+	if d.Refresh || d.TooLong || len(d.IDs) != 50 {
 		t.Errorf("50 pages ending with More 0: Refresh %v, %d IDs; want false, 50", d.Refresh, len(d.IDs))
 	}
 }

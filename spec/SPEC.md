@@ -211,8 +211,11 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
   answers a 4xx other than 429 (cursor unusable); more than 50 pages in one
   pass; the last full sync is older than 24 h; a row re-read answers a
   non-gone 4xx other than 429/401 (R8, so one unreadable row cannot stall the
-  feed). Fallback resyncs (Refresh, refused cursor, R8) are limited to one per
-  calendar per 5 min (R10); initial, `--full` and the 24 h resync are not.
+  feed). Fallback resyncs (Refresh, refused cursor, R8, more than 50 pages)
+  are limited to one per calendar per 5 min (R10); initial, `--full` and the
+  24 h resync are not. A deferred calendar keeps its cursor, its feed is not
+  read again until the gap is over (the pending cause is kept in the cache),
+  then it is listed at once.
 - Core event loop `/core/v4/events/{id}`: **not used in M2** (R2). Whether it
   carries calendar list/membership changes is unverified in every source
   [assumed → E05]; the calendar list is re-read on every pass instead (one
@@ -268,7 +271,7 @@ cache records its account in `meta` and is emptied when opened for another):
   CTags and sync tokens are `epoch:seq` and never recur with another content,
   even after `pcb logout` removed the file.
 - `calendars`: ID, name, type, feed cursor, last full sync time, last sync
-  time, last error.
+  time, last error, and the cause of a deferred fallback resync.
 - `events`: per row, calendar ID, event ID, UID, start, end, full-day flag,
   recurrence ID, RRULE, `LastEditTime`, ETag, a change sequence number and
   `raw`, the row exactly as Proton returned it (ciphertext parts and
@@ -325,8 +328,9 @@ relogin credentials, client tokens (hashed, never stored in clear).
   stop the pass and, in watch, back off x2 up to 10 min with jitter; any
   other per-calendar failure is recorded on that calendar, the others
   continue, and the pass exits 40 (partial). A calendar deferred by the
-  5-minute fallback gap also counts as partial, and the message says when it
-  retries (R11). All requests go through the one per-account client and its
+  5-minute fallback gap also counts as partial, and the message names the
+  cause (Proton asked to refresh, refused the cursor, refused a row, feed too
+  long) and when it retries (R11). All requests go through the one per-account client and its
   limiter. The idle slow-down (5 min) and tuning after E06 are M5 (daemon).
   `--full` lists every calendar again; a re-read row whose ETag is unchanged
   changes nothing (no counter bump).

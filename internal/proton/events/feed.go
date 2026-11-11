@@ -17,6 +17,7 @@ type Delta struct {
 	Cursor  string   // where to resume; the input cursor when nothing is new
 	IDs     []string // changed event IDs, deduplicated, in first-appearance order
 	Refresh bool     // the cache must be rebuilt (Proton asked, or too many pages)
+	TooLong bool     // Refresh because the feed ran past MaxFeedPages, not because Proton asked
 }
 
 // Latest returns the calendar's current head of the change feed.
@@ -63,7 +64,7 @@ func Changes(ctx context.Context, c *api.Client, calID, cursor string) (Delta, e
 			return d, nil
 		}
 		if page == MaxFeedPages {
-			d.Refresh = true
+			d.Refresh, d.TooLong = true, true
 			return d, nil
 		}
 	}

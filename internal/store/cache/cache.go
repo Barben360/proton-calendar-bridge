@@ -116,7 +116,11 @@ type Calendar struct {
 	FullAt         time.Time // last full listing
 	SyncedAt       time.Time // last successful pass
 	Error          string    // last failure, "" if none
-	Events         int       // rows held
+	// Resync is why a fallback full listing is pending (the caller's own
+	// short code), "" if none; only DeferResync sets it and only a full
+	// listing (ReplaceCalendar) clears it.
+	Resync string
+	Events int // rows held
 }
 
 // Changes counts what a write changed.
@@ -181,6 +185,11 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`: %w", path, version, schemaVersion, ErrNewerSchema)
+	}
+	if version == schemaVersion {
+		if err := c.addResyncColumn(ctx); err != nil {
+			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
+		}
 	}
 	if version < schemaVersion {
 		err := c.tx(ctx, func(tx *sql.Tx) error {
@@ -254,6 +263,22 @@ func (c *Cache) Epoch(ctx context.Context) (string, error) {
 		return "", c.classify(err)
 	}
 	return e, nil
+}
+
+// addResyncColumn adds calendars.resync to a version 1 file written before
+// it existed (M2 development builds, before the schema was released).
+func (c *Cache) addResyncColumn(ctx context.Context) error {
+	var n int
+	if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name = 'resync'`).Scan(&n); err != nil || n == 1 {
+		return err
+	}
+	if _, err := c.db.ExecContext(ctx, `ALTER TABLE calendars ADD COLUMN resync TEXT NOT NULL DEFAULT ''`); err != nil {
+		// Another process may have added it first.
+		if qerr := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name = 'resync'`).Scan(&n); qerr != nil || n != 1 {
+			return err
+		}
+	}
+	return nil
 }
 
 type querier interface {
@@ -530,8 +555,9 @@ func (w *writer) finish(cursor string, at time.Time, full bool) error {
 	}
 	_, err := w.tx.ExecContext(w.ctx, `INSERT INTO calendars (id, cursor, full_at, synced_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, synced_at = excluded.synced_at,
-		full_at = CASE WHEN ? THEN excluded.full_at ELSE calendars.full_at END`,
-		w.cal, cursor, fullAt, at.Unix(), full)
+		full_at = CASE WHEN ? THEN excluded.full_at ELSE calendars.full_at END,
+		resync = CASE WHEN ? THEN '' ELSE calendars.resync END`,
+		w.cal, cursor, fullAt, at.Unix(), full, full)
 	return err
 }
 
@@ -607,7 +633,7 @@ func (c *Cache) ApplyDelta(ctx context.Context, calID, cursor string, upserts []
 
 // Calendars lists the calendars, ordered by ID.
 func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
-	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, c.cursor, c.full_at, c.synced_at, c.error,
+	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, c.cursor, c.full_at, c.synced_at, c.error, c.resync,
 		(SELECT count(*) FROM events e WHERE e.calendar_id = c.id) FROM calendars c ORDER BY c.id`)
 	if err != nil {
 		return nil, c.classify(err)
@@ -617,7 +643,7 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 	for rows.Next() {
 		var cal Calendar
 		var full, synced int64
-		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Cursor, &full, &synced, &cal.Error, &cal.Events); err != nil {
+		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Cursor, &full, &synced, &cal.Error, &cal.Resync, &cal.Events); err != nil {
 			return nil, c.classify(err)
 		}
 		cal.FullAt, cal.SyncedAt = fromUnix(full), fromUnix(synced)
@@ -645,6 +671,23 @@ func (c *Cache) PutCalendar(ctx context.Context, cal Calendar) error {
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, error = excluded.error`,
 		cal.ID, cal.Name, cal.Type, cal.Error)
 	return c.classify(err)
+}
+
+// DeferResync records that the calendar needs a full listing it could not
+// have yet, and why (a short code of the caller's). The calendar must be
+// known; ReplaceCalendar clears it.
+func (c *Cache) DeferResync(ctx context.Context, calID, why string) error {
+	if why == "" {
+		return errors.New("cache: empty resync reason")
+	}
+	res, err := c.db.ExecContext(ctx, `UPDATE calendars SET resync = ? WHERE id = ?`, why, calID)
+	if err != nil {
+		return c.classify(err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("cache: no calendar %q to defer", calID)
+	}
+	return nil
 }
 
 // DropCalendar removes a calendar with its rows and tombstones.

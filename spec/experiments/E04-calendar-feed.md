@@ -31,7 +31,7 @@ How does `GET /calendar/v1/{cal}/modelevents/{cursor}` behave: payload, cursor s
 - Shapes as in the table; unknown extra keys are ignored.
 - `Action` and `Event` are **ignored** (ruling R3): every listed ID is re-read with `GET /calendar/v1/{cal}/events/{id}`; 404, or 422 with code 2501, is a delete. Robust to unknown `Action` values and to create-then-delete.
 - Baseline cursor = `latest` read before the full listing; the returned cursor is stored in the same transaction as the row changes it produced.
-- Full resync when: never synced; `Refresh != 0`; the feed answers a 4xx other than 429; more than 50 pages in one pass; the last full sync is older than 24 h; a row re-read answers a non-gone 4xx other than 429/401 (R8). Fallback resyncs are limited to one per calendar per 5 min (R10; a calendar deferred by that gap makes the pass partial, exit 40, R11).
+- Full resync when: never synced; `Refresh != 0`; the feed answers a 4xx other than 429; more than 50 pages in one pass; the last full sync is older than 24 h; a row re-read answers a non-gone 4xx other than 429/401 (R8). Fallback resyncs are limited to one per calendar per 5 min (R10; a calendar deferred by that gap makes the pass partial, exit 40, R11, and its feed is not read again until the gap is over).
 - Cadence: 30 s default, at least 10 s between passes, backoff x2 up to 10 min with jitter on session-wide failures. No push.
 
 ## Live run that settles it

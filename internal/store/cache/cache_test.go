@@ -806,3 +806,65 @@ func corruptPage(t *testing.T, path string, n, size int64) {
 		t.Fatal(err)
 	}
 }
+
+// A pending fallback listing survives everything but a full listing.
+func TestDeferResyncLastsUntilAFullListing(t *testing.T) {
+	c, path := openNew(t)
+	if err := c.DeferResync(bg, "cal", "refresh"); err == nil {
+		t.Error("DeferResync of an unknown calendar succeeded")
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeferResync(bg, "cal", "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	resync := func() string {
+		t.Helper()
+		cals, err := c.Calendars(bg)
+		if err != nil || len(cals) != 1 {
+			t.Fatalf("Calendars = %v, %v", cals, err)
+		}
+		return cals[0].Resync
+	}
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "n", Error: "e"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ApplyDelta(bg, "cal", "c2", nil, nil, time.Unix(101, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := resync(); got != "cursor" {
+		t.Errorf("after PutCalendar and ApplyDelta: Resync %q, want cursor", got)
+	}
+	_ = c.Close()
+	c = openAt(t, path, "acct-1")
+	if got := resync(); got != "cursor" {
+		t.Errorf("after a reopen: Resync %q, want cursor", got)
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal", "c3", []Row{row("e1", 1)}, time.Unix(102, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := resync(); got != "" {
+		t.Errorf("after a full listing: Resync %q, want none", got)
+	}
+}
+
+// A version 1 file from before calendars.resync existed gains it on Open.
+func TestOpenAddsTheResyncColumn(t *testing.T) {
+	c, path := openNew(t)
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(bg, `ALTER TABLE calendars DROP COLUMN resync`); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	c = openAt(t, path, "acct-1")
+	cals, err := c.Calendars(bg)
+	if err != nil || len(cals) != 1 || cals[0].Name != "kept" {
+		t.Fatalf("Calendars after the upgrade = %v, %v", cals, err)
+	}
+	if err := c.DeferResync(bg, "cal", "row"); err != nil {
+		t.Errorf("DeferResync after the upgrade: %v", err)
+	}
+}
