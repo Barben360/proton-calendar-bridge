@@ -40,6 +40,10 @@ pass-cli run --env-file scripts/lab.env.example -- pcb-lab login --captcha-token
 - Refused with a new HV: row 1 "refused at <age>"; a new `hv-log.jsonl` line appears with `sent_captcha_token: true`. The author solves the new URL right away; the agent retries within a minute (row 2, short delay), then if refused again after 30 min (row 3).
 - Any HV later in M0 (E03 candidates, seeder) is a new row, with the protocol above.
 
+## Pending M1 data point
+
+`pcb login resume --captcha-token` (M1) is the second E02 measurement, run in the M1 live session (`HUMAN-CHECKS.md`, step M1.3): a CAPTCHA at the first `pcb login`, solved by the author, then resumed from a new process at least 60 s later. Add a row with the same columns; no CAPTCHA at all is recorded as "no CAPTCHA seen" with the login count.
+
 ## Conclusion
 
 Open. If no further HV occurs after the first solved one, E02 stays open with "no CAPTCHA seen in N logins" (N = the number of logins in the live-run log kept in the pending section of `E03-client-identity.md`, cross-checked with the lines of `hv-log.jsonl`); M1 then keeps the single-process interactive fallback only.
