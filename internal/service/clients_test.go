@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -122,20 +124,140 @@ func TestAuthFailuresAreChallengedAndLimited(t *testing.T) {
 	}
 }
 
-func TestCheckClientRecordsLastUseAtMostOncePerMinute(t *testing.T) {
+// touches records the service's background touches: started and finished
+// ids, delivered on channels so tests wait for them without sleeping.
+type touches struct{ started, done chan string }
+
+// next waits for an event of ch; a touch that never happens fails the test
+// instead of hanging it (the timeout is a guard, never a synchronisation).
+func next(t *testing.T, ch <-chan string, what string) string {
+	t.Helper()
+	select {
+	case id := <-ch:
+		return id
+	case <-time.After(10 * time.Second):
+		t.Fatalf("no background touch %s", what)
+		return ""
+	}
+}
+
+func hookTouches(l *service.Local) *touches {
+	h := &touches{started: make(chan string, 16), done: make(chan string, 16)}
+	l.SetTouchHook(func(phase, id string) {
+		if phase == "start" {
+			h.started <- id
+		} else {
+			h.done <- id
+		}
+	})
+	return h
+}
+
+func TestCheckClientRecordsLastUseOffTheRequestPathAtMostOncePerMinute(t *testing.T) {
 	t.Parallel()
 	e := newClientsEnv(t)
+	h := hookTouches(e.svc)
 	sec, _ := e.svc.AddClient(t.Context(), "Phone")
-	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1"); !ok {
+		t.Fatal("refused")
+	}
 	first := e.clk.Now()
+	next(t, h.done, "finished")
 	list, _ := e.svc.Clients(t.Context())
 	if list[0].LastUsed == nil || !list[0].LastUsed.Equal(first) {
 		t.Fatalf("LastUsed = %v, want %v", list[0].LastUsed, first)
 	}
 	e.clk.advance(30 * time.Second)
 	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	next(t, h.done, "finished")                                 // the touch ran (and was throttled by the store)
 	if list, _ := e.svc.Clients(t.Context()); !list[0].LastUsed.Equal(first) {
 		t.Errorf("LastUsed moved within a minute: %v", list[0].LastUsed)
+	}
+	// Finished touches free the client: a due one is recorded.
+	e.clk.advance(time.Minute)
+	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	next(t, h.done, "finished once more")
+	if list, _ := e.svc.Clients(t.Context()); !list[0].LastUsed.Equal(e.clk.Now()) {
+		t.Errorf("LastUsed = %v, want %v after a minute", list[0].LastUsed, e.clk.Now())
+	}
+}
+
+// A CLI holding clients.lock must not stall requests (ruling M3-R21), and a
+// client already being touched is not touched again.
+func TestCheckClientDoesNotWaitForTheClientsLockAndTouchesOnceInFlight(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	h := hookTouches(e.svc)
+	sec, _ := e.svc.AddClient(t.Context(), "Phone")
+	unlock, held, err := filelock.TryLock(filepath.Join(e.dirs.State, "clients.lock"))
+	if err != nil || !held {
+		t.Skip("no file locks on this system")
+	}
+	returned := make(chan bool)
+	go func() {
+		ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1")
+		returned <- ok
+	}()
+	select {
+	case ok := <-returned:
+		if !ok {
+			t.Fatal("refused")
+		}
+	case <-time.After(10 * time.Second): // a guard, not a synchronisation
+		t.Fatal("CheckClient waited for the clients lock")
+	}
+	next(t, h.started, "started") // in flight, blocked on the lock
+	e.clk.advance(2 * time.Minute)
+	for range 3 {
+		if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:2"); !ok {
+			t.Fatal("refused")
+		}
+	}
+	unlock()
+	next(t, h.done, "finished after the lock was released")
+	// Close waits for every touch there is, so after it the events are complete:
+	// the first touch finished, and no second one ever started.
+	if err := e.svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-h.started:
+		t.Fatalf("a second touch of %s started while one was in flight", id)
+	case id := <-h.done:
+		t.Fatalf("a second touch of %s finished", id)
+	default:
+	}
+}
+
+func TestCloseWaitsForBackgroundTouches(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	sec, _ := e.svc.AddClient(t.Context(), "Phone")
+	unlock, held, err := filelock.TryLock(filepath.Join(e.dirs.State, "clients.lock"))
+	if err != nil || !held {
+		t.Skip("no file locks on this system")
+	}
+	defer unlock()
+	h := hookTouches(e.svc)
+	e.svc.SetTouchTimeout(time.Hour)                               // only Close can end the blocked touch in time
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second) // a synchronous touch ends by this
+	defer cancel()
+	e.svc.CheckClient(ctx, sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	next(t, h.started, "started")
+	closed := make(chan error, 1)
+	go func() { closed <- e.svc.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second): // a guard, not a synchronisation
+		t.Fatal("Close did not cancel the touch blocked on the clients lock")
+	}
+	select {
+	case <-h.done:
+	default:
+		t.Error("Close returned while a touch was still running")
 	}
 }
 

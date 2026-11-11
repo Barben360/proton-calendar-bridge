@@ -51,6 +51,14 @@ type Local struct {
 	clients *access.Store   // CalDAV app passwords, <state>/clients.json; survives logout (ruling M3-R17)
 	limiter *access.Limiter // failed CalDAV password checks per remote IP
 
+	tmu          sync.Mutex // guards touching and the start of touches
+	touching     map[string]bool
+	twg          sync.WaitGroup
+	tctx         context.Context // ends the background touches (Close)
+	tcancel      context.CancelFunc
+	touchHook    func(phase, id string) // tests only
+	touchTimeout time.Duration
+
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
@@ -103,7 +111,11 @@ func NewLocal(o Options) (*Local, error) {
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
 		clients: access.NewStore(o.Dirs.State, o.Now),
 		limiter: access.NewLimiter(o.Now),
+
+		touching:     map[string]bool{},
+		touchTimeout: defaultTouchTimeout,
 	}
+	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
 	return l, nil
 }
@@ -258,6 +270,10 @@ func (l *Local) Close() error {
 	}
 	l.dropPending(context.Background())
 	l.dropClient()
+	l.tmu.Lock() // no touch starts after this: touch checks closed under tmu
+	l.tcancel()
+	l.tmu.Unlock()
+	l.twg.Wait()
 	l.mgr.Close()
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -70,10 +71,22 @@ type fileFormat struct {
 }
 
 // fileState identifies the version of the file a Store has loaded.
+// A write by atomicfile replaces the file, so its identity (device and
+// inode, with the change time where the system has one) changes even when a
+// remove and an add of equal size land in one timestamp tick.
 type fileState struct {
 	exists bool
 	mtime  time.Time
 	size   int64
+	ctime  int64       // change time in ns, 0 where unknown
+	info   os.FileInfo // for os.SameFile
+}
+
+func (a fileState) same(b fileState) bool {
+	if a.exists != b.exists || !a.mtime.Equal(b.mtime) || a.size != b.size || a.ctime != b.ctime {
+		return false
+	}
+	return !a.exists || os.SameFile(a.info, b.info)
 }
 
 // Store is the client list over <dir>/clients.json. Check reloads the file
@@ -116,7 +129,7 @@ func stateOf(path string) (fileState, error) {
 	if err != nil {
 		return fileState{}, err
 	}
-	return fileState{exists: true, mtime: fi.ModTime(), size: fi.Size()}, nil
+	return fileState{exists: true, mtime: fi.ModTime(), size: fi.Size(), ctime: changeTime(fi), info: fi}, nil
 }
 
 // refresh loads the file when it changed since the last load (or always,
@@ -128,7 +141,7 @@ func (s *Store) refresh(force bool) error {
 		s.loaded, s.clients, s.loadErr = false, nil, fmt.Errorf("client list unreadable: %w", err)
 		return s.loadErr
 	}
-	if s.loaded && !force && st == s.state {
+	if s.loaded && !force && st.same(s.state) {
 		return s.loadErr
 	}
 	s.loaded, s.state, s.clients, s.loadErr = true, st, nil, nil
@@ -224,11 +237,16 @@ func ValidateName(name string) error {
 		return fmt.Errorf("%w: not valid UTF-8", ErrInvalidName)
 	case strings.IndexFunc(name, unicode.IsControl) >= 0:
 		return fmt.Errorf("%w: it holds a control character", ErrInvalidName)
+	case idShape.MatchString(name):
+		return fmt.Errorf("%w: it looks like a client ID, which remove would take for one", ErrInvalidName)
 	case strings.TrimSpace(name) != name:
 		return fmt.Errorf("%w: it starts or ends with a space", ErrInvalidName)
 	}
 	return nil
 }
+
+// idShape is what Add generates for IDs; Remove tries IDs before names.
+var idShape = regexp.MustCompile(`^(?i:c[0-9a-f]{16})$`)
 
 func digest(salt []byte, password string) []byte {
 	h := sha256.New()

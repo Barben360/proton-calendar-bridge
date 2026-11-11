@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -172,6 +174,16 @@ func TestBareRootInJSONModeIsAUsageEnvelope(t *testing.T) {
 	}
 }
 
+// The contract runs real commands on the operating system's environment: it
+// is pointed at a temporary home so a command that works instead of failing
+// can never touch (or create) the developer's own state.
 func TestUsageContractOfEveryPcbCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	clitest.CheckUsageContract(t, cli.NewRoot)
+	if _, err := os.Stat(filepath.Join(home, "state", "pcb", "clients.json")); err == nil {
+		t.Error("the usage contract created a client: a bad invocation was accepted")
+	}
 }

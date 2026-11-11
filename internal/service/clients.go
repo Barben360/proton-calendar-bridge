@@ -120,6 +120,40 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 		l.limiter.Fail(remote)
 		return false, 0
 	}
-	_ = l.clients.Touch(ctx, c.ID) // best effort: a failed note of last use must not refuse a valid client
+	l.touch(c.ID)
 	return true, 0
+}
+
+// touchTimeout bounds a background touch waiting for the clients lock.
+const defaultTouchTimeout = 10 * time.Second
+
+// touch notes the client's last use off the request path (ruling M3-R21): a
+// CLI holding clients.lock must not stall requests. At most one touch per
+// client is in flight, so requests arriving meanwhile start none. A failed
+// touch is dropped (a missed LastUsed must not refuse a valid client, and
+// there is nothing secret-free worth logging); Close waits for the running
+// ones after cancelling them.
+func (l *Local) touch(id string) {
+	l.tmu.Lock()
+	defer l.tmu.Unlock()
+	if l.closed.Load() || l.touching[id] {
+		return
+	}
+	l.touching[id] = true
+	l.twg.Add(1)
+	go func() {
+		defer l.twg.Done()
+		if l.touchHook != nil {
+			l.touchHook("start", id)
+		}
+		ctx, cancel := context.WithTimeout(l.tctx, l.touchTimeout)
+		_ = l.clients.Touch(ctx, id)
+		cancel()
+		l.tmu.Lock()
+		delete(l.touching, id)
+		l.tmu.Unlock()
+		if l.touchHook != nil {
+			l.touchHook("done", id)
+		}
+	}()
 }

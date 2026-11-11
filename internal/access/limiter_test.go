@@ -85,8 +85,8 @@ func TestLimiterPrunesExpiredAndStaysBounded(t *testing.T) {
 	for i := range 3 * access.MaxTracked {
 		l.Fail(fmt.Sprintf("10.%d.%d.%d:1", i>>16&255, i>>8&255, i&255))
 	}
-	if n := l.Tracked(); n > access.MaxTracked+1 {
-		t.Fatalf("%d entries tracked, want at most %d", n, access.MaxTracked+1)
+	if n := l.Tracked(); n > access.MaxTracked {
+		t.Fatalf("%d entries tracked, want at most %d", n, access.MaxTracked)
 	}
 	c.add(time.Minute)
 	l.Fail("203.0.113.1:1")
@@ -95,14 +95,59 @@ func TestLimiterPrunesExpiredAndStaysBounded(t *testing.T) {
 	}
 }
 
-func TestLimiterFullTableStillBlocksNewAttackers(t *testing.T) {
+func TestLimiterFullTableNeitherLocksOutNorFreesAttackers(t *testing.T) {
 	t.Parallel()
-	l := access.NewLimiter(newClock().now)
-	for i := range access.MaxTracked {
+	c := newClock()
+	l := access.NewLimiter(c.now)
+	for i := range access.MaxTracked + 100 { // a flood from many addresses overfills the table
 		l.Fail(fmt.Sprintf("10.%d.%d.%d:1", i>>16&255, i>>8&255, i&255))
 	}
-	fail(l, "198.51.100.9:1", 5) // a new IP when the table is full
+	if n := l.Tracked(); n != access.MaxTracked {
+		t.Fatalf("%d entries tracked, want exactly %d", n, access.MaxTracked)
+	}
+	// A fresh IP (an honest client) is accepted: the flood does not lock it out.
+	if ok, _ := l.Allow("198.51.100.1:1"); !ok {
+		t.Fatal("a fresh IP is refused on a full table")
+	}
+	// A fresh IP that fails 5 times is blocked all the same.
+	fail(l, "198.51.100.9:1", 5)
 	if ok, _ := l.Allow("198.51.100.9:1"); ok {
-		t.Error("a full table let a new IP guess without limit")
+		t.Error("a fresh IP guessing on a full table is not blocked")
+	}
+	// The oldest entries were the ones evicted (FIFO), the newest are kept.
+	l2 := access.NewLimiter(c.now)
+	for i := range access.MaxTracked + 1 {
+		fail(l2, fmt.Sprintf("10.1.%d.%d:1", i>>8, i&255), 5)
+	}
+	if ok, _ := l2.Allow("10.1.0.0:1"); !ok {
+		t.Error("the oldest blocked IP is still tracked after the table overflowed")
+	}
+	if ok, _ := l2.Allow(fmt.Sprintf("10.1.%d.%d:1", access.MaxTracked>>8, access.MaxTracked&255)); ok {
+		t.Error("the newest blocked IP was evicted")
+	}
+}
+
+func TestLimiterKeysIPv6ByPrefix64(t *testing.T) {
+	t.Parallel()
+	l := access.NewLimiter(newClock().now)
+	for i := range 5 {
+		l.Fail(fmt.Sprintf("[2001:db8:1:2::%x]:5000", i+1)) // 5 addresses of one /64
+	}
+	if ok, _ := l.Allow("[2001:db8:1:2:ffff::9]:1"); ok {
+		t.Error("addresses of one /64 each get their own counter")
+	}
+	if ok, _ := l.Allow("[2001:db8:1:3::1]:1"); !ok {
+		t.Error("the next /64 is blocked")
+	}
+	for i := range 5 {
+		l.Fail(fmt.Sprintf("192.0.2.%d:1", i+1))
+	}
+	if ok, _ := l.Allow("192.0.2.200:1"); !ok {
+		t.Error("IPv4 is keyed wider than /32")
+	}
+	l.Fail("[::ffff:192.0.2.77]:1") // v4-mapped: same key as the v4 address
+	fail(l, "192.0.2.77:1", 4)
+	if ok, _ := l.Allow("192.0.2.77:1"); ok {
+		t.Error("a v4-mapped address has a counter of its own")
 	}
 }

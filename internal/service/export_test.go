@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
@@ -33,3 +34,10 @@ func (l *Local) HasKeys() bool {
 // BeforeKeyLoad makes fn run as each key load starts (set it before any
 // read).
 func (l *Local) BeforeKeyLoad(fn func()) { l.r.beforeLoad = fn }
+
+// SetTouchHook observes background touches: f gets "start" and "done" with
+// the client ID. Set it before the first CheckClient.
+func (l *Local) SetTouchHook(f func(phase, id string)) { l.touchHook = f }
+
+// SetTouchTimeout sets how long a background touch may wait for the clients lock.
+func (l *Local) SetTouchTimeout(d time.Duration) { l.touchTimeout = d }

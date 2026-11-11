@@ -1,6 +1,7 @@
 package access
 
 import (
+	"container/list"
 	"net"
 	"strings"
 	"sync"
@@ -12,28 +13,35 @@ const (
 	MaxFailures = 5
 	// Window is the length of the limiter's window; Touch is throttled to it too.
 	Window = time.Minute
-	// maxTracked bounds the limiter's map.
+	// maxTracked bounds the limiter's table.
 	maxTracked = 4096
 
-	unparsableKey = "?"  // every remote that is not an IP shares this counter
-	overflowKey   = "??" // every new IP while the table is full shares this one
+	unparsableKey = "?" // every remote that is not an IP shares this counter
 )
 
 // Limiter counts failed password checks per remote IP: after MaxFailures in
 // a window the IP is blocked until the window ends. The window is fixed: it
-// starts at an IP's first failure. Safe for concurrent use.
+// starts at an IP's first failure. IPv4 is keyed by address, IPv6 by /64
+// (one subscriber owns a whole /64), anything unparsable by one shared key.
+// Safe for concurrent use.
 //
-// Memory is bounded: expired entries are pruned, and a new IP arriving while
-// maxTracked live entries exist is counted under one shared overflow key
-// (an attacker with thousands of addresses can make the overflow key block
-// new addresses for a minute, but cannot make the limiter grow or forget).
+// Memory is bounded without a shared bucket (ruling M3-R20): only failures
+// create entries, entries expire in the order they were created, so the
+// table is a FIFO queue; expired ones are dropped from its front, and when
+// maxTracked live ones exist the oldest is evicted. A flood from many
+// addresses therefore never locks out an address it did not come from; its
+// own addresses get at most MaxFailures guesses each per window (an evicted
+// one starts over, which costs the attacker nothing a per-IP limit could
+// prevent).
 type Limiter struct {
 	now     func() time.Time
 	mu      sync.Mutex
-	entries map[string]*window
+	entries map[string]*list.Element // key -> element holding *window
+	order   *list.List               // oldest window first
 }
 
 type window struct {
+	key   string
 	start time.Time
 	n     int
 }
@@ -43,11 +51,11 @@ func NewLimiter(now func() time.Time) *Limiter {
 	if now == nil {
 		now = time.Now
 	}
-	return &Limiter{now: now, entries: map[string]*window{}}
+	return &Limiter{now: now, entries: map[string]*list.Element{}, order: list.New()}
 }
 
-// ipKey is the IP of remote ("host:port", "[v6]:port" or a bare IP) in its
-// canonical form, or unparsableKey.
+// ipKey is the key of remote ("host:port", "[v6]:port" or a bare IP): the
+// IPv4 address, the IPv6 /64, or unparsableKey.
 func ipKey(remote string) string {
 	host := remote
 	if h, _, err := net.SplitHostPort(remote); err == nil {
@@ -60,17 +68,22 @@ func ipKey(remote string) string {
 	if ip == nil {
 		return unparsableKey
 	}
-	return ip.String()
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
-// live returns key's entry if its window has not ended.
-func (l *Limiter) live(key string, now time.Time) *window {
-	w := l.entries[key]
-	if w != nil && !now.Before(w.start.Add(Window)) {
-		delete(l.entries, key)
-		return nil
+// prune drops the windows that ended, oldest first.
+func (l *Limiter) prune(now time.Time) {
+	for e := l.order.Front(); e != nil; e = l.order.Front() {
+		w := e.Value.(*window)
+		if now.Before(w.start.Add(Window)) {
+			return
+		}
+		l.order.Remove(e)
+		delete(l.entries, w.key)
 	}
-	return w
 }
 
 // Allow reports whether remote may try a password. When it may not,
@@ -79,16 +92,11 @@ func (l *Limiter) Allow(remote string) (ok bool, retryAfter time.Duration) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := ipKey(remote)
-	w := l.live(key, now)
-	if w == nil && len(l.entries) >= maxTracked {
-		l.prune(now)
-		if len(l.entries) >= maxTracked {
-			w = l.live(overflowKey, now)
+	l.prune(now)
+	if e := l.entries[ipKey(remote)]; e != nil {
+		if w := e.Value.(*window); w.n >= MaxFailures {
+			return false, w.start.Add(Window).Sub(now)
 		}
-	}
-	if w != nil && w.n >= MaxFailures {
-		return false, w.start.Add(Window).Sub(now)
 	}
 	return true, 0
 }
@@ -98,28 +106,16 @@ func (l *Limiter) Fail(remote string) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.prune(now)
 	key := ipKey(remote)
-	w := l.live(key, now)
-	if w == nil {
-		if len(l.entries) >= maxTracked {
-			l.prune(now)
-		}
-		if len(l.entries) >= maxTracked {
-			key = overflowKey
-			w = l.live(key, now)
-		}
+	if e := l.entries[key]; e != nil {
+		e.Value.(*window).n++
+		return
 	}
-	if w == nil {
-		w = &window{start: now}
-		l.entries[key] = w
+	if len(l.entries) >= maxTracked {
+		oldest := l.order.Front()
+		delete(l.entries, oldest.Value.(*window).key)
+		l.order.Remove(oldest)
 	}
-	w.n++
-}
-
-func (l *Limiter) prune(now time.Time) {
-	for k, w := range l.entries {
-		if !now.Before(w.start.Add(Window)) {
-			delete(l.entries, k)
-		}
-	}
+	l.entries[key] = l.order.PushBack(&window{key: key, start: now, n: 1})
 }

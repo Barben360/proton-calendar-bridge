@@ -69,9 +69,6 @@ func (a *app) newClientList() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			if list == nil {
-				list = []service.Client{}
-			}
 			return Finish(cmd, clientListData{list}, clientTable(list), nil)
 		},
 	}

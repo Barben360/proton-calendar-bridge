@@ -151,6 +151,10 @@ func TestClientNamesAreValidated(t *testing.T) {
 		"my phone (work) - été":      true,
 		"a":                          true,
 		"two  inner spaces are fine": true,
+		"c0123456789abcdef":          false, // shaped like a client ID: remove NAME would hit another client
+		"C0123456789ABCDEF":          false,
+		"c0123456789abcde":           true,
+		"c0123456789abcdefg":         true,
 	} {
 		_, _, err := s.Add(t.Context(), name)
 		if ok && err != nil {
@@ -294,5 +298,105 @@ func TestCorruptFileFailsClosed(t *testing.T) {
 	}
 	if _, _, err := s.Add(t.Context(), "x"); err == nil {
 		t.Error("Add over a corrupt file succeeded and would have destroyed it")
+	}
+}
+
+// A Touch from one process interleaved with Add/Remove from another must not
+// lose either (ruling M3-R18): every write re-reads the file under the lock.
+func TestTouchAndAddRemoveFromTwoStoresLoseNothing(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "state")
+	c := newClock()
+	serve, cli := access.NewStore(dir, c.now), access.NewStore(dir, c.now)
+	keep, _, _ := serve.Add(t.Context(), "keep")
+	gone, gonePW, _ := serve.Add(t.Context(), "gone")
+	if _, err := cli.List(); err != nil { // cli now holds a copy
+		t.Fatal(err)
+	}
+	c.add(2 * time.Minute)
+	if err := serve.Touch(t.Context(), keep); err != nil { // serve writes LastUsed...
+		t.Fatal(err)
+	}
+	if _, _, err := cli.Add(t.Context(), "new"); err != nil { // ...cli writes from its stale copy
+		t.Fatal(err)
+	}
+	if _, err := cli.Remove(t.Context(), gone); err != nil {
+		t.Fatal(err)
+	}
+	c.add(2 * time.Minute)
+	if err := serve.Touch(t.Context(), gone); err != nil { // serve touches a client cli removed
+		t.Fatal(err)
+	}
+	l, err := access.NewStore(dir, c.now).List()
+	if err != nil || len(l) != 2 || l[0].Name != "keep" || l[1].Name != "new" {
+		t.Fatalf("clients = %+v (%v), want keep and new: the removed client must not come back", l, err)
+	}
+	if l[0].LastUsed.IsZero() {
+		t.Error("cli's Add from a stale copy dropped serve's LastUsed")
+	}
+	if _, ok := serve.Check(gonePW); ok {
+		t.Error("a touch resurrected a removed client")
+	}
+}
+
+func TestConcurrentTouchesAndAddsFromTwoStoresKeepEverything(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "state")
+	c := newClock()
+	serve, cli := access.NewStore(dir, c.now), access.NewStore(dir, c.now)
+	keep, _, _ := serve.Add(t.Context(), "keep")
+	var wg sync.WaitGroup
+	for i := range 6 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			c.add(time.Minute) // every touch is due
+			if err := serve.Touch(t.Context(), keep); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, _, err := cli.Add(t.Context(), "n"+string(rune('a'+i))); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	l, err := access.NewStore(dir, c.now).List()
+	if err != nil || len(l) != 7 {
+		t.Fatalf("%d clients (%v), want 7: a touch and an add lost each other", len(l), err)
+	}
+}
+
+func TestFileReplacedByAnotherInodeWithSameSizeAndMtimeIsReloaded(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "state")
+	c := newClock()
+	serve := access.NewStore(dir, c.now)
+	_, pw1, _ := access.NewStore(dir, c.now).Add(t.Context(), "aaaa")
+	if _, ok := serve.Check(pw1); !ok {
+		t.Fatal("setup")
+	}
+	path := filepath.Join(dir, "clients.json")
+	old, _ := os.Stat(path)
+	// Another process removes and re-adds a client of the same name length: the
+	// file has the same size; force the same mtime too.
+	other := access.NewStore(dir, c.now)
+	if _, err := other.Remove(t.Context(), "aaaa"); err != nil {
+		t.Fatal(err)
+	}
+	_, pw2, _ := other.Add(t.Context(), "bbbb")
+	if err := os.Chtimes(path, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if now, _ := os.Stat(path); now.Size() != old.Size() || !now.ModTime().Equal(old.ModTime()) {
+		t.Skipf("could not recreate the same size and mtime (%d vs %d)", now.Size(), old.Size())
+	}
+	if _, ok := serve.Check(pw1); ok {
+		t.Error("the running store still accepts a client removed behind an identical size and mtime")
+	}
+	if _, ok := serve.Check(pw2); !ok {
+		t.Error("the running store missed a client added behind an identical size and mtime")
 	}
 }
