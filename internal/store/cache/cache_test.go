@@ -624,3 +624,47 @@ func TestOpenReadOnlyOtherAccountIsKept(t *testing.T) {
 		t.Errorf("the other account's read emptied the cache: %v, %v", evs, err)
 	}
 }
+
+func TestIOErrorIsTypedAndPathless(t *testing.T) {
+	_, err := Open(filepath.Join(t.TempDir(), "absent", "pcb.db"), "a")
+	var ioe *IOError
+	if !errors.As(err, &ioe) {
+		t.Fatalf("Open in a missing directory: err = %#v, want *IOError", err)
+	}
+	if strings.Contains(ioe.Reason(), "absent") {
+		t.Errorf("reason %q names the path", ioe.Reason())
+	}
+}
+
+// A read-only handle whose file turns to garbage under it reports
+// ErrChanged, never ErrCorrupt (only the writer may call a file damaged).
+func TestReadOnlyMidQueryCorruptionIsChangedNotCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	w := openAt(t, Path(dir), "acct-1")
+	if _, err := w.ReplaceCalendar(bg, "cal", "cur", []Row{row("e1", 1)}, time.Unix(1731000000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	ro, err := OpenReadOnly(Path(dir), "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	if err := os.WriteFile(Path(dir), []byte(strings.Repeat("garbage ", 2000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ro.Events(bg, "cal")
+	if err == nil {
+		t.Skip("SQLite served the read from its page cache; the corruption cannot be provoked here")
+	}
+	if !errors.Is(err, ErrChanged) || errors.Is(err, ErrCorrupt) {
+		t.Errorf("err = %v, want ErrChanged and not ErrCorrupt", err)
+	}
+}
+
+func TestReadErrClassification(t *testing.T) {
+	plain := errors.New("disk I/O")
+	if got := (&Cache{readOnly: true}).readErr(plain); got != plain { //nolint:errorlint // identity is the point
+		t.Errorf("a plain error was rewrapped: %v", got)
+	}
+}

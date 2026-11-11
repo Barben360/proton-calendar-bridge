@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/url"
 	"time"
@@ -44,6 +43,7 @@ func mapError(err error, keyFile string) error {
 		ne  net.Error
 		ue  *url.Error
 	)
+	cf := cacheFailure(err)
 	switch {
 	case err == nil:
 		return nil
@@ -54,8 +54,8 @@ func mapError(err error, keyFile string) error {
 		return ee
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
-	case cacheFailure(err) != nil:
-		return cacheFailure(err)
+	case cf != nil:
+		return cf
 	case errors.Is(err, auth.ErrBadCredentials):
 		return mustAct("wrong Proton username or password", "check them, then run pcb login again (Proton allows one attempt per minute)")
 	case errors.Is(err, auth.ErrTOTPRejected):
@@ -157,17 +157,20 @@ func keysError(err error) string {
 // cacheFailure classifies a failure of the event cache by type, or returns
 // nil when err is not one: a newer schema needs a newer pcb; a file that is
 // not a database needs a person to remove it (MustAct, so a watch stops);
-// a path error (permissions, disk) is Blocked with the operating system's
+// a file-system error of the cache files (cache.IOError: permissions,
+// disk; other files' errors are not matched) is Blocked with the operating system's
 // reason and no advice to remove anything.
 func cacheFailure(err error) *exitcode.Error {
-	var pe *fs.PathError
+	var ioe *cache.IOError
 	switch {
+	case errors.Is(err, cache.ErrChanged):
+		return fail(exitcode.Blocked, "the event cache changed while reading", "run the command again")
 	case errors.Is(err, cache.ErrNewerSchema):
 		return fail(exitcode.Blocked, "the event cache was written by a newer pcb", "upgrade pcb (or remove pcb.db from the state directory and run pcb sync --full)")
 	case errors.Is(err, cache.ErrCorrupt):
 		return fail(exitcode.MustAct, "the event cache is damaged", "remove pcb.db (and its -wal and -shm files) from the state directory, then run pcb sync --full")
-	case errors.As(err, &pe):
-		return fail(exitcode.Blocked, "the event cache cannot be used: "+pe.Err.Error(), "check the permissions and the free space of the state directory")
+	case errors.As(err, &ioe):
+		return fail(exitcode.Blocked, "the event cache cannot be used: "+ioe.Reason(), "check the permissions and the free space of the state directory")
 	}
 	return nil
 }

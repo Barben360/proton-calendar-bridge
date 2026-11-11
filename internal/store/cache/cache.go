@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,6 +24,32 @@ import (
 // ErrNotFound is returned by Raw for an unknown event.
 var ErrNotFound = errors.New("cache: event not found")
 
+// IOError is a file-system failure at the cache boundary (the file or its
+// directory cannot be opened or read), as opposed to the same error from
+// another file of the state directory.
+type IOError struct{ Err error }
+
+func (e *IOError) Error() string { return "cache: " + e.Err.Error() }
+func (e *IOError) Unwrap() error { return e.Err }
+
+// Reason is the operating system's reason, without the path.
+func (e *IOError) Reason() string {
+	var pe *fs.PathError
+	if errors.As(e.Err, &pe) {
+		return pe.Err.Error()
+	}
+	return e.Err.Error()
+}
+
+// ioError wraps a file-system error of the cache's files.
+func ioError(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return &IOError{Err: err}
+	}
+	return fmt.Errorf("cache: %w", err)
+}
+
 // Typed failures of opening a cache file, for callers to classify with
 // errors.Is.
 var (
@@ -31,6 +58,10 @@ var (
 	ErrNoCache = errors.New("cache: no cache for this account")
 	// ErrCorrupt: the file is not a usable SQLite database.
 	ErrCorrupt = errors.New("cache: file is not a usable SQLite database")
+	// ErrChanged: a read-only handle hit a corrupt-looking page, which with a
+	// writer alive is a checkpoint caught half way, not a damaged file. The
+	// read is worth repeating; nothing should be removed.
+	ErrChanged = errors.New("cache: changed while reading")
 	// ErrNewerSchema: the file's schema is newer than this build knows.
 	ErrNewerSchema = errors.New("cache: schema is newer than this pcb supports")
 )
@@ -74,7 +105,10 @@ type Calendar struct {
 type Changes struct{ Added, Updated, Deleted int }
 
 // Cache is an open cache file. Safe for concurrent use.
-type Cache struct{ db *sql.DB }
+type Cache struct {
+	db       *sql.DB
+	readOnly bool
+}
 
 // Path is the cache file inside the state directory.
 func Path(stateDir string) string { return filepath.Join(stateDir, "pcb.db") }
@@ -96,13 +130,13 @@ func Open(path, accountID string) (*Cache, error) {
 	// SQLite gives -wal and -shm the mode of the main file.
 	f, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE, 0o600)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("cache: directory %s does not exist: create the state directory first: %w", filepath.Dir(abs), err)
+		return nil, &IOError{Err: fmt.Errorf("directory %s does not exist: create the state directory first: %w", filepath.Dir(abs), err)}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("cache: %w", err)
+		return nil, ioError(err)
 	}
 	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("cache: %w", err)
+		return nil, ioError(err)
 	}
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"}
@@ -197,10 +231,24 @@ func OpenReadOnly(path, accountID string) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
+	c, err := openReadOnly(abs, accountID)
+	if errors.Is(err, ErrCorrupt) {
+		// A writer's checkpoint can make an immutable read look corrupt for
+		// a moment: look once more before calling the file damaged.
+		time.Sleep(retryDelay)
+		c, err = openReadOnly(abs, accountID)
+	}
+	return c, err
+}
+
+// retryDelay is how long OpenReadOnly waits before its second look.
+var retryDelay = 100 * time.Millisecond
+
+func openReadOnly(abs, accountID string) (*Cache, error) {
 	if _, err := os.Stat(abs); errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNoCache
 	} else if err != nil {
-		return nil, fmt.Errorf("cache: %w", err)
+		return nil, ioError(err)
 	}
 	// A read-only open of a WAL database needs its -shm; with no -wal there
 	// is no writer and nothing pending, so read the file as immutable.
@@ -214,12 +262,22 @@ func OpenReadOnly(path, accountID string) (*Cache, error) {
 		return nil, fmt.Errorf("cache: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	c := &Cache{db: db}
+	c := &Cache{db: db, readOnly: true}
 	if err := c.checkReadOnly(context.Background(), abs, accountID); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// readErr turns a corrupt-looking failure of a read on a read-only handle
+// into ErrChanged: only the writer may conclude the file is damaged.
+func (c *Cache) readErr(err error) error {
+	var se *sqlite.Error
+	if c.readOnly && errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
+		return fmt.Errorf("%w: %w", ErrChanged, err)
+	}
+	return err
 }
 
 func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
@@ -471,7 +529,7 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, c.cursor, c.full_at, c.synced_at, c.error,
 		(SELECT count(*) FROM events e WHERE e.calendar_id = c.id) FROM calendars c ORDER BY c.id`)
 	if err != nil {
-		return nil, err
+		return nil, c.readErr(err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Calendar
@@ -479,12 +537,12 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 		var cal Calendar
 		var full, synced int64
 		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Cursor, &full, &synced, &cal.Error, &cal.Events); err != nil {
-			return nil, err
+			return nil, c.readErr(err)
 		}
 		cal.FullAt, cal.SyncedAt = fromUnix(full), fromUnix(synced)
 		out = append(out, cal)
 	}
-	return out, rows.Err()
+	return out, c.readErr(rows.Err())
 }
 
 func fromUnix(s int64) time.Time {
@@ -529,7 +587,7 @@ func (c *Cache) Events(ctx context.Context, calID string) ([]Event, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT id, uid, start_at, end_at, full_day, recurrence_id, rrule, last_edit, etag, seq
 		FROM events WHERE calendar_id = ? ORDER BY start_at, id`, calID)
 	if err != nil {
-		return nil, err
+		return nil, c.readErr(err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Event
@@ -537,14 +595,14 @@ func (c *Cache) Events(ctx context.Context, calID string) ([]Event, error) {
 		var e Event
 		var rec sql.NullInt64
 		if err := rows.Scan(&e.ID, &e.UID, &e.Start, &e.End, &e.FullDay, &rec, &e.RRule, &e.LastEditTime, &e.ETag, &e.Seq); err != nil {
-			return nil, err
+			return nil, c.readErr(err)
 		}
 		if rec.Valid {
 			e.RecurrenceID = &rec.Int64
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, c.readErr(rows.Err())
 }
 
 // Raw returns a row's JSON exactly as stored, or ErrNotFound.

@@ -130,10 +130,13 @@ func (s *watchStub) WatchSync(_ context.Context, _ service.SyncRequest, iv time.
 func TestSyncWatchCancelledIsExitZero(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, nil)
-	r.svc = &watchStub{}
+	r.svc = &stubAPI{} // WatchSync returns nil at once, with no pass
 	r.want(exitcode.OK, "sync", "--watch")
 	if strings.Contains(r.errb.String(), "Error") {
 		t.Errorf("stderr = %q", r.errb.String())
+	}
+	if r.out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing: no envelope or hint after Ctrl-C", r.out.String())
 	}
 }
 

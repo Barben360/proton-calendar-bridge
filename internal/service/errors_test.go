@@ -52,7 +52,10 @@ func TestMapError(t *testing.T) {
 		{"corrupt store", seal.ErrCorrupt, exitcode.Blocked, "pcb logout", keyFile},
 		{"cache newer schema", fmt.Errorf("reading the cache: %w", cache.ErrNewerSchema), exitcode.Blocked, "upgrade pcb", "newer pcb"},
 		{"cache corrupt", fmt.Errorf("x: %w", cache.ErrCorrupt), exitcode.MustAct, "pcb sync --full", "damaged"},
-		{"cache permission", fmt.Errorf("x: %w", &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}), exitcode.Blocked, "permissions", "permission denied"},
+		{"cache permission", fmt.Errorf("x: %w", &cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}), exitcode.Blocked, "permissions", "permission denied"},
+		{"cache changed while reading", fmt.Errorf("x: %w", cache.ErrChanged), exitcode.Blocked, "run the command again", "changed while reading"},
+		// A path error of another file (the key file, a state file) is not the cache's.
+		{"non-cache path error", &fs.PathError{Op: "open", Path: "/k/secrets.key", Err: fs.ErrPermission}, exitcode.Blocked, "doctor", "unexpected"},
 		{"cancelled", context.Canceled, exitcode.Blocked, "", ""},
 		{"unexpected", errors.New("secret-looking detail hunter2"), exitcode.Blocked, "", "unexpected"},
 	}
