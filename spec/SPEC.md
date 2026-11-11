@@ -248,11 +248,18 @@ files 0600; `doctor` checks them.
   [assumed → E09] decides whether we need a sealed decrypted index later.
 
 ### 7.3 Secrets
-Sealed with a data key held by, in order of preference [call]:
-1. systemd credentials (`systemd-creds`, TPM2 when present) for services;
-2. the Secret Service (desktop keyring) when a session bus has one;
-3. a key file 0600 on a separate path (headless fallback, `doctor` warns).
-Availability [verified: E15]: systemd-creds (user scope, systemd >= 256) works on both machines, TPM2 only on the desktop, no Secret Service on headless morpheus, and none of them inside the container, which uses a key file 0600 plus an optional compose `secrets:` file mount.
+Sealed with a data key held by, in order, per environment (what each backend
+protects against: `spec/experiments/E15-secret-sealing.md`):
+- Desktop user service: 1. Secret Service (unlocked keyring of an interactive
+  login); 2. user-scope `systemd-creds`; 3. key file 0600.
+- Server system service: 1. system-scope `systemd-creds` (host key); 2. key
+  file 0600 on a separate path, `doctor` warns.
+- Container: 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600
+  on a volume separate from the data.
+`doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
+a key file against root or a same-user process; only TPM2 binding changes offline
+theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
+(interactive session), key file; TPM2 and desktop system scope untested]
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 

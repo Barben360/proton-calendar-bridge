@@ -1,0 +1,25 @@
+# blackwater, 2026-11-11, interactive shell (not inside a systemd user service)
+$ systemctl --version | head -1
+systemd 262 (262.1-1-arch)
+$ systemd-creds has-tpm2
+The 'systemd-creds has-tpm2' command has been replaced by 'systemd-analyze has-tpm2'. Redirecting invocation.
+yes
++firmware
++driver
++system
++subsystem
++libraries
+  +libtss2-esys.so.0
+  +libtss2-rc.so.0
+  +libtss2-mu.so.0
+(rc=0)
+$ ls -l /dev/tpmrm0
+crw-rw---- 1 root tss 252, 65536  7 nov.  15:35 /dev/tpmrm0
+$ busctl --user list 2>/dev/null | grep -c org.freedesktop.secrets
+1
+$ echo -n pcb-e15-dummy | systemd-creds encrypt --user --name=e15 - $d/c   (rc=0)
+$ systemd-creds decrypt --user --name=e15 $d/c -
+pcb-e15-dummy   (rc=0)
+$ systemd-creds encrypt --user --with-key=tpm2 --name=e15 - $d/t
+Selected key not available in --uid= scoped mode, refusing.
+# system scope: not run (sudo is interactive on this machine)

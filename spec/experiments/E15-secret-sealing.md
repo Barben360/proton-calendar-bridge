@@ -4,13 +4,11 @@ Feeds C2, SPEC §7.3 (secret sealing order), `pcb doctor`.
 
 ## Question
 
-What can seal the Proton session and key passphrase at rest on the author's two machines (blackwater: CachyOS desktop; morpheus: Debian 13 headless server running the bridge in Docker), and what can the container use?
+What can seal the Proton session and key passphrase at rest on the author's two machines (blackwater: CachyOS desktop; morpheus: Debian 13 headless server running the bridge in Docker), what does each backend actually protect against, and what can the container use?
 
 ## Method
 
-Read-only checks on each machine, 2026-11-11. Round trips use the dummy value `pcb-e15-dummy`, written into a fresh `mktemp -d` directory deleted in the same command. No Proton call, no package installed, nothing on morpheus touched beyond that (no /etc, services, containers). morpheus was reached over SSH (no TTY, key auth), so it has no desktop login session.
-
-Commands per machine: `systemctl --version`, `systemd-analyze has-tpm2` (what `systemd-creds has-tpm2` redirects to), `ls -l /dev/tpmrm0`, `busctl --user list | grep -c org.freedesktop.secrets`, `systemd-creds encrypt/decrypt --user`, and (morpheus) `sudo -n systemd-creds encrypt/decrypt` (system scope).
+Read-only checks on each machine, 2026-11-11. Round trips use the dummy value `pcb-e15-dummy` in a fresh `mktemp -d` directory deleted in the same command. No Proton call, no package installed, nothing on morpheus touched beyond that. morpheus was reached over SSH (no TTY, no desktop session). All commands ran from an interactive shell or SSH session, **not inside a systemd user service**; whether the same holds for a boot/linger-started service was not tested. Raw outputs: `spec/experiments/raw/E15/blackwater.txt`, `spec/experiments/raw/E15/morpheus.txt`.
 
 ## Results
 
@@ -18,40 +16,57 @@ Commands per machine: `systemctl --version`, `systemd-analyze has-tpm2` (what `s
 |---|---|---|
 | OS | CachyOS (Arch) | Debian 13 (trixie) |
 | systemd | 262 (262.1-1-arch) | 257 (257.13-1~deb13u1) |
-| `systemd-analyze has-tpm2` | `yes`, rc 0 (firmware, driver, system, subsystem, libraries all `+`) | `partial`, rc 16: firmware, driver, system, subsystem `+`; `-libraries` (`-libtss2-esys.so.0`, `-libtss2-rc.so.0`, `-libtss2-mu.so.0`) |
-| `/dev/tpmrm0` | present, `crw-rw---- root tss` | present, `crw------- root root` (also `/dev/tpm0`) |
-| Secret Service on session bus | `1` (a provider owns `org.freedesktop.secrets`) | `0`. Over SSH a user bus exists (`XDG_RUNTIME_DIR=/run/user/1000`, `user@1000.service` up, `Linger=no`) but only systemd and busctl are on it; no provider |
-| `systemd-creds encrypt --user` + `decrypt --user` | encrypt rc 0, decrypt returns `pcb-e15-dummy`, rc 0 | encrypt rc 0, decrypt returns `pcb-e15-dummy`, rc 0 |
-| `--user --with-key=tpm2` | refused: `Selected key not available in --uid= scoped mode, refusing.` | same refusal |
-| system scope (root) round trip | not run (needs interactive sudo) | encrypt rc 0, decrypt returns `pcb-e15-dummy`, rc 0. Warning: `Credential secret file '/var/lib/systemd/credential.secret' is not located on encrypted media, using anyway.` Key file is `-r--------` root |
+| `systemd-analyze has-tpm2` | `yes`, rc 0 | `partial`, rc 16: `-libtss2-esys.so.0`, `-libtss2-rc.so.0`, `-libtss2-mu.so.0` missing |
+| `/dev/tpmrm0` | `crw-rw---- root tss` | `crw------- root root` |
+| `org.freedesktop.secrets` on the user bus | 1 owner, in an interactive session only | 0; a user bus exists over SSH but only systemd and busctl are on it |
+| `systemd-creds encrypt/decrypt --user` | round trip ok | round trip ok |
+| `--user --with-key=tpm2` | refused: `Selected key not available in --uid= scoped mode, refusing.` | same |
+| system scope round trip (root) | **untested** (sudo interactive, author away; ruling R18) | ok; warning `credential.secret ... not located on encrypted media, using anyway`; key file `-r--------` root |
+| system scope with TPM2 | **untested** | **untested** (libtss2 not installed; installing is out of scope) |
 
-Docker on morpheus: Docker 29.9.3, Compose v5.7.0, security options apparmor, seccomp (builtin), cgroupns.
+Docker on morpheus: 29.9.3, Compose v5.7.0.
 
-Notes:
-- `systemd-creds has-tpm2` is deprecated and redirects to `systemd-analyze has-tpm2` (still prints the same table).
-- User scope (systemd >= 256) works on both and is host-key based, not TPM-bound: the key is in the per-user scope, TPM2 is not selectable there. On morpheus the user-scope credential is decryptable by any process of that user on that host.
-- TPM2 sealing on morpheus would need `libtss2` installed (not done, out of scope) and root (`/dev/tpmrm0` is root-only). Even then the system-scope host key at `/var/lib/systemd/credential.secret` sits unencrypted on disk unless TPM2 is used.
+Sources and caveats:
+- `systemd-creds(1)` (blackwater, systemd 262): `--user` (added in version 256) incorporates the user's UID, username and the machine-id into the key, and the credential can be decrypted only from that user's context unless privileges can be acquired. The man page's host-key mode: key in `/var/lib/systemd/credential.secret`, "only accessible to the root user"; TPM2 mode: key "not stored on the host system". `--user` therefore needs systemd >= 256: both machines qualify (262, 257), and both round trips passed.
+- `systemd-creds has-tpm2` was deprecated in favour of `systemd-analyze has-tpm2`; observed on 262 (blackwater), and morpheus (257) printed the same redirect message. The exact version that introduced it is not established here.
+- TPM2 sealing was never exercised on either machine. Every TPM2 statement below is from the man page, not measured.
+- Secret Service: the bus name was owned on blackwater in an interactive session. It needs a session with an unlocked keyring (graphical login). A user service started at boot or by linger may find the keyring locked or absent. "Present" on blackwater means interactive session only.
+
+### Protection per backend
+
+Y = protects, N = does not. Statements marked (man) come from systemd-creds(1) and were not tested.
+
+| Backend | Offline disk theft, no FDE | Offline theft, with FDE | Another local user | Same-user process / malware | Local root | Backup/snapshot of the data volume only | Casual disclosure (logs, `cat` of data) |
+|---|---|---|---|---|---|---|---|
+| Secret Service (unlocked login keyring) | Y (keyring encrypted with login password) | Y | Y | N (any process of the session can ask the unlocked keyring) | N (can read the session's memory/bus) | Y | Y |
+| systemd-creds user scope, host key | N (key file on same disk; attacker with the disk has both) | Y (FDE covers both) | Y (UID bound, host key root-only) | N (user can decrypt its own credentials) | N (root has the host key) | Y if the backup excludes `/var/lib/systemd` | Y |
+| systemd-creds system scope, host key | N | Y | Y | Y only if the service runs as a different user than the attacker; N for the service's own user | N | Y if the backup excludes `/var/lib/systemd` | Y |
+| systemd-creds system scope, TPM2 | Y (man, untested) | Y (man, untested) | Y | N for the service's own user | N (root can ask the TPM to unseal) | Y | Y |
+| Key file 0600 | N | Y | Y | N | N | Y only if the key lives on a different volume than the data | Y |
+| Compose secret file (`/run/secrets/x`, from a host file) | N (host file) | Y | Y | N for any process with the same mount | N | Y (key is not in the data volume) | Y |
+
+Plain reading: host-key credentials are no stronger than a 0600 key file against root or a same-user process. They help against casual disclosure and data-only backups, which a key file on a separate path also does. Only TPM2 binding changes offline theft without FDE, and it is untested here.
 
 ### Container (reasoned, no container run)
 
-- A container has its own PID/mount namespaces and, by default, no `/run/systemd`, no host `/run/user/<uid>/bus`, no `/dev/tpmrm0`. `systemd-creds` is not in a typical slim image, and without PID 1 = systemd there is no credential store. Reaching the host's `systemd-creds` or session bus would mean mounting sockets/devices into the container, which defeats the isolation and is not a supported setup.
-- Compose file-based `secrets:` (`secrets: x: {file: ./x}`) bind-mount the file read-only at `/run/secrets/x` in plain `docker compose` (no Swarm needed). Docker 29 / Compose 5 support it. This is a delivery channel for the data key (or an unseal passphrase), not a sealing mechanism: protection equals the host file's permissions.
-- Linux has no default Secret Service in a container.
+- A container has its own PID/mount namespaces and, by default, no `/run/systemd`, no host `/run/user/<uid>/bus`, no `/dev/tpmrm0`; a slim image has no systemd-creds and no PID 1 systemd. Reaching host systemd-creds or the session bus needs socket/device mounts that defeat isolation: not supported.
+- Compose file-based `secrets:` bind-mounts a host file read-only at `/run/secrets/<name>` without Swarm. It is a delivery channel, not a sealing mechanism: strength equals the host file's permissions.
+- A key on a volume separate from the data protects against a backup or snapshot of the data volume alone. It does not protect against host root, any container that has the same mounts, or a bind mount from the same host path (the key sits next to the data on the same host disk).
 
 ## Conclusion
 
-systemd-creds is available on both machines (user scope since systemd >= 256: 262 and 257); TPM2 is usable only on blackwater; Secret Service only on blackwater; the container has none of them.
+Verified: user-scope systemd-creds works (systemd 262 and 257, interactive/SSH context), Secret Service is present on blackwater in an interactive session only, none on morpheus, system-scope systemd-creds works on morpheus. Untested: TPM2 sealing anywhere, desktop (blackwater) system scope, any systemd-service-context run, any container.
 
-Sealing order per environment:
+One order per environment, justified by the table (the only differences between backends are offline theft without FDE, same-user access and backups):
 
-| Environment | Order |
-|---|---|
-| Desktop user service (blackwater) | 1. `systemd-creds` with TPM2 when `systemd-analyze has-tpm2` says `yes` and the scope allows it (system scope; user scope refuses `tpm2`); otherwise user-scope `systemd-creds` host key. 2. Secret Service (present). 3. key file 0600. Practical default for a user service: Secret Service (key tied to the login keyring), then user-scope `systemd-creds`. |
-| Server system service (morpheus, no container) | 1. System-scope `systemd-creds` (works; TPM2 only if libtss2 present, else host key with doctor warning "credential.secret not on encrypted media / not TPM-bound"). 2. Secret Service not available headless. 3. key file 0600 on a separate path with a doctor warning. |
-| Container (morpheus deployment) | No systemd-creds, no Secret Service. 1. Key file 0600 on a mounted volume separate from the data volume. 2. Optional compose `secrets:` file mount (`/run/secrets/<name>`) supplying the data key so the key is not in the data volume (`doctor` reports which source was used). The sealing strength is the host file permissions; document that plainly. |
+| Environment | Order | Why |
+|---|---|---|
+| Desktop user service (blackwater) | 1. Secret Service (needs the unlocked keyring of an interactive login); 2. user-scope systemd-creds; 3. key file 0600 | Secret Service is the only backend whose key is not on the disk in clear, so it alone covers offline theft without FDE. A boot/linger service finds it locked, so it falls to user-scope creds, which equal a key file but are bound to UID and machine. |
+| Server system service (morpheus) | 1. system-scope systemd-creds (host key); 2. key file 0600 on a separate path, `doctor` warns | No Secret Service headless. Host-key creds equal a key file for root and same-user attackers, but integrate with `LoadCredentialEncrypted=` and keep the key out of the service's data tree. TPM2 is not in the order until tested. |
+| Container (morpheus deployment) | 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600 on a volume separate from the data | No systemd, no Secret Service in the container. A key on another volume defends data-volume backups only. |
 
-Selection is per capability probe at start, not per OS name: try systemd-creds (`systemd-creds` binary and `has-tpm2`/round trip), then Secret Service (a name owner for `org.freedesktop.secrets`), then docker secret/key file; `pcb doctor` reports the chosen backend and warns on the key-file fallback.
+`pcb doctor` reports the backend chosen and warns on the key-file fallback and when the key and the data share a volume.
 
 ## Feeds
 
-SPEC §7.3 (marker updated to `[verified: E15]`), `pcb doctor` secret-backend report, container/compose documentation (key file + optional `secrets:`).
+SPEC §7.3 (order and marker), `pcb doctor` secret-backend report, container/compose documentation.
