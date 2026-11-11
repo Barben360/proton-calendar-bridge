@@ -229,9 +229,12 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	if err != nil {
 		return LoginResult{}, err
 	}
+	// The client's tokens, not p.Tokens: a refresh during the key calls spent
+	// the refresh token SRP returned.
+	tok := c.Tokens()
 	acc := store.Account{
 		ID: p.UserID, Username: pl.username,
-		UID: p.Tokens.UID, AccessToken: p.Tokens.AccessToken, RefreshToken: p.Tokens.RefreshToken,
+		UID: tok.UID, AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken,
 		KeyPass: keyPass,
 	}
 	if pl.unattended {

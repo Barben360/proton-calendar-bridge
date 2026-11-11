@@ -190,6 +190,21 @@ func TestLoginPasswordOnlyReady(t *testing.T) {
 	}
 }
 
+// A refresh during the key calls rotates the tokens: the sealed ones must be
+// the fresh pair, not the spent refresh token SRP returned.
+func TestLoginSealsTokensRefreshedDuringKeyCalls(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.FailNext("GET", "/core/v4/keys/salts", 401, 401, 0)
+	e.login(t, e.req())
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Fatalf("%d refreshes during the login, want 1", n)
+	}
+	if !sessionAlive(t, e, tokensOf(e.account(t))) {
+		t.Error("the sealed session is not the live one")
+	}
+}
+
 func TestLoginWithTOTPURI(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{TwoFA: true})
