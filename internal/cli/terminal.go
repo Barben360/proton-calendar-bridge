@@ -38,8 +38,12 @@ func (t *osTerminal) Interactive() bool { return term.IsTerminal(int(t.stdin.Fd(
 
 // read runs f on its own goroutine and returns its result, or ctx.Err() when
 // ctx ends first. The goroutine stays blocked in the read until the process
-// exits, which is right after a cancelled command.
+// exits, which is right after a cancelled command. An ended ctx never starts
+// f: a no-echo read begun after the restore would leave echo off.
 func read(ctx context.Context, f func() (string, error)) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	type result struct {
 		s   string
 		err error

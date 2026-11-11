@@ -34,6 +34,28 @@ func TestOSTerminalReadLineEndsWithContext(t *testing.T) {
 	}
 }
 
+// A read whose context already ended never starts: a no-echo password read
+// begun after Ctrl-C would outlive the restore and leave echo off.
+func TestReadWithEndedContextNeverStarts(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for range 20 {
+		started := make(chan struct{})
+		_, err := read(ctx, func() (string, error) {
+			close(started)
+			return "answer", nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want the context's", err)
+		}
+		select {
+		case <-started:
+			t.Fatal("the read started although its context had ended")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func TestOSTerminalReadLineAnswers(t *testing.T) {
 	rd, wr, err := os.Pipe()
 	if err != nil {
