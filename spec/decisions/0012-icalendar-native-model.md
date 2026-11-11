@@ -1,8 +1,8 @@
 # 0012 — iCalendar-native model for v1
 
 - **Date**: 2026-11-11
-- **Decided by**: agent (controller ruling M3-R2), author to confirm
-- **Status**: provisional until the author confirms; supersedes 0006 for v1
+- **Decided by**: agent (controller ruling M3-R2), confirmed by the author on 2026-11-11
+- **Status**: accepted; supersedes 0006 for v1
 
 The bridge keeps events in iCalendar from end to end in v1. A decrypted Proton event is a set of iCalendar fragments (the card parts, `internal/proton/cards`); the iCalendar codec (`internal/ical`) merges them into one VEVENT line by line, keeping every property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte, and the CalDAV adapter serves the result. There is no JSCalendar (RFC 8984) layer in v1.
 
