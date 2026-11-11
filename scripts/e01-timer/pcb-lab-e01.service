@@ -1,0 +1,7 @@
+[Unit]
+Description=E01 session lifetime sample (one authenticated GET, no refresh)
+
+[Service]
+Type=oneshot
+# Install the lab binary first: go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab
+ExecStart=%h/.local/bin/pcb-lab probe alive

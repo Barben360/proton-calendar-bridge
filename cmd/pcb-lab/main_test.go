@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +74,62 @@ func TestProbeWithoutSavedSessionIsMustAct(t *testing.T) {
 	code, env := run(t, "probe", "calendar-access", "--state-dir", t.TempDir())
 	if code != exitcode.MustAct || env["ok"] != false {
 		t.Fatalf("code %d, envelope %v", code, env)
+	}
+}
+
+func TestProbeRefreshReportsRotationAndOldToken(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "")
+	code, env := run(t, "probe", "refresh", "--state-dir", dir)
+	if code != exitcode.OK {
+		t.Fatalf("code %d, envelope %v", code, env)
+	}
+	d := env["data"].(map[string]any)
+	if d["refresh_rotated"] != true || d["old_token_retried"] != true || d["old_token_works"] != false {
+		t.Errorf("data = %v", d)
+	}
+}
+
+func TestProbeAliveAppendsASampleAndNeverLogsIn(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "")
+	logins := f.AuthCalls
+	code, env := run(t, "probe", "alive", "--state-dir", dir)
+	if code != exitcode.OK || env["data"].(map[string]any)["ok"] != true {
+		t.Fatalf("code %d, envelope %v", code, env)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "e01.jsonl"))
+	if err != nil || !bytes.Contains(b, []byte(`"ok":true`)) {
+		t.Fatalf("e01.jsonl = %q, %v", b, err)
+	}
+	if f.AuthCalls != logins {
+		t.Error("alive logged in")
+	}
+}
+
+// The timer is the E01 long probe: every 6 h, catching up missed runs, and
+// running only `probe alive` (no login, no refresh).
+func TestTimerUnitsMatchTheProtocol(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "scripts", "e01-timer", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	timer, svc := read("pcb-lab-e01.timer"), read("pcb-lab-e01.service")
+	for _, want := range []string{"OnCalendar=*-*-* 00/6:00:00", "Persistent=true", "Unit=pcb-lab-e01.service"} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("timer lacks %q", want)
+		}
+	}
+	var exec []string
+	for _, l := range strings.Split(svc, "\n") {
+		if strings.HasPrefix(l, "ExecStart") {
+			exec = append(exec, l)
+		}
+	}
+	if len(exec) != 1 || exec[0] != "ExecStart=%h/.local/bin/pcb-lab probe alive" {
+		t.Errorf("service must run only `probe alive`, got %q", exec)
 	}
 }

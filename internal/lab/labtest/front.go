@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,14 +63,19 @@ func NewFront(t *testing.T, f *Front) *Front {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		if !f.TwoFA || resp.Request.Method != http.MethodPost || resp.Request.URL.Path != "/auth/v4" || resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "json") {
 			return nil
 		}
 		var body map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			return err
 		}
-		body["2FA"] = map[string]any{"Enabled": 1}
+		if _, ok := body["Code"]; !ok { // Proton always sends one; the backend does not
+			body["Code"] = 1000
+		}
+		if f.TwoFA && resp.Request.Method == http.MethodPost && resp.Request.URL.Path == "/auth/v4" {
+			body["2FA"] = map[string]any{"Enabled": 1}
+		}
 		data, _ := json.Marshal(body)
 		resp.Body = io.NopCloser(bytes.NewReader(data))
 		resp.ContentLength = int64(len(data))
