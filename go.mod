@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
+	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton
 	github.com/goccy/go-yaml v1.19.2
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
@@ -17,7 +18,6 @@ require (
 	github.com/ProtonMail/gluon v0.17.0 // indirect
 	github.com/ProtonMail/go-crypto v1.5.2-proton // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
-	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton // indirect
 	github.com/PuerkitoBio/goquery v1.12.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bradenaw/juniper v0.15.3 // indirect
