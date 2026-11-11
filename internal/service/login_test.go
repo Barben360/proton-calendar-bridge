@@ -5,12 +5,15 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	gpa "github.com/ProtonMail/go-proton-api"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -31,6 +34,8 @@ type clock struct {
 	mu    sync.Mutex
 	now   time.Time
 	slept []time.Duration
+	// onSleep, when set, runs on every Sleep (the clock does not move by itself).
+	onSleep func(d time.Duration)
 }
 
 func (c *clock) Now() time.Time {
@@ -47,8 +52,12 @@ func (c *clock) advance(d time.Duration) {
 
 func (c *clock) Sleep(_ context.Context, d time.Duration) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.slept = append(c.slept, d)
+	hook := c.onSleep
+	c.mu.Unlock()
+	if hook != nil {
+		hook(d)
+	}
 	return nil
 }
 
@@ -256,17 +265,109 @@ func TestSubmitTOTPMalformedIsUsage(t *testing.T) {
 	}
 }
 
-func TestSubmitTOTPRejectedAbortsSession(t *testing.T) {
+func TestTOTPRetryKeepsPendingLogin(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{TwoFA: true})
 	e.login(t, e.req())
+	for _, left := range []string{"2 tries left", "1 tries left"} {
+		_, err := e.svc.SubmitTOTP(t.Context(), "000000")
+		if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, "enter the current code again") || !strings.Contains(ee.Hint, left) {
+			t.Errorf("hint = %q, want it to say %q", ee.Hint, left)
+		}
+	}
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP = %+v, %v", res, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1 (no new login)", n)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d revocations, want 0", n)
+	}
+}
+
+func TestTOTPThirdRejectionAbortsSession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	e.login(t, e.req())
+	for range 2 {
+		if _, err := e.svc.SubmitTOTP(t.Context(), "000000"); err == nil {
+			t.Fatal("a wrong code was accepted")
+		}
+	}
 	_, err := e.svc.SubmitTOTP(t.Context(), "000000")
-	_ = wantExit(t, err, exitcode.MustAct)
+	ee := wantExit(t, err, exitcode.MustAct)
+	if !strings.Contains(ee.Error(), "cancelled") {
+		t.Errorf("message = %q, want it to say the login was cancelled", ee.Error())
+	}
 	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
-		t.Errorf("%d session revocations, want 1", n)
+		t.Errorf("%d revocations, want 1", n)
 	}
 	if _, err := os.Stat(e.secrets().Path); err == nil {
-		t.Error("secrets sealed after a rejected code")
+		t.Error("secrets sealed after rejected codes")
+	}
+	// Nothing is pending any more.
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	_ = wantExit(t, err, exitcode.MustAct)
+	if st, _ := e.svc.Status(t.Context()); st.Phase == "needs-totp" {
+		t.Error("Status still reports a pending login")
+	}
+}
+
+// failStateOnSleep makes the next state.json write fail: during the 2FA wait
+// (after SRP, before the sealing) it replaces state.json by a directory. The
+// clock is placed 3 s before a TOTP period ends so the wait happens.
+func failStateOnSleep(t *testing.T, e *env) {
+	t.Helper()
+	e.clk.advance(80 * time.Second) // 10:01:27, 3 s before the period ends
+	e.clk.onSleep = func(d time.Duration) {
+		e.clk.advance(d)
+		p := filepath.Join(e.dirs.State, "state.json")
+		if err := os.RemoveAll(p); err != nil {
+			t.Error(err)
+		}
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestStateWriteFailureKeepsPreviousSession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	r := e.req()
+	r.TOTP = e.f.TOTPURI
+	e.login(t, r)
+	before := e.account(t)
+	failStateOnSleep(t, e)
+	_, err := e.svc.Login(t.Context(), r)
+	_ = wantExit(t, err, exitcode.Blocked)
+	after := e.account(t)
+	if after.UID != before.UID || after.AccessToken != before.AccessToken || string(after.KeyPass) != string(before.KeyPass) {
+		t.Error("the stored account changed after a failed attempt")
+	}
+	if !sessionAlive(t, e, tokensOf(before)) {
+		t.Error("the previously stored session was revoked")
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d revocations, want 1 (the new session only)", n)
+	}
+}
+
+func TestStateWriteFailureOnFirstLoginSealsNothing(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	failStateOnSleep(t, e)
+	r := e.req()
+	r.TOTP = e.f.TOTPURI
+	_, err := e.svc.Login(t.Context(), r)
+	_ = wantExit(t, err, exitcode.Blocked)
+	if accs, lerr := e.secrets().Load(); lerr != nil || len(accs) != 0 {
+		t.Errorf("secrets = %d accounts, %v; want an empty store", len(accs), lerr)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d revocations, want 1", n)
 	}
 }
 
@@ -642,6 +743,29 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			_, err := e.svc.Status(t.Context())
 			return err
 		}},
+		{"session ended", protontest.Options{TwoFA: true}, exitcode.MustAct, func(t *testing.T, e *env) error {
+			e.login(t, e.req())
+			e.f.RevokeSessions()
+			_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+			return err
+		}},
+		{"captcha rejected", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
+			e.f.FailNext("POST", "/auth/v4", 422, int(gpa.HumanValidationInvalidToken), 0)
+			return login(func(r *service.LoginRequest) { r.CaptchaToken = "stale-token" })(t, e)
+		}},
+		{"failing logout", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+			e.login(t, e.req())
+			if err := os.WriteFile(e.secrets().Path, []byte(`{"version":99,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := e.svc.Logout(t.Context())
+			return err
+		}},
+		{"unwritable state", protontest.Options{TwoFA: true}, exitcode.Blocked, func(t *testing.T, e *env) error {
+			failStateOnSleep(t, e)
+			_, err := e.svc.Login(t.Context(), service.LoginRequest{Username: e.f.Username, Password: e.f.Password, TOTP: e.f.TOTPURI})
+			return err
+		}},
 		{"empty username", protontest.Options{}, exitcode.Usage, login(func(r *service.LoginRequest) { r.Username = "" })},
 		{"no pending totp", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			_, err := e.svc.SubmitTOTP(t.Context(), "123456")
@@ -669,7 +793,13 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			if ee.Hint == "" {
 				t.Error("no hint")
 			}
-			secrets := []string{e.f.Password, e.f.TOTPURI, strings.TrimPrefix(e.f.TOTPURI, "otpauth://totp/pcbfake?secret="), "wrong-" + e.f.Password}
+			u, perr := url.Parse(e.f.TOTPURI)
+			if perr != nil || u.Query().Get("secret") == "" {
+				t.Fatalf("cannot read the fake's TOTP seed: %v", perr)
+			}
+			// Every secret the run touched: the password, the seed, and every
+			// access token the fake handed out (also the pending sessions').
+			secrets := append([]string{e.f.Password, e.f.TOTPURI, u.Query().Get("secret"), "wrong-" + e.f.Password}, e.f.AccessTokens()...)
 			if accs, lerr := e.secrets().Load(); lerr == nil {
 				for _, a := range accs {
 					secrets = append(secrets, a.AccessToken, a.RefreshToken, string(a.KeyPass))
@@ -681,5 +811,84 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLogoutWipesEvenWhenCancelled(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	res, err := e.svc.Logout(ctx)
+	if err != nil || !res.WasLoggedIn {
+		t.Fatalf("Logout = %+v, %v", res, err)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("secrets.sealed remains after a cancelled logout")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut {
+		t.Errorf("state = %+v", st)
+	}
+}
+
+func TestLogoutKeepsStoreItCannotJudge(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	// A format this build does not know is not a lost key: keep the file.
+	if err := os.WriteFile(e.secrets().Path, []byte(`{"version":99,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.Logout(t.Context())
+	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint == "" {
+		t.Error("no hint")
+	}
+	if _, err := os.Stat(e.secrets().Path); err != nil {
+		t.Errorf("secrets.sealed was removed: %v", err)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseReady {
+		t.Errorf("state = %+v, want it untouched", st)
+	}
+}
+
+func TestLogoutWipesCorruptStore(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	if err := os.WriteFile(e.secrets().Path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.svc.Logout(t.Context())
+	if err != nil || !res.WasLoggedIn || res.Revoked {
+		t.Fatalf("Logout = %+v, %v", res, err)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("the corrupt store remains")
+	}
+}
+
+func TestEveryMethodAfterCloseIsBlocked(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	if err := e.svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	calls := map[string]func() error{
+		"Login":      func() error { _, err := e.svc.Login(ctx, e.req()); return err },
+		"SubmitTOTP": func() error { _, err := e.svc.SubmitTOTP(ctx, "123456"); return err },
+		"Logout":     func() error { _, err := e.svc.Logout(ctx); return err },
+		"Status":     func() error { _, err := e.svc.Status(ctx); return err },
+		"Calendars":  func() error { _, err := e.svc.Calendars(ctx); return err },
+	}
+	for name, call := range calls {
+		ee := wantExit(t, call(), exitcode.Blocked)
+		if !strings.Contains(ee.Error(), "service closed") || ee.Hint == "" {
+			t.Errorf("%s: message %q hint %q", name, ee.Error(), ee.Hint)
+		}
+	}
+	if n := e.f.Calls("", "/"); n != 0 {
+		t.Errorf("%d requests after Close", n)
 	}
 }

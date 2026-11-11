@@ -74,6 +74,7 @@ type Fake struct {
 	calls     []call
 	failures  map[string][]failure // "METHOD /path" → queued answers
 	issued    map[string]bool      // access tokens handed out, not yet expired
+	minted    []string             // every access token handed out, in order
 	expired   map[string]bool      // access tokens that answer 401
 	unlocked  map[string]bool      // UIDs holding the locked scope
 	users     map[string]string    // username → user ID
@@ -196,6 +197,14 @@ func (f *Fake) FailNext(method, path string, status, code, retryAfter int) {
 	defer f.mu.Unlock()
 	key := method + " " + path
 	f.failures[key] = append(f.failures[key], failure{status, code, retryAfter})
+}
+
+// AccessTokens returns every access token the fake has handed out, expired or
+// not, so a test can check that none leaks into a message.
+func (f *Fake) AccessTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.minted...)
 }
 
 // ExpireAccessTokens makes every access token handed out so far answer 401
@@ -409,6 +418,7 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 		if tok, ok := body["AccessToken"].(string); ok && (route == "POST /auth/v4" || route == "POST /auth/v4/refresh") {
 			f.mu.Lock()
 			f.issued[tok] = true
+			f.minted = append(f.minted, tok)
 			f.mu.Unlock()
 		}
 		return setBody(resp, http.StatusOK, body)

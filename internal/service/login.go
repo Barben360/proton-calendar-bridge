@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,15 +24,25 @@ type pendingLogin struct {
 	password   []byte
 	unattended bool
 	totpURI    string      // the otpauth:// URI, when one was given
+	tries      int         // 2FA codes Proton rejected so far
+	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
 	last       store.State // state.json when the login began
 }
 
+// maxTOTPTries is how many 2FA codes a login may submit in all (R7m).
+const maxTOTPTries = 3
+
 const unattendedHint = "unattended relogin needs the TOTP secret as an otpauth:// URI"
 
-// Login implements API.
+// Login implements API. A new Login supersedes (aborts) a login still waiting
+// for its 2FA code. A login without UnattendedRelogin turns unattended relogin
+// off for the account: the stored credentials are replaced by tokens only.
 func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return LoginResult{}, errClosed()
+	}
 	if req.Username == "" || req.Password == "" {
 		return LoginResult{}, usage("a username and a password are required", "pass the username and the password (PCB_USERNAME, PCB_PASSWORD or the prompt)")
 	}
@@ -90,6 +102,9 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return LoginResult{}, errClosed()
+	}
 	if l.pending == nil {
 		return LoginResult{}, mustAct("no login is waiting for a 2FA code", "run pcb login first")
 	}
@@ -157,17 +172,33 @@ func (l *Local) needsCaptcha(ce *auth.CaptchaError, last store.State, now time.T
 	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}, nil
 }
 
-// finish runs what follows SRP: the 2FA code, the keys, the sealing. Any
-// failure aborts the session it opened and saves nothing.
+// finish runs what follows SRP: the 2FA code, the keys, the sealing. A failure
+// aborts the session it opened and saves nothing, except a rejected 2FA code:
+// the login then stays pending for up to maxTOTPTries codes in all.
 func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (LoginResult, error) {
-	defer clear(pl.password)
 	res, err := l.complete(ctx, pl, totp, now)
-	if err != nil {
-		pl.p.Abort(ctx)
-		return LoginResult{}, l.fail(err)
+	if err == nil {
+		pl.p.Close()
+		clear(pl.password)
+		return res, nil
 	}
-	pl.p.Close()
-	return res, nil
+	if errors.Is(err, auth.ErrTOTPRejected) {
+		if pl.tries++; pl.tries < maxTOTPTries {
+			l.pending = pl
+			l.waiting.Store(true)
+			return LoginResult{}, mustAct("the 2FA code was rejected by Proton",
+				fmt.Sprintf("enter the current code again (%d tries left)", maxTOTPTries-pl.tries))
+		}
+		pl.p.Abort(ctx)
+		clear(pl.password)
+		return LoginResult{}, mustAct("the 2FA code was rejected "+strconv.Itoa(maxTOTPTries)+" times and the login was cancelled",
+			"run pcb login again")
+	}
+	if !pl.sealed {
+		pl.p.Abort(ctx)
+	}
+	clear(pl.password)
+	return LoginResult{}, l.fail(err)
 }
 
 func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (LoginResult, error) {
@@ -215,15 +246,29 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	}); err != nil {
 		return LoginResult{}, storeError(err, l.keyFile())
 	}
-	if replaced && old.UID != acc.UID {
-		l.revoke(ctx, old)
-	}
+	pl.sealed = true
 	st := store.State{
 		AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 		LastLogin: now, LastRelogin: pl.last.LastRelogin,
 	}
 	if err := store.SaveState(l.o.Dirs.State, st); err != nil {
+		// Put the secrets back as they were, so the stored session stays the
+		// one state.json describes. If that fails too, the new session is
+		// what is sealed and must not be revoked.
+		if rerr := l.secrets.Update(context.WithoutCancel(ctx), func(accounts map[string]store.Account) error {
+			if replaced {
+				accounts[acc.ID] = old
+			} else {
+				delete(accounts, acc.ID)
+			}
+			return nil
+		}); rerr == nil {
+			pl.sealed = false
+		}
 		return LoginResult{}, storeError(err, l.keyFile())
+	}
+	if replaced && old.UID != acc.UID {
+		l.revoke(ctx, old)
 	}
 	return LoginResult{State: StateReady, Username: acc.Username, AccountID: acc.ID}, nil
 }

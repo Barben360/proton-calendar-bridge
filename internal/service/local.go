@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
@@ -20,6 +21,11 @@ import (
 
 // revokeTimeout bounds the best-effort revocation of a session.
 const revokeTimeout = 10 * time.Second
+
+// wipeTimeout bounds the local wipe of a logout, which ignores cancellation.
+const wipeTimeout = 10 * time.Second
+
+func errClosed() error { return blocked("service closed", "start a new session") }
 
 // Options build a Local. Sealer, HTTP, Now and Sleep default to the key file
 // of Config, the API client's default, time.Now and a context-aware sleep.
@@ -42,7 +48,7 @@ type Local struct {
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout and Close
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
-	closed  bool
+	closed  atomic.Bool
 }
 
 var _ API = (*Local)(nil)
@@ -105,20 +111,32 @@ func (l *Local) revoke(ctx context.Context, acc store.Account) bool {
 	return auth.Logout(ctx, c) == nil
 }
 
-// Logout implements API.
+// Logout implements API. The local wipe runs even when ctx is cancelled, so
+// a cancelled caller cannot leave secrets behind; only the revocation (best
+// effort) follows ctx.
 func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return LogoutResult{}, errClosed()
+	}
 	l.dropPending(ctx)
+	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
+	defer cancel()
 	var res LogoutResult
 	accounts, err := l.secrets.Load()
-	if err != nil {
-		// Unreadable: nothing to revoke with, so wipe what cannot be used.
+	switch {
+	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt):
+		// Unopenable for good: nothing to revoke with, so wipe what cannot be used.
 		res.WasLoggedIn = true
-		if werr := l.secrets.Wipe(ctx); werr != nil {
+		if werr := l.secrets.Wipe(wipe); werr != nil {
 			return LogoutResult{}, storeError(werr, l.keyFile())
 		}
-	} else {
+	case err != nil:
+		// Unreadable for another reason (permissions, a newer format): keep it.
+		return LogoutResult{}, blocked("the stored secrets cannot be read, so they were kept",
+			"check the permissions and the format of secrets.sealed in the state directory, then run pcb logout again")
+	default:
 		res.WasLoggedIn = len(accounts) > 0
 		res.Revoked = len(accounts) > 0
 		for _, acc := range accounts {
@@ -127,7 +145,7 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 			}
 		}
 		if len(accounts) > 0 {
-			if err := l.secrets.Update(ctx, func(a map[string]store.Account) error {
+			if err := l.secrets.Update(wipe, func(a map[string]store.Account) error {
 				clear(a)
 				return nil
 			}); err != nil {
@@ -143,6 +161,9 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 
 // Status implements API.
 func (l *Local) Status(context.Context) (Status, error) {
+	if l.closed.Load() {
+		return Status{}, errClosed()
+	}
 	st, err := store.LoadState(l.o.Dirs.State)
 	if err != nil {
 		return Status{}, stateError(err)
@@ -183,6 +204,9 @@ func (l *Local) Status(context.Context) (Status, error) {
 
 // Calendars implements API. Task 9 fills it in.
 func (l *Local) Calendars(context.Context) ([]Calendar, error) {
+	if l.closed.Load() {
+		return nil, errClosed()
+	}
 	return nil, blocked("listing calendars is not available yet", "wait for the next release")
 }
 
@@ -191,10 +215,9 @@ func (l *Local) Calendars(context.Context) ([]Calendar, error) {
 func (l *Local) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed {
+	if l.closed.Swap(true) {
 		return nil
 	}
-	l.closed = true
 	l.dropPending(context.Background())
 	l.mgr.Close()
 	return nil
