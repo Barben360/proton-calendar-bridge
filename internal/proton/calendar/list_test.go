@@ -18,13 +18,7 @@ import (
 // unlocked keys.
 func session(t *testing.T) (*protontest.Fake, *api.Client, *keys.Unlocked) {
 	t.Helper()
-	return sessionOn(t, protontest.Options{})
-}
-
-// sessionOn is session on a fake built with o.
-func sessionOn(t *testing.T, o protontest.Options) (*protontest.Fake, *api.Client, *keys.Unlocked) {
-	t.Helper()
-	f := protontest.New(t, o)
+	f := protontest.New(t, protontest.Options{})
 	m := auth.NewManager(f.URL, "Other")
 	t.Cleanup(m.Close)
 	p, err := auth.Begin(t.Context(), m, f.Username, []byte(f.Password), "")

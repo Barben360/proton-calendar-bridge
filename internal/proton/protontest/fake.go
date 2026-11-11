@@ -4,9 +4,8 @@
 // and FIDO2 accounts, the locked scope, token expiry, revocation and injected
 // failures). It never contacts Proton. Test use only.
 //
-// Fakes share backends and their accounts per test binary (see shared), so a
-// fake is cheap while its crypto stays real; Options.Private gives a fake an
-// account of its own.
+// Backends and their accounts are pooled per test binary (see pool), so a
+// fake is cheap while its crypto stays real.
 package protontest
 
 import (
@@ -14,7 +13,6 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,10 +57,6 @@ type Options struct {
 	Now            func() time.Time // clock for TOTP; default time.Now
 	// Username and Password name the first account; empty: throwaway values.
 	Username, Password string
-	// Private gives the fake a backend and accounts of its own instead of the
-	// binary-wide shared ones. AddAddress needs it (it changes the account);
-	// it costs a fresh key and SRP verifier per account.
-	Private bool
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the
@@ -73,7 +67,7 @@ type Fake struct {
 	t       testing.TB
 	o       Options
 	backend *server.Server
-	shard   *shard // the shared backend; nil with Options.Private
+	pool    *pooled // where backend comes from
 	proxy   *httputil.ReverseProxy
 	totp    *otp.TOTP
 	http    *http.Client
@@ -89,8 +83,6 @@ type Fake struct {
 	passwords map[string]string    // username → password
 	captcha   string               // Options.Captcha, changed by SetCaptcha
 	codes     []string             // 2FA codes received, in order
-	sessions  map[string]bool      // UIDs handed out
-	revoked   map[string]bool      // UIDs ended by RevokeSessions
 
 	cal calendars
 }
@@ -109,17 +101,8 @@ func New(t testing.TB, o Options) *Fake {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	var sh *shard
-	var srv *server.Server
-	if o.Private {
-		useFastKeys()
-		srv = server.New(server.WithTLS(false))
-		t.Cleanup(srv.Close)
-	} else {
-		sh = nextShard()
-		srv = sh.srv
-	}
-	target, err := url.Parse(srv.GetHostURL())
+	p := borrow(t)
+	target, err := url.Parse(p.srv.GetHostURL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +110,7 @@ func New(t testing.TB, o Options) *Fake {
 		o.Username = "pcbfake"
 	}
 	if o.Password == "" {
-		o.Password = shared.password
-		if o.Private {
-			o.Password = "fake-" + hex.EncodeToString(random(t, 12))
-		}
+		o.Password = defaultPassword()
 	}
 	f := &Fake{
 		Username:  o.Username,
@@ -138,8 +118,8 @@ func New(t testing.TB, o Options) *Fake {
 		TOTPURI:   "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
 		t:         t,
 		o:         o,
-		backend:   srv,
-		shard:     sh,
+		backend:   p.srv,
+		pool:      p,
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 		http:      &http.Client{Timeout: 10 * time.Second},
 		failures:  map[string][]failure{},
@@ -148,8 +128,6 @@ func New(t testing.TB, o Options) *Fake {
 		unlocked:  map[string]bool{},
 		users:     map[string]string{},
 		passwords: map[string]string{},
-		sessions:  map[string]bool{},
-		revoked:   map[string]bool{},
 		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
@@ -173,18 +151,12 @@ func random(t testing.TB, n int) []byte {
 	return b
 }
 
-// AddUser creates another account and returns its user ID. Without
-// Options.Private the account is the shared one of that username, created on
-// first use; asking it with another password fails the test.
+// AddUser creates another account and returns its user ID. An account an
+// earlier fake left on the pooled backend under that username is reused if
+// its password matches, replaced otherwise.
 func (f *Fake) AddUser(username, password string) (userID string) {
 	f.t.Helper()
-	var id string
-	var err error
-	if f.shard == nil {
-		id, _, err = f.backend.CreateUser(username, []byte(password))
-	} else {
-		id, err = f.shard.user(username, password)
-	}
+	id, err := f.pool.user(username, password)
 	if err != nil {
 		f.t.Fatalf("protontest: create user: %v", err)
 	}
@@ -263,28 +235,24 @@ func (f *Fake) ExpireAccessTokens() {
 	clear(f.issued)
 }
 
-// RevokeSessions ends every session this fake handed out so far: its
-// requests answer 401 and its refresh 422/10013. Later logins work. Sessions
-// of other fakes on the same shared account are untouched.
+// RevokeSessions ends every existing session: its requests answer 401 and its
+// refresh 422/10013.
 func (f *Fake) RevokeSessions() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for uid := range f.sessions {
-		f.revoked[uid] = true
+	for _, id := range f.users {
+		if err := f.backend.RevokeUser(id); err != nil {
+			f.t.Errorf("protontest: revoke sessions: %v", err)
+		}
 	}
 	clear(f.unlocked)
 }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + r.URL.Path
-	uid := r.Header.Get("x-pm-uid")
-	if route == "POST /auth/v4/refresh" {
-		uid = refreshUID(r)
-	}
 	f.mu.Lock()
 	f.calls = append(f.calls, call{r.Method, r.URL.Path})
 	fail, injected := f.popFailure(route)
-	revoked := f.revoked[uid]
 	expired := f.expired[bearer(r)] && r.URL.Path != "/auth/v4/refresh"
 	f.mu.Unlock()
 	switch {
@@ -293,9 +261,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", strconv.Itoa(fail.retryAfter))
 		}
 		reply(w, fail.status, fail.code, "injected failure")
-	case revoked && route == "POST /auth/v4/refresh":
-		reply(w, http.StatusUnprocessableEntity, 10013, "Invalid refresh token")
-	case revoked || expired:
+	case expired:
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
 	case route == "POST /auth/v4" && f.challenged(r):
 		WriteChallenge(w, f.captchaToken(), f.o.CaptchaMethods)
@@ -316,19 +282,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.proxy.ServeHTTP(w, r)
 	}
-}
-
-// refreshUID returns the UID a refresh names in its body (it carries no
-// x-pm-uid), leaving the body readable for the backend.
-func refreshUID(r *http.Request) string {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		return ""
-	}
-	r.Body = io.NopCloser(bytes.NewReader(data))
-	var req struct{ UID string }
-	_ = json.Unmarshal(data, &req)
-	return req.UID
 }
 
 func (f *Fake) popFailure(route string) (failure, bool) {
@@ -488,11 +441,6 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 		}
 		if route == "POST /auth/v4" {
 			f.shapeAuth(body)
-			if uid, ok := body["UID"].(string); ok && uid != "" {
-				f.mu.Lock()
-				f.sessions[uid] = true
-				f.mu.Unlock()
-			}
 		}
 		if tok, ok := body["AccessToken"].(string); ok && (route == "POST /auth/v4" || route == "POST /auth/v4/refresh") {
 			f.mu.Lock()
