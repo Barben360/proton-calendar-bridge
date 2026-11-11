@@ -128,7 +128,7 @@ func New(t testing.TB, o Options) *Fake {
 		unlocked:  map[string]bool{},
 		users:     map[string]string{},
 		passwords: map[string]string{},
-		cal:       calendars{byUser: map[string]*userCalendars{}},
+		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)

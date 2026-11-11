@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -81,7 +82,7 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 	if memberID == "" {
 		return nil, fmt.Errorf("calendar %s: none of our addresses is a member", cal.ID)
 	}
-	passphrase, err := decryptPassphrase(u, memberID, b)
+	passphrase, err := decryptPassphrase(u, memberID, addressID, b)
 	if err != nil {
 		return nil, fmt.Errorf("calendar %s: %w", cal.ID, err)
 	}
@@ -102,6 +103,9 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 			err = kr.AddKey(unlocked)
 		}
 		if err != nil {
+			if kr != nil {
+				kr.ClearPrivateParams()
+			}
 			return nil, fmt.Errorf("calendar %s: building the keyring failed", cal.ID)
 		}
 	}
@@ -121,9 +125,10 @@ func ownsEmail(u *keys.Unlocked, email string) bool {
 }
 
 // decryptPassphrase decrypts the entry of memberID (never another member's)
-// with each address keyring in address order. Library errors are dropped so
+// with the member's address keyring first, then every other address keyring in
+// address order, since the passphrase may be encrypted to any of them. Library errors are dropped so
 // no armor or key detail reaches the message.
-func decryptPassphrase(u *keys.Unlocked, memberID string, b bootstrap) ([]byte, error) {
+func decryptPassphrase(u *keys.Unlocked, memberID, addressID string, b bootstrap) ([]byte, error) {
 	for _, e := range b.Passphrase.MemberPassphrases {
 		if e.MemberID != memberID {
 			continue
@@ -132,7 +137,7 @@ func decryptPassphrase(u *keys.Unlocked, memberID string, b bootstrap) ([]byte, 
 		if err != nil {
 			return nil, errors.New("the member passphrase is not valid PGP")
 		}
-		for _, a := range u.Addresses {
+		for _, a := range addressOrder(u.Addresses, addressID) {
 			kr, ok := u.AddrKRs[a.ID]
 			if !ok {
 				continue
@@ -146,4 +151,21 @@ func decryptPassphrase(u *keys.Unlocked, memberID string, b bootstrap) ([]byte, 
 		return nil, errors.New("no address key decrypts the member passphrase")
 	}
 	return nil, errors.New("no passphrase for our member")
+}
+
+// addressOrder returns addrs with the address first listed first, the rest in
+// their order.
+func addressOrder(addrs []gpa.Address, first string) []gpa.Address {
+	out := make([]gpa.Address, 0, len(addrs))
+	for _, a := range addrs {
+		if a.ID == first {
+			out = append(out, a)
+		}
+	}
+	for _, a := range addrs {
+		if a.ID != first {
+			out = append(out, a)
+		}
+	}
+	return out
 }

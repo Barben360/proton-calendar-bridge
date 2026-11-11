@@ -179,3 +179,45 @@ func TestAccessCloseIsNilSafe(t *testing.T) {
 	a.Close()
 	(&calendar.Access{}).Close()
 }
+
+func TestUnlockChoosesOurMemberPassphrase(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	id := f.AddCalendar(f.Username, protontest.Calendar{ForeignMemberFirst: true})
+	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")), "probe")
+}
+
+func TestUnlockUnknownMemberNeverFallsBack(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	// Without the foreign entry the only entry is decryptable by us: a
+	// fallback to "the first entry" would succeed here.
+	id := f.AddCalendar(f.Username, protontest.Calendar{})
+	a, err := calendar.Unlock(t.Context(), c, u, calendar.Calendar{ID: id, MemberID: "no-such-member"})
+	if err == nil {
+		a.Close()
+		t.Fatal("want an error: another member's entry must never be used")
+	}
+}
+
+func TestUnlockResolvesSecondAddressMember(t *testing.T) {
+	t.Parallel()
+	f, c, _ := session(t)
+	f.AddAddress(f.Username, "second@proton.local")
+	u := unlockKeys(t, c, f.Password)
+	id := f.AddCalendar(f.Username, protontest.Calendar{ToSecondAddress: true, ForeignMemberFirst: true})
+	cal := firstCalendar(t, c)
+	a, err := calendar.Unlock(t.Context(), c, u, calendar.Calendar{ID: id}) // no member given
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.MemberID != cal.MemberID || a.AddressID != u.Addresses[1].ID {
+		t.Fatalf("member %q address %q, want %q and the second address %q", a.MemberID, a.AddressID, cal.MemberID, u.Addresses[1].ID)
+	}
+}

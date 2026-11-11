@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -21,6 +23,7 @@ type Calendar struct {
 	ToSecondAddress          bool // the member passphrase is encrypted to the user's second address key only
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
 	ExtraLockedKey           bool // a second calendar key no passphrase opens, listed first
+	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
 }
 
 // calendars holds the fake's calendar state, guarded by mu.
@@ -30,9 +33,19 @@ type calendars struct {
 	byID   map[string]*calendarRec   // calendar ID → record
 }
 
+// user returns username's state, creating it. Caller holds mu.
+func (c *calendars) user(username string) *userCalendars {
+	u := c.byUser[username]
+	if u == nil {
+		u = &userCalendars{}
+		c.byUser[username] = u
+	}
+	return u
+}
+
 type userCalendars struct {
-	list     []*calendarRec
-	defaultI string
+	list      []*calendarRec
+	defaultID string
 }
 
 type calendarRec struct {
@@ -46,7 +59,11 @@ type calendarRec struct {
 	memberID string
 	address  gpa.Address
 	encPass  string
+	foreign  foreignMember // set with ForeignMemberFirst
 }
+
+// foreignMember is another member of a shared calendar.
+type foreignMember struct{ id, encPass string }
 
 // AddCalendar adds a calendar for username and returns its ID. The calendar
 // key (x25519) is locked with a random base64 passphrase; that passphrase is
@@ -91,14 +108,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
-	if f.cal.byID == nil {
-		f.cal.byID = map[string]*calendarRec{}
-	}
-	u := f.cal.byUser[username]
-	if u == nil {
-		u = &userCalendars{}
-		f.cal.byUser[username] = u
-	}
+	u := f.cal.user(username)
 	u.list = append(u.list, rec)
 	f.cal.byID[id] = rec
 	return id
@@ -108,12 +118,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 func (f *Fake) SetDefaultCalendar(username, id string) {
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
-	u := f.cal.byUser[username]
-	if u == nil {
-		u = &userCalendars{}
-		f.cal.byUser[username] = u
-	}
-	u.defaultI = id
+	f.cal.user(username).defaultID = id
 }
 
 // EncryptToCalendar encrypts plaintext to the calendar's key and returns the
@@ -158,11 +163,7 @@ func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
-	u := f.cal.byUser[name]
-	if u == nil {
-		u = &userCalendars{}
-		f.cal.byUser[name] = u
-	}
+	u := f.cal.user(name)
 	if !f.materialize(u, r) {
 		reply(w, http.StatusInternalServerError, 0, "fake: cannot prepare calendars")
 		return
@@ -174,7 +175,7 @@ func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case path == "/settings/calendar":
-		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "CalendarUserSettings": map[string]any{"DefaultCalendarID": u.defaultI}})
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "CalendarUserSettings": map[string]any{"DefaultCalendarID": u.defaultID}})
 	case path == "/calendar/v1":
 		cals := make([]any, 0, len(u.list))
 		for _, rec := range u.list {
@@ -238,6 +239,20 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 		if rec.encPass, err = msg.GetArmored(); err != nil {
 			return false
 		}
+		if rec.def.ForeignMemberFirst {
+			other, err := recipientRing(&calendarRec{def: Calendar{BrokenPassphrase: true}})
+			if err != nil {
+				return false
+			}
+			m, err := other.Encrypt(crypto.NewPlainMessage([]byte("not-the-passphrase")), nil)
+			if err != nil {
+				return false
+			}
+			rec.foreign.id = "mem" + hex.EncodeToString(random(f.t, 6)) + "=="
+			if rec.foreign.encPass, err = m.GetArmored(); err != nil {
+				return false
+			}
+		}
 		rec.ready = true
 	}
 	return true
@@ -272,7 +287,7 @@ func recipientRing(rec *calendarRec) (*crypto.KeyRing, error) {
 		}
 	}
 	if kr == nil {
-		return nil, http.ErrNoCookie // unreachable in practice: addresses carry keys
+		return nil, errors.New("the address has no key")
 	}
 	return kr, nil
 }
@@ -289,6 +304,24 @@ func (c *calendarRec) member() map[string]any {
 	return m
 }
 
+// members is ours, preceded by a foreign one with ForeignMemberFirst.
+func (c *calendarRec) members() []any {
+	ours := c.member()
+	if !c.def.ForeignMemberFirst {
+		return []any{ours}
+	}
+	other := map[string]any{"ID": c.foreign.id, "CalendarID": c.id, "AddressID": "foreign-addr", "Email": "other@example.org", "Permissions": 1, "Display": 1}
+	return []any{other, ours}
+}
+
+func (c *calendarRec) memberPassphrases() []any {
+	ours := map[string]any{"MemberID": c.memberID, "Passphrase": c.encPass, "Signature": ""}
+	if !c.def.ForeignMemberFirst {
+		return []any{ours}
+	}
+	return []any{map[string]any{"MemberID": c.foreign.id, "Passphrase": c.foreign.encPass, "Signature": ""}, ours}
+}
+
 func (c *calendarRec) listEntry() map[string]any {
 	e := map[string]any{"ID": c.id, "Type": c.def.Type, "CreateTime": 1700000000, "Members": []any{c.member()}}
 	if c.def.LegacyTopLevel {
@@ -300,7 +333,7 @@ func (c *calendarRec) listEntry() map[string]any {
 func (c *calendarRec) bootstrap() map[string]any {
 	keys := make([]any, 0, len(c.armored))
 	for i, a := range c.armored {
-		keys = append(keys, map[string]any{"ID": "key" + string(rune('0'+i)), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": a, "Flags": 3})
+		keys = append(keys, map[string]any{"ID": "key" + strconv.Itoa(i), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": a, "Flags": 3})
 	}
 	return map[string]any{
 		"Code": 1000,
@@ -308,9 +341,9 @@ func (c *calendarRec) bootstrap() map[string]any {
 		"Passphrase": map[string]any{
 			"ID": "pass1", "Flags": 1,
 			// Signature is left empty: the client does not verify it in M1.
-			"MemberPassphrases": []any{map[string]any{"MemberID": c.memberID, "Passphrase": c.encPass, "Signature": ""}},
+			"MemberPassphrases": c.memberPassphrases(),
 		},
-		"Members": []any{c.member()},
+		"Members": c.members(),
 		"CalendarSettings": map[string]any{
 			"ID": "set1", "CalendarID": c.id, "DefaultEventDuration": 30, "MakesUserBusy": 1,
 			"DefaultPartDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT1H"}},
