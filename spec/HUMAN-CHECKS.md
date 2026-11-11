@@ -76,10 +76,10 @@ curl -si -X PROPFIND http://localhost:1080/ | head -1                           
 ```
 Then repeat the Thunderbird dialog once with the bare URL and once with `http://localhost:1080/.well-known/caldav`: both must find the same calendars.
 
-**6.3 Over the network, TLS (agent, then author).** Stop `pcb serve`, set in `config.toml` (`[caldav]`): `listen = "0.0.0.0:8443"` and `hostnames = ["<the host's LAN name>"]`, run `pcb serve` again. Expect `Thunderbird URL: https://<hostname>:8443/` and the fingerprint line. `pcb doctor` shows the same fingerprint. On the other machine, repeat 6.2 with that URL. Thunderbird shows the certificate exception dialog: **compare the SHA-256 fingerprint in the dialog with the one `pcb serve` printed, character by character; confirm the exception only if they match.** Record: whether the dialog appears in the creation flow or the certificate had to be added first under Settings > Certificates, and whether the IP-literal URL works (E08 §2.3).
+**6.3 Over the network, TLS (agent, then author).** Stop `pcb serve`, set in `config.toml` (`$XDG_CONFIG_HOME/pcb/config.toml`, else `~/.config/pcb/config.toml`), section `[caldav]`: `listen = "0.0.0.0:8443"` and `hostnames = ["<the host's LAN name>"]`, run `pcb serve` again (`pcb serve --listen 0.0.0.0:8443` replaces the `listen` edit; `hostnames` still needs the file). Expect `Thunderbird URL: https://<hostname>:8443/` and the fingerprint line. `pcb doctor` shows the same fingerprint. On the other machine, repeat 6.2 with that URL. Thunderbird shows the certificate exception dialog: **compare the SHA-256 fingerprint in the dialog with the one `pcb serve` printed, character by character; confirm the exception only if they match.** Record: whether the dialog appears in the creation flow or the certificate had to be added first under Settings > Certificates, and whether the IP-literal URL works (E08 §2.3).
 
 **6.4 Round trips (author edits in the web app on the test account, agent notes the time).**
-1. Edit an event's title in the web app: it shows in Thunderbird within one refresh (`pcb serve` syncs every 30 s; Thunderbird's own poll is 30 min by default, so use right-click > Synchronize Calendars).
+1. Edit an event's title in the web app: it shows in Thunderbird within one refresh (`pcb serve` syncs every 30 s; Thunderbird's own poll is 30 min by default, so use right-click > Synchronize Calendars [claim: from E08's source reading, the menu path was not checked]).
 2. Delete an event in the web app: it disappears in Thunderbird after the same refresh.
 3. Edit the same event again after Thunderbird showed an alarm for it, dismiss the alarm, refresh: it must not re-fire (E08 AVOID normalising).
 4. Stop `pcb serve`, restart Thunderbird: the calendars still show their cached events; start `pcb serve`, refresh: no error, no duplicated calendar.
@@ -89,7 +89,7 @@ Then repeat the Thunderbird dialog once with the bare URL and once with `http://
 
 **6.6 What to record (agent writes it up in `E08-thunderbird-caldav.md`, "Live results").** One line each, with [verified: live] or what differed:
 1. Detection through `/.well-known/caldav` (308), `/` and the principal; whether Basic credentials are sent preemptively.
-2. `sync-collection` end to end: empty token, delta, a deletion, and a 403 `valid-sync-token` reset (stop `pcb serve`, remove `pcb.db` and `pcb sync --full`, restart: a new epoch).
+2. `sync-collection` end to end: empty token, delta, a deletion, and a 403 `valid-sync-token` reset (stop `pcb serve`, remove `pcb.db`, `pcb.db-wal` and `pcb.db-shm` from the state directory, run `pcb sync --full`, restart: a new epoch).
 3. Multiget with a UID containing `@`, space or non-ASCII.
 4. `readOnly`: with M4 enabled, whether Thunderbird writes after M3-era subscriptions (E08 §5).
 5. The self-signed exception flow and the certificate validity (825 days) accepted.

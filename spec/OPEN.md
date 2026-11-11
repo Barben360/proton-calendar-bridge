@@ -54,4 +54,6 @@ For the final audit (parked minors):
 - Over-long comment in `serve.go` `refreshSettings` (Task 4).
 - Limiter: an expire, re-fail, evict test; a "no touch after Close" test inside `touch()` (Task 5).
 - A malformed token on a pending calendar answers 403, not 503 (race only); a stale token on a pending calendar is untested; a home-set Depth 0 service failure logs a warning per request (Task 6).
+- M3-R18: on platforms without filelock, `clients.json` writers take an in-process mutex only, so a concurrent CLI and `pcb serve` write can drop a `LastUsed` update (documented; Task 5).
+- Decision (Task 7): `pcb doctor` keeps an Error, not a Warning, for a too-wide `tls/` directory or key: a readable key may already have been exposed, and the repair at start cannot undo that.
 - `go-vcard` moved to `v0.0.0-20230815062825-8fda7d206ec9` through go-webdav (test-only import, MVS): only README and `example_test.go` differ (E17); re-check when go-webdav changes.

@@ -410,8 +410,9 @@ it imports `service` and the standard library only [verified:
   `calendar-multiget`; GET and HEAD on `<uid>.ics`; OPTIONS on any path with
   `DAV: 1, 3, calendar-access` (never the scheduling classes). PUT and DELETE: 403
   `DAV:need-privileges` until M4; PROPPATCH and MKCALENDAR: 405. Not built:
-  `calendar-query`, `free-busy-query` (403 `supported-report`), RFC 6638 scheduling,
-  507 paging [verified: the contract tests listed in E08, "What the bridge does (M3)"].
+  `calendar-query`, `free-busy-query` (403 `supported-report`), RFC 6638 scheduling
+  [verified: the contract tests listed in E08, "What the bridge does (M3)"], nor 507
+  paging [source: ruling M3-R23; no test asserts the absence].
 - Thunderbird is the reference client: its requests and failure modes were read from
   its source [verified: E08 source]; the MUST/SHOULD/AVOID list of
   `spec/experiments/E08-thunderbird-caldav.md` is the contract and every item maps to
@@ -535,7 +536,7 @@ with a dedicated user [call]; container image with the same binary and
 
 One TOML file, strict decoding (unknown keys and empty lists refused —
 lesson from the proton-cal fork audit). CalDAV client credentials live in
-the store (hashed) and are managed by `pcb client`, not hand-edited [call].
+`<state>/clients.json` (salted hashes, not the C2 SQLite store) and are managed by `pcb client`, not hand-edited [call].
 
 `[caldav]` (M3): `listen` (HOST:PORT, explicit host, default
 `127.0.0.1:1080`; `pcb serve --listen` overrides it under the same rule),
@@ -622,7 +623,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 
 Nothing after M5 is planned [decided 0007].
 
-M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (M2-R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (M2-R2, until E05); event decryption, the JSCalendar model, the iCalendar codec and E09 (M3, M2-R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: M2-R1 decrypt/E09 to M3; M2-R2 no core loop; M2-R3 Action ignored; M2-R4 ETag over the canonical row; M2-R8 a refused row read makes the calendar resync in full; M2-R10 fallback gap 5 min; M2-R11 deferred counts as partial; M2-R12 Ctrl-C of watch exits 0; M2-R13 cache error classes.
+M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (M2-R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (M2-R2, until E05); event decryption, the JSCalendar model (dropped, 0012), the iCalendar codec and E09 (M3, M2-R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: M2-R1 decrypt/E09 to M3; M2-R2 no core loop; M2-R3 Action ignored; M2-R4 ETag over the canonical row; M2-R8 a refused row read makes the calendar resync in full; M2-R10 fallback gap 5 min; M2-R11 deferred counts as partial; M2-R12 Ctrl-C of watch exits 0; M2-R13 cache error classes.
 
 M3 delivered (2026-11-11, branch m3-caldav-read): event decryption and the iCalendar merge (`internal/proton/cards`, `internal/ical`), the render and sync-token layer in `service.Local.Serve`, `internal/caldav` (read-only CalDAV), `pcb client`, `pcb serve` with generated or user TLS, the doctor checks for listener, certificate and clients, E08 contract tests, E09 (offline), E17. Deferred: the live Thunderbird session and the live halves of E08/E09/E11 (after M4); writes (M4); the daemon behaviours (M5). Rulings recorded: M3-R1 privileges read+write on owned calendars, live session after M4; R2 iCalendar-native (decision 0012); R3 duplicate masters; R4 placeholders; R5 own server; R6 serve reads on the writer's handle; R9 to R12, R16 tokens and ETags; R15 writability from member permissions parked to M4; R17 to R21 client store and limiter; R22 to R26, R30 503 rather than 4xx; R28 to R32 `pcb serve` and TLS.
 
