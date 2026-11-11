@@ -261,7 +261,8 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
-Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5, see "M5 carry-overs" in §18). Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
+Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5, see "M5 carry-overs" in §18).
+Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 
@@ -456,7 +457,7 @@ M5 carry-overs (known gaps left by M1, to close with the daemon work):
 - R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.
 - R8m: a pending login holds the password in memory with no timeout in M1; the daemon gives it a TTL (about 5 min).
 - R10m: a leaf state-file lock (held only for load-and-write) on every writer of `state.json`, to close the rare spurious `needs-login` overwrite.
-- R17: member-passphrase signature verification (E10) must be settled before M4 encrypts to a calendar key.
+- R17 (needed before M4, not M5): member-passphrase signature verification (E10) must be settled before M4 encrypts to a calendar key.
 - R16: `pcb login resume --totp CODE`.
 
 ## 19. Security model (summary)
