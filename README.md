@@ -25,6 +25,19 @@ Design phase, milestone M0 (foundations): the CLI skeleton exists
 (`pcb version`, the `--json` envelope, exit codes); there is no bridge yet.
 The design is in `spec/SPEC.md`.
 
+## Usage
+
+```sh
+pcb login                              # prompts for what is missing; or set PCB_USERNAME, PCB_PASSWORD, PCB_TOTP
+pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
+pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
+pcb status                             # the login state, no network call
+pcb calendar list [--json]
+pcb logout
+```
+
+Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
+
 ## Build
 
 ```sh

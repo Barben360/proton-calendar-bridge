@@ -22,17 +22,25 @@ func Root(use, short string, subs ...*cobra.Command) *cobra.Command {
 	root.SilenceUsage = true
 	root.SilenceErrors = true
 	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
+	root.CompletionOptions.DisableDefaultCmd = true // not part of the usage contract
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return UsageError(err) })
 	return root
 }
+
+// groupKey marks the commands Group builds, which have no behaviour of their own.
+const groupKey = "pcb/group"
+
+// IsGroup reports whether c was built by Group.
+func IsGroup(c *cobra.Command) bool { return c.Annotations[groupKey] == "true" }
 
 // Group builds a command that only holds subcommands. An unknown
 // subcommand is a usage error (exit 2); with none given it prints its help,
 // or in JSON mode fails with a usage error so stdout stays one envelope.
 func Group(use, short string, subs ...*cobra.Command) *cobra.Command {
 	c := &cobra.Command{
-		Use:   use,
-		Short: short,
+		Use:         use,
+		Short:       short,
+		Annotations: map[string]string{groupKey: "true"},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return UsageError(fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath()))
@@ -131,11 +139,16 @@ func (e *reportedError) Unwrap() error { return e.error }
 // Run executes root with args and returns the process exit code. A failure
 // is printed on stderr as text, or as the one envelope on stdout with --json.
 func Run(root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.Code {
+	return RunContext(context.Background(), root, args, stdout, stderr)
+}
+
+// RunContext is Run with ctx, which commands see through cmd.Context().
+func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.Code {
 	asJSON := jsonRequested(args)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	cmd, err := root.ExecuteContextC(context.WithValue(context.Background(), jsonKey{}, asJSON))
+	cmd, err := root.ExecuteContextC(context.WithValue(ctx, jsonKey{}, asJSON))
 	if err == nil {
 		return exitcode.OK
 	}

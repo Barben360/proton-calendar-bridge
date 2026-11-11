@@ -40,7 +40,7 @@ func CheckUsageContract(t *testing.T, newRoot func() *cobra.Command) {
 			"unknown flag":       {"--bogus-flag"},
 			"unexpected operand": {"nope"},
 		}
-		if len(path) == 0 || hasSubcommands(newRoot(), path) {
+		if len(path) == 0 || cli.IsGroup(find(newRoot(), path)) {
 			cases["no subcommand"] = nil
 		}
 		for what, extra := range cases {
@@ -94,10 +94,6 @@ func find(root *cobra.Command, path []string) *cobra.Command {
 		}
 	}
 	return c
-}
-
-func hasSubcommands(root *cobra.Command, path []string) bool {
-	return len(find(root, path).Commands()) > 0
 }
 
 // commandName is the name an envelope must carry: the path, or the binary
