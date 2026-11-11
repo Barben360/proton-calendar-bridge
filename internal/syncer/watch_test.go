@@ -38,13 +38,16 @@ func TestWatchBacksOffAndStops(t *testing.T) {
 	// (back to 30 s: the success reset the count), then a stop.
 	outcomes := append(append(append(repeat(errFlaky, 7), nil), errFlaky), errStop)
 	p, runs := script(t, outcomes...)
-	var waits []time.Duration
+	var waits, nexts []time.Duration
 	var seen []error
 	err := syncer.Watch(t.Context(), p, syncer.WatchOptions{
-		Sleep:  func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil },
-		OnPass: func(r syncer.Report, err error) { seen = append(seen, err) },
-		Stop:   func(err error) bool { return errors.Is(err, errStop) },
-		Rand:   func() float64 { return 0.5 }, // no jitter
+		Sleep: func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil },
+		OnPass: func(r syncer.Report, err error, next time.Duration) {
+			seen = append(seen, err)
+			nexts = append(nexts, next)
+		},
+		Stop: func(err error) bool { return errors.Is(err, errStop) },
+		Rand: func() float64 { return 0.5 }, // no jitter
 	})
 	if !errors.Is(err, errStop) {
 		t.Fatalf("Watch = %v, want the stop error", err)
@@ -56,6 +59,11 @@ func TestWatchBacksOffAndStops(t *testing.T) {
 	}
 	if *runs != len(outcomes) || !slices.Equal(seen, outcomes) {
 		t.Errorf("%d passes, OnPass saw %v; want %d passes, each reported", *runs, seen, len(outcomes))
+	}
+	// OnPass is told each wait before it starts, and 0 for the pass Watch
+	// stops on.
+	if wantNext := append(slices.Clone(want), 0); !slices.Equal(nexts, wantNext) {
+		t.Errorf("OnPass next %v, want %v", nexts, wantNext)
 	}
 }
 
@@ -155,7 +163,7 @@ func TestWatchHonoursContext(t *testing.T) {
 		return syncer.Report{}, errFlaky
 	}, syncer.WatchOptions{
 		Sleep:  func(context.Context, time.Duration) error { slept++; return nil },
-		OnPass: func(syncer.Report, error) { reported++ },
+		OnPass: func(syncer.Report, error, time.Duration) { reported++ },
 		Stop:   func(error) bool { stopAsked++; return false },
 	})
 	if !errors.Is(err, context.Canceled) || reported != 0 || stopAsked != 0 || slept != 0 {

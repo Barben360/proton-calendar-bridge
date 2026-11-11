@@ -327,7 +327,8 @@ func TestWatchStopsWhenLoginNeeded(t *testing.T) {
 	e.login(t, e.req()) // no unattended relogin: a person is needed once the session ends
 	e.f.RevokeSessions()
 	passes := 0
-	err := e.svc.WatchSync(t.Context(), service.SyncRequest{}, 0, func(_ service.SyncResult, err error) {
+	err := e.svc.WatchSync(t.Context(), service.SyncRequest{}, 0, func(p service.WatchPass) {
+		err := p.Err
 		passes++
 		_ = wantExit(t, err, exitcode.MustAct)
 	})
@@ -352,7 +353,8 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var modes []string
-	err := e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(res service.SyncResult, err error) {
+	err := e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) {
+		res, err := p.Result, p.Err
 		if err != nil {
 			t.Errorf("pass: %v", err)
 		}
@@ -379,7 +381,8 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 	ctx, cancel = context.WithCancel(t.Context())
 	defer cancel()
 	var outcomes []string
-	err = e.svc.WatchSync(ctx, service.SyncRequest{Full: true}, 0, func(res service.SyncResult, err error) {
+	err = e.svc.WatchSync(ctx, service.SyncRequest{Full: true}, 0, func(p service.WatchPass) {
+		res, err := p.Result, p.Err
 		if err != nil {
 			outcomes = append(outcomes, "failed")
 		} else {
@@ -407,7 +410,8 @@ func TestWatchKeepsGoingAfterPartial(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var codes []exitcode.Code
-	_ = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(_ service.SyncResult, err error) {
+	_ = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) {
+		err := p.Err
 		codes = append(codes, exitcode.From(err))
 		if len(codes) == 3 {
 			cancel()
@@ -575,7 +579,7 @@ func TestSyncOnDamagedTablesMustAct(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	passes := 0
-	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.SyncResult, error) {
+	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.WatchPass) {
 		if passes++; passes == 3 {
 			cancel() // the watch did not stop by itself: end the test
 		}
@@ -639,14 +643,19 @@ func TestWatchWaitsRetryAfterAndStopsOnANewerCache(t *testing.T) {
 	e.f.FailNext("GET", "/calendar/v1", 429, 0, 20*60)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	var codes []exitcode.Code
-	err := e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(_ service.SyncResult, err error) {
-		if codes = append(codes, exitcode.From(err)); len(codes) == 2 {
+	var passes []service.WatchPass
+	err := e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) {
+		if passes = append(passes, p); len(passes) == 2 {
 			cancel()
 		}
 	})
-	if err != nil || len(codes) != 2 || codes[0] != exitcode.Blocked || codes[1] != exitcode.OK {
-		t.Fatalf("WatchSync = %v, passes %v; want a blocked pass then a good one", err, codes)
+	if err != nil || len(passes) != 2 || exitcode.From(passes[0].Err) != exitcode.Blocked || passes[1].Err != nil {
+		t.Fatalf("WatchSync = %v, passes %+v; want a blocked pass then a good one", err, passes)
+	}
+	// The pass is told when the next one runs; the one-shot "retry in"
+	// hint is dropped (the watch retries by itself).
+	if passes[0].Next != 20*time.Minute || exitcode.HintOf(passes[0].Err) != "" {
+		t.Errorf("rate-limited pass: next %v, hint %q; want 20m0s and no hint", passes[0].Next, exitcode.HintOf(passes[0].Err))
 	}
 	if len(e.clk.slept) == 0 || e.clk.slept[0] != 20*time.Minute {
 		t.Errorf("slept %v, want the 20 min Proton asked for first", e.clk.slept)
@@ -661,16 +670,19 @@ func TestWatchWaitsRetryAfterAndStopsOnANewerCache(t *testing.T) {
 	}
 	_ = db.Close()
 	slept := len(e.clk.slept)
-	passes := 0
+	passes = nil
 	ctx, cancel = context.WithCancel(t.Context())
 	defer cancel()
-	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.SyncResult, error) {
-		if passes++; passes == 3 {
+	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) {
+		if passes = append(passes, p); len(passes) == 3 {
 			cancel() // the watch did not stop by itself: end the test
 		}
 	})
-	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "upgrade pcb") || passes != 1 || len(e.clk.slept) != slept {
+	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "upgrade pcb") || len(passes) != 1 || len(e.clk.slept) != slept {
 		t.Errorf("newer cache: %v (hint %q) after %d passes, %d sleeps; want it to stop after 1 pass, no sleep",
-			ee, ee.Hint, passes, len(e.clk.slept)-slept)
+			ee, ee.Hint, len(passes), len(e.clk.slept)-slept)
+	}
+	if len(passes) > 0 && passes[0].Next != 0 {
+		t.Errorf("the pass the watch stops on: next %v, want 0", passes[0].Next)
 	}
 }

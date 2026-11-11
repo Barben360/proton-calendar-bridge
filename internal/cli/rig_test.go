@@ -101,7 +101,7 @@ func (*stubAPI) Sync(context.Context, service.SyncRequest) (service.SyncResult, 
 	return service.SyncResult{}, nil
 }
 
-func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, func(service.SyncResult, error)) error {
+func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, func(service.WatchPass)) error {
 	return nil
 }
 

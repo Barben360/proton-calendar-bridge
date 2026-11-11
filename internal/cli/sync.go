@@ -39,8 +39,8 @@ func (a *app) newSync() *cobra.Command {
 			defer a.closeService(svc)
 			req := service.SyncRequest{Full: full}
 			if watch {
-				err := svc.WatchSync(cmd.Context(), req, interval, func(res service.SyncResult, err error) {
-					a.printPass(cmd, res, err)
+				err := svc.WatchSync(cmd.Context(), req, interval, func(p service.WatchPass) {
+					a.printPass(cmd, p)
 				})
 				return Finish(cmd, nil, "", err)
 			}
@@ -61,19 +61,22 @@ func (a *app) newSync() *cobra.Command {
 }
 
 // printPass writes one watch pass: a timestamped line per calendar on
-// stdout, or the failure of a pass that got nowhere on stderr.
-func (a *app) printPass(cmd *cobra.Command, res service.SyncResult, err error) {
+// stdout, or the failure of a pass that got nowhere on stderr with when
+// the next pass runs. The failure the watch stops on (Next 0) is left to
+// the final report, so it is printed once.
+func (a *app) printPass(cmd *cobra.Command, p service.WatchPass) {
 	stamp := time.Now().Format(time.RFC3339)
-	if len(res.Calendars) == 0 {
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "%s sync failed: %s\n", stamp, err)
-			if h := exitcode.HintOf(err); h != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "%s hint: %s\n", stamp, h)
-			}
-		}
+	if len(p.Result.Calendars) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), syncText(p.Result, stamp+" "))
 		return
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), syncText(res, stamp+" "))
+	if p.Err == nil || p.Next == 0 {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "%s sync failed: %s; next try in %s\n", stamp, p.Err, p.Next.Round(time.Second))
+	if h := exitcode.HintOf(p.Err); h != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s hint: %s\n", stamp, h)
+	}
 }
 
 // syncText is one line per calendar, each starting with prefix.

@@ -63,7 +63,7 @@ func (l *Local) Sync(ctx context.Context, req SyncRequest) (SyncResult, error) {
 // service's own mutex is not (a login or logout may run meanwhile).
 // req.Full applies until a pass gets through (exit 0 or 40); a partial pass
 // is reported but does not make the watch back off.
-func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(SyncResult, error)) error {
+func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass)) error {
 	if l.closed.Load() {
 		return errClosed()
 	}
@@ -95,9 +95,9 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 	}, syncer.WatchOptions{
 		Interval: interval,
 		Sleep:    l.o.Sleep,
-		OnPass: func(syncer.Report, error) {
+		OnPass: func(_ syncer.Report, _ error, next time.Duration) {
 			if onPass != nil {
-				onPass(last, lastErr)
+				onPass(WatchPass{Result: last, Err: watchError(lastErr), Next: next})
 			}
 		},
 		Stop:       stopsWatch,
@@ -107,6 +107,19 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 		return nil // the caller stopped the watch: a normal end
 	}
 	return l.fail(err)
+}
+
+// watchError is err without the "retry in X" hint of a rate limit: the
+// watch waits that long by itself.
+func watchError(err error) error {
+	var (
+		ee *exitcode.Error
+		d  *detail
+	)
+	if errors.As(err, &d) && d.limited && errors.As(err, &ee) {
+		return &exitcode.Error{Code: ee.Code, Err: ee.Err}
+	}
+	return err
 }
 
 // syncPass runs one pass on the stored session, without the sync lock.

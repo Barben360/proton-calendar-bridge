@@ -27,8 +27,8 @@ type API interface {
 	Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
 	// WatchSync repeats Sync every interval (0: DefaultWatchInterval) until
 	// ctx ends (nil: a normal stop) or a person is needed (that error), calling
-	// onPass after every pass with its result and error.
-	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(SyncResult, error)) error
+	// onPass after every pass.
+	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass)) error
 	// Events lists a calendar's cached events, without any network call.
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
 	// Close releases what the service holds, aborting a login waiting for a code.
@@ -130,6 +130,16 @@ type SyncRequest struct {
 // SyncResult is what a pass did, one entry per calendar.
 type SyncResult struct {
 	Calendars []CalendarSync `json:"calendars"`
+}
+
+// WatchPass is one pass of WatchSync: its result and error (as Sync
+// returns them, except that a hint only a one-shot sync needs, "retry in
+// X", is dropped), and the wait before the next pass, 0 when the watch
+// stops on Err (WatchSync then returns it).
+type WatchPass struct {
+	Result SyncResult
+	Err    error
+	Next   time.Duration
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or

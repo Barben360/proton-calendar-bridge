@@ -337,7 +337,9 @@ relogin credentials, client tokens (hashed, never stored in clear).
   by a newer pcb or a system without file locks (exit 20). Session-wide
   failures (429, 5xx, network, session ended) stop the pass and, in watch,
   back off x2 up to 10 min with jitter, or wait the 429's `Retry-After` when
-  longer (up to 1 h; the one-shot `pcb sync` exits 20 with "retry in X"); any
+  longer (up to 1 h; the one-shot `pcb sync` exits 20 with "retry in X";
+  the watch prints "next try in X" after a failed pass instead, and the
+  error it stops on once); any
   other per-calendar failure is recorded on that calendar, the others
   continue, and the pass exits 40 (partial); in watch a partial pass is
   reported but does not back off (the other calendars keep the interval). A calendar deferred by the

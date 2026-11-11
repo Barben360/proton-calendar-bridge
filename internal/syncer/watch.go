@@ -21,7 +21,7 @@ const (
 type WatchOptions struct {
 	Interval time.Duration                                    // between passes; default DefaultInterval, at least MinInterval
 	Sleep    func(ctx context.Context, d time.Duration) error // default: a timer, cut short by ctx
-	OnPass   func(Report, error)                              // told every pass's outcome; nil: nothing
+	OnPass   func(Report, error, time.Duration)               // every pass's outcome and the wait before the next (0: Watch returns); nil: nothing
 	Stop     func(error) bool                                 // true: Watch returns this pass error; nil: never
 	Rand     func() float64                                   // jitter source in [0, 1); default math/rand/v2
 	// RetryAfter is the least wait a pass error asks for (a 429's
@@ -56,21 +56,25 @@ func Watch(ctx context.Context, pass func(context.Context) (Report, error), o Wa
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if o.OnPass != nil {
-			o.OnPass(rep, err)
-		}
 		wait := o.Interval
-		if err != nil {
-			if o.Stop != nil && o.Stop(err) {
-				return err
-			}
+		stop := err != nil && o.Stop != nil && o.Stop(err)
+		switch {
+		case stop:
+			wait = 0
+		case err != nil:
 			failures++
 			wait = backoff(o.Interval, failures, o.Rand())
 			if o.RetryAfter != nil {
 				wait = max(wait, min(o.RetryAfter(err), MaxRetryAfter))
 			}
-		} else {
+		default:
 			failures = 0
+		}
+		if o.OnPass != nil {
+			o.OnPass(rep, err, wait)
+		}
+		if stop {
+			return err
 		}
 		if err := o.Sleep(ctx, wait); err != nil {
 			if ctx.Err() != nil {

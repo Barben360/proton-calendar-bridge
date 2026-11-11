@@ -33,7 +33,8 @@ func fail(code exitcode.Code, msg, hint string) *exitcode.Error {
 // help. Its text is the message.
 type detail struct {
 	msg        string
-	retryAfter time.Duration // Proton's Retry-After (a 429), 0 if none
+	limited    bool          // Proton is rate limiting (a 429): the hint is a one-shot "retry in X"
+	retryAfter time.Duration // Proton's Retry-After, 0 if none
 	final      bool          // a retry cannot help: a person must change something
 }
 
@@ -137,7 +138,7 @@ func protonDown(e *api.Error) error {
 		if e.RetryAfter > 0 {
 			wait = e.RetryAfter.Round(time.Second).String()
 		}
-		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", retryAfter: e.RetryAfter},
+		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter},
 			Hint: "retry in " + wait}
 	case e.Status >= 500:
 		return blocked("Proton is unavailable", "try again later")

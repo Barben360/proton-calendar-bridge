@@ -110,7 +110,8 @@ func TestSyncIntervalBelowMinimumIsUsage(t *testing.T) {
 	}
 }
 
-// watchStub plays two passes then stops with the error a Ctrl-C produces.
+// watchStub plays a good pass, a failed one (next try in 2 min), then,
+// when err is set, the pass the watch stops on with err.
 type watchStub struct {
 	stubAPI
 	calls    int
@@ -118,11 +119,16 @@ type watchStub struct {
 	err      error
 }
 
-func (s *watchStub) WatchSync(_ context.Context, _ service.SyncRequest, iv time.Duration, onPass func(service.SyncResult, error)) error {
+func (s *watchStub) WatchSync(_ context.Context, _ service.SyncRequest, iv time.Duration, onPass func(service.WatchPass)) error {
 	s.calls++
 	s.interval = iv
-	onPass(service.SyncResult{Calendars: []service.CalendarSync{{ID: "c1", Name: "Work", Mode: "incremental", Added: 1, Events: 3}}}, nil)
-	onPass(service.SyncResult{}, errors.New("Proton is unavailable"))
+	onPass(service.WatchPass{Result: service.SyncResult{Calendars: []service.CalendarSync{{ID: "c1", Name: "Work", Mode: "incremental", Added: 1, Events: 3}}},
+		Next: 30 * time.Second})
+	onPass(service.WatchPass{Err: &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("Proton is unavailable"), Hint: "try again later"},
+		Next: 2 * time.Minute})
+	if s.err != nil {
+		onPass(service.WatchPass{Err: s.err})
+	}
 	return s.err
 }
 
@@ -140,12 +146,14 @@ func TestSyncWatchCancelledIsExitZero(t *testing.T) {
 	}
 }
 
+// A failed pass says when the next one runs; the error the watch stops on
+// is printed once, by the final report.
 func TestSyncWatchPrintsAPassLineEach(t *testing.T) {
 	t.Parallel()
-	s := &watchStub{err: &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the operation was cancelled or timed out"), Hint: "run the command again"}}
+	s := &watchStub{err: &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the Proton session has ended"), Hint: "run pcb login"}}
 	r := stubRig(t, nil)
 	r.svc = s
-	r.want(exitcode.Blocked, "sync", "--watch")
+	r.want(exitcode.MustAct, "sync", "--watch")
 	lines := strings.Split(strings.TrimSpace(r.out.String()), "\n")
 	if len(lines) != 1 || !strings.HasSuffix(lines[0], " Work: incremental sync, +1 ~0 -0, 3 events") {
 		t.Fatalf("stdout = %q", r.out.String())
@@ -153,7 +161,11 @@ func TestSyncWatchPrintsAPassLineEach(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, strings.Fields(lines[0])[0]); err != nil {
 		t.Errorf("line has no timestamp: %q", lines[0])
 	}
-	if !strings.Contains(r.errb.String(), "sync failed: Proton is unavailable") || !strings.Contains(r.errb.String(), "Hint: run the command again") {
-		t.Errorf("stderr = %q", r.errb.String())
+	stderr := r.errb.String()
+	if !strings.Contains(stderr, "sync failed: Proton is unavailable; next try in 2m0s") || !strings.Contains(stderr, "hint: try again later") {
+		t.Errorf("stderr = %q, want the failed pass with its next try", stderr)
+	}
+	if n := strings.Count(stderr, "the Proton session has ended"); n != 1 || !strings.Contains(stderr, "Hint: run pcb login") {
+		t.Errorf("stderr = %q: the stopping error is printed %d times, want once with its hint", stderr, n)
 	}
 }
