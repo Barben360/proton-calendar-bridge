@@ -26,10 +26,10 @@ func TestMain(m *testing.M) {
 }
 
 type fakeCall struct {
-	Args        []string `json:"args"`
-	ConfigDir   string   `json:"config_dir"`
-	HasPassword bool     `json:"has_password"`
-	Failed      bool     `json:"failed,omitempty"`
+	Args      []string `json:"args"`
+	ConfigDir string   `json:"config_dir"`
+	EnvKeys   []string `json:"env_keys"`
+	Failed    bool     `json:"failed,omitempty"`
 }
 
 func readLog(path string) []fakeCall {
@@ -50,6 +50,15 @@ func readLog(path string) []fakeCall {
 	return calls
 }
 
+func envKeys() []string {
+	var ks []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		ks = append(ks, k)
+	}
+	return ks
+}
+
 func isWrite(a []string) bool {
 	return len(a) >= 2 && (a[0] == "create" || a[0] == "update" || a[0] == "delete")
 }
@@ -57,7 +66,7 @@ func isWrite(a []string) bool {
 func fakeProtonCal(args []string) int {
 	logPath := os.Getenv("PCB_SEED_LOG")
 	prev := readLog(logPath)
-	call := fakeCall{Args: args, ConfigDir: os.Getenv("PROTON_CAL_CONFIG_DIR"), HasPassword: os.Getenv("PROTON_CAL_PASSWORD") != ""}
+	call := fakeCall{Args: args, ConfigDir: os.Getenv("PROTON_CAL_CONFIG_DIR"), EnvKeys: envKeys()}
 	writes := 0
 	for _, c := range prev {
 		if isWrite(c.Args) {
@@ -72,8 +81,8 @@ func fakeProtonCal(args []string) int {
 		_, _ = f.Write(append(b, '\n'))
 		_ = f.Close()
 	}
-	if call.Failed {
-		fmt.Fprintln(os.Stderr, "Error: API error 429: Too Many Requests")
+	if call.Failed || (os.Getenv("PCB_SEED_FAIL_READ") == args[0]) {
+		fmt.Fprintln(os.Stderr, "Error: proton api error: status=429 code=0: Too Many Requests")
 		return 1
 	}
 	cals := []map[string]any{
@@ -82,11 +91,19 @@ func fakeProtonCal(args []string) int {
 	}
 	var rows []map[string]any
 	creates := 0
-	stamp := func(s string) string {
+	// The real tool renders timed starts in its own zone (Paris here) and
+	// all-day starts at UTC midnight.
+	paris, _ := time.LoadLocation("Europe/Paris")
+	stamp := func(s, tz string) string {
 		if len(s) == 10 {
 			return s + "T00:00:00Z"
 		}
-		return strings.Replace(s, " ", "T", 1) + ":00Z"
+		loc, err := time.LoadLocation(tz)
+		if err != nil || tz == "" {
+			loc = time.UTC
+		}
+		t, _ := time.ParseInLocation("2006-01-02 15:04", s, loc)
+		return t.In(paris).Format(time.RFC3339)
 	}
 	drop := func(start string) {
 		rows = slices.DeleteFunc(rows, func(r map[string]any) bool { return r["start"] == start })
@@ -105,22 +122,32 @@ func fakeProtonCal(args []string) int {
 			if flagValue(c.Args, "--repeat") != "daily" || n < 1 {
 				n = 1
 			}
-			t0, _ := time.Parse("2006-01-02T15:04:05Z", stamp(flagValue(c.Args, "--start")))
+			t0, _ := time.Parse(time.RFC3339, stamp(flagValue(c.Args, "--start"), flagValue(c.Args, "--tz")))
 			for i := 0; i < n; i++ { // the real listing expands series occurrences
-				rows = append(rows, map[string]any{"id": id, "summary": c.Args[2], "start": t0.AddDate(0, 0, i).Format("2006-01-02T15:04:05Z")})
+				rows = append(rows, map[string]any{"id": id, "summary": c.Args[2], "start": t0.AddDate(0, 0, i).Format(time.RFC3339)})
 			}
 		case c.Args[0] == "update" && flagValue(c.Args, "--occurrence") != "":
-			drop(stamp(flagValue(c.Args, "--occurrence")))
-			rows = append(rows, map[string]any{"id": "EVE-" + c.Args[2], "summary": flagValue(c.Args, "--summary"), "start": stamp(flagValue(c.Args, "--start"))})
+			drop(stamp(flagValue(c.Args, "--occurrence"), flagValue(c.Args, "--tz")))
+			rows = append(rows, map[string]any{"id": "EVE-" + c.Args[2], "summary": flagValue(c.Args, "--summary"), "start": stamp(flagValue(c.Args, "--start"), flagValue(c.Args, "--tz"))})
 		case c.Args[0] == "delete" && flagValue(c.Args, "--occurrence") != "":
-			drop(stamp(flagValue(c.Args, "--occurrence")))
+			drop(stamp(flagValue(c.Args, "--occurrence"), flagValue(c.Args, "--tz")))
 		}
 	}
 	switch {
 	case args[0] == "calendars":
 		return say(cals)
 	case args[0] == "events":
-		return say(rows)
+		// proton-cal filters by its --from/--days window in its own zone.
+		wf, _ := time.ParseInLocation("2006-01-02", flagValue(args, "--from"), paris)
+		nd, _ := strconv.Atoi(flagValue(args, "--days"))
+		var in []map[string]any
+		for _, r := range rows {
+			t, _ := time.Parse(time.RFC3339, r["start"].(string))
+			if !t.Before(wf) && t.Before(wf.AddDate(0, 0, nd)) {
+				in = append(in, r)
+			}
+		}
+		return say(in)
 	case args[0] == "create" && args[1] == "calendar":
 		return say(map[string]any{"id": "CAL-" + strings.ToUpper(args[2]), "name": args[2]})
 	case args[0] == "create" && args[1] == "event":
@@ -188,8 +215,11 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	r := &rig{ds: ds, log: filepath.Join(t.TempDir(), "calls.jsonl"), cfg: filepath.Join(t.TempDir(), "pcb-lab-seed")}
-	t.Setenv("PROTON_CAL_PASSWORD", "must-not-reach-the-child")
-	t.Setenv("PCB_LAB_PASSWORD", "must-not-reach-the-child")
+	for _, k := range []string{"PROTON_CAL_PASSWORD", "PROTON_CAL_USERNAME", "PROTON_CAL_TOTP", "PROTON_CAL_MCP_TOKEN", "PCB_LAB_PASSWORD", "SSH_AUTH_SOCK", "PCB_SEED_RANDOM_SENTINEL"} {
+		t.Setenv(k, "must-not-reach-the-child")
+	}
+	t.Setenv("https_proxy", "http://proxy.invalid:3128") // allowed, in any case
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	r.runner = &ExecRunner{Bin: os.Args[0], ConfigDir: r.cfg, Env: []string{"GORACE=atexit_sleep_ms=0", "PCB_SEED_FAKE=1", "PCB_SEED_LOG=" + r.log}}
 	return r
 }
@@ -198,6 +228,13 @@ func (r *rig) apply(t *testing.T) (Result, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
+	// The runner's environment is an allowlist: the fake's knobs go through Env.
+	r.runner.Env = slices.DeleteFunc(r.runner.Env, func(kv string) bool { return strings.HasPrefix(kv, "PCB_SEED_FAIL_") })
+	for _, k := range []string{"PCB_SEED_FAIL_AFTER", "PCB_SEED_FAIL_READ"} {
+		if v := os.Getenv(k); v != "" {
+			r.runner.Env = append(r.runner.Env, k+"="+v)
+		}
+	}
 	return Apply(ctx, r.ds, r.runner, ApplyOptions{
 		Wait:  2 * time.Second,
 		Sleep: func(_ context.Context, d time.Duration) error { r.sleeps = append(r.sleeps, d); return nil },
@@ -234,8 +271,15 @@ func TestApplyDrivesProtonCalInOrderWithIDsAndDefaultCalendar(t *testing.T) {
 		if c.ConfigDir != r.cfg {
 			t.Fatalf("%v ran with PROTON_CAL_CONFIG_DIR=%q, want %q", c.Args, c.ConfigDir, r.cfg)
 		}
-		if c.HasPassword {
-			t.Fatalf("%v inherited PROTON_CAL_PASSWORD", c.Args)
+		for _, k := range c.EnvKeys {
+			if strings.HasPrefix(k, "PROTON_CAL_") && k != "PROTON_CAL_CONFIG_DIR" || k == "SSH_AUTH_SOCK" || strings.HasPrefix(k, "PCB_LAB_") || k == "PCB_SEED_RANDOM_SENTINEL" {
+				t.Fatalf("%v inherited %s", c.Args, k)
+			}
+		}
+		for _, k := range []string{"PATH", "https_proxy", "XDG_STATE_HOME", "PROTON_CAL_CONFIG_DIR"} {
+			if !slices.Contains(c.EnvKeys, k) {
+				t.Fatalf("%v did not get %s (keys %v)", c.Args, k, c.EnvKeys)
+			}
 		}
 		for _, a := range c.Args {
 			if strings.Contains(a, "{id}") || strings.Contains(a, "{cal}") {
@@ -347,4 +391,110 @@ func writeScript(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+const edgeDataset = `
+seed: 1
+range: {from: "2021-01-01", to: "2027-06-30"}
+calendars: [{key: default, name: Main, default: true}]
+text:
+  - {title: First edge, calendar: default, start: "2021-01-01 07:00", end: "2021-01-01 08:00", tz: Asia/Tokyo}
+  - {title: Last edge, calendar: default, start: "2027-06-30 23:00", end: "2027-06-30 23:30", tz: America/New_York}
+`
+
+// The edge events fall on 2020-12-31 and 2027-07-01 in the listing's zone
+// (Paris): a window of exactly the range would not list them and a rerun would
+// create them twice.
+func TestApplyRecognisesEdgeEventsListedInAnotherTimezone(t *testing.T) {
+	r := newRig(t)
+	ds, err := loadInline(t, edgeDataset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ds = ds
+	if _, err := r.apply(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(r.writes()); got != 2 {
+		t.Fatalf("first run: %d writes, want 2", got)
+	}
+	if res, err := r.apply(t); err != nil || res.Written != 0 || len(r.writes()) != 2 {
+		t.Fatalf("rerun wrote %d (err %v), %d writes in all: the edge events were not recognised", res.Written, err, len(r.writes()))
+	}
+}
+
+func TestListingWindowCoversRangeWithAMarginEachSide(t *testing.T) {
+	ds := load(t)
+	from, days := ListingWindow(ds)
+	f, _ := time.Parse(dateLayout, from)
+	end := f.AddDate(0, 0, days)
+	if from != "2020-12-31" || end.Format(dateLayout) != "2027-07-02" {
+		t.Errorf("window %s + %d days ends %s, want 2020-12-31 to 2027-07-02 (range 2021-01-01..2027-06-30, one day each side)", from, days, end.Format(dateLayout))
+	}
+}
+
+func TestApplyStopsOnRateLimitOfAListing(t *testing.T) {
+	for _, listing := range []string{"calendars", "events"} {
+		r := newRig(t)
+		t.Setenv("PCB_SEED_FAIL_READ", listing)
+		res, err := r.apply(t)
+		eventWrites := 0 // creating the missing calendar before the events listing is fine
+		for _, w := range r.writes() {
+			if w.Args[1] == "event" {
+				eventWrites++
+			}
+		}
+		if !errors.Is(err, ErrRateLimited) || eventWrites != 0 {
+			t.Errorf("%s 429: err = %v (%d result writes), %d event writes; want ErrRateLimited and no event write", listing, err, res.Written, eventWrites)
+		}
+	}
+}
+
+func TestRateLimitedMatchesProtonCalsErrorOnly(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"Error: proton api error: status=429 code=0: Too Many Requests": true,
+		"proton api error: status=429 code=2028: slow down":             true,
+		"Error: too many requests, retry later":                         true,
+		"proton api error: status=4290 code=1: x":                       false,
+		"Error: event 1429 not found":                                   false,
+		"Error: calendar \"Room 429\" not found":                        false,
+		"proton api error: status=422 code=2001: bad start":             false,
+	} {
+		if got := rateLimited(&RunError{Stderr: stderr}); got != want {
+			t.Errorf("rateLimited(%q) = %v, want %v", stderr, got, want)
+		}
+	}
+}
+
+func TestAllDayOccurrenceMatchesByCalendarDate(t *testing.T) {
+	ds, err := loadInline(t, `
+seed: 1
+range: {from: "2021-01-01", to: "2027-06-30"}
+calendars: [{key: default, name: Main, default: true}]
+series:
+  - {title: Party, calendar: default, all_day: true, start: "2021-06-12", repeat: yearly, count: 5, edit: {occurrence: "2022-06-12", start: "2022-06-13"}, delete: {occurrence: "2024-06-12"}}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(listed string) bool {
+		ts, err := time.Parse(time.RFC3339, listed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range Plan(ds, []Existing{{ID: "s001", EventID: "E", Start: ts}, {ID: "s001.e", EventID: "F"}}) {
+			if c.Op == OpDelete {
+				return true
+			}
+		}
+		return false
+	}
+	for _, listed := range []string{"2024-06-12T00:00:00+02:00", "2024-06-12T00:00:00Z", "2024-06-12T00:00:00-05:00"} {
+		if !has(listed) {
+			t.Errorf("all-day occurrence listed at %s not seen as still present, so the delete would be skipped", listed)
+		}
+	}
+	if has("2024-06-13T00:00:00Z") {
+		t.Error("a listing of another date counted as the occurrence")
+	}
 }

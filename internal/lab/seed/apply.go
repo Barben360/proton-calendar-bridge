@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -22,24 +23,31 @@ type Runner interface {
 	Run(ctx context.Context, args []string) ([]byte, error)
 }
 
-// ExecRunner runs the proton-cal binary in an isolated config dir. Only what
-// the tool needs reaches it: the lab's own credentials (PCB_LAB_*) and
-// proton-cal's login variables (PROTON_CAL_USERNAME, _PASSWORD, _TOTP,
-// _MAILBOX_PASSWORD) are removed from its environment, since apply never logs in.
+// ExecRunner runs the proton-cal binary in an isolated config dir. Its
+// environment is an allowlist (PATH, HOME, XDG_*, TZ, LANG, LC_*, SSL_CERT_*,
+// proxy variables) plus PROTON_CAL_CONFIG_DIR; apply never logs in, so no
+// credential variable is passed at all.
 type ExecRunner struct {
 	Bin       string   // proton-cal binary
 	ConfigDir string   // PROTON_CAL_CONFIG_DIR
 	Env       []string // extra KEY=VALUE entries (tests)
 }
 
+// childEnvAllowed reports whether proton-cal may inherit the variable. It is an
+// allowlist: nothing else (credentials, SSH agent, tokens...) reaches the child.
+func childEnvAllowed(k string) bool {
+	u := strings.ToUpper(k)
+	switch u {
+	case "PATH", "HOME", "TZ", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY":
+		return true
+	}
+	return strings.HasPrefix(k, "XDG_") || strings.HasPrefix(k, "LC_")
+}
+
 func (r *ExecRunner) environ() []string {
 	var env []string
 	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		switch {
-		case strings.HasPrefix(k, "PCB_LAB_"), k == "PROTON_CAL_CONFIG_DIR",
-			k == "PROTON_CAL_USERNAME", k == "PROTON_CAL_PASSWORD", k == "PROTON_CAL_TOTP", k == "PROTON_CAL_MAILBOX_PASSWORD":
-		default:
+		if k, _, _ := strings.Cut(kv, "="); childEnvAllowed(k) {
 			env = append(env, kv)
 		}
 	}
@@ -72,18 +80,14 @@ func (r *ExecRunner) Run(ctx context.Context, args []string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// rateLimitRE matches proton-cal's own 429 error ("proton api error:
+// status=429 code=N: ...", printed after its 3 retries) and a plain "too many
+// requests" or "rate limit" message; a bare 429 inside an id or a title is not one.
+var rateLimitRE = regexp.MustCompile(`(?i)\bstatus=429\b|\btoo many requests\b|\brate[ -]?limit`)
+
 func rateLimited(err error) bool {
 	var re *RunError
-	if !errors.As(err, &re) {
-		return false
-	}
-	s := strings.ToLower(re.Stderr)
-	for _, m := range []string{"429", "too many requests", "rate limit", "rate-limit", "ratelimit"} {
-		if strings.Contains(s, m) {
-			return true
-		}
-	}
-	return false
+	return errors.As(err, &re) && rateLimitRE.MatchString(re.Stderr)
 }
 
 // ApplyOptions tunes Apply.
@@ -150,8 +154,16 @@ func Apply(ctx context.Context, ds Dataset, r Runner, o ApplyOptions) (Result, e
 		return out, err
 	}
 
+	// read runs a listing; a 429 there stops the run like one on a write.
+	read := func(args []string) ([]byte, error) {
+		out, err := r.Run(ctx, args)
+		if rateLimited(err) {
+			return nil, fmt.Errorf("%w: %w", ErrRateLimited, err)
+		}
+		return out, err
+	}
 	listCalendars := func() ([]calendarRow, error) {
-		out, err := r.Run(ctx, []string{"calendars", "-o", "json"})
+		out, err := read([]string{"calendars", "-o", "json"})
 		if err != nil {
 			return nil, err
 		}
@@ -200,10 +212,8 @@ func Apply(ctx context.Context, ds Dataset, r Runner, o ApplyOptions) (Result, e
 		calIDs[c.Key] = id
 	}
 
-	from, _ := time.Parse(dateLayout, ds.Range.From)
-	to, _ := time.Parse(dateLayout, ds.Range.To)
-	days := int(to.Sub(from).Hours()/24) + 1
-	out, err := r.Run(ctx, []string{"events", "--all-calendars", "--from", ds.Range.From, "--days", fmt.Sprint(days), "-o", "json"})
+	from, days := ListingWindow(ds)
+	out, err := read([]string{"events", "--all-calendars", "--from", from, "--days", fmt.Sprint(days), "-o", "json"})
 	if err != nil {
 		return res, err
 	}
@@ -247,4 +257,14 @@ func Apply(ctx context.Context, ds Dataset, r Runner, o ApplyOptions) (Result, e
 		}
 	}
 	return res, nil
+}
+
+// ListingWindow is the --from and --days of the events listing that finds
+// every seeded event. proton-cal filters by the window in its own time zone,
+// so the data set's range is widened by a day on each side: an event at
+// 2021-01-01 07:00 in Tokyo is still 2020-12-31 in Paris.
+func ListingWindow(ds Dataset) (from string, days int) {
+	f, _ := time.Parse(dateLayout, ds.Range.From)
+	t, _ := time.Parse(dateLayout, ds.Range.To)
+	return f.AddDate(0, 0, -1).Format(dateLayout), int(t.Sub(f).Hours()/24) + 3
 }

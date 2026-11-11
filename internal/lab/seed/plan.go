@@ -99,13 +99,21 @@ func Plan(ds Dataset, existing []Existing) []Command {
 }
 
 // occurrenceListed reports whether the series still lists its to-delete occurrence.
+// Timed occurrences are compared as instants; all-day ones by calendar date (the
+// listing renders them at local or UTC midnight, with any offset).
 func occurrenceListed(e Entry, existing []Existing) bool {
 	at, ok := e.instant(e.Delete.Occurrence)
 	if !ok {
 		return true
 	}
 	for _, x := range existing {
-		if x.ID == e.ID && x.Start.Equal(at) {
+		if x.ID != e.ID {
+			continue
+		}
+		if e.AllDay && x.Start.Format(dateLayout) == e.Delete.Occurrence {
+			return true
+		}
+		if !e.AllDay && x.Start.Equal(at) {
 			return true
 		}
 	}

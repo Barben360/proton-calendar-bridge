@@ -80,3 +80,18 @@ func TestSeedApplyWithoutLoginIsBlocked(t *testing.T) {
 		t.Fatalf("code %d, want Blocked when proton-cal cannot run", code)
 	}
 }
+
+func TestSeedApplyListingRateLimitIsResumable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script")
+	}
+	bin := filepath.Join(t.TempDir(), "proton-cal")
+	script := "#!/bin/sh\necho 'Error: proton api error: status=429 code=0: Too Many Requests' >&2\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, env := run(t, "seed", "apply", "--dataset", realDataset, "--bin", bin, "--interval", "0s", "--config-dir", t.TempDir())
+	if code != exitcode.Partial || env["ok"] != false {
+		t.Fatalf("code %d, envelope %v, want 40 with a resume hint", code, env)
+	}
+}
