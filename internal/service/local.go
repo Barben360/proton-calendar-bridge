@@ -16,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -178,6 +179,10 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 			}
 		}
 	}
+	if err := cache.Remove(cache.Path(l.o.Dirs.State)); err != nil {
+		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
+			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
+	}
 	if err := store.SaveState(l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut}); err != nil {
 		return LogoutResult{}, storeError(err, l.keyFile())
 	}
@@ -224,6 +229,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 	if l.waiting.Load() {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
 	}
+	s.Sync = l.syncStatus(st.AccountID)
 	return s, nil
 }
 

@@ -22,6 +22,15 @@ type API interface {
 	Status(ctx context.Context) (Status, error)
 	// Calendars lists the account's calendars.
 	Calendars(ctx context.Context) ([]Calendar, error)
+	// Sync brings the event cache up to date with Proton. A calendar that
+	// failed is in the result, and the error is a Partial *exitcode.Error.
+	Sync(ctx context.Context, req SyncRequest) (SyncResult, error)
+	// WatchSync repeats Sync every interval (0: DefaultWatchInterval) until
+	// ctx ends or a person is needed, calling onPass after every pass with
+	// its result and error. It always returns an error.
+	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(SyncResult, error)) error
+	// Events lists a calendar's cached events, without any network call.
+	Events(ctx context.Context, req EventsRequest) ([]Event, error)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
 }
@@ -90,6 +99,72 @@ type Status struct {
 	CaptchaURL  string     `json:"captcha_url,omitempty"`
 	LastLogin   *time.Time `json:"last_login,omitempty"`
 	LastRelogin *time.Time `json:"last_relogin,omitempty"`
+	// Sync is the event cache's state; nil while there is no cache.
+	Sync *SyncStatus `json:"sync,omitempty"`
+}
+
+// SyncStatus is what the event cache holds, per calendar.
+type SyncStatus struct {
+	Calendars []CalendarStatus `json:"calendars"`
+}
+
+// CalendarStatus is one cached calendar. SyncedAt is its last successful
+// pass and FullAt its last full listing (nil: never). Error is its last
+// failure ("" if none).
+type CalendarStatus struct {
+	ID       string     `json:"id"`
+	Name     string     `json:"name"`
+	Events   int        `json:"events"`
+	SyncedAt *time.Time `json:"synced_at,omitempty"`
+	FullAt   *time.Time `json:"full_at,omitempty"`
+	Error    string     `json:"error,omitempty"`
+}
+
+// SyncRequest asks for a sync pass; Full lists every calendar in full.
+type SyncRequest struct {
+	Full bool `json:"full,omitempty"`
+}
+
+// SyncResult is what a pass did, one entry per calendar.
+type SyncResult struct {
+	Calendars []CalendarSync `json:"calendars"`
+}
+
+// CalendarSync is one calendar's outcome. Mode is initial, incremental or
+// full; Events is the calendar's row count after the pass; Error is the
+// secret-free reason the calendar failed, "" if it synced.
+type CalendarSync struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Mode    string `json:"mode"`
+	Added   int    `json:"added"`
+	Updated int    `json:"updated"`
+	Deleted int    `json:"deleted"`
+	Events  int    `json:"events"`
+	Error   string `json:"error,omitempty"`
+}
+
+// EventsRequest selects cached events: Calendar is an ID or an exact name;
+// From and To keep the events overlapping [From, To), and the recurring
+// masters starting before To whatever From says.
+type EventsRequest struct {
+	Calendar string     `json:"calendar"`
+	From     *time.Time `json:"from,omitempty"`
+	To       *time.Time `json:"to,omitempty"`
+}
+
+// Event is a cached event row (its content stays encrypted in the cache).
+type Event struct {
+	ID           string     `json:"id"`
+	UID          string     `json:"uid"`
+	CalendarID   string     `json:"calendar_id"`
+	Start        time.Time  `json:"start"`
+	End          time.Time  `json:"end"`
+	AllDay       bool       `json:"all_day"`
+	Recurring    bool       `json:"recurring"`
+	RecurrenceID *time.Time `json:"recurrence_id,omitempty"`
+	LastEdit     time.Time  `json:"last_edit"`
+	ETag         string     `json:"etag"`
 }
 
 // Calendar is one calendar of the account. Keys is "ok" or "error".

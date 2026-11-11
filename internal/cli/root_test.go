@@ -31,7 +31,7 @@ func TestUsageContractListsEveryNewCommand(t *testing.T) {
 	for _, p := range clitest.Paths(cli.NewRoot()) {
 		got[strings.Join(p, " ")] = true
 	}
-	for _, want := range []string{"login", "login resume", "logout", "status", "calendar", "calendar list"} {
+	for _, want := range []string{"login", "login resume", "logout", "status", "calendar", "calendar list", "sync", "event", "event list"} {
 		if !got[want] {
 			t.Errorf("command %q is not in the command tree the usage contract walks", want)
 		}

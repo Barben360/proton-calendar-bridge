@@ -97,6 +97,18 @@ func (s *stubAPI) Status(context.Context) (service.Status, error) {
 	return service.Status{Phase: s.statusPhase}, nil
 }
 
+func (*stubAPI) Sync(context.Context, service.SyncRequest) (service.SyncResult, error) {
+	return service.SyncResult{}, nil
+}
+
+func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, func(service.SyncResult, error)) error {
+	return nil
+}
+
+func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event, error) {
+	return nil, nil
+}
+
 func (s *stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return nil, nil }
 func (s *stubAPI) Close() error                                          { s.closed++; return s.closeErr }
 
