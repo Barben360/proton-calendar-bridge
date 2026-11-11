@@ -173,16 +173,23 @@ per-event session keys for shared and calendar parts [verified: proton-cal
 docs/crypto.md, Proton security-model blog]. Unlocked keys live in memory
 only; the salted key passphrase is sealed in C2.
 
-Signature policy [call]: verify every signed part; a bad or missing
-signature (another key, an author not one of our addresses, a part sent
-unsigned) marks the event unverified: in CalDAV each affected VEVENT (the
-master or an exception) carries `X-PCB-INTEGRITY:unverified`, and
-`pcb serve` logs the count (`unverified`, §15); never silently accepted or
-dropped (M3-R33). An `X-PCB-INTEGRITY` a part carries itself is dropped
-[verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
-`TestUnverifiedWhenAnyPartIsNotVerified`, `TestMarkIntegrity`]. Which parts
-are signed by which key [assumed → E10]: if Proton signs a part with another
-key than its author address's, the event shows as unverified.
+Signature policy [call] (M3-R33, narrowed by M3-R36): verify every part
+authored by one of our addresses. Such a part with a bad signature, or a
+shared or calendar part of ours (shared signed, shared encrypted, calendar
+signed, calendar encrypted) sent without a signature, marks the event
+unverified; an attendees or personal part of ours marks it only when it is
+signed and the signature fails. In CalDAV each affected VEVENT (the master or
+an exception) carries `X-PCB-INTEGRITY:unverified`, and `pcb serve` logs the
+count (`unverified`, §15); the event is never silently accepted or dropped.
+A part authored by an address that is not ours (an invitation, another
+member of a shared calendar) is not verified in v1 and never marks the
+event: there is no public-key lookup, and invitations and shared calendars
+are out of scope (`OPEN.md`). An `X-PCB-INTEGRITY` a part carries itself is
+dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
+`TestUnverifiedOnlyForOwnAuthoredParts`, `TestOpenTellsOwnAuthoredParts`,
+`TestMarkIntegrity`]. Which parts are signed by which key [assumed → E10]:
+if Proton signs a part of ours with another key than its author address's,
+the event shows as unverified.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings

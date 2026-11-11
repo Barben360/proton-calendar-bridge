@@ -40,23 +40,36 @@ func TestAddressKeyTagsMarkUnlockedKeys(t *testing.T) {
 	}
 }
 
-// SPEC §5.3, ruling M3-R33: a bad or missing signature makes the event
-// unverified; only parts that all verify with our key make it verified.
-func TestUnverifiedWhenAnyPartIsNotVerified(t *testing.T) {
-	ok := cards.Part{Kind: cards.SharedSigned, Signed: true, Verified: true}
+// SPEC §5.3, rulings M3-R33 and M3-R36: an own-authored part marks the
+// event when its signature fails, or when it is a shared or calendar part
+// without one; an attendees or personal part only when signed and failing;
+// a part authored by an address not ours never (no key to check it in v1).
+func TestUnverifiedOnlyForOwnAuthoredParts(t *testing.T) {
+	ok := cards.Part{Kind: cards.SharedSigned, Own: true, Signed: true, Verified: true}
 	for _, c := range []struct {
-		name  string
-		parts []cards.Part
-		want  bool
+		name string
+		part cards.Part
+		want bool
 	}{
-		{"every part verifies", []cards.Part{ok, {Kind: cards.SharedEncrypted, Signed: true, Verified: true}}, false},
-		{"a bad signature", []cards.Part{ok, {Kind: cards.CalendarSigned, Signed: true}}, true},
-		{"a missing signature (unsigned part)", []cards.Part{ok, {Kind: cards.CalendarSigned}}, true},
-		{"no parts", nil, false},
+		{"own, verified", ok, false},
+		{"own, bad signature", cards.Part{Kind: cards.CalendarSigned, Own: true, Signed: true}, true},
+		{"own shared signed part, no signature", cards.Part{Kind: cards.SharedSigned, Own: true}, true},
+		{"own shared encrypted part, no signature", cards.Part{Kind: cards.SharedEncrypted, Own: true}, true},
+		{"own calendar signed part, no signature", cards.Part{Kind: cards.CalendarSigned, Own: true}, true},
+		{"own calendar encrypted part, no signature", cards.Part{Kind: cards.CalendarEncrypted, Own: true}, true},
+		{"own attendees part, no signature", cards.Part{Kind: cards.Attendees, Own: true}, false},
+		{"own personal part, no signature", cards.Part{Kind: cards.Personal, Own: true}, false},
+		{"own attendees part, bad signature", cards.Part{Kind: cards.Attendees, Own: true, Signed: true}, true},
+		{"own personal part, bad signature", cards.Part{Kind: cards.Personal, Own: true, Signed: true}, true},
+		{"a stranger's, bad signature", cards.Part{Kind: cards.SharedSigned, Signed: true}, false},
+		{"a stranger's, no signature", cards.Part{Kind: cards.SharedSigned}, false},
 	} {
-		if got := unverifiedParts(c.parts); got != c.want {
+		if got := unverifiedParts([]cards.Part{ok, c.part}); got != c.want {
 			t.Errorf("%s: unverified = %v, want %v", c.name, got, c.want)
 		}
+	}
+	if unverifiedParts(nil) {
+		t.Error("no parts: unverified")
 	}
 }
 

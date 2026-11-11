@@ -576,3 +576,43 @@ func BenchmarkOpen(b *testing.B) {
 		}
 	}
 }
+
+// Ruling M3-R36: Own tells a part authored by one of our addresses (the
+// part's Author, else the row's), whether or not it is signed; nil own
+// knows no address.
+func TestOpenTellsOwnAuthoredParts(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	raw := r.add(t, protontest.Event{UID: "o@pcb.test", Start: 1, End: 2, Card: fullCard}).Raw
+	stranger := r.add(t, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2, Card: fullCard, Author: "stranger@pcb.test"}).Raw
+	unsigned := r.add(t, protontest.Event{UID: "u@pcb.test", Start: 1, End: 2, Card: fullCard, Unsigned: protontest.SharedSignedPart}).Raw
+	addrs := map[string]*crypto.KeyRing{"addr1": r.addr}
+	for _, c := range []struct {
+		name string
+		raw  json.RawMessage
+		own  func(string) *crypto.KeyRing
+		want bool
+	}{
+		{"ours", raw, r.own, true},
+		{"a stranger's", stranger, r.own, false},
+		{"no own function", raw, nil, false},
+	} {
+		ev, err := cards.Open(c.raw, r.calKR, addrs, c.own)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		for _, p := range ev.Parts {
+			if p.Own != c.want {
+				t.Errorf("%s: %s Own = %v, want %v", c.name, p.Kind, p.Own, c.want)
+			}
+		}
+	}
+	ev, err := cards.Open(unsigned, r.calKR, addrs, r.own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := part(t, ev, cards.SharedSigned)
+	if !ss.Own || ss.Signed || ss.Verified {
+		t.Errorf("the unsigned shared part = Own %v, Signed %v, Verified %v; want ours, unsigned, unverified", ss.Own, ss.Signed, ss.Verified)
+	}
+}

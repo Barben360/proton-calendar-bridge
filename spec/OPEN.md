@@ -41,6 +41,9 @@ For M4:
 - Derive writability from the member permissions (M3-R15): until then every owned normal calendar advertises read and write and every write is refused (M3-R1). Must be in place before M4 enables writes, with E14 for view-only shares.
 - Refuse every write to a placeholder object (412 or 403, M3-R4), so an edit in Thunderbird can never overwrite the real event.
 
+Later (with E10 and a public-key lookup):
+- Verify the parts authored by addresses that are not ours (invitations, other members of a shared calendar): until then they never mark an event `X-PCB-INTEGRITY:unverified`, so tampering with them goes unnoticed (M3-R36).
+
 For M5 (daemon and ops):
 - `pcb serve` waits for a login instead of refusing to start (M3-R28); restart after a stop error.
 - Plain HTTP inside a container behind a reverse proxy, as an explicit opt-in (M3-R28): today a non-loopback bind needs TLS.

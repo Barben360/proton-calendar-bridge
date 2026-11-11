@@ -39,6 +39,7 @@ type Event struct {
 	// (SharedKeyPacket), as on a Proton-to-Proton invitation.
 	AddressKeyPacket bool
 	BrokenPart       Part // that part is encrypted under an unrelated session key
+	Unsigned         Part // that part is served without a signature (see unsign)
 }
 
 // Feed actions, as the change feed names them.

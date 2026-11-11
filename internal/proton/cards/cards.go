@@ -62,9 +62,10 @@ type Part struct {
 	Kind Kind
 	Text []byte // the VCALENDAR fragment, byte for byte as signed
 	// Signed: the part carries a signature. Verified: it verifies with the
-	// key of Author, one of our addresses.
-	Signed, Verified bool
-	Author           string // the part's, else the row's
+	// key of Author, one of our addresses. Own: Author is one of our
+	// addresses (own knows it), signed or not (ruling M3-R36).
+	Signed, Verified, Own bool
+	Author                string // the part's, else the row's
 }
 
 // AttendeeStatus is a row's attendee status, joined to an attendee line by
@@ -177,8 +178,13 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 				}
 				p.Text = text
 			}
-			if p.Signed && own != nil {
-				p.Verified = verify(p.Text, wp.Signature, own(p.Author))
+			var kr *crypto.KeyRing
+			if own != nil {
+				kr = own(p.Author)
+			}
+			p.Own = kr != nil
+			if p.Signed && p.Own {
+				p.Verified = verify(p.Text, wp.Signature, kr)
 			}
 			ev.Parts = append(ev.Parts, p)
 		}

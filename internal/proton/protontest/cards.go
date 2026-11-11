@@ -20,16 +20,19 @@ import (
 // plaintext. Every signature is made by the address key (AddressKeyRing), or
 // by an unrelated key with Event.ForeignKey.
 
-// Part names a part that Event.BrokenPart makes undecryptable.
+// Part names a part that Event.BrokenPart makes undecryptable, or that
+// Event.Unsigned serves without a signature.
 type Part int
 
-// The parts Event.BrokenPart can break: the encrypted ones.
+// The parts Event.BrokenPart can break: the encrypted ones. Event.Unsigned
+// takes any but PersonalPart, and SharedSignedPart (the cleartext one).
 const (
 	NoPart Part = iota
 	SharedEncryptedPart
 	CalendarEncryptedPart
 	AttendeesPart
 	PersonalPart
+	SharedSignedPart
 )
 
 // Notification is an event reminder as the row serves it.
@@ -332,7 +335,36 @@ func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error)
 		errs = append(errs, err)
 		out["PersonalEvents"] = []any{map[string]any{"Type": 3, "Data": data, "Signature": sign(text), "Author": author, "MemberID": cal.memberID}}
 	}
+	if err := unsign(out, r.ev.Unsigned); err != nil {
+		return nil, err
+	}
 	return out, errors.Join(errs...)
+}
+
+// unsign serves part of the row's crypto fields without a signature: the
+// signed bit of its Type cleared and no Signature, as a server that dropped
+// it would.
+func unsign(out map[string]any, part Part) error {
+	at := map[Part]struct {
+		field string
+		i     int
+	}{SharedSignedPart: {"SharedEvents", 0}, SharedEncryptedPart: {"SharedEvents", 1},
+		CalendarEncryptedPart: {"CalendarEvents", 1}, AttendeesPart: {"AttendeesEvents", 0}}
+	if part == NoPart {
+		return nil
+	}
+	loc, ok := at[part]
+	if !ok {
+		return fmt.Errorf("protontest: Unsigned cannot take part %d", part)
+	}
+	parts, _ := out[loc.field].([]any)
+	if loc.i >= len(parts) {
+		return fmt.Errorf("protontest: the row has no part %d to unsign", part)
+	}
+	m := parts[loc.i].(map[string]any)
+	m["Type"] = m["Type"].(int) &^ 2
+	delete(m, "Signature")
+	return nil
 }
 
 // personalData is a personal part's Data: an armored message encrypted to the

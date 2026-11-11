@@ -433,13 +433,20 @@ func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev 
 	return ev, unverified, true
 }
 
-// unverifiedParts reports whether a part of an event has a bad or missing
-// signature (SPEC §5.3): one that does not verify with the key of its
-// author, one of our addresses, including a part sent unsigned (a server
-// could otherwise drop a signature to pass an edit).
+// unverifiedParts reports whether an event has a part of ours with a bad or
+// missing signature (SPEC §5.3, rulings M3-R33 and M3-R36): one authored by
+// one of our addresses that is signed and does not verify, or a shared or
+// calendar part of ours sent unsigned (a server could otherwise drop a
+// signature to pass an edit). An attendees or personal part marks only when
+// signed and failing. A part authored by an address not ours never marks:
+// v1 has no key to check it with.
 func unverifiedParts(parts []cards.Part) bool {
 	for _, p := range parts {
-		if !p.Verified {
+		switch {
+		case !p.Own:
+		case p.Signed && !p.Verified:
+			return true
+		case !p.Signed && p.Kind <= cards.CalendarEncrypted:
 			return true
 		}
 	}

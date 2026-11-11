@@ -133,6 +133,15 @@ func TestObjectReads(t *testing.T) {
 	// Signatures that do not verify (ruling M3-R33): a whole event, and one
 	// exception of a series whose master verifies.
 	e.f.AddEvent(hol, protontest.Event{UID: "forged@x", Start: base, End: base + 3600, ForeignKey: true, Card: card("forged@x", "Forged", base)})
+	// Ruling M3-R36: an own shared part sent unsigned marks the event; a
+	// part authored by an address not ours (unverifiable in v1), or an own
+	// attendees part sent unsigned, does not.
+	e.f.AddEvent(hol, protontest.Event{UID: "unsigned@x", Start: base, End: base + 3600, Unsigned: protontest.SharedSignedPart,
+		Card: card("unsigned@x", "Unsigned", base)})
+	e.f.AddEvent(hol, protontest.Event{UID: "stranger@x", Start: base, End: base + 3600, Author: "stranger@example.org", ForeignKey: true,
+		Card: card("stranger@x", "Invitation", base)})
+	e.f.AddEvent(hol, protontest.Event{UID: "attendees@x", Start: base, End: base + 3600, Unsigned: protontest.AttendeesPart,
+		Card: card("attendees@x", "Meeting", base, "ATTENDEE;CN=Bob;PARTSTAT=ACCEPTED;X-PM-TOKEN=tok1:mailto:bob@example.org")})
 	e.f.AddEvent(hol, protontest.Event{UID: "mixed@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY",
 		Card: card("mixed@x", "Mixed", base, "RRULE:FREQ=DAILY")})
 	e.f.AddEvent(hol, protontest.Event{UID: "mixed@x", Start: rid, End: rid + 3600, RecurrenceID: &rid, ForeignKey: true,
@@ -290,8 +299,14 @@ func TestObjectReads(t *testing.T) {
 			t.Errorf("mixed@x: want the marker on the exception's VEVENT only:\n%s", mixed)
 		}
 		lacks(t, "rich@x (verified)", e.objects(t, work, "rich@x")["rich@x"].Data, "X-PCB-INTEGRITY")
-		if n := e.svc.RenderCounts().Unverified; n != 2 {
-			t.Errorf("Unverified = %d, want 2 (forged@x and mixed@x's exception)", n)
+		more := e.objects(t, hol, "unsigned@x", "stranger@x", "attendees@x")
+		contains(t, "unsigned@x (own shared part, no signature)", more["unsigned@x"].Data, "SUMMARY:Unsigned\r\n", "X-PCB-INTEGRITY:unverified\r\n")
+		lacks(t, "stranger@x (authored by an address not ours)", more["stranger@x"].Data, "X-PCB-INTEGRITY")
+		contains(t, "stranger@x", more["stranger@x"].Data, "SUMMARY:Invitation\r\n")
+		lacks(t, "attendees@x (own attendees part, no signature)", more["attendees@x"].Data, "X-PCB-INTEGRITY")
+		contains(t, "attendees@x", more["attendees@x"].Data, "mailto:bob@example.org")
+		if n := e.svc.RenderCounts().Unverified; n != 3 {
+			t.Errorf("Unverified = %d, want 3 (forged@x, mixed@x's exception, unsigned@x)", n)
 		}
 	})
 
