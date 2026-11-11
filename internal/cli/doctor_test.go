@@ -56,12 +56,12 @@ func TestDoctorExitCode(t *testing.T) {
 		names = append(names, r.Name)
 		statuses = append(statuses, r.Status)
 	}
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache"; got != want {
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok") {
+		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -78,8 +78,8 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 8 {
-		t.Fatalf("stdout = %q, want 8 lines", out)
+	if len(lines) != 12 { // 11 checks, the clients warning with its fix line
+		t.Fatalf("stdout = %q, want 12 lines", out)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)
@@ -98,6 +98,15 @@ func TestDoctorTextOK(t *testing.T) {
 	}
 	if want := "✓  cache: no cache yet"; lines[7] != want {
 		t.Errorf("line 7 = %q, want %q", lines[7], want)
+	}
+	if want := "✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)"; lines[8] != want {
+		t.Errorf("line 8 = %q, want %q", lines[8], want)
+	}
+	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[9] != want {
+		t.Errorf("line 9 = %q, want %q", lines[9], want)
+	}
+	if want := "!  caldav clients: no CalDAV client: nothing can sign in to pcb serve"; lines[10] != want || lines[11] != "   fix: pcb client add NAME" {
+		t.Errorf("lines 10-11 = %q, want %q and its fix", lines[10:], want)
 	}
 }
 

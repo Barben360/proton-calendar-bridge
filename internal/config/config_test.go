@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,7 +44,8 @@ func TestPathAndDefaults(t *testing.T) {
 	}
 	d := config.Defaults(dirs)
 	if d.Proton.BaseURL != "https://mail-api.proton.me" || d.Proton.AppVersion != "Other" ||
-		d.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" {
+		d.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" || d.CalDAV.Listen != "127.0.0.1:1080" ||
+		d.CalDAV.Hostnames != nil || d.CalDAV.TLSCert != "" || d.CalDAV.TLSKey != "" {
 		t.Fatalf("defaults = %+v", d)
 	}
 }
@@ -53,7 +55,7 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != config.Defaults(dirs) || got.Proton.BaseURL != config.DefaultBaseURL || got.Proton.AppVersion != config.DefaultAppVersion {
+	if !reflect.DeepEqual(got, config.Defaults(dirs)) || got.Proton.BaseURL != config.DefaultBaseURL || got.Proton.AppVersion != config.DefaultAppVersion {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -67,8 +69,9 @@ func TestLoadOverridesEachKey(t *testing.T) {
 	want := config.Config{
 		Proton:  config.Proton{BaseURL: "https://example.org", AppVersion: "web-calendar@1.2.3"},
 		Secrets: config.Secrets{KeyFile: "/k/my.key"},
+		CalDAV:  config.CalDAV{Listen: "127.0.0.1:1080"},
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
@@ -156,5 +159,75 @@ func TestLoadUnreadableFileIsAnError(t *testing.T) {
 	var e *exitcode.Error
 	if !errors.As(err, &e) || e.Code != exitcode.MustAct {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadCalDAVSection(t *testing.T) {
+	p := write(t, "[caldav]\nlisten = \"0.0.0.0:8443\"\nhostnames = [\"pcb.lan\", \"192.168.1.5\"]\n"+
+		"tls_cert = \"/c/cert.pem\"\ntls_key = \"/c/key.pem\"\n")
+	got, err := config.Load(p, dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"pcb.lan", "192.168.1.5"}, TLSCert: "/c/cert.pem", TLSKey: "/c/key.pem"}
+	if !reflect.DeepEqual(got.CalDAV, want) {
+		t.Fatalf("caldav = %+v, want %+v", got.CalDAV, want)
+	}
+	// Absent keys keep their defaults.
+	got, err = config.Load(write(t, "[caldav]\nhostnames = [\"pcb.lan\"]\n"), dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CalDAV.Listen != "127.0.0.1:1080" {
+		t.Fatalf("listen = %q, want the default", got.CalDAV.Listen)
+	}
+}
+
+func TestLoadCalDAVIsStrict(t *testing.T) {
+	for body, key := range map[string]string{
+		"[caldav]\nport = 1080\n":                            "caldav.port",
+		"[caldav]\nlisten = 1080\n":                          "listen",
+		"[caldav]\nlisten = \"1080\"\n":                      "caldav.listen",
+		"[caldav]\nlisten = \":1080\"\n":                     "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1\"\n":                 "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:65536\"\n":           "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:-1\"\n":              "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:http\"\n":            "caldav.listen",
+		"[caldav]\nlisten = \"bad host:1080\"\n":             "caldav.listen",
+		"[caldav]\nhostnames = []\n":                         "caldav.hostnames",
+		"[caldav]\nhostnames = [\"\"]\n":                     "caldav.hostnames",
+		"[caldav]\nhostnames = [\"a b\"]\n":                  "caldav.hostnames",
+		"[caldav]\nhostnames = [\"-a.lan\"]\n":               "caldav.hostnames",
+		"[caldav]\nhostnames = [\"https://a.lan\"]\n":        "caldav.hostnames",
+		"[caldav]\ntls_cert = \"/c/cert.pem\"\n":             "caldav.tls_key",
+		"[caldav]\ntls_key = \"/c/key.pem\"\n":               "caldav.tls_cert",
+		"[caldav]\ntls_cert = \"c.pem\"\ntls_key = \"/k\"\n": "caldav.tls_cert",
+		"[caldav]\ntls_cert = \"/c\"\ntls_key = \"k.pem\"\n": "caldav.tls_key",
+	} {
+		if msg := refused(t, body); !strings.Contains(msg, key) {
+			t.Errorf("%q: error %q does not name %s", body, msg, key)
+		}
+	}
+	for _, ok := range []string{"127.0.0.1:1080", "[::1]:1080", "0.0.0.0:443", "[::]:8443", "localhost:1080", "pcb.lan:1", "192.168.1.5:0"} {
+		if _, err := config.Load(write(t, "[caldav]\nlisten = \""+ok+"\"\n"), dirs); err != nil {
+			t.Errorf("listen %q refused: %v", ok, err)
+		}
+	}
+}
+
+func TestValidateListenIsTheConfigRule(t *testing.T) {
+	for _, bad := range []string{"", "1080", ":1080", "127.0.0.1", "127.0.0.1:99999", "a b:1"} {
+		if err := config.ValidateListen(bad); err == nil {
+			t.Errorf("ValidateListen(%q) = nil, want an error", bad)
+		}
+	}
+	// An empty host is not "every interface" by accident: the message says how to ask for it.
+	if err := config.ValidateListen(":1080"); err == nil || !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Errorf("ValidateListen(:1080) = %v, want it to name 0.0.0.0", err)
+	}
+	for _, good := range []string{"127.0.0.1:1080", "[::]:0", "localhost:1080"} {
+		if err := config.ValidateListen(good); err != nil {
+			t.Errorf("ValidateListen(%q) = %v", good, err)
+		}
 	}
 }

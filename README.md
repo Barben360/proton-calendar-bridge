@@ -21,10 +21,11 @@ caloxide.
 
 ## Status
 
-Design phase, milestone M2 (store and sync): `pcb login` (password, TOTP,
+Design phase, milestone M3 (CalDAV read): `pcb login` (password, TOTP,
 CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status`,
-`pcb calendar list`, `pcb sync` and `pcb event list` are built and tested
-against a fake Proton; there is no bridge (daemon, CalDAV) yet. The live
+`pcb calendar list`, `pcb sync`, `pcb event list`, `pcb client` and
+`pcb serve` (read-only CalDAV for Thunderbird) are built and tested
+against a fake Proton; writes come with M4, the background daemon with M5. The live
 sessions against the test account (M1, then M2 for the change feed, `pcb-lab probe feed`) are deferred until the author can solve a
 CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session" and "M2 live session"); the cache and sync rules are source-based until then. The design is in
 `spec/SPEC.md`.
@@ -45,12 +46,44 @@ pcb event list --calendar NAME [--from 2026-11-01] [--to 2026-12-01]   # cached 
 pcb client add NAME                    # a CalDAV app password for one client (printed once, never stored); works logged out
 pcb client list                        # the clients, never their passwords
 pcb client remove NAME|ID              # its password stops working at once, even for a running pcb serve
+pcb serve [--listen HOST:PORT]         # sync loop + CalDAV listener until Ctrl-C (see below)
+pcb doctor                             # every check (listener, certificate, clients included), with the fix
 pcb logout
 ```
 
 Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
 
 CalDAV clients (Thunderbird, a phone) sign in with an app password, not your Proton one: `pcb client add NAME` prints 24 random bytes (base64url) once and stores only a salted SHA-256 in `clients.json` (0600) in the state directory. Use any username, that password, and the URL `pcb serve` prints. Five wrong passwords from one IP in a minute are refused until the minute ends. `pcb logout` keeps the clients; uninstalling removes them.
+
+## Serve to Thunderbird
+
+```sh
+pcb client add Thunderbird   # prints the app password once
+pcb serve                    # prints the URL to enter, e.g. "Thunderbird URL: http://localhost:1080/"
+```
+
+In Thunderbird: New Calendar > On the Network, format CalDAV, the printed URL as Location, any username and the
+app password. `pcb serve` keeps the cache in sync (a pass every 30 s) and serves it read-only until Ctrl-C
+(SIGINT or SIGTERM: requests in flight get 5 s, exit 0); it refuses to start logged out (exit 10, `pcb login`) or
+while `pcb sync` runs (exit 20), and stops when Proton needs you again (exit 10). Logs go to stderr, IDs only.
+
+The listener comes from `[caldav]` in `config.toml` (or `--listen`):
+
+```toml
+[caldav]
+listen = "0.0.0.0:8443"        # default 127.0.0.1:1080
+hostnames = ["pcb.lan"]        # names clients use; the first one is in the printed URL
+# tls_cert = "/etc/pcb/cert.pem" # your own certificate: both keys or neither
+# tls_key = "/etc/pcb/key.pem"
+```
+
+A loopback address serves plain HTTP; any other one serves TLS 1.2+ only (with `tls_cert`/`tls_key`, every
+address does). Without `tls_cert`/`tls_key`, pcb
+generates a self-signed certificate (ECDSA P-256, 825 days, for the hostnames, `localhost` and the bind address
+or, on `0.0.0.0`/`[::]`, every interface address) in `tls/` of the state directory (key 0600), reuses it, and
+replaces it when a hostname is no longer covered or under 30 days remain. `pcb serve` and `pcb doctor` print its
+SHA-256 fingerprint: Thunderbird shows a certificate exception dialog on first use; confirm the exception only
+when its SHA-256 fingerprint is the printed one (again after a replacement).
 
 ## Build
 

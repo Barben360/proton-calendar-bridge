@@ -22,9 +22,13 @@ const settingsRefresh = 10 * time.Minute
 
 // ServeOptions tune Serve: the interval between sync passes (0:
 // DefaultWatchInterval) and a callback after each pass, as WatchSync.
+// Ready, when set, is called once Serve holds the sync lock, a ready login
+// and its cache handle, before the first pass: pcb serve binds its listener
+// then, so a refused start (logged out, a sync running) never binds it.
 type ServeOptions struct {
 	Interval time.Duration
 	OnPass   func(WatchPass)
+	Ready    func()
 }
 
 // Serve runs the sync loop of serve mode until ctx ends (nil) or a person
@@ -63,6 +67,9 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		l.smu.Unlock()
 		_ = db.Close()
 	}()
+	if o.Ready != nil {
+		o.Ready()
+	}
 	return l.watch(ctx, SyncRequest{}, interval, o.OnPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {

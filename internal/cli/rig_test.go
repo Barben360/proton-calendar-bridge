@@ -105,6 +105,8 @@ func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, f
 	return nil
 }
 
+func (*stubAPI) Serve(context.Context, service.ServeOptions) error { return nil }
+
 func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event, error) {
 	return nil, nil
 }

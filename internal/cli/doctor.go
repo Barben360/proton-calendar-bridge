@@ -63,7 +63,10 @@ func doctorChecks() []doctor.Check {
 		doctor.FileModeCheck{Label: "key file", Path: cfg.Secrets.KeyFile, Want: 0o600},
 		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
 		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile},
-		doctor.CacheCheck{StateDir: dirs.State})
+		doctor.CacheCheck{StateDir: dirs.State},
+		doctor.ListenerCheck{CalDAV: cfg.CalDAV},
+		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls")},
+		doctor.ClientsCheck{StateDir: dirs.State})
 }
 
 var marks = map[doctor.Status]string{

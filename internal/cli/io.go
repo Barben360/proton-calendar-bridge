@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -25,11 +26,13 @@ type IO struct {
 	// NewService opens the service a command calls (in process for now; the
 	// socket client replaces it later). The command closes it.
 	NewService func(ctx context.Context, env func(string) string) (service.API, error)
+	// Listen opens pcb serve's listener (net.Listen).
+	Listen func(network, address string) (net.Listener, error)
 }
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
-	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService}
+	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen}
 }
 
 // withDefaults fills the nil fields with the operating system's values.
@@ -49,17 +52,30 @@ func (o IO) withDefaults() IO {
 	if o.NewService == nil {
 		o.NewService = localService
 	}
+	if o.Listen == nil {
+		o.Listen = net.Listen
+	}
 	return o
+}
+
+// loadConfig resolves the directories and loads config.toml.
+func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
+	dirs, err := paths.Resolve(env)
+	if err != nil {
+		return paths.Dirs{}, config.Config{}, &exitcode.Error{Code: exitcode.Blocked, Err: err,
+			Hint: "set HOME, or XDG_CONFIG_HOME and XDG_STATE_HOME to absolute paths"}
+	}
+	cfg, err := config.Load(config.Path(dirs), dirs)
+	if err != nil {
+		return paths.Dirs{}, config.Config{}, err
+	}
+	return dirs, cfg, nil
 }
 
 // localService resolves the directories, loads config.toml and returns the
 // in-process service.
 func localService(_ context.Context, env func(string) string) (service.API, error) {
-	dirs, err := paths.Resolve(env)
-	if err != nil {
-		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "set HOME, or XDG_CONFIG_HOME and XDG_STATE_HOME to absolute paths"}
-	}
-	cfg, err := config.Load(config.Path(dirs), dirs)
+	dirs, cfg, err := loadConfig(env)
 	if err != nil {
 		return nil, err
 	}
