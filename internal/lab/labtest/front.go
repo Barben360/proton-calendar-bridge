@@ -26,11 +26,12 @@ const (
 type Reply struct {
 	Status int
 	Body   string // JSON
+	Once   bool   // answer only the next matching request
 }
 
 // Seen is one request that reached the fake.
 type Seen struct {
-	Method, Path, AppVersion, Authorization string
+	Method, Path, AppVersion, Authorization, UserAgent string
 }
 
 // Front can answer /auth/v4 with a CAPTCHA challenge, fake a TOTP account and
@@ -85,8 +86,11 @@ func NewFront(t *testing.T, f *Front) *Front {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.Mu.Lock()
 		f.Requests++
-		f.Log = append(f.Log, Seen{r.Method, r.URL.Path, r.Header.Get("x-pm-appversion"), r.Header.Get("Authorization")})
+		f.Log = append(f.Log, Seen{r.Method, r.URL.Path, r.Header.Get("x-pm-appversion"), r.Header.Get("Authorization"), r.Header.Get("User-Agent")})
 		reply, canned := f.Replies[r.Method+" "+r.URL.Path]
+		if canned && reply.Once {
+			delete(f.Replies, r.Method+" "+r.URL.Path)
+		}
 		f.Mu.Unlock()
 		if canned {
 			w.Header().Set("Content-Type", "application/json")

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	proton "github.com/ProtonMail/go-proton-api"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 )
 
 const (
@@ -61,6 +63,7 @@ func call(ctx context.Context, o Options, method, path, uid, access string, body
 		return Response{}, err
 	}
 	req.Header.Set("x-pm-appversion", app)
+	req.Header.Set("User-Agent", "pcb-lab/"+buildinfo.Version)
 	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
 	if uid != "" {
 		req.Header.Set("x-pm-uid", uid)
@@ -112,11 +115,9 @@ type refreshBody struct {
 	Scope        string
 }
 
-// Refresh refreshes the saved session once, saves the new tokens, then
-// retries once with the previous refresh token to learn whether Proton still
-// honours it. A retry that succeeds is saved too, so the file always holds
-// the newest pair. It never logs in.
-func Refresh(ctx context.Context, o Options) (RefreshResult, error) {
+// RefreshSaved refreshes the saved session once and saves the new tokens. A
+// refused refresh is reported in First (nothing saved), not as an error.
+func RefreshSaved(ctx context.Context, o Options) (RefreshResult, error) {
 	var res RefreshResult
 	st, err := load(o.StateDir)
 	if err != nil {
@@ -126,8 +127,7 @@ func Refresh(ctx context.Context, o Options) (RefreshResult, error) {
 		o.Recorder.Forbid(st.AccessToken)
 		o.Recorder.Forbid(st.RefreshToken)
 	}
-	oldRefresh, oldAccess := st.RefreshToken, st.AccessToken
-	first, nb, err := refreshOnce(ctx, o, st.UID, oldRefresh)
+	first, nb, err := refreshOnce(ctx, o, st.UID, st.RefreshToken)
 	if err != nil {
 		return res, err
 	}
@@ -137,12 +137,27 @@ func Refresh(ctx context.Context, o Options) (RefreshResult, error) {
 	}
 	forbid(o, nb)
 	res.ExpiresIn = nb.ExpiresIn
-	res.RefreshRotated = nb.RefreshToken != "" && nb.RefreshToken != oldRefresh
-	res.AccessRotated = nb.AccessToken != "" && nb.AccessToken != oldAccess
+	res.RefreshRotated = nb.RefreshToken != "" && nb.RefreshToken != st.RefreshToken
+	res.AccessRotated = nb.AccessToken != "" && nb.AccessToken != st.AccessToken
 	if err := saveRotation(o.StateDir, &st, authOf(nb)); err != nil {
 		return res, fmt.Errorf("saving the rotated session tokens: %w", err)
 	}
+	return res, nil
+}
 
+// Refresh is RefreshSaved followed by one retry with the previous refresh
+// token, to learn whether Proton still honours it. A retry that succeeds is
+// saved too, so the file always holds the newest pair. It never logs in.
+func Refresh(ctx context.Context, o Options) (RefreshResult, error) {
+	st, err := load(o.StateDir)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	oldRefresh := st.RefreshToken
+	res, err := RefreshSaved(ctx, o)
+	if err != nil || res.First.Status != http.StatusOK {
+		return res, err
+	}
 	retry, rb, err := refreshOnce(ctx, o, st.UID, oldRefresh)
 	if err != nil {
 		return res, err

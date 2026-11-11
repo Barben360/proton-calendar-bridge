@@ -52,8 +52,11 @@ func TestProbeCalendarAccessPrintsCodesAndRecords(t *testing.T) {
 	dir := labEnv(t, f, "external-drive-x@1.0.0")
 	rec := t.TempDir()
 	code, env := run(t, "probe", "calendar-access", "--state-dir", dir, "--record-dir", rec)
-	if code != exitcode.OK || env["ok"] != true {
-		t.Fatalf("code %d, envelope %v", code, env)
+	if code != exitcode.Blocked || env["ok"] != false {
+		t.Fatalf("code %d, envelope %v; want Blocked: the calendar list was refused", code, env)
+	}
+	if msg := env["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "/calendar/v1") || strings.Contains(msg, "/settings/calendar") {
+		t.Errorf("error message = %q, want it to name the failed endpoints only", msg)
 	}
 	data := env["data"].(map[string]any)
 	if data["app_version"] != "external-drive-x@1.0.0" {
@@ -107,8 +110,8 @@ func TestProbeAliveAppendsASampleAndNeverLogsIn(t *testing.T) {
 	}
 }
 
-// The timer is the E01 long probe: every 6 h, catching up missed runs, and
-// running only `probe alive` (no login, no refresh).
+// The timer is the E01 long probe: every 6 h, catching up missed runs, running
+// only `probe alive` on its own dedicated state dir (R15), never the lab's.
 func TestTimerUnitsMatchTheProtocol(t *testing.T) {
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join("..", "..", "scripts", "e01-timer", name))
@@ -129,7 +132,56 @@ func TestTimerUnitsMatchTheProtocol(t *testing.T) {
 			exec = append(exec, l)
 		}
 	}
-	if len(exec) != 1 || exec[0] != "ExecStart=%h/.local/bin/pcb-lab probe alive" {
+	if len(exec) != 1 || exec[0] != "ExecStart=%h/.local/bin/pcb-lab probe alive --state-dir %S/pcb-lab-e01" {
 		t.Errorf("service must run only `probe alive`, got %q", exec)
+	}
+}
+
+func TestProbeCalendarAccessSucceedsWhenAllEndpointsAnswer(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{Replies: map[string]labtest.Reply{
+		"GET /calendar/v1":              labtest.R(200, `{"Code":1000,"Calendars":[{"ID":"c1"}]}`),
+		"GET /calendar/v1/c1/bootstrap": labtest.R(200, `{"Code":1000}`),
+		"GET /settings/calendar":        labtest.R(200, `{"Code":1000}`),
+	}})
+	dir := labEnv(t, f, "")
+	if code, env := run(t, "probe", "calendar-access", "--state-dir", dir); code != exitcode.OK || env["ok"] != true {
+		t.Fatalf("code %d, envelope %v", code, env)
+	}
+}
+
+func TestProbeRefreshFailureIsBlockedWithoutTokens(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "")
+	f.Mu.Lock()
+	f.Replies = map[string]labtest.Reply{"POST /auth/v4/refresh": labtest.R(422, `{"Code":10013,"Error":"Invalid refresh token","AccessToken":"LEAKY-ACCESS-TOKEN-VALUE"}`)}
+	f.Mu.Unlock()
+	code, env := run(t, "probe", "refresh", "--state-dir", dir)
+	if code != exitcode.Blocked || env["ok"] != false {
+		t.Fatalf("code %d, envelope %v; a refused refresh must exit non-zero", code, env)
+	}
+	b, _ := json.Marshal(env)
+	if !strings.Contains(string(b), "10013") || strings.Contains(string(b), "LEAKY") {
+		t.Errorf("envelope %s: want the Proton code and no token", b)
+	}
+}
+
+func TestRawCallsIdentifyAsPcbLab(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "")
+	run(t, "probe", "alive", "--state-dir", dir)
+	run(t, "probe", "refresh", "--state-dir", dir)
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	n := 0
+	for _, s := range f.Log {
+		if s.Path == "/core/v4/users" || s.Path == "/auth/v4/refresh" {
+			n++
+			if !strings.HasPrefix(s.UserAgent, "pcb-lab/") {
+				t.Errorf("%s %s sent User-Agent %q, want pcb-lab/<version>", s.Method, s.Path, s.UserAgent)
+			}
+		}
+	}
+	if n < 3 {
+		t.Fatalf("only %d raw calls seen", n)
 	}
 }

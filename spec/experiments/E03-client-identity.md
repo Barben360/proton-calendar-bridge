@@ -39,11 +39,12 @@ Blocked on the test account's CAPTCHA (first login 2026-11-10 23:47 UTC answered
 ENV='pass-cli run --env-file scripts/lab.env.example --'
 REC='--record-dir spec/experiments/raw/E03'
 
-# 1. Other, with the solved token (E02 data point, see E02)
+# 1. Other, with the solved token (E02 data point, see E02). This session is
+#    the E01 disposable one.
 $ENV pcb-lab login --captcha-token <token from hv.json>
 pcb-lab whoami --json                                    # scope list for Other
-PCB_LAB_APPVERSION=Other pcb-lab probe calendar-access $REC
-# (E01 immediate probe runs here, see E01: pcb-lab probe refresh)
+PCB_LAB_APPVERSION=Other pcb-lab probe calendar-access $REC     # exit 20 = a failed endpoint
+pcb-lab probe refresh --record-dir spec/experiments/raw/E01 --json   # E01, ONCE; stop on non-zero exit
 
 # 2-4. other candidates, each >= 60 s after the previous login
 PCB_LAB_APPVERSION=linux-mail@1.0.0 $ENV pcb-lab login
@@ -53,9 +54,14 @@ PCB_LAB_APPVERSION=web-calendar@5.0.131.2 pcb-lab probe calendar-access $REC
 PCB_LAB_APPVERSION=external-drive-caloxide@0.2.1-stable $ENV pcb-lab login
 PCB_LAB_APPVERSION=external-drive-caloxide@0.2.1-stable pcb-lab probe calendar-access $REC
 
-# 5. back on the default for E01 and the seeder, >= 60 s later
+# 5. the default session for the seeder, >= 60 s later
 $ENV pcb-lab login
+
+# 6. E01's dedicated session in its own state dir, >= 60 s later (see E01)
+$ENV pcb-lab login --state-dir ~/.local/state/pcb-lab-e01
 ```
+
+`probe calendar-access` exits 20 when an endpoint fails (a candidate without calendar access is an expected measurement: note it and go on). `probe refresh` exits 20 when its refresh is refused: stop the sequence there. The 60 s guard is per state directory, so between logins in different directories (step 6) the agent keeps the time of the last login by hand. Keep the log of logins (candidate or directory, UTC time, outcome) in this section while running: E02 counts logins from it.
 
 If a login ends in a CAPTCHA (exit 10), stop there, record it for E02 (`hv-log.jsonl`) and follow the E02 protocol; the remaining candidates wait. Each login passes `PCB_LAB_APPVERSION` in the environment, so the candidate is also the identity of the session it creates.
 

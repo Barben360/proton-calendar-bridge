@@ -42,15 +42,22 @@ func Refresh(ctx context.Context, o session.Options) (session.RefreshResult, err
 
 // AliveResult is one `probe alive` sample, as appended to e01.jsonl.
 type AliveResult struct {
-	At   string `json:"at"`
-	OK   bool   `json:"ok"`
-	Code int    `json:"code"`
-	Over bool   `json:"-"` // the window is over: nothing was sampled
+	At        string `json:"at"`
+	OK        bool   `json:"ok"`
+	Code      int    `json:"code"`
+	Refreshed bool   `json:"refreshed"`  // the access token was rejected and a refresh succeeded
+	Rotated   bool   `json:"rotated"`    // that refresh returned a new refresh token
+	ExpiresIn int    `json:"expires_in"` // as returned by that refresh, 0 when absent
+	Over      bool   `json:"-"`          // the window is over: nothing was sampled
 }
 
-// Alive makes one authenticated GET with the saved access token, never
-// refreshing, and appends {at, ok, code} to StateDir/e01.jsonl. Once the
-// first sample is older than AliveWindow it samples nothing and reports Over.
+// Alive is E01's long probe, on its own dedicated session (its own state
+// dir, used by nothing else). It makes one authenticated GET with the saved
+// access token; on a 401 it refreshes once, saves the new tokens and repeats
+// the GET. It appends {at, ok, code, refreshed, rotated, expires_in} to
+// StateDir/e01.jsonl. A refused refresh is the sample (ok false, the refresh
+// code): that is how the session ended. Once the first sample is older than
+// AliveWindow it samples nothing and reports Over.
 func Alive(ctx context.Context, o session.Options) (AliveResult, error) {
 	now := o.Now
 	if now == nil {
@@ -64,11 +71,26 @@ func Alive(ctx context.Context, o session.Options) (AliveResult, error) {
 	if !first.IsZero() && now().Sub(first) > AliveWindow {
 		return AliveResult{Over: true}, nil
 	}
+	res := AliveResult{At: now().UTC().Format(time.RFC3339)}
 	r, err := session.Get(ctx, o, "/core/v4/users")
 	if err != nil {
-		return AliveResult{}, err
+		return res, err
 	}
-	res := AliveResult{At: now().UTC().Format(time.RFC3339), OK: r.OK(), Code: r.Code}
+	if r.Status == http.StatusUnauthorized {
+		rr, err := session.RefreshSaved(ctx, o)
+		if err != nil {
+			return res, err
+		}
+		if rr.First.Status != http.StatusOK {
+			r = rr.First
+		} else {
+			res.Refreshed, res.Rotated, res.ExpiresIn = true, rr.RefreshRotated, rr.ExpiresIn
+			if r, err = session.Get(ctx, o, "/core/v4/users"); err != nil {
+				return res, err
+			}
+		}
+	}
+	res.OK, res.Code = r.OK(), r.Code
 	if r.Code == 0 { // not a Proton answer: keep the HTTP status visible
 		res.Code = r.Status
 	}

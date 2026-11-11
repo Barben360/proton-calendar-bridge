@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/probe"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/record"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
@@ -68,6 +70,20 @@ func calendarAccessCmd() *cobra.Command {
 					fmt.Fprintf(&b, "\n  %s: HTTP %d, Proton code %d", r.Path, r.Status, r.Code)
 				}
 			}
+			if err == nil {
+				var failed []string
+				for _, r := range res {
+					if r.Failed() {
+						failed = append(failed, r.Path)
+					}
+				}
+				if len(failed) > 0 {
+					err = &exitcode.Error{
+						Code: exitcode.Blocked,
+						Err:  fmt.Errorf("no calendar access with x-pm-appversion %s: failed %s", app, strings.Join(failed, ", ")),
+					}
+				}
+			}
 			return finish(cmd, name, data, b.String(), err)
 		},
 	}
@@ -88,6 +104,13 @@ func refreshCmd() *cobra.Command {
 			res, err := probe.Refresh(cmd.Context(), o)
 			if err != nil {
 				return finish(cmd, name, nil, "", err)
+			}
+			if res.First.Status != http.StatusOK {
+				return finish(cmd, name, nil, "", &exitcode.Error{
+					Code: exitcode.Blocked,
+					Err:  fmt.Errorf("refresh refused: HTTP %d, Proton code %d", res.First.Status, res.First.Code),
+					Hint: "stop here; the session needs pcb-lab login (guard and E02 protocol apply)",
+				})
 			}
 			data := struct {
 				RefreshStatus  int  `json:"refresh_status"`
@@ -126,16 +149,14 @@ func aliveCmd() *cobra.Command {
 			if err != nil {
 				return finish(cmd, name, nil, "", err)
 			}
-			text := fmt.Sprintf("%s ok=%v code=%d", res.At, res.OK, res.Code)
+			text := fmt.Sprintf("%s ok=%v code=%d refreshed=%v rotated=%v expires_in=%d", res.At, res.OK, res.Code, res.Refreshed, res.Rotated, res.ExpiresIn)
 			if res.Over {
 				text = "the 14-day window is over; nothing sampled. Stop it: systemctl --user disable --now pcb-lab-e01.timer"
 			}
 			return finish(cmd, name, struct {
-				At   string `json:"at"`
-				OK   bool   `json:"ok"`
-				Code int    `json:"code"`
-				Over bool   `json:"over"`
-			}{res.At, res.OK, res.Code, res.Over}, text, nil)
+				probe.AliveResult
+				Over bool `json:"over"`
+			}{res, res.Over}, text, nil)
 		},
 	}
 }

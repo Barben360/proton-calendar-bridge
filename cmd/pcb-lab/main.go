@@ -113,7 +113,7 @@ func finish(cmd *cobra.Command, name string, data any, text string, err error) e
 		}
 		return nil
 	}
-	if err == nil {
+	if text != "" { // a failing measurement still prints what it measured
 		fmt.Fprintln(cmd.OutOrStdout(), text)
 	}
 	return err

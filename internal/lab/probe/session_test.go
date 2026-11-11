@@ -141,7 +141,7 @@ func readLog(t *testing.T, o session.Options) []map[string]any {
 	return out
 }
 
-func TestAliveAppendsOneLinePerRunWithoutRefreshing(t *testing.T) {
+func TestAliveAppendsOneLinePerRunAndRefreshesOnlyWhenRejected(t *testing.T) {
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	for i := range 2 {
@@ -163,24 +163,76 @@ func TestAliveAppendsOneLinePerRunWithoutRefreshing(t *testing.T) {
 		t.Errorf("lines = %v", lines)
 	}
 	if n := count(f, "POST", "/auth/v4/refresh"); n != 0 {
-		t.Errorf("alive refreshed %d times, want none", n)
+		t.Errorf("alive refreshed %d times with a valid access token, want none", n)
 	}
 }
 
-func TestAliveRecordsAnExpiredSession(t *testing.T) {
+func TestAliveRefreshesAnExpiredAccessTokenAndRetries(t *testing.T) {
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
-	f.Replies = map[string]labtest.Reply{"GET /core/v4/users": labtest.R(401, `{"Code":401,"Error":"Invalid access token"}`)}
+	f.Replies = map[string]labtest.Reply{"GET /core/v4/users": {Status: 401, Body: `{"Code":401,"Error":"Invalid access token"}`, Once: true}}
 	f.Mu.Unlock()
 	r, err := probe.Alive(t.Context(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.OK || r.Code != 401 {
-		t.Fatalf("result %+v, want not ok, code 401", r)
+	if !r.OK || r.Code != 1000 || !r.Refreshed || !r.Rotated {
+		t.Fatalf("result %+v, want ok after a rotating refresh", r)
 	}
-	if l := readLog(t, o); len(l) != 1 || l[0]["ok"] != false || l[0]["code"] != float64(401) {
+	if n := count(f, "POST", "/auth/v4/refresh"); n != 1 {
+		t.Errorf("refresh calls = %d, want 1", n)
+	}
+	if l := readLog(t, o); len(l) != 1 || l[0]["refreshed"] != true || l[0]["rotated"] != true || l[0]["ok"] != true {
+		t.Errorf("log = %v", l)
+	}
+	// The new pair was saved: the next sample needs no refresh.
+	if r2, err := probe.Alive(t.Context(), o); err != nil || !r2.OK || r2.Refreshed {
+		t.Fatalf("next sample %+v, %v", r2, err)
+	}
+}
+
+func TestAliveRecordsExpiresInFromTheRefresh(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := loggedIn(t, f, "")
+	f.Mu.Lock()
+	f.Replies = map[string]labtest.Reply{
+		"GET /core/v4/users":    {Status: 401, Body: `{"Code":401}`},
+		"POST /auth/v4/refresh": labtest.R(200, `{"Code":1000,"AccessToken":"A2","RefreshToken":"R2","ExpiresIn":3600}`),
+	}
+	f.Mu.Unlock()
+	r, err := probe.Alive(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Refreshed || r.ExpiresIn != 3600 {
+		t.Fatalf("result %+v, want refreshed with ExpiresIn 3600", r)
+	}
+	if l := readLog(t, o); l[0]["expires_in"] != float64(3600) {
+		t.Errorf("log = %v", l)
+	}
+}
+
+func TestAliveRecordsTheRefusedRefreshThatEndedTheSession(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := loggedIn(t, f, "")
+	f.Mu.Lock()
+	f.Replies = map[string]labtest.Reply{
+		"GET /core/v4/users":    labtest.R(401, `{"Code":401}`),
+		"POST /auth/v4/refresh": labtest.R(422, `{"Code":10013,"Error":"Invalid refresh token"}`),
+	}
+	f.Mu.Unlock()
+	r, err := probe.Alive(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.OK || r.Refreshed || r.Code != 10013 {
+		t.Fatalf("result %+v, want not ok, not refreshed, code 10013", r)
+	}
+	if n := count(f, "GET", "/core/v4/users"); n != 1 {
+		t.Errorf("GETs = %d, want no retry after a refused refresh", n)
+	}
+	if l := readLog(t, o); len(l) != 1 || l[0]["code"] != float64(10013) {
 		t.Errorf("log = %v", l)
 	}
 }

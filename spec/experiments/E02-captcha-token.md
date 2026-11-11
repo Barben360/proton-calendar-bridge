@@ -42,7 +42,7 @@ pass-cli run --env-file scripts/lab.env.example -- pcb-lab login --captcha-token
 
 ## Conclusion
 
-Open. If no further HV occurs after the first solved one, E02 stays open with "no CAPTCHA seen in N logins" (N counted from `last-login` history in the E03 sequence); M1 then keeps the single-process interactive fallback only.
+Open. If no further HV occurs after the first solved one, E02 stays open with "no CAPTCHA seen in N logins" (N = the number of logins in the live-run log kept in the pending section of `E03-client-identity.md`, cross-checked with the lines of `hv-log.jsonl`); M1 then keeps the single-process interactive fallback only.
 
 ## Feeds
 
