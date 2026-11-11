@@ -127,8 +127,8 @@ func TestStatusShowsSyncSection(t *testing.T) {
 	r, cal := syncRig(t)
 	r.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 60})
 	r.want(exitcode.OK, "status")
-	if strings.Contains(r.out.String(), "sync:") {
-		t.Errorf("status shows a sync line before any sync: %q", r.out.String())
+	if strings.Count(r.out.String(), "sync:") != 1 || !strings.Contains(r.out.String(), "sync: never (run pcb sync)") {
+		t.Errorf("status before any sync = %q, want only the never-synced line", r.out.String())
 	}
 	r.want(exitcode.OK, "sync")
 	r.want(exitcode.OK, "status")

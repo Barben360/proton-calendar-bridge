@@ -213,6 +213,13 @@ func TestEventsCalendarSelection(t *testing.T) {
 	if !strings.Contains(ee.Error(), `no calendar named "Nope"`) || !strings.Contains(ee.Hint, "pcb calendar list") {
 		t.Errorf("error = %q, hint = %q", ee.Error(), ee.Hint)
 	}
+	// A calendar Proton has but the cache does not (added since the last
+	// sync) asks for pcb sync, not for a check of its name.
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Later"})
+	_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Later"})
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "not synced yet") || ee.Hint != "run pcb sync" {
+		t.Errorf("not yet synced: error %q, hint %q", ee.Error(), ee.Hint)
+	}
 	_, err = e.svc.Events(t.Context(), service.EventsRequest{})
 	_ = wantExit(t, err, exitcode.Usage)
 	if evs := e.events(t, service.EventsRequest{Calendar: w2}); evs == nil {

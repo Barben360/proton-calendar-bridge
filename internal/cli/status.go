@@ -56,6 +56,9 @@ func statusText(s service.Status) string {
 	optional("captcha_url", s.CaptchaURL)
 	optional("last_login", at(s.LastLogin))
 	optional("last_relogin", at(s.LastRelogin))
+	if s.Sync == nil && s.Phase == string(service.StateReady) {
+		line("sync", "never (run pcb sync)")
+	}
 	if s.Sync != nil {
 		if s.Sync.Error != "" {
 			line("sync", "cache unreadable: "+s.Sync.Error)

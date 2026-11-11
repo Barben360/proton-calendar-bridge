@@ -169,3 +169,22 @@ func TestSyncWatchPrintsAPassLineEach(t *testing.T) {
 		t.Errorf("stderr = %q: the stopping error is printed %d times, want once with its hint", stderr, n)
 	}
 }
+
+// First use: an account without calendars says so instead of printing
+// nothing, and --interval means nothing without --watch.
+func TestSyncFirstUseMessages(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{}) // Sync answers no calendars
+	r.want(exitcode.OK, "sync")
+	if got := r.out.String(); got != "no calendars to sync\n" {
+		t.Errorf("stdout = %q, want the no-calendar line", got)
+	}
+	r.want(exitcode.OK, "sync", "--json")
+	if !strings.Contains(r.out.String(), `"calendars": []`) {
+		t.Errorf("--json stdout = %q, want an empty array", r.out.String())
+	}
+	r.want(exitcode.Usage, "sync", "--interval", "20s")
+	if !strings.Contains(r.errb.String(), "--watch") {
+		t.Errorf("stderr = %q, want the usage error to name --watch", r.errb.String())
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/calendar"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
@@ -281,6 +282,9 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 		return nil, notSynced
 	}
 	cal, err := pickCalendar(cals, req.Calendar)
+	if errors.Is(err, errNotCached) {
+		return nil, l.notCached(ctx, req.Calendar)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -314,8 +318,33 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 	return out, nil
 }
 
+// errNotCached: no cached calendar has that ID or name.
+var errNotCached = errors.New("no such calendar in the cache")
+
+// notCached tells a calendar Proton has but the cache does not (added since
+// the last sync: run pcb sync) from one that does not exist (check the
+// name). It asks Proton for the calendar list, the one network call of a
+// read, and only on this error path; when Proton cannot be asked, the
+// message covers both.
+func (l *Local) notCached(ctx context.Context, ref string) error {
+	var cals []calendar.Calendar
+	err := l.withSession(ctx, func(ctx context.Context, c *api.Client, _ store.Account) error {
+		var err error
+		cals, err = calendar.List(ctx, c)
+		return err
+	})
+	switch {
+	case err != nil:
+		return usage(fmt.Sprintf("no calendar named %q in the event cache", ref),
+			"pcb calendar list shows your calendars; one added since the last sync needs pcb sync first")
+	case slices.ContainsFunc(cals, func(c calendar.Calendar) bool { return c.ID == ref || c.Name == ref }):
+		return mustAct(fmt.Sprintf("calendar %q is not synced yet", ref), "run pcb sync")
+	}
+	return usage(fmt.Sprintf("no calendar named %q", ref), "pcb calendar list")
+}
+
 // pickCalendar finds the calendar whose ID is ref, else the one whose name
-// is exactly ref.
+// is exactly ref; errNotCached when there is none.
 func pickCalendar(cals []cache.Calendar, ref string) (cache.Calendar, error) {
 	if i := slices.IndexFunc(cals, func(c cache.Calendar) bool { return c.ID == ref }); i >= 0 {
 		return cals[i], nil
@@ -328,7 +357,7 @@ func pickCalendar(cals []cache.Calendar, ref string) (cache.Calendar, error) {
 	}
 	switch len(named) {
 	case 0:
-		return cache.Calendar{}, usage(fmt.Sprintf("no calendar named %q", ref), "pcb calendar list")
+		return cache.Calendar{}, errNotCached
 	case 1:
 		return named[0], nil
 	}

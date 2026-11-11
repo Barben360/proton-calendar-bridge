@@ -22,6 +22,11 @@ func (a *app) newSync() *cobra.Command {
 			"read Proton's change feed. With --watch it repeats every --interval until Ctrl-C or until you must log in again.",
 		Args: NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("interval") && !watch {
+				return &exitcode.Error{Code: exitcode.Usage,
+					Err:  errors.New("--interval needs --watch: a single pass has no interval"),
+					Hint: "add --watch, or drop --interval"}
+			}
 			if interval < service.MinWatchInterval {
 				return &exitcode.Error{Code: exitcode.Usage,
 					Err:  fmt.Errorf("--interval %s is below the minimum of %s", interval, service.MinWatchInterval),
@@ -66,7 +71,7 @@ func (a *app) newSync() *cobra.Command {
 // the final report, so it is printed once.
 func (a *app) printPass(cmd *cobra.Command, p service.WatchPass) {
 	stamp := time.Now().Format(time.RFC3339)
-	if len(p.Result.Calendars) > 0 {
+	if len(p.Result.Calendars) > 0 || p.Err == nil {
 		fmt.Fprintln(cmd.OutOrStdout(), syncText(p.Result, stamp+" "))
 		return
 	}
@@ -79,8 +84,12 @@ func (a *app) printPass(cmd *cobra.Command, p service.WatchPass) {
 	}
 }
 
-// syncText is one line per calendar, each starting with prefix.
+// syncText is one line per calendar, each starting with prefix, or one
+// line saying there is none.
 func syncText(res service.SyncResult, prefix string) string {
+	if len(res.Calendars) == 0 {
+		return prefix + "no calendars to sync"
+	}
 	lines := make([]string, 0, len(res.Calendars))
 	for _, c := range res.Calendars {
 		if c.Error != "" {

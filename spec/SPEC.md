@@ -351,7 +351,12 @@ relogin credentials, client tokens (hashed, never stored in clear).
   through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).
 - Reads are served from the cache; a read never waits for Proton unless the
-  calendar was never synced.
+  calendar was never synced (M2: `pcb event list` for a calendar the cache
+  does not hold reads Proton's calendar list once, to tell "not synced yet,
+  run `pcb sync`" from "no such calendar"). First use is explicit: `pcb sync`
+  on an account without calendars says so, `pcb status` logged in but never
+  synced shows `sync: never (run pcb sync)`, and `--interval` without
+  `--watch` is refused (exit 2).
 - Writes go to Proton synchronously (the client gets the real result), then
   the cache is updated from Proton's answer [call; no offline write queue
   in v1].
