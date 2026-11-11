@@ -59,3 +59,19 @@ func TestUnverifiedWhenAnyPartIsNotVerified(t *testing.T) {
 		}
 	}
 }
+
+// A placeholder's RRULE comes from a plaintext column: one content line,
+// without a "RRULE:" prefix should Proton's column carry one.
+func TestPlaceholderRRuleIsOneValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"FREQ=WEEKLY;BYDAY=FR":   "FREQ=WEEKLY;BYDAY=FR",
+		"RRULE:FREQ=DAILY":       "FREQ=DAILY",
+		"rrule:FREQ=DAILY":       "FREQ=DAILY",
+		"FREQ=DAILY\r\nX-EVIL:1": "FREQ=DAILYX-EVIL:1",
+		"":                       "",
+	} {
+		if got := placeholderRRule(in); got != want {
+			t.Errorf("placeholderRRule(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

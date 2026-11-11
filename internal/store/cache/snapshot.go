@@ -13,6 +13,7 @@ type StoredRow struct {
 	Start, End   int64
 	FullDay      bool
 	RecurrenceID *int64
+	RRule        string // the row's plaintext RRULE value, "" for none
 	LastEdit     int64
 	ETag         string
 	Seq          int64
@@ -147,7 +148,7 @@ func (v *view) Floor() int64               { return v.floor }
 // errEnded is returned by a View used after its Snapshot callback returned.
 var errEnded = errors.New("cache: snapshot used after it ended")
 
-const rowColumns = `uid, id, start_at, end_at, full_day, recurrence_id, last_edit, etag, seq, raw`
+const rowColumns = `uid, id, start_at, end_at, full_day, recurrence_id, rrule, last_edit, etag, seq, raw`
 const rowOrder = ` ORDER BY uid, recurrence_id IS NOT NULL, recurrence_id, id`
 
 // groups runs a query selecting rowColumns in rowOrder and groups it by UID.
@@ -165,7 +166,7 @@ func (v *view) groups(query string, args ...any) ([]Group, error) {
 		var r StoredRow
 		var rec sql.NullInt64
 		var raw []byte
-		if err := rows.Scan(&r.UID, &r.ID, &r.Start, &r.End, &r.FullDay, &rec, &r.LastEdit, &r.ETag, &r.Seq, &raw); err != nil {
+		if err := rows.Scan(&r.UID, &r.ID, &r.Start, &r.End, &r.FullDay, &rec, &r.RRule, &r.LastEdit, &r.ETag, &r.Seq, &raw); err != nil {
 			return nil, v.c.classify(err)
 		}
 		if rec.Valid {

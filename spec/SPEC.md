@@ -265,7 +265,8 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
 - One CalDAV object per UID: master first, then exceptions by RecurrenceID; duplicate
   masters resolved to the most recently edited one, the others left out and counted
   (M3-R3). An event that cannot be decrypted or parsed is served as a placeholder
-  VEVENT (`X-PCB-PLACEHOLDER:1`) rather than failing a report (M3-R4)
+  VEVENT (`X-PCB-PLACEHOLDER:1`; the row's plaintext times and, for a master, its
+  RRULE, so a series still shows every occurrence) rather than failing a report (M3-R4)
   [verified: `TestUndecryptableEventDoesNotFailTheReport`]. These counts live in the
   serving process only: `pcb serve` logs them (§15), `pcb status` does not show them
   (M3-R34).

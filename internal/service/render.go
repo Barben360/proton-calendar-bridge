@@ -448,9 +448,10 @@ func unverifiedParts(parts []cards.Part) bool {
 
 // placeholder is the minimal VEVENT of a row pcb cannot render (ruling
 // M3-R4), from the row's plaintext columns only: UID, DTSTAMP (its last
-// edit), DTSTART/DTEND (DATE values for an all-day row), RECURRENCE-ID for an
-// exception, the placeholder SUMMARY and X-PCB-PLACEHOLDER:1 (M4 refuses
-// writes to such an object).
+// edit), DTSTART/DTEND (DATE values for an all-day row), RRULE for a master
+// (so a weekly meeting does not read as one occurrence, final review minor
+// 3), RECURRENCE-ID for an exception, the placeholder SUMMARY and
+// X-PCB-PLACEHOLDER:1 (M4 refuses writes to such an object).
 func placeholder(row *cache.StoredRow) ical.Component {
 	at := func(name string, unix int64) ical.Property {
 		t := time.Unix(unix, 0).UTC()
@@ -470,6 +471,9 @@ func placeholder(row *cache.StoredRow) ical.Component {
 	case end > row.Start:
 		props = append(props, at("DTEND", end))
 	}
+	if rule := placeholderRRule(row.RRule); rule != "" && row.RecurrenceID == nil {
+		props = append(props, ical.Property{Name: "RRULE", Value: rule})
+	}
 	if row.RecurrenceID != nil {
 		props = append(props, at("RECURRENCE-ID", *row.RecurrenceID))
 	}
@@ -479,6 +483,17 @@ func placeholder(row *cache.StoredRow) ical.Component {
 		c.Items = append(c.Items, ical.Item{Prop: p})
 	}
 	return c
+}
+
+// placeholderRRule is the RRULE value of a row's plaintext rule: without a
+// "RRULE:" prefix should the column carry one, and without control
+// characters (textOnly).
+func placeholderRRule(s string) string {
+	s = strings.TrimSpace(textOnly(s))
+	if len(s) >= 6 && strings.EqualFold(s[:6], "RRULE:") {
+		s = s[6:]
+	}
+	return s
 }
 
 // textOnly drops the control characters of s, so a plaintext column cannot

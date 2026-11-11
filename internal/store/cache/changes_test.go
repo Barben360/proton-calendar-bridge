@@ -174,6 +174,23 @@ func TestChangedSinceGroupsByUID(t *testing.T) {
 	})
 }
 
+// Final review, minor 3: a stored row carries its plaintext RRULE, which a
+// placeholder master needs.
+func TestGroupCarriesTheRRule(t *testing.T) {
+	c, _ := openNew(t)
+	m := urow("m", "u1", 0, 1)
+	m.RRule = "FREQ=WEEKLY;BYDAY=FR"
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{m, urow("x", "u1", 100, 1)}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	snap(t, c, "cal", func(v View) {
+		g, ok, err := v.Group("u1")
+		if err != nil || !ok || len(g.Rows) != 2 || g.Rows[0].RRule != "FREQ=WEEKLY;BYDAY=FR" || g.Rows[1].RRule != "" {
+			t.Errorf("Group(u1) = %+v %v %v; want the master's RRULE only", g, ok, err)
+		}
+	})
+}
+
 func TestDeletedUIDOnlyWhenNoLiveRow(t *testing.T) {
 	c, _ := openNew(t)
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{

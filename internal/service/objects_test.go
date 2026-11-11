@@ -126,6 +126,10 @@ func TestObjectReads(t *testing.T) {
 	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60, Card: card("dup@x", "Mid", base)})
 	e.f.UpdateEvent(work, old, protontest.Event{UID: "dup@x", Start: base, End: base + 60, Card: card("dup@x", "Newest", base)})
 	e.f.AddEvent(locked, protontest.Event{UID: "locked@x", Start: base - 8*3600, End: base - 8*3600 + 2*day, FullDay: true})
+	// A recurring event that does not decrypt: its placeholder master keeps
+	// the row's plaintext RRULE (final review, minor 3).
+	e.f.AddEvent(locked, protontest.Event{UID: "lockedseries@x", Start: base, End: base + 3600, RRule: "FREQ=WEEKLY;BYDAY=FR"})
+	e.f.AddEvent(locked, protontest.Event{UID: "lockedseries@x", Start: rid + 3600, End: rid + 7200, RecurrenceID: &rid})
 	// Signatures that do not verify (ruling M3-R33): a whole event, and one
 	// exception of a series whose master verifies.
 	e.f.AddEvent(hol, protontest.Event{UID: "forged@x", Start: base, End: base + 3600, ForeignKey: true, Card: card("forged@x", "Forged", base)})
@@ -263,6 +267,15 @@ func TestObjectReads(t *testing.T) {
 		}
 		if !slices.Equal(rc.KeysErrors, []string{locked}) {
 			t.Errorf("KeysErrors = %v, want the Locked calendar's ID only", rc.KeysErrors)
+		}
+	})
+
+	t.Run("PlaceholderMasterKeepsTheRRule", func(t *testing.T) {
+		d := string(e.objects(t, locked, "lockedseries@x")["lockedseries@x"].Data)
+		vevents := strings.Split(d, "BEGIN:VEVENT")
+		if len(vevents) != 3 || !strings.Contains(vevents[1], "\r\nRRULE:FREQ=WEEKLY;BYDAY=FR\r\n") || strings.Contains(vevents[2], "RRULE") ||
+			strings.Count(d, "X-PCB-PLACEHOLDER:1\r\n") != 2 || !strings.Contains(vevents[2], "RECURRENCE-ID:"+stamp(rid)+"\r\n") {
+			t.Errorf("lockedseries@x: want a placeholder master with the row's RRULE, then its placeholder exception without:\n%s", d)
 		}
 	})
 
