@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -308,17 +309,6 @@ func TestRefreshAfterRevokeIsSessionEnded(t *testing.T) {
 	}
 }
 
-func TestRefreshRateLimitIsTransient(t *testing.T) {
-	t.Parallel()
-	f := protontest.New(t, protontest.Options{})
-	m := manager(t, f)
-	p := begin(t, f, m)
-	f.FailNext("POST", "/auth/v4/refresh", http.StatusTooManyRequests, 2028, 0)
-	if _, err := auth.Refresh(t.Context(), m, p.Tokens); err == nil || errors.Is(err, api.ErrSessionEnded) {
-		t.Fatalf("Refresh on 429 = %v, want a transient error", err)
-	}
-}
-
 func TestRefreshNetworkErrorIsTransient(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.NotFoundHandler())
@@ -356,6 +346,118 @@ func TestPendingAndScopeRedactSecrets(t *testing.T) {
 			if strings.Contains(text, secret) {
 				t.Fatalf("%T formats a secret: %s", v, text)
 			}
+		}
+	}
+}
+
+// otherTransport is not an *http.Transport.
+type otherTransport struct{ http.RoundTripper }
+
+// Not parallel: it swaps http.DefaultTransport while the parallel tests wait.
+func TestNewManagerToleratesAReplacedDefaultTransport(t *testing.T) {
+	saved := http.DefaultTransport
+	http.DefaultTransport = otherTransport{saved}
+	t.Cleanup(func() { http.DefaultTransport = saved })
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"Code":8002,"Error":"no"}`))
+	}))
+	t.Cleanup(srv.Close)
+	m := auth.NewManager(srv.URL, "Other")
+	t.Cleanup(m.Close)
+	if _, err := auth.Begin(t.Context(), m, "u", []byte("p"), ""); !errors.Is(err, auth.ErrBadCredentials) || calls != 1 {
+		t.Fatalf("Begin = %v after %d requests, want ErrBadCredentials after 1", err, calls)
+	}
+}
+
+func TestBeginRefusalReportsAFailedRevoke(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		o    protontest.Options
+		want error
+	}{
+		"two-password": {protontest.Options{TwoPassword: true}, auth.ErrTwoPassword},
+		"FIDO2 only":   {protontest.Options{FIDO2Only: true}, auth.ErrFIDO2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := protontest.New(t, c.o)
+			f.FailNext("DELETE", "/auth/v4", http.StatusInternalServerError, 0, 0)
+			p, err := auth.Begin(t.Context(), manager(t, f), f.Username, []byte(f.Password), "")
+			var e *api.Error
+			if !errors.Is(err, c.want) || !errors.As(err, &e) || e.Status != http.StatusInternalServerError || p != nil {
+				t.Fatalf("Begin = %v, %v; want nil and %v joined with the failed revoke (HTTP 500)", p, err, c.want)
+			}
+			if strings.Contains(err.Error(), f.Password) || strings.Contains(err.Error(), "Bearer") {
+				t.Fatalf("the error text carries a secret: %v", err)
+			}
+			if n := f.Calls("DELETE", "/auth/v4"); n != 1 {
+				t.Fatalf("DELETE /auth/v4 calls = %d, want 1", n)
+			}
+		})
+	}
+}
+
+func TestBeginRejectsBadLoginProof(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{BadLoginProof: true})
+	p, err := auth.Begin(t.Context(), manager(t, f), f.Username, []byte(f.Password), "")
+	if !errors.Is(err, auth.ErrServerProof) || p != nil {
+		t.Fatalf("Begin = %v, %v; want nil, ErrServerProof", p, err)
+	}
+}
+
+func TestAbortRevokesEvenWhenCancelled(t *testing.T) {
+	t.Parallel()
+	f, _ := totpAccount(t)
+	p := begin(t, f, manager(t, f))
+	tok := p.Tokens
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	p.Abort(ctx)
+	if err := client(f, tok).Get(t.Context(), "/core/v4/users", nil, nil); !errors.Is(err, api.ErrSessionEnded) {
+		t.Fatalf("the session aborted with a cancelled context still answers: %v", err)
+	}
+}
+
+func TestRefreshEndsTheSessionOnlyOnRefusal(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	m := manager(t, f)
+	stale := api.Tokens{UID: "u", AccessToken: "a", RefreshToken: "r"}
+	for _, c := range []struct {
+		status, code int
+		ended        bool
+	}{
+		{http.StatusUnauthorized, 0, true},
+		{http.StatusUnprocessableEntity, 0, true},
+		{http.StatusBadRequest, api.CodeRefreshInvalid, true},
+		{http.StatusBadRequest, 2001, false},
+		{http.StatusBadRequest, 5003, false},
+		{http.StatusForbidden, 0, false},
+		{http.StatusTooManyRequests, 2028, false},
+		{http.StatusInternalServerError, 0, false},
+	} {
+		f.FailNext("POST", "/auth/v4/refresh", c.status, c.code, 0)
+		_, err := auth.Refresh(t.Context(), m, stale)
+		if err == nil || errors.Is(err, api.ErrSessionEnded) != c.ended {
+			t.Errorf("refresh answered %d/%d: err = %v, session ended = %t, want %t", c.status, c.code, err, errors.Is(err, api.ErrSessionEnded), c.ended)
+		}
+	}
+}
+
+func TestSubmitTOTPRejectedOnlyOn422(t *testing.T) {
+	t.Parallel()
+	f, tp := totpAccount(t)
+	p := begin(t, f, manager(t, f))
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		f.FailNext("POST", "/auth/v4/2fa", status, protontest.CodeTOTPWrong, 0)
+		err := p.SubmitTOTP(t.Context(), tp.Code(t0))
+		if err == nil || errors.Is(err, auth.ErrTOTPRejected) || errors.Is(err, api.ErrSessionEnded) {
+			t.Errorf("2FA answered %d: err = %v, want a plain error", status, err)
 		}
 	}
 }

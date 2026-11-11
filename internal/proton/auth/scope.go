@@ -36,13 +36,14 @@ func (Scope) GoString() string { return redactedScope }
 func (Scope) LogValue() slog.Value { return slog.StringValue(redactedScope) }
 
 // Unlock sends an SRP proof to PUT /core/v4/users/unlock and checks the
-// server's proof. A wrong password is ErrBadCredentials; a mismatching proof
-// is ErrServerProof, after a best-effort Lock.
+// server's proof. A wrong password (422, code 8002) is ErrBadCredentials; a
+// mismatching, empty or absent proof is ErrServerProof, after a Lock whose
+// failure is joined to it.
 func (s Scope) Unlock(ctx context.Context) error {
 	info, err := s.M.AuthInfo(ctx, gpa.AuthInfoReq{Username: s.Username})
 	if err != nil {
 		perr := protonError(http.MethodPost, "/auth/v4/info", err)
-		if api.IsCode(perr, codePasswordWrong) {
+		if wrongPassword(perr) {
 			return fmt.Errorf("%w: %w", ErrBadCredentials, perr)
 		}
 		return fmt.Errorf("unlock: %w", perr)
@@ -62,18 +63,30 @@ func (s Scope) Unlock(ctx context.Context) error {
 	}
 	var out struct{ ServerProof string }
 	if err := s.C.Put(ctx, "/core/v4/users/unlock", req, &out); err != nil {
-		var e *api.Error
-		if errors.As(err, &e) && (e.Code == codePasswordWrong || e.Status == http.StatusUnprocessableEntity) {
+		if wrongPassword(err) {
 			return fmt.Errorf("%w: %w", ErrBadCredentials, err)
 		}
 		return fmt.Errorf("unlock: %w", err)
 	}
 	got, err := base64.StdEncoding.DecodeString(out.ServerProof)
 	if err != nil || len(got) == 0 || subtle.ConstantTimeCompare(got, proofs.ExpectedServerProof) != 1 {
-		_ = s.Lock(ctx) // the server may have granted the scope anyway
+		// The server may have granted the scope anyway: drop it, even when
+		// ctx is cancelled.
+		lctx, cancel := cleanupContext(ctx)
+		defer cancel()
+		if lerr := s.Lock(lctx); lerr != nil {
+			return errors.Join(ErrServerProof, fmt.Errorf("re-locking: %w", lerr))
+		}
 		return ErrServerProof
 	}
 	return nil
+}
+
+// wrongPassword reports Proton's answer to a wrong SRP proof: HTTP 422 with
+// code 8002 (ruling R6m: nothing looser).
+func wrongPassword(err error) bool {
+	var e *api.Error
+	return errors.As(err, &e) && e.Status == http.StatusUnprocessableEntity && e.Code == codePasswordWrong
 }
 
 // Lock drops the locked scope (PUT /core/v4/users/lock).

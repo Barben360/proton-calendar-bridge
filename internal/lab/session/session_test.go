@@ -44,6 +44,7 @@ func exitErr(t *testing.T, err error) *exitcode.Error {
 }
 
 func TestLoginGuardRefusesWithin60s(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
@@ -68,6 +69,7 @@ func TestLoginGuardRefusesWithin60s(t *testing.T) {
 }
 
 func TestLoginGuardAllowsAfter60s(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
@@ -89,6 +91,7 @@ func TestLoginGuardAllowsAfter60s(t *testing.T) {
 }
 
 func TestLoginHVStopsWithResumeInfo(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
 	o := opts(t, f)
 	_, err := session.Login(t.Context(), o)
@@ -125,6 +128,7 @@ func TestLoginHVStopsWithResumeInfo(t *testing.T) {
 }
 
 func TestLoginWithCaptchaTokenSendsIt(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	o.CaptchaToken = "T1"
@@ -139,6 +143,7 @@ func TestLoginWithCaptchaTokenSendsIt(t *testing.T) {
 }
 
 func TestLoginWithoutCaptchaTokenSendsNone(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	s, err := session.Login(t.Context(), opts(t, f))
 	if err != nil {
@@ -151,6 +156,7 @@ func TestLoginWithoutCaptchaTokenSendsNone(t *testing.T) {
 }
 
 func TestLoginTOTPFromURI(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{TwoFA: true})
 	o := opts(t, f)
 	tp, err := otp.Parse(totpURI)
@@ -173,6 +179,7 @@ func TestLoginTOTPFromURI(t *testing.T) {
 }
 
 func TestLoginNeedsTOTPWhenAccountHas2FA(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{TwoFA: true})
 	_, err := session.Login(t.Context(), opts(t, f))
 	if e := exitErr(t, err); e.Code != exitcode.MustAct {
@@ -184,6 +191,7 @@ func TestLoginNeedsTOTPWhenAccountHas2FA(t *testing.T) {
 }
 
 func TestLoginMissingCredsIsUsageAndKeepsGuardFree(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	o.Creds.Password = ""
@@ -197,6 +205,7 @@ func TestLoginMissingCredsIsUsageAndKeepsGuardFree(t *testing.T) {
 }
 
 func TestLoginWrongPasswordDoesNotLeakIt(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	o.Creds.Password = "wrong-password-canary"
@@ -210,6 +219,7 @@ func TestLoginWrongPasswordDoesNotLeakIt(t *testing.T) {
 }
 
 func TestSessionFileMode0600(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX modes")
 	}
@@ -234,6 +244,7 @@ func TestSessionFileMode0600(t *testing.T) {
 }
 
 func TestSessionFileHoldsNoPassword(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	s, err := session.Login(t.Context(), o)
@@ -262,6 +273,7 @@ func TestSessionFileHoldsNoPassword(t *testing.T) {
 }
 
 func TestResumeRebuildsClientAndPersistsRotation(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	s, err := session.Login(t.Context(), o)
@@ -305,6 +317,7 @@ func TestResumeRebuildsClientAndPersistsRotation(t *testing.T) {
 }
 
 func TestResumeWithoutSessionIsMustAct(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	_, err := session.Resume(t.Context(), opts(t, f))
 	if e := exitErr(t, err); e.Code != exitcode.MustAct || !strings.Contains(e.Hint, "pcb-lab login") {
@@ -316,6 +329,7 @@ func TestResumeWithoutSessionIsMustAct(t *testing.T) {
 }
 
 func TestRedactIDNeverReturnsTheWholeID(t *testing.T) {
+	t.Parallel()
 	for _, id := range []string{"", "ab", "abcd", "abcde", "5ad57d77-3c1c-4784-a6c5-e38b25881c57"} {
 		got := session.RedactID(id)
 		if id != "" && strings.Contains(got, id) {
@@ -328,6 +342,7 @@ func TestRedactIDNeverReturnsTheWholeID(t *testing.T) {
 }
 
 func TestConcurrentLoginsReachProtonOnce(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	const n = 8
@@ -368,6 +383,7 @@ func TestConcurrentLoginsReachProtonOnce(t *testing.T) {
 }
 
 func TestHVFileLifecycle(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
 	o := opts(t, f)
 	if _, err := session.Login(t.Context(), o); err == nil {
@@ -394,6 +410,7 @@ func TestHVFileLifecycle(t *testing.T) {
 }
 
 func TestHVFileRemovedByPlainSuccessfulLogin(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
@@ -414,6 +431,7 @@ func TestHVFileRemovedByPlainSuccessfulLogin(t *testing.T) {
 }
 
 func TestExistingStateDirTightenedTo0700(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o755); err != nil {
@@ -434,6 +452,7 @@ func TestExistingStateDirTightenedTo0700(t *testing.T) {
 }
 
 func TestResumeReportsFailedTokenWrite(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory modes")
 	}
@@ -480,6 +499,7 @@ func TestResumeReportsFailedTokenWrite(t *testing.T) {
 }
 
 func TestTOTPWaitsForTheNextPeriod(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{TwoFA: true})
 	o := opts(t, f)
 	tp, err := otp.Parse(totpURI)
@@ -513,6 +533,7 @@ func TestTOTPWaitsForTheNextPeriod(t *testing.T) {
 }
 
 func TestHVEventsAreLogged(t *testing.T) {
+	t.Parallel()
 	const second = "SECOND-CHALLENGE-TOKEN"
 	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
 	o := opts(t, f)
@@ -567,6 +588,7 @@ func TestHVEventsAreLogged(t *testing.T) {
 }
 
 func TestSuccessfulLoginLeavesTheHVLog(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
 	o := opts(t, f)
 	if _, err := session.Login(t.Context(), o); err == nil {

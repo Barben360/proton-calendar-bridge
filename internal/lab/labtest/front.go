@@ -54,8 +54,7 @@ type Front struct {
 // response shape.
 func NewFront(t *testing.T, f *Front) *Front {
 	t.Helper()
-	fake := protontest.New(t, protontest.Options{TwoFA: f.TwoFA})
-	fake.AddUser(User, Pass)
+	fake := protontest.New(t, protontest.Options{TwoFA: f.TwoFA, Username: User, Password: Pass})
 	target, err := url.Parse(fake.URL)
 	if err != nil {
 		t.Fatal(err)

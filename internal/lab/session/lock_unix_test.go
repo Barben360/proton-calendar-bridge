@@ -15,6 +15,7 @@ import (
 )
 
 func TestLoginRefusedWhileLockHeld(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o700); err != nil {

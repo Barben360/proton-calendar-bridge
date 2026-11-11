@@ -57,3 +57,13 @@ Update `E01`, `E02`, `E03`, `DATASET.md`, SPEC §5.1/§5.2 markers, `spec/OPEN.m
 ## 6. Later: Thunderbird against the bridge (author, GUI; after the M3 CalDAV adapter exists)
 
 Placeholder, to be written when the adapter exists. Scope: a real Thunderbird (local, then over the network) subscribes to the bridge, shows every calendar and stays in sync; confirms the E08 source findings live (discovery through `/.well-known/caldav`, Basic 401 challenge, `sync-collection` with the empty token, `calendar-multiget`, PUT/DELETE precondition handling, no VTIMEZONE needed in responses, dismissed alarms not re-firing after an edit). Needs the author because it is a GUI client. Source-based expectations: `spec/experiments/E08-thunderbird-caldav.md`.
+
+## M1 live run: signals to confirm
+
+Real-Proton answers that `internal/proton/auth` classifies on assumption (ruling R6m); each one is checked during the Task 11 live run, and the code is adjusted if Proton answers differently.
+
+- Wrong TOTP on `POST /auth/v4/2fa`: assumed HTTP 422 (fake uses code 12060), mapped to `ErrTOTPRejected`; record the real status and code.
+- Wrong login password on `PUT /core/v4/users/unlock`: assumed HTTP 422 with code 8002, mapped to `ErrBadCredentials`; record the real status and code.
+- Refused refresh on `POST /auth/v4/refresh` (spent or revoked refresh token): assumed HTTP 401 or 422, or code 10013, mapped to `api.ErrSessionEnded`; record the real status and code (any other answer must leave the session alone).
+- Wrong password on `POST /auth/v4`: assumed HTTP 422 with code 8002, mapped to `ErrBadCredentials`; record the real status and code.
+- Refused or expired CAPTCHA token on `POST /auth/v4`: assumed code 12087, mapped to `ErrCaptchaRejected` (a fresh 9001 challenge instead is also possible); record what Proton sends.

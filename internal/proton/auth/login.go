@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
@@ -21,7 +23,17 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
 
-const codePasswordWrong = 8002
+const (
+	codePasswordWrong = 8002
+	// cleanupTimeout bounds a revoke or a re-lock, which run even when the
+	// caller's context is already cancelled.
+	cleanupTimeout = 10 * time.Second
+)
+
+// cleanupContext keeps ctx's values but not its cancellation.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
 
 // Credential and verification failures: the user must act (R23a). Test them
 // with errors.Is.
@@ -69,8 +81,25 @@ func NewManager(baseURL, appVersion string) *gpa.Manager {
 		gpa.WithAppVersion(appVersion),
 		gpa.WithLogger(silent{}),
 		gpa.WithRetryCount(0),
-		gpa.WithTransport(userAgent{http.DefaultTransport.(*http.Transport).Clone()}),
+		gpa.WithTransport(userAgent{newTransport()}),
 	)
+}
+
+// newTransport clones http.DefaultTransport, or builds the same defaults when
+// something replaced it with another RoundTripper.
+func newTransport() *http.Transport {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 type silent struct{}
@@ -146,15 +175,29 @@ func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte
 	default:
 		return p, nil
 	}
-	if err := c.AuthDelete(ctx); err != nil {
-		refused = errors.Join(refused, fmt.Errorf("revoking the session: %w", protonError(http.MethodDelete, "/auth/v4", err)))
+	if err := p.revoke(ctx); err != nil {
+		refused = errors.Join(refused, err)
 	}
 	p.Close()
 	return nil, refused
 }
 
+// revoke deletes the session, even when ctx is cancelled.
+func (p *Pending) revoke(ctx context.Context) error {
+	ctx, cancel := cleanupContext(ctx)
+	defer cancel()
+	if err := p.c.AuthDelete(ctx); err != nil {
+		return fmt.Errorf("revoking the session: %w", protonError(http.MethodDelete, "/auth/v4", err))
+	}
+	return nil
+}
+
 // loginError classifies a failed SRP login.
 func loginError(err error) error {
+	// go-proton-api compares the login's ServerProof (bytes.Equal) and, on a
+	// mismatch, returns no client: the session the server may have opened
+	// cannot be revoked from here. It expires server-side; its tokens are
+	// never kept.
 	if errors.Is(err, gpa.ErrInvalidProof) {
 		return ErrServerProof
 	}
@@ -183,8 +226,9 @@ func loginError(err error) error {
 	return fmt.Errorf("proton login: %w", perr)
 }
 
-// SubmitTOTP sends the 2FA code. A refused code is ErrTOTPRejected; a session
-// that ended meanwhile wraps api.ErrSessionEnded.
+// SubmitTOTP sends the 2FA code. A refused code (HTTP 422) is
+// ErrTOTPRejected; a session that ended meanwhile (401, or a refused refresh)
+// wraps api.ErrSessionEnded; anything else is a plain error.
 func (p *Pending) SubmitTOTP(ctx context.Context, code string) error {
 	if p.c == nil {
 		return errors.New("auth: the login is closed")
@@ -199,16 +243,17 @@ func (p *Pending) SubmitTOTP(ctx context.Context, code string) error {
 	switch {
 	case p.ended || (errors.As(err, &ge) && ge.Status == http.StatusUnauthorized):
 		return fmt.Errorf("%w: %w", api.ErrSessionEnded, perr)
-	case errors.As(err, &ge) && ge.Status >= 400 && ge.Status < 500 && ge.Status != http.StatusTooManyRequests:
+	case errors.As(err, &ge) && ge.Status == http.StatusUnprocessableEntity:
 		return fmt.Errorf("%w: %w", ErrTOTPRejected, perr)
 	}
 	return fmt.Errorf("proton 2FA: %w", perr)
 }
 
-// Abort revokes the pending session (best effort), then closes it.
+// Abort revokes the pending session (best effort, even when ctx is
+// cancelled), then closes it.
 func (p *Pending) Abort(ctx context.Context) {
 	if p.c != nil {
-		_ = p.c.AuthDelete(ctx)
+		_ = p.revoke(ctx)
 	}
 	p.Close()
 }

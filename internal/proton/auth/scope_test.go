@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -85,5 +86,42 @@ func TestScopeUnlockWrongPasswordIsBadCredentials(t *testing.T) {
 	}
 	if code := saltsCode(t, s.C); code != api.CodeInsufficientScope {
 		t.Fatalf("salts after a refused unlock: code %d, want %d", code, api.CodeInsufficientScope)
+	}
+}
+
+func TestScopeUnlockEmptyServerProofFailsClosed(t *testing.T) {
+	t.Parallel()
+	_, s := lockedScope(t, protontest.Options{EmptyUnlockProof: true})
+	if err := s.Unlock(t.Context()); !errors.Is(err, auth.ErrServerProof) {
+		t.Fatalf("Unlock without a server proof = %v, want ErrServerProof", err)
+	}
+	if code := saltsCode(t, s.C); code != api.CodeInsufficientScope {
+		t.Fatalf("salts after a missing proof: code %d, want %d", code, api.CodeInsufficientScope)
+	}
+}
+
+func TestScopeUnlockReportsAFailedRelock(t *testing.T) {
+	t.Parallel()
+	f, s := lockedScope(t, protontest.Options{BadUnlockProof: true})
+	f.FailNext("PUT", "/core/v4/users/lock", http.StatusInternalServerError, 0, 0)
+	err := s.Unlock(t.Context())
+	var e *api.Error
+	if !errors.Is(err, auth.ErrServerProof) || !errors.As(err, &e) || e.Status != http.StatusInternalServerError {
+		t.Fatalf("Unlock = %v, want ErrServerProof joined with the failed re-lock (HTTP 500)", err)
+	}
+}
+
+func TestScopeUnlockBadCredentialsOnlyOn422With8002(t *testing.T) {
+	t.Parallel()
+	f, s := lockedScope(t, protontest.Options{})
+	for _, c := range []struct{ status, code int }{
+		{http.StatusUnprocessableEntity, 2001},
+		{http.StatusBadRequest, protontest.CodePasswordWrong},
+		{http.StatusForbidden, protontest.CodePasswordWrong},
+	} {
+		f.FailNext("PUT", "/core/v4/users/unlock", c.status, c.code, 0)
+		if err := s.Unlock(t.Context()); err == nil || errors.Is(err, auth.ErrBadCredentials) {
+			t.Errorf("unlock answered %d/%d: err = %v, want a plain error", c.status, c.code, err)
+		}
 	}
 }

@@ -28,6 +28,7 @@ func count(f *labtest.Front, method, path string) int {
 }
 
 func TestRefreshRotatesAndOldRefreshTokenIsRefused(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	logins := f.AuthCalls
@@ -57,6 +58,7 @@ func TestRefreshRotatesAndOldRefreshTokenIsRefused(t *testing.T) {
 }
 
 func TestRefreshReportsExpiresInAndAcceptedOldToken(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
@@ -81,6 +83,7 @@ func TestRefreshReportsExpiresInAndAcceptedOldToken(t *testing.T) {
 }
 
 func TestRefreshFailureSkipsTheRetry(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
@@ -97,6 +100,7 @@ func TestRefreshFailureSkipsTheRetry(t *testing.T) {
 }
 
 func TestRefreshRecordsWithoutTokens(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	before, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
@@ -142,6 +146,7 @@ func readLog(t *testing.T, o session.Options) []map[string]any {
 }
 
 func TestAliveAppendsOneLinePerRunAndRefreshesOnlyWhenRejected(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	for i := range 2 {
@@ -168,6 +173,7 @@ func TestAliveAppendsOneLinePerRunAndRefreshesOnlyWhenRejected(t *testing.T) {
 }
 
 func TestAliveRefreshesAnExpiredAccessTokenAndRetries(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
@@ -193,6 +199,7 @@ func TestAliveRefreshesAnExpiredAccessTokenAndRetries(t *testing.T) {
 }
 
 func TestAliveRecordsExpiresInFromTheRefresh(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
@@ -214,6 +221,7 @@ func TestAliveRecordsExpiresInFromTheRefresh(t *testing.T) {
 }
 
 func TestAliveRecordsTheRefusedRefreshThatEndedTheSession(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	f.Mu.Lock()
@@ -238,6 +246,7 @@ func TestAliveRecordsTheRefusedRefreshThatEndedTheSession(t *testing.T) {
 }
 
 func TestAliveStopsAfterTheFourteenDayWindow(t *testing.T) {
+	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := loggedIn(t, f, "")
 	if _, err := probe.Alive(t.Context(), o); err != nil { // first sample at t0

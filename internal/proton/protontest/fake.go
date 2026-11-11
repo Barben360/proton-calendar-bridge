@@ -41,17 +41,21 @@ const appVersion = "Other" // for the fake's own calls to the backend
 
 // Options choose the account's shape and the fake's challenges.
 type Options struct {
-	TwoFA          bool // 2FA.Enabled = 1; /auth/v4/2fa checks codes of Fake.TOTPURI
-	FIDO2Only      bool // 2FA.Enabled = 2
-	TwoPassword    bool // PasswordMode = 2
-	LockedSalts    bool // GET /core/v4/keys/salts answers 403/9101 until unlocked
-	BadUnlockProof bool // PUT /core/v4/users/unlock returns a wrong ServerProof
+	TwoFA            bool // 2FA.Enabled = 1; /auth/v4/2fa checks codes of Fake.TOTPURI
+	FIDO2Only        bool // 2FA.Enabled = 2
+	TwoPassword      bool // PasswordMode = 2
+	LockedSalts      bool // GET /core/v4/keys/salts answers 403/9101 until unlocked
+	BadUnlockProof   bool // PUT /core/v4/users/unlock returns a wrong ServerProof
+	EmptyUnlockProof bool // PUT /core/v4/users/unlock returns no ServerProof
+	BadLoginProof    bool // POST /auth/v4 returns a wrong ServerProof
 	// Captcha, when set, makes POST /auth/v4 answer 422/9001 with this token
 	// unless the request carries it (x-pm-human-verification-token, type
 	// captcha).
 	Captcha        string
 	CaptchaMethods []string         // offered with Captcha; default ["captcha"]
 	Now            func() time.Time // clock for TOTP; default time.Now
+	// Username and Password name the first account; empty: throwaway values.
+	Username, Password string
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the
@@ -83,8 +87,8 @@ type failure struct{ status, code, retryAfter int }
 // one per user and address (seconds per test). Insecure; test use only.
 var fastKeys sync.Once
 
-// New starts a fake with one user (Username, Password). It is closed when the
-// test ends.
+// New starts a fake with one user (Options.Username and Password, or
+// throwaway values). It is closed when the test ends.
 func New(t testing.TB, o Options) *Fake {
 	t.Helper()
 	fastKeys.Do(func() { backend.GenerateKey = backend.FastGenerateKey })
@@ -100,9 +104,15 @@ func New(t testing.TB, o Options) *Fake {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if o.Username == "" {
+		o.Username = "pcbfake"
+	}
+	if o.Password == "" {
+		o.Password = "fake-" + hex.EncodeToString(random(t, 12))
+	}
 	f := &Fake{
-		Username: "pcbfake",
-		Password: "fake-" + hex.EncodeToString(random(t, 12)),
+		Username: o.Username,
+		Password: o.Password,
 		TOTPURI:  "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
 		t:        t,
 		o:        o,
@@ -299,19 +309,17 @@ func (f *Fake) unlock(w http.ResponseWriter, r *http.Request) {
 	if _, err := f.backendCall(http.MethodDelete, "/auth/v4", hdr, nil, nil); err != nil {
 		f.t.Errorf("protontest: drop the unlock replay session: %v", err)
 	}
-	proof := auth.ServerProof
-	if f.o.BadUnlockProof {
-		b, _ := base64.StdEncoding.DecodeString(proof)
-		if len(b) == 0 {
-			b = []byte{0}
-		}
-		b[0] ^= 0xff
-		proof = base64.StdEncoding.EncodeToString(b)
-	}
 	f.mu.Lock()
 	f.unlocked[r.Header.Get("x-pm-uid")] = true
 	f.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "ServerProof": proof})
+	answer := map[string]any{"Code": 1000, "ServerProof": auth.ServerProof}
+	switch {
+	case f.o.EmptyUnlockProof:
+		delete(answer, "ServerProof")
+	case f.o.BadUnlockProof:
+		answer["ServerProof"] = corrupt(auth.ServerProof)
+	}
+	writeJSON(w, http.StatusOK, answer)
 }
 
 func (f *Fake) lock(w http.ResponseWriter, r *http.Request) {
@@ -417,6 +425,19 @@ func (f *Fake) shapeAuth(body map[string]any) {
 	if f.o.TwoPassword {
 		body["PasswordMode"] = 2
 	}
+	if proof, ok := body["ServerProof"].(string); ok && f.o.BadLoginProof {
+		body["ServerProof"] = corrupt(proof)
+	}
+}
+
+// corrupt flips the first byte of a base64 proof.
+func corrupt(proof string) string {
+	b, _ := base64.StdEncoding.DecodeString(proof)
+	if len(b) == 0 {
+		b = []byte{0}
+	}
+	b[0] ^= 0xff
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // WriteChallenge answers a login with Proton's human-verification demand
