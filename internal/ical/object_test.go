@@ -21,7 +21,7 @@ func TestObjectOrderAndStripping(t *testing.T) {
 	e1 := vevent(t, "UID:u", "RECURRENCE-ID:20261102T100000Z", "SUMMARY:first", "EXDATE;TZID=Europe/Paris:20261106T100000")
 	e2a := vevent(t, "UID:u", "RECURRENCE-ID:20261104T100000Z", "SUMMARY:tie-a")
 	e2b := vevent(t, "UID:u", "RECURRENCE-ID:20261104T100000Z", "SUMMARY:tie-b")
-	in := []Component{e3, e2a, e1, e2b}
+	in := []Exception{{e3, 500}, {e2a, 400}, {e1, 200}, {e2b, 400}}
 
 	out := string(Object(&master, in))
 	order := []string{"SUMMARY:first", "SUMMARY:tie-a", "SUMMARY:tie-b", "SUMMARY:third"}
@@ -43,7 +43,7 @@ func TestObjectOrderAndStripping(t *testing.T) {
 		t.Fatal("only RRULE and EXDATE are stripped")
 	}
 	// Inputs untouched.
-	if len(values(in[0], "RRULE")) != 1 || len(values(in[0], "EXDATE")) != 1 || in[0].Name != "VEVENT" || len(in) != 4 || values(in[0], "SUMMARY")[0] != ":third" {
+	if len(values(in[0].Comp, "RRULE")) != 1 || len(values(in[0].Comp, "EXDATE")) != 1 || len(in) != 4 || values(in[0].Comp, "SUMMARY")[0] != ":third" {
 		t.Fatal("Object mutated its inputs")
 	}
 	if len(values(master, "RRULE")) != 1 {
@@ -51,20 +51,35 @@ func TestObjectOrderAndStripping(t *testing.T) {
 	}
 }
 
-func TestObjectSortsByInstantAcrossZones(t *testing.T) {
-	// 10:00 Paris in December is 09:00Z, earlier than 09:30Z, although the
-	// raw strings sort the other way round.
-	first := vevent(t, "UID:u", "RECURRENCE-ID;TZID=Europe/Paris:20261201T100000", "SUMMARY:first")
-	second := vevent(t, "UID:u", "RECURRENCE-ID:20261201T093000Z", "SUMMARY:second")
-	out := string(Object(nil, []Component{second, first}))
-	if strings.Index(out, "SUMMARY:first") > strings.Index(out, "SUMMARY:second") {
-		t.Fatalf("expected chronological order:\n%s", out)
+func TestObjectSortsByCallerKeyNotByContent(t *testing.T) {
+	// The RECURRENCE-ID text says the opposite order: the key decides.
+	a := vevent(t, "UID:u", "RECURRENCE-ID:20260101T000000Z", "SUMMARY:key-high")
+	b := vevent(t, "UID:u", "RECURRENCE-ID:20300101T000000Z", "SUMMARY:key-low")
+	out := string(Object(nil, []Exception{{a, 1000}, {b, -5}}))
+	if strings.Index(out, "SUMMARY:key-low") > strings.Index(out, "SUMMARY:key-high") {
+		t.Fatalf("expected key order:\n%s", out)
+	}
+}
+
+func TestObjectEqualKeysKeepCallerOrder(t *testing.T) {
+	var in []Exception
+	for _, n := range []string{"z", "a", "m", "b"} {
+		in = append(in, Exception{vevent(t, "UID:u", "SUMMARY:"+n), 7})
+	}
+	out := string(Object(nil, in))
+	last := -1
+	for _, n := range []string{"z", "a", "m", "b"} {
+		i := strings.Index(out, "SUMMARY:"+n)
+		if i < last {
+			t.Fatalf("row order lost for equal keys:\n%s", out)
+		}
+		last = i
 	}
 }
 
 func TestObjectOrphansWithoutMaster(t *testing.T) {
 	e := vevent(t, "UID:u", "RECURRENCE-ID:20261102T100000Z", "RRULE:FREQ=DAILY")
-	out := string(Object(nil, []Component{e}))
+	out := string(Object(nil, []Exception{{e, 1}}))
 	if !strings.Contains(out, "RECURRENCE-ID:20261102T100000Z") || strings.Contains(out, "RRULE") {
 		t.Fatalf("%s", out)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -101,12 +102,14 @@ func TestUnknownPropertiesSurvive(t *testing.T) {
 func TestParseErrorsCarryLineNumberNotContent(t *testing.T) {
 	secret := "SECRETSUMMARYTEXT"
 	cases := map[string]string{
-		"no colon":      "BEGIN:VEVENT\r\nUID:1\r\n" + secret + "\r\nEND:VEVENT\r\n",
-		"unterminated":  "BEGIN:VEVENT\r\nSUMMARY:" + secret + "\r\n",
-		"stray end":     "END:VEVENT\r\n",
-		"mismatch":      "BEGIN:VEVENT\r\nSUMMARY:" + secret + "\r\nEND:VCALENDAR\r\n",
-		"outside":       "SUMMARY:" + secret + "\r\n",
-		"leading space": " " + secret + "\r\n",
+		"no colon":                "BEGIN:VEVENT\r\nUID:1\r\n" + secret + "\r\nEND:VEVENT\r\n",
+		"unterminated":            "BEGIN:VEVENT\r\nSUMMARY:" + secret + "\r\n",
+		"stray end":               "END:VEVENT\r\n",
+		"mismatch":                "BEGIN:VEVENT\r\nSUMMARY:" + secret + "\r\nEND:VCALENDAR\r\n",
+		"outside":                 "SUMMARY:" + secret + "\r\n",
+		"leading space":           " " + secret + "\r\n",
+		"blank then continuation": "BEGIN:VEVENT\r\nSUMMARY:a\r\n\r\n " + secret + "\r\nEND:VEVENT\r\n",
+		"too deep":                strings.Repeat("BEGIN:X\r\n", 9) + secret + "\r\n",
 	}
 	for name, src := range cases {
 		_, err := Parse([]byte(src))
@@ -136,5 +139,44 @@ func TestNestedComponentsKeepOrder(t *testing.T) {
 	}
 	if string(comps[0].Bytes()) != src {
 		t.Fatalf("order changed: %q", comps[0].Bytes())
+	}
+}
+
+func TestParseErrorLineNumbers(t *testing.T) {
+	cases := []struct {
+		src  string
+		line int
+	}{
+		{"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:1\r\n", 2}, // innermost unclosed BEGIN
+		{"BEGIN:VEVENT\r\nSUMMARY:a\r\n\r\n b\r\nEND:VEVENT\r\n", 4},
+		{strings.Repeat("BEGIN:X\r\n", 9), 9},
+	}
+	for _, c := range cases {
+		_, err := Parse([]byte(c.src))
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Line != c.line {
+			t.Errorf("%q: want line %d, got %v", c.src, c.line, err)
+		}
+	}
+	if _, err := Parse([]byte(strings.Repeat("BEGIN:X\r\n", 8) + strings.Repeat("END:X\r\n", 8))); err != nil {
+		t.Errorf("depth 8 must parse: %v", err)
+	}
+}
+
+func TestUnfoldHostileContinuationsIsLinear(t *testing.T) {
+	const n = 200000
+	src := []byte("BEGIN:VEVENT\r\nSUMMARY:x")
+	src = append(src, bytes.Repeat([]byte("\n a"), n)...)
+	src = append(src, "\nEND:VEVENT\n"...)
+	start := time.Now()
+	comps, err := Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 5*time.Second { // quadratic concatenation takes minutes
+		t.Fatalf("unfold took %v", d)
+	}
+	if p, _ := comps[0].Get("SUMMARY"); len(p.Value) != n+1 {
+		t.Fatalf("value length %d", len(p.Value))
 	}
 }

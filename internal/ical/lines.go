@@ -45,16 +45,30 @@ type ParseError struct {
 
 func (e *ParseError) Error() string { return fmt.Sprintf("ical: line %d: %s", e.Line, e.Msg) }
 
+// maxDepth caps component nesting (VCALENDAR > VEVENT > VALARM is 3).
+const maxDepth = 8
+
 type logicalLine struct {
 	no   int
 	text string
 }
 
 // unfold joins continuation lines (CRLF or LF followed by SP or TAB) and
-// drops blank lines. The line number is that of the first physical line.
+// drops blank lines. The line number is that of the first physical line. A
+// continuation right after a blank line is malformed. Chunks of one logical
+// line are accumulated in a buffer, so hostile input stays linear.
 func unfold(b []byte) ([]logicalLine, error) {
 	var out []logicalLine
+	var cur []byte
+	curNo := 0
+	flush := func() {
+		if curNo > 0 {
+			out = append(out, logicalLine{no: curNo, text: string(cur)})
+		}
+		cur, curNo = cur[:0], 0
+	}
 	no := 0
+	blankBefore := false
 	for len(b) > 0 {
 		no++
 		var line []byte
@@ -65,17 +79,25 @@ func unfold(b []byte) ([]logicalLine, error) {
 		}
 		line = bytes.TrimSuffix(line, []byte{'\r'})
 		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-			if len(out) == 0 {
+			if curNo == 0 {
 				return nil, &ParseError{Line: no, Msg: "continuation without a line to continue"}
 			}
-			out[len(out)-1].text += string(line[1:])
+			if blankBefore {
+				return nil, &ParseError{Line: no, Msg: "continuation after a blank line"}
+			}
+			cur = append(cur, line[1:]...)
 			continue
 		}
 		if len(line) == 0 {
+			blankBefore = true
 			continue
 		}
-		out = append(out, logicalLine{no: no, text: string(line)})
+		blankBefore = false
+		flush()
+		curNo = no
+		cur = append(cur, line...)
 	}
+	flush()
 	return out, nil
 }
 
@@ -113,6 +135,7 @@ func Parse(b []byte) ([]Component, error) {
 	}
 	var top []Component
 	var stack []*Component
+	var begins []int // physical line of each open BEGIN
 	for _, l := range lines {
 		p, ok := splitLine(l.text)
 		if !ok {
@@ -120,7 +143,11 @@ func Parse(b []byte) ([]Component, error) {
 		}
 		switch {
 		case strings.EqualFold(p.Name, "BEGIN") && p.Params == "":
+			if len(stack) >= maxDepth {
+				return nil, &ParseError{Line: l.no, Msg: "components nested too deeply"}
+			}
 			stack = append(stack, &Component{Name: strings.TrimSpace(p.Value)})
+			begins = append(begins, l.no)
 		case strings.EqualFold(p.Name, "END") && p.Params == "":
 			if len(stack) == 0 {
 				return nil, &ParseError{Line: l.no, Msg: "END without BEGIN"}
@@ -130,6 +157,7 @@ func Parse(b []byte) ([]Component, error) {
 				return nil, &ParseError{Line: l.no, Msg: "END does not match BEGIN"}
 			}
 			stack = stack[:len(stack)-1]
+			begins = begins[:len(begins)-1]
 			if len(stack) == 0 {
 				top = append(top, *c)
 			} else {
@@ -145,7 +173,7 @@ func Parse(b []byte) ([]Component, error) {
 		}
 	}
 	if len(stack) > 0 {
-		return nil, &ParseError{Line: len(lines) + 1, Msg: "component not closed"}
+		return nil, &ParseError{Line: begins[len(begins)-1], Msg: "component not closed"}
 	}
 	return top, nil
 }

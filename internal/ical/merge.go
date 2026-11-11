@@ -192,7 +192,8 @@ var partstat = map[int]string{0: "NEEDS-ACTION", 1: "TENTATIVE", 2: "DECLINED", 
 // ApplyRow renders the row-level data into the VEVENT: Color replaces any
 // COLOR of the parts (an empty color leaves them), and each ATTENDEE's
 // X-PM-TOKEN is consumed: PARTSTAT is set from statuses[token] and the
-// Proton-internal parameter is dropped.
+// Proton-internal parameter is dropped. ATTENDEE lines repeating an earlier
+// address (case-insensitive) are dropped.
 func ApplyRow(ev *Component, color string, statuses map[string]int) {
 	if color != "" && !strings.ContainsAny(color, "\r\n") {
 		ev.removeProps(func(p Property) bool { return strings.EqualFold(p.Name, "COLOR") })
@@ -203,6 +204,16 @@ func ApplyRow(ev *Component, color string, statuses map[string]int) {
 			ev.Items[i].Prop.Params = joinStatus(it.Prop.Params, statuses)
 		}
 	}
+	seen := map[string]bool{}
+	ev.removeProps(func(p Property) bool {
+		if !strings.EqualFold(p.Name, "ATTENDEE") {
+			return false
+		}
+		k := strings.ToLower(strings.TrimSpace(p.Value))
+		dup := seen[k]
+		seen[k] = true
+		return dup
+	})
 }
 
 // splitParams splits a raw ";a=b;c=\"d;e\"" parameter string on the ";" outside quotes.

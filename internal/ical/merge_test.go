@@ -197,7 +197,9 @@ func TestAlarmsTriState(t *testing.T) {
 }
 
 func TestAlarmsRejectsBadInput(t *testing.T) {
-	for _, bad := range []string{`{"a":1}`, `[{"Type":1,"Trigger":"tomorrow"}]`, `[{"Type":1}]`, `[`} {
+	for _, bad := range []string{`{"a":1}`, `[{"Type":1,"Trigger":"tomorrow"}]`, `[{"Type":1}]`, `[`,
+		`[{"Type":1,"Trigger":"-PT5M\r\nX-EVIL:1"}]`, `[{"Type":1,"Trigger":"-PT5M\n"}]`, `[{"Type":1,"Trigger":"-PT5M\r"}]`,
+		`[{"Type":1,"Trigger":"x-PT5M"}]`, `[{"Type":1,"Trigger":"-PT"}]`} {
 		if _, err := Alarms(json.RawMessage(bad), nil, false); err == nil {
 			t.Errorf("%s: expected error", bad)
 		}
@@ -294,5 +296,28 @@ func TestPartstatJoin(t *testing.T) {
 	}
 	if o := values(ev, "ORGANIZER"); len(o) != 1 || o[0] != ";CN=O:mailto:o@x" {
 		t.Fatalf("organizer touched: %v", o)
+	}
+}
+
+func TestApplyRowRejectsColorInjection(t *testing.T) {
+	ev := mustMerge(t, part("UID:u", "COLOR:red"))
+	ApplyRow(&ev, "#fff\r\nX-EVIL:1", nil)
+	if strings.Contains(string(ev.Bytes()), "X-EVIL") {
+		t.Fatal("CR/LF color reached the output")
+	}
+	if got := values(ev, "COLOR"); len(got) != 1 || got[0] != ":red" {
+		t.Fatalf("part color must stay: %v", got)
+	}
+}
+
+func TestApplyRowDedupsAttendees(t *testing.T) {
+	ev := mustMerge(t, part("UID:u",
+		"ATTENDEE;X-PM-TOKEN=t1;CN=First:mailto:A@Example.com",
+		"ATTENDEE;X-PM-TOKEN=t2;CN=Dup:mailto:a@example.com",
+		"ATTENDEE;CN=Other:mailto:b@example.com"))
+	ApplyRow(&ev, "", map[string]int{"t1": 3, "t2": 2})
+	got := values(ev, "ATTENDEE")
+	if len(got) != 2 || got[0] != ";CN=First;PARTSTAT=ACCEPTED:mailto:A@Example.com" {
+		t.Fatalf("%v", got)
 	}
 }
