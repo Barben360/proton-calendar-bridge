@@ -50,7 +50,12 @@ func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target
 			return
 		}
 	}
-	q := propRequest{props: names(sel)}
+	props, err := names(sel)
+	if err != nil {
+		empty(w, http.StatusBadRequest)
+		return
+	}
+	q := propRequest{props: props}
 	c, ok := s.collection(w, r, t.calseg)
 	if !ok {
 		return
@@ -110,7 +115,11 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 		empty(w, http.StatusRequestEntityTooLarge)
 		return
 	}
-	q := propSelection(root)
+	q, err := propSelection(root)
+	if err != nil {
+		empty(w, http.StatusBadRequest)
+		return
+	}
 	c, ok := s.collection(w, r, t.calseg)
 	if !ok {
 		return

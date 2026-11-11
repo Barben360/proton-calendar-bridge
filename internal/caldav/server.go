@@ -115,21 +115,29 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // fail answers a service error: ErrInvalidSyncToken is 403 valid-sync-token,
-// ErrNoSuchCalendar 404, anything else 503 with Retry-After (ruling M3-R22)
-// and a warning; a request whose client went away gets nothing.
+// ErrNoSuchCalendar 404, anything else 503 with Retry-After (ruling M3-R22),
+// with a warning unless the calendar is pending (ruling M3-R25) or the
+// request's context ended (its client is gone, or the server is stopping:
+// still a 503, never an empty 200).
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case r.Context().Err() != nil:
 	case errors.Is(err, service.ErrInvalidSyncToken):
 		forbidden(w, errValidSyncToken)
 	case errors.Is(err, service.ErrNoSuchCalendar):
 		empty(w, http.StatusNotFound)
 	default:
-		// The service's errors are secret-free by contract (service.API).
-		s.log.Warn("caldav: the service could not answer", "method", r.Method, "error", err.Error())
-		w.Header().Set("Retry-After", retryAfter(unavailableRetry))
-		empty(w, http.StatusServiceUnavailable)
+		if r.Context().Err() == nil && !errors.Is(err, service.ErrCalendarPending) {
+			// The service's errors are secret-free by contract (service.API).
+			s.log.Warn("caldav: the service could not answer", "method", r.Method, "error", err.Error())
+		}
+		unavailable(w)
 	}
+}
+
+// unavailable answers 503 with the Retry-After a client should wait.
+func unavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", retryAfter(unavailableRetry))
+	empty(w, http.StatusServiceUnavailable)
 }
 
 // readBody reads the request body, at most maxBody bytes; it answers 413
@@ -149,7 +157,8 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 }
 
 // collection finds the calendar of segment seg; it answers the failure
-// itself (404 when no synced calendar has that segment).
+// itself: 404 when no calendar has that segment, 503 while it is pending
+// (ruling M3-R25).
 func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) (service.Collection, bool) {
 	colls, err := s.api.Collections(r.Context())
 	if err != nil {
@@ -158,6 +167,10 @@ func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) 
 	}
 	for _, c := range colls {
 		if calendarSegment(c.ID) == seg {
+			if c.Pending {
+				unavailable(w)
+				return c, false
+			}
 			return c, true
 		}
 	}

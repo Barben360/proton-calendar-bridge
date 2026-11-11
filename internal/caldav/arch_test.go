@@ -3,6 +3,7 @@ package caldav_test
 import (
 	"go/build"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,15 +31,16 @@ func TestCalDAVImportsOnlyTheServiceAndTheStandardLibrary(t *testing.T) {
 	}
 }
 
-// go-webdav is a test-only dependency (ruling M3-R5): no package of the
-// module imports it outside its tests.
-func TestGoWebdavIsTestOnly(t *testing.T) {
-	const webdav = "github.com/emersion/go-webdav"
+// go-webdav and go-ical are test-only dependencies (ruling M3-R5): no
+// package of the module imports them outside its tests.
+func TestGoWebdavAndGoICalAreTestOnly(t *testing.T) {
+	testOnly := []string{"github.com/emersion/go-webdav", "github.com/emersion/go-ical"}
+	is := func(imp, mod string) bool { return imp == mod || strings.HasPrefix(imp, mod+"/") }
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkgs, usedInTests := 0, false
+	pkgs, usedInTests := 0, map[string]bool{}
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -54,20 +56,22 @@ func TestGoWebdavIsTestOnly(t *testing.T) {
 			return nil // no Go files, or build-constrained away
 		}
 		pkgs++
-		for _, imp := range pkg.Imports {
-			if imp == webdav || strings.HasPrefix(imp, webdav+"/") {
-				t.Errorf("%s imports %s outside its tests", path, imp)
+		for _, mod := range testOnly {
+			for _, imp := range pkg.Imports {
+				if is(imp, mod) {
+					t.Errorf("%s imports %s outside its tests", path, imp)
+				}
 			}
-		}
-		for _, imp := range slices.Concat(pkg.TestImports, pkg.XTestImports) {
-			usedInTests = usedInTests || strings.HasPrefix(imp, webdav)
+			for _, imp := range slices.Concat(pkg.TestImports, pkg.XTestImports) {
+				usedInTests[mod] = usedInTests[mod] || is(imp, mod)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pkgs < 20 || !usedInTests {
-		t.Fatalf("walked %d packages, go-webdav seen in tests: %v: the check would pass vacuously", pkgs, usedInTests)
+	if pkgs < 20 || len(usedInTests) != len(testOnly) || slices.Contains(slices.Collect(maps.Values(usedInTests)), false) {
+		t.Fatalf("walked %d packages, seen in tests: %v: the check would pass vacuously", pkgs, usedInTests)
 	}
 }

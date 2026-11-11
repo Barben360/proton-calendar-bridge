@@ -24,11 +24,13 @@ var prefixes = map[string]string{nsDAV: "D", nsCalDAV: "C", nsCS: "CS", nsApple:
 func dav(local string) xml.Name    { return xml.Name{Space: nsDAV, Local: local} }
 func caldav(local string) xml.Name { return xml.Name{Space: nsCalDAV, Local: local} }
 
-// Limits of a request body's XML: nesting and element count bound what a
-// body may cost beyond its 8 MiB (maxBody).
+// Limits of a request body's XML: nesting, element count and attributes per
+// element (namespace declarations included, ruling M3-R27) bound what a body
+// may cost beyond its 8 MiB (maxBody).
 const (
 	maxDepth    = 32
 	maxElements = 10_000
+	maxAttrs    = 64
 )
 
 var (
@@ -37,6 +39,9 @@ var (
 	errTooLarge = errors.New("caldav: request XML has too many elements")
 	errNoRoot   = errors.New("caldav: request XML has no root element")
 	errBadName  = errors.New("caldav: request XML has an element name that is not an XML name")
+	// errTooManyAttrs is checked once the decoder parsed the element: an
+	// element of the 8 MiB body still costs its attributes once.
+	errTooManyAttrs = errors.New("caldav: request XML has an element with too many attributes")
 )
 
 // ncName reports whether s is an XML name without a colon (XML 1.0 fifth
@@ -105,6 +110,9 @@ func parseXML(body []byte) (*node, error) {
 			}
 			if !ncName(tok.Name.Local) { // encoding/xml lets "<:/>" through
 				return nil, errBadName
+			}
+			if len(tok.Attr) > maxAttrs {
+				return nil, errTooManyAttrs
 			}
 			n := &node{name: tok.Name}
 			if len(stack) == 0 {

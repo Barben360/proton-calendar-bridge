@@ -37,8 +37,9 @@ type API interface {
 	// call Proton only to unlock a calendar's keys and read its settings,
 	// the first time the process reads that calendar.
 
-	// Collections lists the synced calendars of the event cache with their
-	// CTag and sync token; no cache is a MustAct. It may call Proton (the
+	// Collections lists the calendars of the event cache with their CTag
+	// and sync token, and those not synced yet as Pending; no cache is a
+	// MustAct. It may call Proton (the
 	// CTag holds each calendar's settings, ruling M3-R14).
 	Collections(ctx context.Context) ([]Collection, error)
 	// Objects lists a calendar's objects (one per UID) with their ETags, and
@@ -259,8 +260,12 @@ type Collection struct {
 	Color       string `json:"color,omitempty"`
 	Description string `json:"description,omitempty"`
 	ReadOnly    bool   `json:"read_only"`
-	CTag        string `json:"ctag"`
-	SyncToken   string `json:"sync_token"`
+	// Pending: the cache knows the calendar but has not synced it yet (a
+	// first pass is on its way to it, or it failed): no CTag, no sync token,
+	// and its reads return ErrCalendarPending (ruling M3-R25).
+	Pending   bool   `json:"pending,omitempty"`
+	CTag      string `json:"ctag"`
+	SyncToken string `json:"sync_token"`
 }
 
 // ObjectInfo names one object: the UID of its rows and its ETag (quoted, as

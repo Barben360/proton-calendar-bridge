@@ -172,6 +172,7 @@ type stub struct {
 	objs    map[string][]service.Object     // calID → objects, listing order
 	deltas  map[string]service.ChangeSet    // token → answer, any calendar
 	gone    map[string]bool                 // calIDs Collections lists but reads call unknown
+	pending map[string]bool                 // calIDs whose reads say ErrCalendarPending
 	readErr error                           // every read fails with it
 	wait    time.Duration                   // CheckClient's retryAfter on a refusal
 	checks  int                             // CheckClient calls
@@ -194,8 +195,9 @@ func newStub() *stub {
 			},
 			holID: {{UID: "newyear@x", ETag: `"v1-ny"`, Data: ics("newyear@x", "New year")}},
 		},
-		deltas: map[string]service.ChangeSet{},
-		gone:   map[string]bool{},
+		deltas:  map[string]service.ChangeSet{},
+		gone:    map[string]bool{},
+		pending: map[string]bool{},
 	}
 }
 
@@ -217,7 +219,7 @@ func (s *stub) read(ctx context.Context, calID string) error {
 	s.mu.Lock()
 	s.reads++
 	before, err := s.before, s.readErr
-	gone := s.gone[calID]
+	gone, pending := s.gone[calID], s.pending[calID]
 	s.mu.Unlock()
 	if before != nil {
 		if err := before(ctx); err != nil {
@@ -226,6 +228,9 @@ func (s *stub) read(ctx context.Context, calID string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if pending {
+		return &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrCalendarPending, Hint: "x"}
 	}
 	if _, ok := s.objs[calID]; calID != "" && (!ok || gone) {
 		return noSuchCalendar()
@@ -559,9 +564,10 @@ func TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge(t *testing.T) 
 	}
 }
 
-// A blocked IP gets 429 with Retry-After in whole seconds, rounded up, at
-// least 1 (ruling M3-R24).
-func TestMust01LimitedClientsGet429WithWholeSecondsRetryAfter(t *testing.T) {
+// A blocked IP gets 503 (not 429: a 4xx on the first PROPFIND disables the
+// calendar, ruling M3-R26) with Retry-After in whole seconds, rounded up, at
+// least 1 (ruling M3-R24), and no challenge.
+func TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		wait time.Duration
@@ -572,12 +578,12 @@ func TestMust01LimitedClientsGet429WithWholeSecondsRetryAfter(t *testing.T) {
 		r := call("PROPFIND", "/", tbDetect, "Depth", "0")
 		r.SetBasicAuth("x", "wrong")
 		rec := serve(caldav.Handler(s, caldav.Options{}), r)
-		wantStatus(t, rec, http.StatusTooManyRequests)
+		wantStatus(t, rec, http.StatusServiceUnavailable)
 		if got := rec.Header().Get("Retry-After"); got != tc.want {
 			t.Errorf("retryAfter %v: Retry-After %q, want %q", tc.wait, got, tc.want)
 		}
-		if rec.Body.Len() != 0 {
-			t.Errorf("429 body %q", rec.Body)
+		if rec.Body.Len() != 0 || rec.Header().Get("WWW-Authenticate") != "" {
+			t.Errorf("blocked: body %q, WWW-Authenticate %q", rec.Body, rec.Header().Get("WWW-Authenticate"))
 		}
 	}
 }
@@ -1201,8 +1207,8 @@ func TestUnknownCalendarsAre404(t *testing.T) {
 	}
 }
 
-// A request whose client went away is not a service failure: no 503, no
-// warning.
+// A request whose context ended still gets its 503 (a live client must
+// never see an empty 200), but it is not logged as a service failure.
 func TestCancelledRequestsAreNotReportedAsFailures(t *testing.T) {
 	t.Parallel()
 	var logs bytes.Buffer
@@ -1215,8 +1221,8 @@ func TestCancelledRequestsAreNotReportedAsFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	rec := serve(h, authed(call("REPORT", calPath(workID), tbSync(""), "Depth", "1")).WithContext(ctx))
-	if rec.Code == http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "" {
-		t.Errorf("a cancelled request got %d, Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
+		t.Errorf("a cancelled request got %d, Retry-After %q; want 503, 30", rec.Code, rec.Header().Get("Retry-After"))
 	}
 	if logs.Len() != 0 {
 		t.Errorf("logged:\n%s", logs.String())
@@ -1403,5 +1409,248 @@ func TestUnknownPathsAre404(t *testing.T) {
 	h := caldav.Handler(newStub(), caldav.Options{})
 	for _, p := range []string{"/dav/", "/dav/principals/", "/dav/principals/someone-else/", "/dav/calendars/", "/dav/calendars/other/", home + "nothex/", "/favicon.ico"} {
 		wantStatus(t, do(h, "PROPFIND", p, tbDetect, "Depth", "0"), http.StatusNotFound)
+	}
+}
+
+// --- Fix round 1 ----------------------------------------------------------
+
+// propNames is a prop list of count distinct names (ruling M3-R27's cap is
+// 64), each written twice: duplicates do not count.
+func propNames(count int) string {
+	var b strings.Builder
+	for i := range count {
+		fmt.Fprintf(&b, "<x:p%d/><x:p%d/>", i, i)
+	}
+	return b.String()
+}
+
+// More than 64 distinct property names in a prop or include is 400 (ruling
+// M3-R27): each name is echoed on every resource, so the list bounds the
+// response; the service is not asked.
+func TestPropertyListsOver64NamesAre400(t *testing.T) {
+	t.Parallel()
+	const ns = `xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:x="urn:x"`
+	bodies := map[string]func(names string) (method, body string){
+		"PROPFIND prop": func(names string) (string, string) {
+			return "PROPFIND", `<D:propfind ` + ns + `><D:prop>` + names + `</D:prop></D:propfind>`
+		},
+		"PROPFIND include": func(names string) (string, string) {
+			return "PROPFIND", `<D:propfind ` + ns + `><D:allprop/><D:include>` + names + `</D:include></D:propfind>`
+		},
+		"sync-collection prop": func(names string) (string, string) {
+			return "REPORT", `<D:sync-collection ` + ns + `><D:sync-token/><D:prop>` + names + `</D:prop></D:sync-collection>`
+		},
+		"multiget prop": func(names string) (string, string) {
+			return "REPORT", `<C:calendar-multiget ` + ns + `><D:prop>` + names + `</D:prop><D:href>` + objPath(workID, plainUID) + `</D:href></C:calendar-multiget>`
+		},
+	}
+	for what, body := range bodies {
+		s := newStub()
+		h := caldav.Handler(s, caldav.Options{})
+		m, b := body(propNames(65))
+		rec := do(h, m, calPath(workID), b, "Depth", "1")
+		wantStatus(t, rec, http.StatusBadRequest)
+		if _, reads := s.counts(); reads != 0 || rec.Body.Len() != 0 {
+			t.Errorf("%s: %d reads, body %q", what, reads, rec.Body)
+		}
+		m, b = body(propNames(64))
+		ms := parseMS(t, do(h, m, calPath(workID), b, "Depth", "1"))
+		if r := ms.responses[len(ms.responses)-1]; len(r.missing) != 64 {
+			t.Errorf("%s with 64 names: %d missing properties, want 64", what, len(r.missing))
+		}
+	}
+}
+
+// More than 64 attributes on one element (namespace declarations included)
+// is 400 (ruling M3-R27).
+func TestElementsWithOver64AttributesAre400(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	attrs := func(count int) string {
+		var b strings.Builder
+		for i := range count {
+			fmt.Fprintf(&b, ` xmlns:p%d="urn:p%d"`, i, i)
+		}
+		return b.String()
+	}
+	// The root carries xmlns:D, so it holds count+1 attributes.
+	body := func(count int) string {
+		return `<D:propfind xmlns:D="DAV:"` + attrs(count-1) + `><D:prop><D:getetag/></D:prop></D:propfind>`
+	}
+	parseMS(t, do(h, "PROPFIND", calPath(workID), body(64), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", calPath(workID), body(65), "Depth", "0"), http.StatusBadRequest)
+	wantStatus(t, do(h, "REPORT", calPath(workID), `<sync-collection xmlns="DAV:"`+attrs(64)+`><sync-token/><prop/></sync-collection>`, "Depth", "1"),
+		http.StatusBadRequest)
+	// Plain attributes count the same way, on any element.
+	var plain strings.Builder
+	for i := range 65 {
+		fmt.Fprintf(&plain, ` a%d="v"`, i)
+	}
+	wantStatus(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag`+plain.String()+`/></D:prop></D:propfind>`, "Depth", "0"),
+		http.StatusBadRequest)
+}
+
+// The parser's limits: at most 10 000 elements (else 413) and 32 levels of
+// nesting (else 400).
+func TestXMLElementAndDepthLimits(t *testing.T) {
+	t.Parallel()
+	h := caldav.Handler(newStub(), caldav.Options{})
+	// propfind, prop, getetag and x are 4 elements; the rest are y.
+	elements := func(count int) string {
+		return `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop><x>` + strings.Repeat("<y/>", count-4) + `</x></D:propfind>`
+	}
+	parseMS(t, do(h, "PROPFIND", calPath(workID), elements(10_000), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", calPath(workID), elements(10_001), "Depth", "0"), http.StatusRequestEntityTooLarge)
+	// propfind is level 1; depth-1 nested z reach level depth.
+	nested := func(depth int) string {
+		return `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop>` + strings.Repeat("<z>", depth-1) + strings.Repeat("</z>", depth-1) + `</D:propfind>`
+	}
+	parseMS(t, do(h, "PROPFIND", calPath(workID), nested(32), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", calPath(workID), nested(33), "Depth", "0"), http.StatusBadRequest)
+}
+
+// sync-level, when sent, is 1 or infinite (a calendar holds no collection,
+// both list the same); anything else is 400.
+func TestSyncLevelMustBe1OrInfinite(t *testing.T) {
+	t.Parallel()
+	h := caldav.Handler(newStub(), caldav.Options{})
+	body := func(level string) string {
+		return `<sync-collection xmlns="DAV:"><sync-token/>` + level + `<prop><getetag/></prop></sync-collection>`
+	}
+	for _, level := range []string{"<sync-level>1</sync-level>", "<sync-level>infinite</sync-level>", "<sync-level> 1 </sync-level>", ""} {
+		if ms := parseMS(t, do(h, "REPORT", calPath(workID), body(level), "Depth", "1")); len(ms.responses) != 3 {
+			t.Errorf("%q: %d responses", level, len(ms.responses))
+		}
+	}
+	for _, level := range []string{"<sync-level>2</sync-level>", "<sync-level>0</sync-level>", "<sync-level/>"} {
+		wantStatus(t, do(h, "REPORT", calPath(workID), body(level), "Depth", "1"), http.StatusBadRequest)
+	}
+}
+
+// A sync-collection asking for calendar-data fetches the changed objects;
+// one gone since the changes were read is a deletion (response-level 404).
+func TestSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.deltas["tok-1"] = service.ChangeSet{
+		Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}, {UID: "vanished@x", ETag: `"v1-vanished"`}},
+		Deleted: []string{}, Token: "tok-2",
+	}
+	h := caldav.Handler(s, caldav.Options{})
+	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><prop><getetag/><C:calendar-data/></prop></sync-collection>`
+	ms := parseMS(t, do(h, "REPORT", calPath(workID), body, "Depth", "1"))
+	if got := ms.get(t, objPath(workID, plainUID)).prop(t, nsC, "calendar-data").Text; got != string(s.objs[workID][0].Data) {
+		t.Errorf("calendar-data %q", got)
+	}
+	if r := ms.get(t, objPath(workID, "vanished@x")); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+		t.Errorf("vanished object: status %q, %d propstats; want a response-level 404", r.status, r.propstats)
+	}
+	if len(ms.responses) != 2 || ms.token == nil || *ms.token != "tok-2" {
+		t.Errorf("%d responses, token %v", len(ms.responses), ms.token)
+	}
+}
+
+// allprop leaves sync-token out (RFC 6578 §4) unless include names it; an
+// included name the resource lacks is a 404 property; propname lists the
+// names with empty values.
+func TestAllpropIncludeAndPropname(t *testing.T) {
+	t.Parallel()
+	h := caldav.Handler(newStub(), caldav.Options{})
+	c := parseMS(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, "Depth", "0")).get(t, calPath(workID))
+	if _, ok := c.props[n(nsD, "sync-token")]; ok {
+		t.Error("allprop returned sync-token")
+	}
+	c.prop(t, nsCS, "getctag")
+	inc := `<D:propfind xmlns:D="DAV:"><D:allprop/><D:include><D:sync-token/><D:getctag-not/><D:displayname/></D:include></D:propfind>`
+	c = parseMS(t, do(h, "PROPFIND", calPath(workID), inc, "Depth", "0")).get(t, calPath(workID))
+	if c.prop(t, nsD, "sync-token").Text != "urn:pcb:sync:1:e1:7:gen1" || !c.missing[n(nsD, "getctag-not")] || c.prop(t, nsD, "displayname").Text != "Work" {
+		t.Errorf("allprop with include: %+v, missing %v", c.props, c.missing)
+	}
+	if strings.Count(parseMS(t, do(h, "PROPFIND", calPath(workID), inc, "Depth", "0")).raw, "<D:displayname>") != 1 {
+		t.Error("an included property already in allprop is written twice")
+	}
+	names := parseMS(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`, "Depth", "0")).get(t, calPath(workID))
+	for _, p := range []xml.Name{n(nsD, "resourcetype"), n(nsCS, "getctag"), n(nsD, "sync-token"), n(nsD, "current-user-privilege-set")} {
+		v, ok := names.props[p]
+		if !ok || len(v.Kids) != 0 || v.Text != "" {
+			t.Errorf("propname: %v = %+v (listed %v), want an empty element", p, v, ok)
+		}
+	}
+	if len(names.missing) != 0 {
+		t.Errorf("propname reported missing %v", names.missing)
+	}
+}
+
+// Path variants resolve exactly (rulings M3-R13): dot segments, encoded
+// slashes and dots, double encoding, an uppercase calseg, empty segments and
+// a trailing slash on an object name nothing; %40 and a query string are
+// the object.
+func TestPathVariantsResolveExactly(t *testing.T) {
+	t.Parallel()
+	h := caldav.Handler(newStub(), caldav.Options{})
+	cal, holCal := calPath(workID), calPath(holID)
+	name := objName(plainUID)
+	seg := strings.TrimSuffix(strings.TrimPrefix(cal, home), "/")
+	for _, tc := range []struct {
+		target string
+		code   int
+	}{
+		{cal + name, http.StatusOK},
+		{cal + strings.ReplaceAll(name, "@", "%40"), http.StatusOK},
+		{cal + name + "?x=1", http.StatusOK},
+		{cal + name + "/", http.StatusNotFound},
+		{cal + strings.ReplaceAll(name, "@", "%2540"), http.StatusNotFound},
+		{cal + "../" + strings.TrimPrefix(holCal, home) + objName("newyear@x"), http.StatusNotFound},
+		{cal + "%2E%2E/" + strings.TrimPrefix(holCal, home) + objName("newyear@x"), http.StatusNotFound},
+		{cal + "x%2F..%2F" + name, http.StatusNotFound},
+		{cal + "./" + name, http.StatusNotFound},
+		{home + strings.ToUpper(seg) + "/" + name, http.StatusNotFound},
+		{home + "/" + seg + "/" + name, http.StatusNotFound},
+		{cal + "/" + name, http.StatusNotFound},
+		{strings.Replace(cal, "/dav/", "//dav/", 1) + name, http.StatusNotFound},
+		{"/dav/calendars/me/../me/" + seg + "/" + name, http.StatusNotFound},
+	} {
+		if rec := do(h, "GET", tc.target, ""); rec.Code != tc.code {
+			t.Errorf("GET %s: %d, want %d", tc.target, rec.Code, tc.code)
+		}
+	}
+}
+
+// A pending calendar (known to the cache, not synced yet, ruling M3-R25) is
+// left out of the home set and answers 503 + Retry-After: 30, never a 4xx
+// (which would disable it in Thunderbird), without a warning; so does one
+// whose read says it is pending.
+func TestPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	s := newStub()
+	s.colls = append(s.colls, service.Collection{ID: "pending-ID", Name: "Pending", Pending: true})
+	s.pending[holID] = true // listed as synced, then a new cache life began
+	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
+	if _, ok := ms.byPath[calPath("pending-ID")]; ok || len(ms.responses) != 3 {
+		t.Errorf("home set lists %d responses, the pending calendar included: %v", len(ms.responses), ok)
+	}
+	for _, id := range []string{"pending-ID", holID} {
+		for _, tc := range []struct{ method, path, body, depth string }{
+			{"PROPFIND", calPath(id), tbServerInfo, "0"},
+			{"PROPFIND", calPath(id), tbEtags, "1"},
+			{"REPORT", calPath(id), tbSync(""), "1"},
+			{"REPORT", calPath(id), tbSync("urn:pcb:sync:1:e1:3:gen2"), "1"},
+			{"REPORT", calPath(id), tbMultiget(tbHref(id, "newyear@x")), "1"},
+			{"GET", objPath(id, "newyear@x"), "", ""},
+		} {
+			if id == holID && tc.method == "PROPFIND" && tc.depth == "0" {
+				continue // reads nothing but the listing, which says synced
+			}
+			rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
+				t.Errorf("%s %s (%s): %d, Retry-After %q, body %q; want 503, 30, none", tc.method, tc.path, id, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+			}
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a pending calendar logged:\n%s", logs.String())
 	}
 }

@@ -12,7 +12,9 @@ const challenge = `Basic realm="pcb", charset="UTF-8"`
 
 // authenticate checks the request's Basic credentials, any username, the
 // password a client's app password. It answers the refusal itself: 401 with
-// the challenge (never 403, E08 MUST 1), 429 while the remote is blocked.
+// the challenge (never 403, E08 MUST 1), 503 with Retry-After while the
+// remote is blocked (ruling M3-R26: not 429, a 4xx on a calendar's first
+// PROPFIND disables it in Thunderbird, a 5xx is temporary).
 // A request without credentials is not a failed attempt: it is how
 // Thunderbird asks for the challenge, so it is answered without a check.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request) bool {
@@ -24,7 +26,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		}
 		if wait > 0 {
 			w.Header().Set("Retry-After", retryAfter(wait))
-			empty(w, http.StatusTooManyRequests)
+			empty(w, http.StatusServiceUnavailable)
 			return false
 		}
 	}

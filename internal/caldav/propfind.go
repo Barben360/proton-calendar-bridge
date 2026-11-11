@@ -21,31 +21,46 @@ type propRequest struct {
 
 func (q propRequest) wants(name xml.Name) bool { return slices.Contains(q.props, name) }
 
+// maxProps caps the distinct property names a prop or include may list
+// (ruling M3-R27): each is written back on every resource, so the list
+// bounds the response. Thunderbird asks for 7 at most.
+const maxProps = 64
+
 // propSelection reads the prop, allprop or propname child of n; none is
 // allprop.
-func propSelection(n *node) propRequest {
+func propSelection(n *node) (propRequest, error) {
 	if p := n.child(dav("prop")); p != nil {
-		return propRequest{props: names(p)}
+		props, err := names(p)
+		return propRequest{props: props}, err
 	}
 	if n.child(dav("propname")) != nil {
-		return propRequest{names: true}
+		return propRequest{names: true}, nil
 	}
 	q := propRequest{all: true}
 	if inc := n.child(dav("include")); inc != nil {
-		q.props = names(inc)
+		var err error
+		q.props, err = names(inc)
+		return q, err
 	}
-	return q
+	return q, nil
 }
 
-// names lists the names of n's children, each once.
-func names(n *node) []xml.Name {
+// names lists the names of n's children, each once; more than maxProps is
+// errBadRequest.
+func names(n *node) ([]xml.Name, error) {
+	seen := make(map[xml.Name]bool, len(n.kids))
 	out := make([]xml.Name, 0, len(n.kids))
 	for _, k := range n.kids {
-		if !slices.Contains(out, k.name) {
-			out = append(out, k.name)
+		if seen[k.name] {
+			continue
 		}
+		if len(out) == maxProps {
+			return nil, errBadRequest
+		}
+		seen[k.name] = true
+		out = append(out, k.name)
 	}
-	return out
+	return out, nil
 }
 
 // parsePropfind reads a PROPFIND body; an empty one is allprop (RFC 4918).
@@ -60,7 +75,7 @@ func parsePropfind(body []byte) (propRequest, error) {
 	if root.name != dav("propfind") || root.child(dav("prop")) == nil && root.child(dav("allprop")) == nil && root.child(dav("propname")) == nil {
 		return propRequest{}, errBadRequest
 	}
-	return propSelection(root), nil
+	return propSelection(root)
 }
 
 // liveProp is a property a resource has; hidden ones are left out of
@@ -246,7 +261,9 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 				return
 			}
 			for _, c := range colls {
-				calendarResource(c).write(ms, q)
+				if !c.Pending { // listed once synced (ruling M3-R25)
+					calendarResource(c).write(ms, q)
+				}
 			}
 		}
 	case kindCalendar:

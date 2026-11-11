@@ -1,15 +1,23 @@
 package caldav_test
 
 // The reports against the real service (protontest fake, real encrypted
-// cards, the real cache): what the stub cannot show.
+// cards, the real cache): what the stub cannot show. The tests of this file
+// share one logged-in rig, built by the first of them and torn down by
+// TestMain; each works in a calendar of its own and starts from an
+// empty-token sync, so any of them runs alone, in any order, any number of
+// times.
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,8 +42,8 @@ func card(uid, summary string, start int64, extra ...string) string {
 	return strings.Join(append(lines, extra...), "\r\n")
 }
 
-// rig is a logged-in, synced service on a fake Proton, its handler and a
-// client's app password.
+// rig is a logged-in service on a fake Proton, its handler and a client's
+// app password.
 type rig struct {
 	f    *protontest.Fake
 	svc  *service.Local
@@ -46,33 +54,171 @@ type rig struct {
 
 func noSleep(context.Context, time.Duration) error { return nil }
 
-// newRig builds the rig; setup adds the account's calendars and events
-// before the login and the first sync.
-func newRig(t *testing.T, setup func(f *protontest.Fake)) *rig {
-	t.Helper()
-	r := &rig{f: protontest.New(t, protontest.Options{})}
-	root := t.TempDir()
+// buildRig builds a rig in root whose fake and service live as long as tb;
+// setup adds the account's calendars and events before the login, and the
+// first sync runs when firstSync.
+func buildRig(ctx context.Context, tb testing.TB, root string, setup func(f *protontest.Fake), firstSync bool) (*rig, error) {
+	r := &rig{f: protontest.New(tb, protontest.Options{})}
 	r.dirs = paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
 	cfg := config.Defaults(r.dirs)
 	cfg.Proton.BaseURL = r.f.URL
 	svc, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Sleep: noSleep})
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	t.Cleanup(func() { _ = svc.Close() })
+	tb.Cleanup(func() { _ = svc.Close() })
 	r.svc = svc
 	setup(r.f)
-	if _, err := svc.Login(t.Context(), service.LoginRequest{Username: r.f.Username, Password: r.f.Password}); err != nil {
-		t.Fatalf("Login: %v", err)
+	if _, err := svc.Login(ctx, service.LoginRequest{Username: r.f.Username, Password: r.f.Password}); err != nil {
+		return nil, fmt.Errorf("login: %w", err)
 	}
-	r.sync(t)
-	sec, err := svc.AddClient(t.Context(), "Thunderbird")
+	if firstSync {
+		if _, err := svc.Sync(ctx, service.SyncRequest{}); err != nil {
+			return nil, fmt.Errorf("sync: %w", err)
+		}
+	}
+	sec, err := svc.AddClient(ctx, "Thunderbird")
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	r.pass = sec.Password
 	r.h = caldav.Handler(svc, caldav.Options{})
+	return r, nil
+}
+
+// newRig builds a synced rig of the test t.
+func newRig(t *testing.T, setup func(f *protontest.Fake)) *rig {
+	t.Helper()
+	r, err := buildRig(t.Context(), t, t.TempDir(), setup, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return r
+}
+
+// newUnsyncedRig builds a rig of the test t that never synced.
+func newUnsyncedRig(t *testing.T, setup func(f *protontest.Fake)) *rig {
+	t.Helper()
+	r, err := buildRig(t.Context(), t, t.TempDir(), setup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// processTB is a testing.TB that lives as long as the test binary, for the
+// shared rig: its cleanups run in TestMain after every test. It implements
+// what protontest calls (Helper, Cleanup, Fatal, Fatalf, Errorf); any other
+// method panics on the nil embedded TB.
+type processTB struct {
+	testing.TB
+	mu       sync.Mutex
+	cleanups []func()
+	failed   bool
+}
+
+func (*processTB) Helper() {}
+
+func (p *processTB) Cleanup(f func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cleanups = append(p.cleanups, f)
+}
+
+func (*processTB) Fatal(args ...any) { panic("shared rig: " + fmt.Sprint(args...)) }
+
+func (*processTB) Fatalf(format string, args ...any) {
+	panic("shared rig: " + fmt.Sprintf(format, args...))
+}
+
+func (p *processTB) Errorf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "shared rig: "+format+"\n", args...)
+	p.mu.Lock()
+	p.failed = true
+	p.mu.Unlock()
+}
+
+// teardown runs the cleanups, last first, and reports whether all went well.
+func (p *processTB) teardown() bool {
+	p.mu.Lock()
+	cleanups := p.cleanups
+	p.cleanups = nil
+	p.mu.Unlock()
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i]()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.failed
+}
+
+// The shared rig's calendars, one per test, and their fixed events.
+type reportCalendars struct{ placeholders, edits, deletions, epoch string }
+
+const (
+	keepUID   = "keep@x"
+	seriesUID = "series@x"
+	brokenUID = "broken@x"
+	oddRigUID = "odd uid/é"
+)
+
+var shared struct {
+	once sync.Once
+	tb   processTB
+	r    *rig
+	cals reportCalendars
+	err  error
+	runs atomic.Int64 // makes each run's UIDs unique (-count=N)
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if !shared.tb.teardown() && code == 0 {
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// sharedRig returns the file's rig, built on first use.
+func sharedRig(t *testing.T) (*rig, reportCalendars) {
+	t.Helper()
+	shared.once.Do(func() {
+		defer func() {
+			if p := recover(); p != nil {
+				shared.err = fmt.Errorf("%v", p)
+			}
+		}()
+		root, err := os.MkdirTemp("", "caldav-report-rig-")
+		if err != nil {
+			shared.err = err
+			return
+		}
+		shared.tb.Cleanup(func() { _ = os.RemoveAll(root) })
+		c := &shared.cals
+		rid := base + day
+		shared.r, shared.err = buildRig(context.Background(), &shared.tb, root, func(f *protontest.Fake) {
+			c.placeholders = f.AddCalendar(f.Username, protontest.Calendar{Name: "Placeholders"})
+			c.edits = f.AddCalendar(f.Username, protontest.Calendar{Name: "Edits"})
+			c.deletions = f.AddCalendar(f.Username, protontest.Calendar{Name: "Deletions"})
+			c.epoch = f.AddCalendar(f.Username, protontest.Calendar{Name: "Epoch"})
+			p := c.placeholders
+			f.AddEvent(p, protontest.Event{UID: keepUID, Start: base, End: base + 3600, Card: card(keepUID, "Keep me", base)})
+			f.AddEvent(p, protontest.Event{UID: seriesUID, Start: base, End: base + 3600, RRule: "FREQ=DAILY",
+				Card: card(seriesUID, "Standup", base, "RRULE:FREQ=DAILY")})
+			f.AddEvent(p, protontest.Event{UID: seriesUID, Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
+				Card: card(seriesUID, "Standup moved", rid+1800, "RECURRENCE-ID:"+stamp(rid))})
+			f.AddEvent(p, protontest.Event{UID: brokenUID, Start: base, End: base + 3600, BrokenPart: protontest.SharedEncryptedPart,
+				Card: card(brokenUID, "Secret plan", base)})
+			f.AddEvent(p, protontest.Event{UID: oddRigUID, Start: base, End: base + 3600, Card: card(oddRigUID, "Odd one", base)})
+			for _, uid := range []string{"e1@x", "e2 /é"} {
+				f.AddEvent(c.epoch, protontest.Event{UID: uid, Start: base, End: base + 3600, Card: card(uid, "Epoch "+uid, base)})
+			}
+		}, true)
+	})
+	if shared.err != nil {
+		t.Fatalf("shared rig: %v", shared.err)
+	}
+	return shared.r, shared.cals
 }
 
 func (r *rig) sync(t *testing.T) {
@@ -125,154 +271,144 @@ func listed(t *testing.T, ms multistatus) (changed map[string]string, deleted []
 	return changed, deleted
 }
 
-// TestReportsOverTheService shares one logged-in rig; the subtests run in
-// order and each builds on the state the previous one left.
-func TestReportsOverTheService(t *testing.T) {
-	t.Parallel()
-	const (
-		keep   = "keep@x"
-		gone   = "gone@x"
-		series = "series@x"
-		broken = "broken@x"
-		odd    = "odd uid/é"
-	)
-	var work, keepID, excID, goneID string
+// Review focus 3: one event with a part that does not decrypt; every other
+// event of the calendar still syncs, that one is the placeholder, counted.
+func TestUndecryptableEventDoesNotFailTheReport(t *testing.T) {
+	r, c := sharedRig(t)
+	all := []string{keepUID, seriesUID, brokenUID, oddRigUID}
+	changed, deleted := listed(t, r.syncReport(t, c.placeholders, ""))
+	if len(changed) != len(all) || len(deleted) != 0 {
+		t.Fatalf("empty-token sync listed %v, deleted %v; want the %d UIDs", changed, deleted, len(all))
+	}
+	got := r.multiget(t, c.placeholders, all...)
+	for _, uid := range all {
+		resp := got.get(t, objPath(c.placeholders, uid))
+		if resp.status != "" {
+			t.Fatalf("%s: status %q", uid, resp.status)
+		}
+		if e := resp.prop(t, nsD, "getetag").Text; e != changed[objPath(c.placeholders, uid)] {
+			t.Errorf("%s: multiget ETag %q, listing %q", uid, e, changed[objPath(c.placeholders, uid)])
+		}
+	}
+	data := func(uid string) string {
+		return got.get(t, objPath(c.placeholders, uid)).prop(t, nsC, "calendar-data").Text
+	}
+	if d := data(brokenUID); !strings.Contains(d, "X-PCB-PLACEHOLDER:1\r\n") || !strings.Contains(d, "SUMMARY:(pcb could not decrypt this event)\r\n") ||
+		strings.Contains(d, "Secret plan") {
+		t.Errorf("the undecryptable event:\n%q", d)
+	}
+	for uid, summary := range map[string]string{keepUID: "Keep me", oddRigUID: "Odd one", seriesUID: "Standup moved"} {
+		if d := data(uid); !strings.Contains(d, "SUMMARY:"+summary+"\r\n") || strings.Contains(d, "X-PCB-PLACEHOLDER") {
+			t.Errorf("%s:\n%q", uid, d)
+		}
+	}
+	st, err := r.svc.Status(t.Context())
+	if err != nil || st.Sync == nil || st.Sync.Undecryptable == 0 {
+		t.Errorf("the placeholder is not counted: %+v, %v", st.Sync, err)
+	}
+}
+
+// E08 MUST 12: an edit changes the object's ETag, and the delta, the
+// multiget, PROPFIND and GET agree on the new one.
+func TestMust12ETagsChangeWithContentAndAgree(t *testing.T) {
+	r, c := sharedRig(t)
+	uid := fmt.Sprintf("edit-%d@x", shared.runs.Add(1))
+	id := r.f.AddEvent(c.edits, protontest.Event{UID: uid, Start: base, End: base + 3600, Card: card(uid, "Before", base)})
+	r.sync(t)
+	first := r.syncReport(t, c.edits, "")
+	p := objPath(c.edits, uid)
+	before, _ := listed(t, first)
+	if before[p] == "" {
+		t.Fatalf("%s not listed", uid)
+	}
+	r.f.UpdateEvent(c.edits, id, protontest.Event{UID: uid, Start: base, End: base + 3600, Card: card(uid, "Kept and edited", base)})
+	r.sync(t)
+	changed, deleted := listed(t, r.syncReport(t, c.edits, *first.token))
+	if len(changed) != 1 || changed[p] == "" || len(deleted) != 0 {
+		t.Fatalf("delta after one edit: changed %v, deleted %v", changed, deleted)
+	}
+	if changed[p] == before[p] {
+		t.Errorf("the ETag did not change with the content: %s", changed[p])
+	}
+	got := r.multiget(t, c.edits, uid).get(t, p)
+	one := parseMS(t, r.do("PROPFIND", p, tbEtags, "Depth", "0")).get(t, p)
+	head := r.do("GET", p, "")
+	for what, e := range map[string]string{"multiget": got.prop(t, nsD, "getetag").Text, "PROPFIND": one.prop(t, nsD, "getetag").Text, "GET": head.Header().Get("ETag")} {
+		if e != changed[p] {
+			t.Errorf("%s ETag %q, delta %q", what, e, changed[p])
+		}
+	}
+	if !strings.Contains(head.Body.String(), "SUMMARY:Kept and edited\r\n") {
+		t.Errorf("GET:\n%s", head.Body)
+	}
+}
+
+// Review focus 2: an event deleted in Proton is its href's response-level
+// 404, exactly once; a deleted exception changes its UID's object.
+func TestSyncCollectionReportsDeletionsPerUID(t *testing.T) {
+	r, c := sharedRig(t)
+	n := shared.runs.Add(1)
+	gone, series := fmt.Sprintf("gone-%d@x", n), fmt.Sprintf("series-%d@x", n)
 	rid := base + day
-	r := newRig(t, func(f *protontest.Fake) {
-		work = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"})
-		keepID = f.AddEvent(work, protontest.Event{UID: keep, Start: base, End: base + 3600, Card: card(keep, "Keep me", base)})
-		goneID = f.AddEvent(work, protontest.Event{UID: gone, Start: base, End: base + 3600, Card: card(gone, "Gone soon", base)})
-		f.AddEvent(work, protontest.Event{UID: series, Start: base, End: base + 3600, RRule: "FREQ=DAILY",
-			Card: card(series, "Standup", base, "RRULE:FREQ=DAILY")})
-		excID = f.AddEvent(work, protontest.Event{UID: series, Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
-			Card: card(series, "Standup moved", rid+1800, "RECURRENCE-ID:"+stamp(rid))})
-		f.AddEvent(work, protontest.Event{UID: broken, Start: base, End: base + 3600, BrokenPart: protontest.SharedEncryptedPart,
-			Card: card(broken, "Secret plan", base)})
-		f.AddEvent(work, protontest.Event{UID: odd, Start: base, End: base + 3600, Card: card(odd, "Odd one", base)})
-	})
-	all := []string{keep, gone, series, broken, odd}
-	var token string
-	etags := map[string]string{}
+	goneID := r.f.AddEvent(c.deletions, protontest.Event{UID: gone, Start: base, End: base + 3600, Card: card(gone, "Gone soon", base)})
+	r.f.AddEvent(c.deletions, protontest.Event{UID: series, Start: base, End: base + 3600, RRule: "FREQ=DAILY",
+		Card: card(series, "Standup", base, "RRULE:FREQ=DAILY")})
+	excID := r.f.AddEvent(c.deletions, protontest.Event{UID: series, Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
+		Card: card(series, "Standup moved", rid+1800, "RECURRENCE-ID:"+stamp(rid))})
+	r.sync(t)
+	first := r.syncReport(t, c.deletions, "")
+	before, _ := listed(t, first)
+	r.f.DeleteEvent(c.deletions, goneID)
+	r.f.DeleteEvent(c.deletions, excID)
+	r.sync(t)
+	ms := r.syncReport(t, c.deletions, *first.token)
+	changed, deleted := listed(t, ms)
+	if len(deleted) != 1 || deleted[0] != objPath(c.deletions, gone) {
+		t.Errorf("deleted %v, want only %s", deleted, objPath(c.deletions, gone))
+	}
+	sp := objPath(c.deletions, series)
+	if len(changed) != 1 || changed[sp] == "" || changed[sp] == before[sp] {
+		t.Errorf("changed %v, want %s with a new ETag", changed, series)
+	}
+	if d := r.multiget(t, c.deletions, series).get(t, sp).prop(t, nsC, "calendar-data").Text; strings.Contains(d, "RECURRENCE-ID") {
+		t.Errorf("the exception is still served:\n%s", d)
+	}
+	if rec := r.do("GET", objPath(c.deletions, gone), ""); rec.Code != http.StatusNotFound {
+		t.Errorf("GET of the deleted object: %d", rec.Code)
+	}
+	again, gone2 := listed(t, r.syncReport(t, c.deletions, *ms.token))
+	if len(again) != 0 || len(gone2) != 0 {
+		t.Errorf("the next sync repeats: changed %v, deleted %v", again, gone2)
+	}
+}
 
-	// Review focus 3: one event with a part that does not decrypt; every
-	// other event still syncs, that one is the placeholder.
-	t.Run("TestUndecryptableEventDoesNotFailTheReport", func(t *testing.T) {
-		ms := r.syncReport(t, work, "")
-		changed, deleted := listed(t, ms)
-		if len(changed) != len(all) || len(deleted) != 0 {
-			t.Fatalf("empty-token sync listed %v, deleted %v; want the %d UIDs", changed, deleted, len(all))
+// Review focus 1: Thunderbird holds a token of a cache since recreated
+// (another epoch): 403 valid-sync-token, then its empty-token sync lists
+// every live object once.
+func TestSyncTokenOfAnotherEpochIsRefused(t *testing.T) {
+	r, c := sharedRig(t)
+	old := *r.syncReport(t, c.epoch, "").token
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(cache.Path(r.dirs.State) + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
 		}
-		for _, uid := range all {
-			etags[uid] = changed[objPath(work, uid)]
+	}
+	r.sync(t)
+	rec := r.do("REPORT", calPath(c.epoch), tbSync(old), "Depth", "1")
+	wantStatus(t, rec, http.StatusForbidden)
+	wantBody(t, rec, validSyncTokenBody)
+	ms := r.syncReport(t, c.epoch, "")
+	changed, deleted := listed(t, ms)
+	want := []string{"e1@x", "e2 /é"}
+	if len(changed) != len(want) || len(deleted) != 0 || len(ms.responses) != len(want) {
+		t.Fatalf("full sync: %d responses, changed %v, deleted %v; want %v once each", len(ms.responses), changed, deleted, want)
+	}
+	for _, uid := range want {
+		if changed[objPath(c.epoch, uid)] == "" {
+			t.Errorf("%s not listed", uid)
 		}
-		token = *ms.token
-		got := r.multiget(t, work, all...)
-		for _, uid := range all {
-			resp := got.get(t, objPath(work, uid))
-			if resp.status != "" {
-				t.Fatalf("%s: status %q", uid, resp.status)
-			}
-			if e := resp.prop(t, nsD, "getetag").Text; e != etags[uid] {
-				t.Errorf("%s: multiget ETag %q, listing %q", uid, e, etags[uid])
-			}
-		}
-		data := func(uid string) string { return got.get(t, objPath(work, uid)).prop(t, nsC, "calendar-data").Text }
-		if d := data(broken); !strings.Contains(d, "X-PCB-PLACEHOLDER:1\r\n") || !strings.Contains(d, "SUMMARY:(pcb could not decrypt this event)\r\n") ||
-			strings.Contains(d, "Secret plan") {
-			t.Errorf("the undecryptable event:\n%q", d)
-		}
-		for uid, summary := range map[string]string{keep: "Keep me", odd: "Odd one", series: "Standup moved"} {
-			if d := data(uid); !strings.Contains(d, "SUMMARY:"+summary+"\r\n") || strings.Contains(d, "X-PCB-PLACEHOLDER") {
-				t.Errorf("%s:\n%q", uid, d)
-			}
-		}
-		st, err := r.svc.Status(t.Context())
-		if err != nil || st.Sync == nil || st.Sync.Undecryptable == 0 {
-			t.Errorf("the placeholder is not counted: %+v, %v", st.Sync, err)
-		}
-	})
-
-	// E08 MUST 12: an edit changes the object's ETag, and the delta, the
-	// multiget, GET and PROPFIND agree on the new one.
-	t.Run("TestMust12ETagsChangeWithContentAndAgree", func(t *testing.T) {
-		r.f.UpdateEvent(work, keepID, protontest.Event{UID: keep, Start: base, End: base + 3600, Card: card(keep, "Kept and edited", base)})
-		r.sync(t)
-		ms := r.syncReport(t, work, token)
-		changed, deleted := listed(t, ms)
-		p := objPath(work, keep)
-		if len(changed) != 1 || changed[p] == "" || len(deleted) != 0 {
-			t.Fatalf("delta after one edit: changed %v, deleted %v", changed, deleted)
-		}
-		if changed[p] == etags[keep] {
-			t.Errorf("the ETag did not change with the content: %s", changed[p])
-		}
-		got := r.multiget(t, work, keep).get(t, p)
-		one := parseMS(t, r.do("PROPFIND", p, tbEtags, "Depth", "0")).get(t, p)
-		head := r.do("GET", p, "")
-		for what, e := range map[string]string{"multiget": got.prop(t, nsD, "getetag").Text, "PROPFIND": one.prop(t, nsD, "getetag").Text, "GET": head.Header().Get("ETag")} {
-			if e != changed[p] {
-				t.Errorf("%s ETag %q, delta %q", what, e, changed[p])
-			}
-		}
-		if !strings.Contains(head.Body.String(), "SUMMARY:Kept and edited\r\n") {
-			t.Errorf("GET:\n%s", head.Body)
-		}
-		token, etags[keep] = *ms.token, changed[p]
-	})
-
-	// Review focus 2: an event deleted in Proton is its href's response-
-	// level 404, exactly once; a deleted exception changes its UID's object.
-	t.Run("TestSyncCollectionReportsDeletionsPerUID", func(t *testing.T) {
-		r.f.DeleteEvent(work, goneID)
-		r.f.DeleteEvent(work, excID)
-		r.sync(t)
-		ms := r.syncReport(t, work, token)
-		changed, deleted := listed(t, ms)
-		if len(deleted) != 1 || deleted[0] != objPath(work, gone) {
-			t.Errorf("deleted %v, want only %s", deleted, objPath(work, gone))
-		}
-		if len(changed) != 1 || changed[objPath(work, series)] == "" || changed[objPath(work, series)] == etags[series] {
-			t.Errorf("changed %v, want %s with a new ETag", changed, series)
-		}
-		if d := r.multiget(t, work, series).get(t, objPath(work, series)).prop(t, nsC, "calendar-data").Text; strings.Contains(d, "RECURRENCE-ID") {
-			t.Errorf("the exception is still served:\n%s", d)
-		}
-		if rec := r.do("GET", objPath(work, gone), ""); rec.Code != http.StatusNotFound {
-			t.Errorf("GET of the deleted object: %d", rec.Code)
-		}
-		token = *ms.token
-		again, gone2 := listed(t, r.syncReport(t, work, token))
-		if len(again) != 0 || len(gone2) != 0 {
-			t.Errorf("the next sync repeats: changed %v, deleted %v", again, gone2)
-		}
-	})
-
-	// Review focus 1: Thunderbird holds a token of a cache since recreated
-	// (another epoch): 403 valid-sync-token, then its empty-token sync lists
-	// every live object once, and nothing deleted.
-	t.Run("TestSyncTokenOfAnotherEpochIsRefused", func(t *testing.T) {
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			if err := os.Remove(cache.Path(r.dirs.State) + suffix); err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
-		}
-		r.sync(t)
-		rec := r.do("REPORT", calPath(work), tbSync(token), "Depth", "1")
-		wantStatus(t, rec, http.StatusForbidden)
-		wantBody(t, rec, validSyncTokenBody)
-		ms := r.syncReport(t, work, "")
-		changed, deleted := listed(t, ms)
-		want := []string{keep, series, broken, odd}
-		if len(changed) != len(want) || len(deleted) != 0 || len(ms.responses) != len(want) {
-			t.Fatalf("full sync: %d responses, changed %v, deleted %v; want %v once each", len(ms.responses), changed, deleted, want)
-		}
-		for _, uid := range want {
-			if changed[objPath(work, uid)] == "" {
-				t.Errorf("%s not listed", uid)
-			}
-		}
-		if *ms.token == token {
-			t.Error("the new life kept the old token")
-		}
-	})
+	}
+	if *ms.token == old {
+		t.Error("the new life kept the old token")
+	}
 }

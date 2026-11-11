@@ -103,14 +103,18 @@ func (l *Local) withCache(fn func(*cache.Cache) error) error {
 }
 
 // syncedCalendar returns calendar id of the cache; ErrNoSuchCalendar when
-// the cache has no such calendar or never synced it.
+// the cache has no such calendar, ErrCalendarPending when it has not synced
+// it yet (ruling M3-R25).
 func syncedCalendar(ctx context.Context, db *cache.Cache, id string) (cache.Calendar, error) {
 	cals, err := db.Calendars(ctx)
 	if err != nil {
 		return cache.Calendar{}, cacheError(err)
 	}
 	for _, c := range cals {
-		if c.ID == id && !c.SyncedAt.IsZero() {
+		if c.ID == id {
+			if c.SyncedAt.IsZero() {
+				return cache.Calendar{}, calendarPending()
+			}
 			return c, nil
 		}
 	}
@@ -226,25 +230,27 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 	return nil
 }
 
-// Collections implements API: every synced calendar of the cache with its
-// CTag and sync token. It may call Proton (ruling M3-R14): the CTag holds
-// the calendar settings, read from each calendar's bootstrap the first time
+// Collections implements API: every calendar of the cache, a synced one
+// with its CTag and sync token, one not synced yet as Pending (ruling
+// M3-R25). It may call Proton (ruling M3-R14): the CTag holds the calendar
+// settings, read from each synced calendar's bootstrap the first time
 // (ensureKeys). Outside Serve it opens the cache read-only for the call;
-// during Serve it reads Serve's handle. No cache is a MustAct.
+// during Serve it reads Serve's handle. No cache, or one without any
+// calendar, is a MustAct.
 func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	if l.closed.Load() {
 		return nil, errClosed()
 	}
-	var synced []cache.Calendar
+	var known []cache.Calendar
 	var ids []string
 	err := l.withCache(func(db *cache.Cache) error {
 		cals, err := db.Calendars(ctx)
 		if err != nil {
 			return l.fail(cacheError(err))
 		}
+		known = cals
 		for _, c := range cals {
 			if !c.SyncedAt.IsZero() {
-				synced = append(synced, c)
 				ids = append(ids, c.ID)
 			}
 		}
@@ -253,15 +259,23 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(synced) == 0 {
+	if len(known) == 0 {
 		return nil, notSynced()
 	}
-	if err := l.ensureKeys(ctx, ids); err != nil {
-		return nil, err
+	if len(ids) > 0 {
+		if err := l.ensureKeys(ctx, ids); err != nil {
+			return nil, err
+		}
 	}
-	out := make([]Collection, 0, len(synced))
+	out := make([]Collection, 0, len(known))
 	err = l.withCache(func(db *cache.Cache) error {
-		for _, c := range synced {
+		for _, c := range known {
+			coll := Collection{ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description,
+				ReadOnly: c.Type != calendar.Normal.String(), Pending: c.SyncedAt.IsZero()}
+			if coll.Pending {
+				out = append(out, coll)
+				continue
+			}
 			ck := l.r.calKeys(c.ID)
 			if ck == nil {
 				return errKeysDropped()
@@ -274,12 +288,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 			}); err != nil {
 				return l.fail(cacheError(err))
 			}
-			out = append(out, Collection{
-				ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description,
-				ReadOnly:  c.Type != calendar.Normal.String(),
-				CTag:      epoch + ":" + strconv.FormatInt(seq, 10) + ":" + ck.hash,
-				SyncToken: syncToken(epoch, seq, ck.gen),
-			})
+			coll.CTag = epoch + ":" + strconv.FormatInt(seq, 10) + ":" + ck.hash
+			coll.SyncToken = syncToken(epoch, seq, ck.gen)
+			out = append(out, coll)
 		}
 		return nil
 	})
