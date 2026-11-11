@@ -58,7 +58,7 @@ PCB_LAB_APPVERSION=external-drive-caloxide@0.2.1-stable pcb-lab probe calendar-a
 $ENV pcb-lab login --state-dir ~/.local/state/pcb-lab-e01
 ```
 
-`probe calendar-access` exits 20 when an endpoint fails (a candidate without calendar access is an expected measurement: note it and go on). `probe refresh` exits 20 when its refresh is refused: stop the sequence there. The 60 s guard is per state directory, so between logins in different directories (step 6) the agent keeps the time of the last login by hand. Keep the log of logins (candidate or directory, UTC time, outcome) in this section while running: E02 counts logins from it.
+`probe calendar-access` exits 20 when an endpoint fails (a candidate without calendar access is an expected measurement: note it and go on). `probe refresh` exits 20 when its refresh is refused: stop the sequence; resume from the next step only after a fresh guarded login. The 60 s guard is per state directory, so between logins in different directories (step 5) the agent keeps the time of the last login by hand. Keep the log of logins (candidate or directory, UTC time, outcome) in this section while running: E02 counts logins from it.
 
 If a login ends in a CAPTCHA (exit 10), stop there, record it for E02 (`hv-log.jsonl`) and follow the E02 protocol; the remaining candidates wait. Each login passes `PCB_LAB_APPVERSION` in the environment, so the candidate is also the identity of the session it creates.
 
@@ -69,4 +69,4 @@ Write the results table (status / code per endpoint per candidate, scope list) h
 
 ## Feeds
 
-C1 transport (default identity, configuration key), decision 0011, SPEC §5.1; E01 and the seeder reuse the `Other` session.
+C1 transport (default identity, configuration key), decision 0011, SPEC §5.1; E01 uses its own dedicated session; the seeder logs in through proton-cal (HUMAN-CHECKS step 4); the default-dir session left after the sequence is the negative-control candidate's.

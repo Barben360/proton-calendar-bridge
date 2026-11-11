@@ -12,7 +12,7 @@ Nothing below has been run: no live result exists yet.
 - Stop conditions (stop the whole sequence, record what happened, report; do not retry in a loop):
   - any login or probe ends in a CAPTCHA (exit 10): record it as a new row in `E02-captcha-token.md` (protocol there), ask the author for a fresh solve (the only other author step); the remaining steps wait;
   - any 429 or `Retry-After`: wait it out, never faster; a second one in the same step: stop;
-  - `pcb-lab probe refresh` non-zero (refresh refused, session gone): stop, log in again under the guard;
+  - `pcb-lab probe refresh` non-zero (refresh refused, session gone): stop the sequence; resume from the next step only after a fresh guarded login;
   - `Other` without calendar access on the test account while the fork's evidence says it works: investigate the account state before anything else;
   - no candidate gets calendar access: stop M0 and report (the E03 gate);
   - `seed apply` exit 40 (rate limit): wait a few minutes, rerun unchanged; a failed command naming an id (`s346.e`, ...) is a dataset fix, not a retry.
@@ -31,7 +31,7 @@ The agent then continues alone with step 2. If Proton refuses the hours-old toke
 
 ## 2. Agent: pre-check, build, then the E03/E02/E01 login sequence
 
-Pre-check first: `PROTON_PASS_AGENT_REASON="<why>" pass-cli info` must succeed. If not, log pass-cli in again with the PAT file `~/.config/pcb-dev/pass-pat`, passed through the environment variable `PROTON_PASS_PERSONAL_ACCESS_TOKEN` (never argv), then repeat the check. Then, from `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0`: `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`. Commands and result tables: `E03-client-identity.md` ("Pending live run").
+Pre-check first: `PROTON_PASS_AGENT_REASON="<why>" pass-cli info` must succeed. If not, log pass-cli in again with the PAT file `~/.config/pcb-dev/pass-pat`, passed through the environment variable `PROTON_PASS_PERSONAL_ACCESS_TOKEN` (never argv), then repeat the check. Then, from `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0`: `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`. Commands and result tables: `E03-client-identity.md` ("Pending live run"), where E03's steps 1 to 4 are 2a to 2d below and E03's step 5 (E01's dedicated login) is step 3 here. The login log is kept in that E03 section, as E02 and E03 expect.
 
 | # | Login (state dir) | Then, on that session | Experiment |
 |---|---|---|---|

@@ -29,7 +29,7 @@ No live measurement yet (the test account's CAPTCHA is pending, HUMAN-CHECKS ste
 
 Two steps inside the sequence of `E03-client-identity.md` (build once: `cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0 && go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`).
 
-**Immediate results, once, right after login #1 (disposable session) and its E03 probe.** Stop on a non-zero exit (refresh refused: the session is gone, log in again with the guard and E02 protocol):
+**Immediate results, once, right after login #1 (disposable session) and its E03 probe.** Stop on a non-zero exit (refresh refused: the session is gone): stop the sequence and resume from the next step only after a fresh guarded login (E02 protocol):
 
 ```
 pcb-lab probe refresh --record-dir spec/experiments/raw/E01 --json
@@ -37,7 +37,7 @@ pcb-lab probe refresh --record-dir spec/experiments/raw/E01 --json
 
 It runs once on this session and never again; the next login in the sequence replaces it.
 
-**Long probe, as its own login step** (the last login of the sequence, at least 60 s after the previous login: the guard is per state dir, so the agent keeps the time of the last login by hand):
+**Long probe, as its own login step** (the login of HUMAN-CHECKS step 3; the seeder's proton-cal login (step 4) follows it; at least 60 s after the previous login: the guard is per state dir, so the agent keeps the time of the last login by hand):
 
 ```
 ENV='pass-cli run --env-file scripts/lab.env.example --'
