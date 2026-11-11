@@ -1,20 +1,18 @@
 // Package labtest is the fake Proton the lab's tests share: an httptest proxy
-// in front of go-proton-api's in-memory server. Test use only.
+// in front of protontest's fake. Test use only.
 package labtest
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync"
 	"testing"
 
-	"github.com/ProtonMail/go-proton-api/server"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 )
 
 const (
@@ -50,39 +48,19 @@ type Front struct {
 	URL       string
 }
 
-// NewFront starts the fake with one user (User, Pass).
+// NewFront starts the fake with one user (User, Pass). It is a lab-specific
+// layer (request log, canned replies, a changeable challenge, any 2FA code
+// accepted) over protontest.Fake, which supplies the backend and Proton's
+// response shape.
 func NewFront(t *testing.T, f *Front) *Front {
 	t.Helper()
-	backend := server.New(server.WithTLS(false))
-	t.Cleanup(backend.Close)
-	if _, _, err := backend.CreateUser(User, []byte(Pass)); err != nil {
-		t.Fatal(err)
-	}
-	target, err := url.Parse(backend.GetHostURL())
+	fake := protontest.New(t, protontest.Options{TwoFA: f.TwoFA})
+	fake.AddUser(User, Pass)
+	target, err := url.Parse(fake.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "json") {
-			return nil
-		}
-		var body map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return err
-		}
-		if _, ok := body["Code"]; !ok { // Proton always sends one; the backend does not
-			body["Code"] = 1000
-		}
-		if f.TwoFA && resp.Request.Method == http.MethodPost && resp.Request.URL.Path == "/auth/v4" {
-			body["2FA"] = map[string]any{"Enabled": 1}
-		}
-		data, _ := json.Marshal(body)
-		resp.Body = io.NopCloser(bytes.NewReader(data))
-		resp.ContentLength = int64(len(data))
-		resp.Header.Del("Content-Length")
-		return nil
-	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.Mu.Lock()
 		f.Requests++
@@ -106,15 +84,7 @@ func NewFront(t *testing.T, f *Front) *Front {
 			challenge := f.Challenge
 			f.Mu.Unlock()
 			if challenge != "" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnprocessableEntity)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"Code": 9001, "Error": "Human verification required",
-					"Details": map[string]any{
-						"HumanVerificationMethods": []string{"captcha"},
-						"HumanVerificationToken":   challenge,
-					},
-				})
+				protontest.WriteChallenge(w, challenge, []string{"captcha"})
 				return
 			}
 		case r.Method == http.MethodPost && r.URL.Path == "/auth/v4/2fa":

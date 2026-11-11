@@ -1,0 +1,242 @@
+// Package auth is C1's login: SRP through go-proton-api, the CAPTCHA (9001)
+// stop, TOTP, refusal of the account kinds pcb does not support, token
+// refresh, the locked scope and logout. Credential and verification failures
+// are typed (sentinels and error types) so callers classify them without
+// reading message text. No error or formatted value carries a secret.
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+
+	gpa "github.com/ProtonMail/go-proton-api"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+)
+
+const codePasswordWrong = 8002
+
+// Credential and verification failures: the user must act (R23a). Test them
+// with errors.Is.
+var (
+	ErrBadCredentials = errors.New("wrong Proton username or password")
+	ErrTwoPassword    = errors.New("the Proton account uses two-password mode, which pcb does not support")
+	ErrFIDO2          = errors.New("the Proton account's only second factor is a security key (FIDO2), which pcb does not support")
+	ErrTOTPRejected   = errors.New("the 2FA code was rejected by Proton")
+	// ErrCaptchaRejected: the CAPTCHA token sent to Begin is invalid or expired.
+	ErrCaptchaRejected = errors.New("the CAPTCHA token was not accepted by Proton")
+	ErrServerProof     = errors.New("the Proton server proof does not match: the server could not prove it knows the password")
+)
+
+// CaptchaError is a CAPTCHA to solve at URL; the next Begin passes Token.
+type CaptchaError struct{ Token, URL string }
+
+// Error implements error.
+func (e *CaptchaError) Error() string {
+	return "Proton asks for a CAPTCHA: solve it at " + e.URL
+}
+
+// UnsupportedVerificationError is a human verification without the captcha
+// method, which pcb cannot complete.
+type UnsupportedVerificationError struct{ Methods []string }
+
+// Error implements error.
+func (e *UnsupportedVerificationError) Error() string {
+	return "Proton asks for human verification by " + strings.Join(e.Methods, ", ") + ", which pcb does not support"
+}
+
+// VerifyURL is the page that solves the CAPTCHA challenge token.
+func VerifyURL(token string) string {
+	return "https://verify.proton.me/?methods=captcha&token=" + url.QueryEscape(token)
+}
+
+// NewManager returns a go-proton-api manager for baseURL (required: its own
+// default host is not ours) with pcb's identity and a silent logger. It never
+// retries: one login attempt is one request, and writes are not repeated.
+func NewManager(baseURL, appVersion string) *gpa.Manager {
+	if appVersion == "" {
+		appVersion = "Other"
+	}
+	return gpa.New(
+		gpa.WithHostURL(baseURL),
+		gpa.WithAppVersion(appVersion),
+		gpa.WithLogger(silent{}),
+		gpa.WithRetryCount(0),
+		gpa.WithTransport(userAgent{http.DefaultTransport.(*http.Transport).Clone()}),
+	)
+}
+
+type silent struct{}
+
+func (silent) Errorf(string, ...any) {}
+func (silent) Warnf(string, ...any)  {}
+func (silent) Debugf(string, ...any) {}
+
+// userAgent sets pcb's User-Agent, which go-proton-api has no option for.
+type userAgent struct{ next *http.Transport }
+
+func (u userAgent) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("User-Agent", "pcb/"+buildinfo.Version)
+	return u.next.RoundTrip(r)
+}
+
+// CloseIdleConnections lets Manager.Close reach the transport.
+func (u userAgent) CloseIdleConnections() { u.next.CloseIdleConnections() }
+
+// Pending is a login that passed SRP. Tokens follow go-proton-api's
+// rotations. It is not safe for concurrent use; Close it when done.
+type Pending struct {
+	Tokens    api.Tokens
+	UserID    string
+	NeedsTOTP bool
+
+	c     *gpa.Client
+	ended bool // a refresh failed for good: the session is gone
+}
+
+const redacted = "auth.Pending{<redacted>}"
+
+// String implements fmt.Stringer.
+func (Pending) String() string { return redacted }
+
+// GoString implements fmt.GoStringer (%#v).
+func (Pending) GoString() string { return redacted }
+
+// LogValue implements slog.LogValuer.
+func (Pending) LogValue() slog.Value { return slog.StringValue(redacted) }
+
+// Begin runs SRP for username. A non-empty captchaToken is a solved CAPTCHA
+// challenge. Errors: *CaptchaError, *UnsupportedVerificationError,
+// ErrCaptchaRejected, ErrBadCredentials, ErrServerProof, and ErrTwoPassword or
+// ErrFIDO2 once the session they opened is revoked. Begin sends one
+// POST /auth/v4.
+func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte, captchaToken string) (*Pending, error) {
+	var hv *gpa.APIHVDetails
+	if captchaToken != "" {
+		hv = &gpa.APIHVDetails{Methods: []string{"captcha"}, Token: captchaToken}
+	}
+	c, a, err := m.NewClientWithLoginWithHVToken(ctx, username, password, hv)
+	if err != nil {
+		return nil, loginError(err)
+	}
+	p := &Pending{
+		Tokens:    api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken},
+		UserID:    a.UserID,
+		NeedsTOTP: a.TwoFA.Enabled&gpa.HasTOTP != 0,
+		c:         c,
+	}
+	c.AddAuthHandler(func(r gpa.Auth) {
+		p.Tokens.AccessToken, p.Tokens.RefreshToken = r.AccessToken, r.RefreshToken
+	})
+	c.AddDeauthHandler(func() { p.ended = true })
+	var refused error
+	switch {
+	case a.PasswordMode == gpa.TwoPasswordMode:
+		refused = ErrTwoPassword
+	case a.TwoFA.Enabled != 0 && !p.NeedsTOTP:
+		refused = ErrFIDO2
+	default:
+		return p, nil
+	}
+	if err := c.AuthDelete(ctx); err != nil {
+		refused = errors.Join(refused, fmt.Errorf("revoking the session: %w", protonError(http.MethodDelete, "/auth/v4", err)))
+	}
+	p.Close()
+	return nil, refused
+}
+
+// loginError classifies a failed SRP login.
+func loginError(err error) error {
+	if errors.Is(err, gpa.ErrInvalidProof) {
+		return ErrServerProof
+	}
+	perr := protonError(http.MethodPost, "/auth/v4", err)
+	var ge *gpa.APIError
+	if !errors.As(err, &ge) {
+		return fmt.Errorf("proton login: %w", perr)
+	}
+	switch {
+	case ge.Code == gpa.HumanVerificationRequired:
+		d, derr := ge.GetHVDetails()
+		switch {
+		case derr != nil || d == nil:
+			return fmt.Errorf("proton login: unreadable human verification: %w", perr)
+		case !slices.Contains(d.Methods, "captcha"):
+			return &UnsupportedVerificationError{Methods: d.Methods}
+		case d.Token == "":
+			return fmt.Errorf("proton login: CAPTCHA without a token: %w", perr)
+		}
+		return &CaptchaError{Token: d.Token, URL: VerifyURL(d.Token)}
+	case ge.Code == gpa.HumanValidationInvalidToken:
+		return fmt.Errorf("%w: %w", ErrCaptchaRejected, perr)
+	case ge.Code == codePasswordWrong || ge.Status == http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: %w", ErrBadCredentials, perr)
+	}
+	return fmt.Errorf("proton login: %w", perr)
+}
+
+// SubmitTOTP sends the 2FA code. A refused code is ErrTOTPRejected; a session
+// that ended meanwhile wraps api.ErrSessionEnded.
+func (p *Pending) SubmitTOTP(ctx context.Context, code string) error {
+	if p.c == nil {
+		return errors.New("auth: the login is closed")
+	}
+	err := p.c.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: code})
+	if err == nil {
+		p.NeedsTOTP = false
+		return nil
+	}
+	perr := protonError(http.MethodPost, "/auth/v4/2fa", err)
+	var ge *gpa.APIError
+	switch {
+	case p.ended || (errors.As(err, &ge) && ge.Status == http.StatusUnauthorized):
+		return fmt.Errorf("%w: %w", api.ErrSessionEnded, perr)
+	case errors.As(err, &ge) && ge.Status >= 400 && ge.Status < 500 && ge.Status != http.StatusTooManyRequests:
+		return fmt.Errorf("%w: %w", ErrTOTPRejected, perr)
+	}
+	return fmt.Errorf("proton 2FA: %w", perr)
+}
+
+// Abort revokes the pending session (best effort), then closes it.
+func (p *Pending) Abort(ctx context.Context) {
+	if p.c != nil {
+		_ = p.c.AuthDelete(ctx)
+	}
+	p.Close()
+}
+
+// Close forgets the go-proton-api client. The session stays valid.
+func (p *Pending) Close() {
+	if p.c != nil {
+		p.c.Close()
+		p.c = nil
+	}
+}
+
+// Logout revokes c's session (DELETE /auth/v4).
+func Logout(ctx context.Context, c *api.Client) error {
+	return c.Delete(ctx, "/auth/v4", nil)
+}
+
+// protonError turns a go-proton-api failure into an *api.Error (so callers
+// test codes with api.IsCode) and strips the request URL from transport
+// errors. Nothing from the request body survives.
+func protonError(method, path string, err error) error {
+	var ge *gpa.APIError
+	if errors.As(err, &ge) {
+		return &api.Error{Method: method, Path: path, Status: ge.Status, Code: int(ge.Code), Message: ge.Message}
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
