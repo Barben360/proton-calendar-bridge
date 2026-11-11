@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -28,7 +30,7 @@ type loginFlags struct {
 
 func addLoginFlags(c *cobra.Command, f *loginFlags) {
 	c.Flags().StringVar(&f.username, "username", "", "Proton username (default: $PCB_USERNAME, else asked)")
-	c.Flags().IntVar(&f.passwordFD, "password-fd", -1, "read the password from this file descriptor (default: $PCB_PASSWORD, else asked)")
+	c.Flags().IntVar(&f.passwordFD, "password-fd", -1, "read the password from this file descriptor until end of input (default: $PCB_PASSWORD, else asked)")
 	c.Flags().BoolVar(&f.unattended, "unattended-relogin", false, "store the credentials so pcb can log in again without you (needs PCB_TOTP as an otpauth:// URI with 2FA)")
 }
 
@@ -69,28 +71,30 @@ func (a *app) interactive(cmd *cobra.Command) bool {
 }
 
 func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error {
+	ctx := cmd.Context()
 	interactive := a.interactive(cmd)
-	creds, err := a.credentials(credentialSource{
+	// The service first: a bad config.toml fails before any prompt.
+	svc, err := a.service(cmd)
+	if err != nil {
+		return Finish(cmd, nil, "", err)
+	}
+	defer a.closeService(svc)
+	creds, err := a.credentials(ctx, credentialSource{
 		username: f.username, passwordFD: f.passwordFD, passwordFDSet: cmd.Flags().Changed("password-fd"), interactive: interactive,
 	})
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
-	svc, err := a.service(cmd)
-	if err != nil {
-		return Finish(cmd, nil, "", err)
-	}
-	defer closeService(svc)
 
 	req := service.LoginRequest{
 		Username: creds.username, Password: creds.password, TOTP: creds.totp,
 		CaptchaToken: captchaToken, UnattendedRelogin: f.unattended,
 	}
-	ctx := cmd.Context()
 	res, err := svc.Login(ctx, req)
 	for round := 0; err == nil && res.State == service.StateNeedsCaptcha && interactive && round < maxCaptchaRounds; round++ {
-		if err = a.waitForCaptcha(res); err != nil {
-			break
+		if werr := a.waitForCaptcha(ctx, res); werr != nil {
+			// Keep the way back: the solved token is still good for pcb login resume.
+			return Finish(cmd, res, "", withHint(werr, resumeHint(res)))
 		}
 		req.CaptchaToken = res.CaptchaToken
 		res, err = svc.Login(ctx, req)
@@ -115,15 +119,27 @@ func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error
 // captchaError is the exit 10 of a CAPTCHA nobody solved: it names the URL
 // and the command that resumes with the token.
 func captchaError(res service.LoginResult) error {
-	return mustAct("Proton asks for a CAPTCHA: solve it at "+res.CaptchaURL,
-		"pcb login resume --captcha-token "+shellquote.Quote(res.CaptchaToken))
+	return mustAct("Proton asks for a CAPTCHA: solve it at "+res.CaptchaURL, resumeHint(res))
+}
+
+func resumeHint(res service.LoginResult) string {
+	return "pcb login resume --captcha-token " + shellquote.Quote(res.CaptchaToken)
+}
+
+// withHint returns err with hint as its hint, keeping its exit code.
+func withHint(err error, hint string) error {
+	var ee *exitcode.Error
+	if errors.As(err, &ee) {
+		return &exitcode.Error{Code: ee.Code, Err: ee.Err, Hint: hint}
+	}
+	return &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: hint}
 }
 
 // waitForCaptcha shows the CAPTCHA URL and waits for Enter.
-func (a *app) waitForCaptcha(res service.LoginResult) error {
+func (a *app) waitForCaptcha(ctx context.Context, res service.LoginResult) error {
 	fmt.Fprintf(a.Stderr, "Proton asks for a CAPTCHA. Solve it in a browser:\n  %s\n", res.CaptchaURL)
-	if _, err := a.Term.ReadLine("Press Enter once solved: "); err != nil {
-		return noAnswer(err)
+	if _, err := a.Term.ReadLine(ctx, "Press Enter once solved: "); err != nil {
+		return noAnswer(ctx, "answer to the CAPTCHA prompt", err)
 	}
 	return nil
 }
@@ -142,9 +158,9 @@ func (a *app) promptTOTP(cmd *cobra.Command, svc service.API, failure error) (se
 		if failure != nil {
 			a.reportFailure(failure)
 		}
-		code, err := a.Term.ReadSecret("2FA code (or otpauth:// URI): ")
+		code, err := a.Term.ReadSecret(cmd.Context(), "2FA code (or otpauth:// URI): ")
 		if err != nil {
-			return service.LoginResult{}, noAnswer(err)
+			return service.LoginResult{}, noAnswer(cmd.Context(), "2FA code", err)
 		}
 		var res service.LoginResult
 		if res, failure = svc.SubmitTOTP(cmd.Context(), code); failure == nil {

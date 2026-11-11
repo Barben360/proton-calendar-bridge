@@ -28,7 +28,7 @@ func (a *app) newCalendarList() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer closeService(svc)
+			defer a.closeService(svc)
 			cals, err := svc.Calendars(cmd.Context())
 			if err != nil {
 				return Finish(cmd, nil, "", err)

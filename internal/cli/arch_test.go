@@ -19,7 +19,7 @@ func TestCLIImportsNeitherProtonNorStore(t *testing.T) {
 		t.Fatal("no imports found: the check would pass vacuously")
 	}
 	for _, imp := range pkg.Imports {
-		for _, banned := range []string{module + "/internal/proton", module + "/internal/store"} {
+		for _, banned := range []string{module + "/internal/proton", module + "/internal/store", "github.com/ProtonMail/go-proton-api"} {
 			if imp == banned || strings.HasPrefix(imp, banned+"/") {
 				t.Errorf("internal/cli imports %s; go through internal/service", imp)
 			}

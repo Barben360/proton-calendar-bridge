@@ -26,12 +26,23 @@ type fakeTerm struct {
 	lines, secrets []string
 	linePrompts    []string
 	secretPrompts  []string
+	// block makes every read wait for ctx to end, like a person not answering.
+	block bool
+	// onBlock runs when a read starts waiting (the test cancels there).
+	onBlock func()
 }
 
 func (f *fakeTerm) Interactive() bool { return f.interactive }
 
-func (f *fakeTerm) ReadLine(prompt string) (string, error) {
+func (f *fakeTerm) ReadLine(ctx context.Context, prompt string) (string, error) {
 	f.linePrompts = append(f.linePrompts, prompt)
+	if f.block {
+		if f.onBlock != nil {
+			f.onBlock()
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
 	if len(f.lines) == 0 {
 		return "", io.EOF
 	}
@@ -40,8 +51,15 @@ func (f *fakeTerm) ReadLine(prompt string) (string, error) {
 	return l, nil
 }
 
-func (f *fakeTerm) ReadSecret(prompt string) (string, error) {
+func (f *fakeTerm) ReadSecret(ctx context.Context, prompt string) (string, error) {
 	f.secretPrompts = append(f.secretPrompts, prompt)
+	if f.block {
+		if f.onBlock != nil {
+			f.onBlock()
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
 	if len(f.secrets) == 0 {
 		return "", io.EOF
 	}
@@ -57,6 +75,7 @@ type stubAPI struct {
 	totps       []string
 	submit      func(string) (service.LoginResult, error)
 	closed      int
+	closeErr    error
 	statusPhase string
 }
 
@@ -79,11 +98,15 @@ func (s *stubAPI) Status(context.Context) (service.Status, error) {
 }
 
 func (s *stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return nil, nil }
-func (s *stubAPI) Close() error                                          { s.closed++; return nil }
+func (s *stubAPI) Close() error                                          { s.closed++; return s.closeErr }
 
 func ready() (service.LoginResult, error) {
 	return service.LoginResult{State: service.StateReady, Username: "u", AccountID: "id"}, nil
 }
+
+// t0 is the fixed clock of every rig: the service and the fake's TOTP agree
+// on it, mid-period, so codes are deterministic and nothing ever waits.
+var t0 = time.Date(2026, 11, 11, 10, 0, 7, 0, time.UTC)
 
 // rig runs the CLI against a fake Proton, an isolated directory tree and an
 // environment map.
@@ -95,8 +118,10 @@ type rig struct {
 	term *fakeTerm
 	svc  service.API // injected service, or nil for the default one
 	mk   func() (service.API, error)
-	out  bytes.Buffer
-	errb bytes.Buffer
+	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
+	ctrlC bool
+	out   bytes.Buffer
+	errb  bytes.Buffer
 }
 
 // stubRig is a rig on a stub service, without a Proton: nothing can reach one.
@@ -114,6 +139,7 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 	var f *protontest.Fake
 	user, password, baseURL := "user", "pw", "http://127.0.0.1:1"
 	if o != nil {
+		o.Now = func() time.Time { return t0 }
 		f = protontest.New(t, *o)
 		user, password, baseURL = f.Username, f.Password, f.URL
 	}
@@ -126,23 +152,29 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 	if err := os.WriteFile(config.Path(dirs), []byte(toml), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &rig{t: t, f: f, dirs: dirs, term: &fakeTerm{}, env: map[string]string{
+	r := &rig{t: t, f: f, dirs: dirs, term: &fakeTerm{}, env: map[string]string{
 		"XDG_CONFIG_HOME": filepath.Dir(dirs.Config),
 		"XDG_STATE_HOME":  filepath.Dir(dirs.State),
 		"PCB_USERNAME":    user,
 		"PCB_PASSWORD":    password,
 	}}
+	if f != nil {
+		r.useLocal()
+	}
+	return r
 }
 
-// noSleep injects a Local that does not wait out the login guard.
-func (r *rig) noSleep() {
-	r.t.Helper()
-	cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-	if err != nil {
-		r.t.Fatal(err)
-	}
+// useLocal makes the rig open the real service on its directories with the
+// fixed clock and no sleeping (the way the default one does, config.toml
+// included).
+func (r *rig) useLocal() {
 	r.mk = func() (service.API, error) {
+		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+		if err != nil {
+			return nil, err
+		}
 		return service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg,
+			Now:   func() time.Time { return t0 },
 			Sleep: func(context.Context, time.Duration) error { return nil }})
 	}
 }
@@ -160,6 +192,9 @@ func (r *rig) run(args ...string) exitcode.Code {
 	}
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()
+	if r.ctrlC {
+		r.term.onBlock = cancel
+	}
 	return cli.Main(ctx, args, io)
 }
 
@@ -170,7 +205,7 @@ func (r *rig) totpCode() string {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	return o.Code(time.Now())
+	return o.Code(t0)
 }
 
 type envelope struct {

@@ -20,7 +20,7 @@ func (a *app) newStatus() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer closeService(svc)
+			defer a.closeService(svc)
 			st, err := svc.Status(cmd.Context())
 			if err != nil {
 				return Finish(cmd, nil, "", err)

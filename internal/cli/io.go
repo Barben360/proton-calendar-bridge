@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -77,5 +78,10 @@ func (a *app) service(cmd *cobra.Command) (service.API, error) {
 	return a.NewService(cmd.Context(), a.Env)
 }
 
-// closeService releases svc; its error has nowhere to go once the command is done.
-func closeService(svc service.API) { _ = svc.Close() }
+// closeService releases svc. A failure is one line on stderr: it never
+// changes the command's result or exit code.
+func (a *app) closeService(svc service.API) {
+	if err := svc.Close(); err != nil {
+		fmt.Fprintf(a.Stderr, "Warning: closing the service failed: %s\n", err)
+	}
+}

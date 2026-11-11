@@ -1,9 +1,13 @@
 package cli_test
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -239,7 +243,6 @@ func TestCaptchaNonInteractiveExit10(t *testing.T) {
 func TestCaptchaInteractiveRetries(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{Captcha: "T1"})
-	r.noSleep()
 	r.term = &fakeTerm{interactive: true, lines: []string{""}}
 	r.want(exitcode.OK, "login")
 	if n := r.f.Calls("POST", "/auth/v4"); n != 2 {
@@ -272,7 +275,6 @@ func TestCaptchaInteractiveStopsAfterThreeRounds(t *testing.T) {
 func TestLoginResume(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{Captcha: "T1"})
-	r.noSleep()
 	r.want(exitcode.MustAct, "login", "--non-interactive")
 	r.want(exitcode.OK, "login", "resume", "--captcha-token", "T1", "--non-interactive")
 	if n := r.f.Calls("POST", "/auth/v4"); n != 2 {
@@ -297,5 +299,178 @@ func TestLoginClosesTheService(t *testing.T) {
 	r.want(exitcode.OK, "login")
 	if s.closed == 0 {
 		t.Error("the service was not closed")
+	}
+}
+
+func TestCtrlCEndsEveryPrompt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		o      protontest.Options
+		env    []string // variables to drop
+		pcbArg []string
+		abort  bool // the pending login must be aborted at Proton
+		hint   string
+	}{
+		{name: "password prompt", env: []string{"PCB_PASSWORD"}},
+		{name: "username prompt", env: []string{"PCB_USERNAME"}},
+		{name: "2FA prompt", o: protontest.Options{TwoFA: true}, abort: true},
+		{name: "CAPTCHA wait", o: protontest.Options{Captcha: "T1"}, hint: "pcb login resume --captcha-token T1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &tc.o)
+			for _, k := range tc.env {
+				delete(r.env, k)
+			}
+			r.term = &fakeTerm{interactive: true, block: true}
+			r.ctrlC = true
+			start := time.Now()
+			r.want(exitcode.Blocked, "login", "--json")
+			if d := time.Since(start); d > 10*time.Second {
+				t.Errorf("the prompt outlived the cancellation by %v", d)
+			}
+			e := r.envelope()
+			if tc.hint != "" && (e.Error == nil || e.Error.Hint != tc.hint) {
+				t.Errorf("error = %+v, want the resume hint %q", e.Error, tc.hint)
+			}
+			if n := r.f.Calls("DELETE", "/auth/v4"); tc.abort && n != 1 {
+				t.Errorf("%d DELETE /auth/v4, want the pending login aborted", n)
+			}
+		})
+	}
+}
+
+func TestEndOfInputAtAPromptIsExit10(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		drop string
+		want string
+	}{
+		{"password", "PCB_PASSWORD", "Proton password"},
+		{"username", "PCB_USERNAME", "Proton username"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+			r := stubRig(t, s)
+			delete(r.env, tc.drop)
+			r.term = &fakeTerm{interactive: true} // every read answers EOF
+			r.want(exitcode.MustAct, "login", "--json")
+			if e := r.envelope(); e.Error == nil || !strings.Contains(e.Error.Message, tc.want) {
+				t.Errorf("error = %+v, want it to name %q", e.Error, tc.want)
+			}
+			if len(s.logins) != 0 {
+				t.Error("login reached the service")
+			}
+		})
+	}
+	t.Run("2FA code", func(t *testing.T) {
+		t.Parallel()
+		r := newRig(t, &protontest.Options{TwoFA: true})
+		r.term = &fakeTerm{interactive: true}
+		r.want(exitcode.MustAct, "login", "--json")
+		if e := r.envelope(); e.Error == nil || !strings.Contains(e.Error.Message, "2FA code") {
+			t.Errorf("error = %+v", e.Error)
+		}
+		if n := r.f.Calls("DELETE", "/auth/v4"); n != 1 {
+			t.Errorf("%d DELETE /auth/v4, want 1", n)
+		}
+	})
+}
+
+func TestCaptchaPromptFailureKeepsTheResumeHint(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{Captcha: "T1"})
+	r.term = &fakeTerm{interactive: true} // Enter never comes: EOF
+	r.want(exitcode.MustAct, "login", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Hint != "pcb login resume --captcha-token T1" {
+		t.Fatalf("error = %+v", e.Error)
+	}
+	if !strings.Contains(string(e.Data), "T1") {
+		t.Errorf("data %s lacks the token", e.Data)
+	}
+}
+
+func TestInteractiveJSONKeepsStdoutToOneEnvelope(t *testing.T) {
+	t.Parallel()
+	t.Run("2FA", func(t *testing.T) {
+		t.Parallel()
+		r := newRig(t, &protontest.Options{TwoFA: true})
+		r.term = &fakeTerm{interactive: true, secrets: []string{"000000", r.totpCode()}}
+		r.want(exitcode.OK, "login", "--json")
+		if e := r.envelope(); !e.OK || e.Command != "login" {
+			t.Errorf("envelope = %+v", e)
+		}
+		if !strings.Contains(r.errb.String(), "rejected") {
+			t.Errorf("the rejected code is not reported on stderr: %q", r.errb.String())
+		}
+	})
+	t.Run("CAPTCHA", func(t *testing.T) {
+		t.Parallel()
+		r := newRig(t, &protontest.Options{Captcha: "T1"})
+		r.term = &fakeTerm{interactive: true, lines: []string{""}}
+		r.want(exitcode.OK, "login", "--json")
+		if e := r.envelope(); !e.OK {
+			t.Errorf("envelope = %+v", e)
+		}
+		if strings.Contains(r.out.String(), "verify.proton.me") || !strings.Contains(r.errb.String(), "https://verify.proton.me/") {
+			t.Errorf("the CAPTCHA URL must be on stderr only: stdout %q stderr %q", r.out.String(), r.errb.String())
+		}
+	})
+}
+
+func TestCloseFailureIsReportedNotFatal(t *testing.T) {
+	t.Parallel()
+	closeErr := errors.New("abort failed")
+	t.Run("success stays 0", func(t *testing.T) {
+		t.Parallel()
+		s := &stubAPI{closeErr: closeErr, login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+		r := stubRig(t, s)
+		r.want(exitcode.OK, "login", "--json")
+		if n := strings.Count(r.errb.String(), "abort failed"); n != 1 {
+			t.Errorf("stderr %q mentions the failure %d times, want once", r.errb.String(), n)
+		}
+		if e := r.envelope(); !e.OK {
+			t.Errorf("envelope = %+v", e)
+		}
+	})
+	t.Run("failure keeps its code", func(t *testing.T) {
+		t.Parallel()
+		s := &stubAPI{closeErr: closeErr, login: func(service.LoginRequest) (service.LoginResult, error) {
+			return service.LoginResult{}, &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("wrong password")}
+		}}
+		r := stubRig(t, s)
+		r.want(exitcode.MustAct, "login")
+		if !strings.Contains(r.errb.String(), "abort failed") {
+			t.Errorf("stderr %q lacks the close failure", r.errb.String())
+		}
+	})
+}
+
+func TestBadConfigFailsBeforeAnyPrompt(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.mk = nil // the default service: it reads config.toml
+	if err := os.WriteFile(config.Path(r.dirs), []byte("bogus = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	delete(r.env, "PCB_PASSWORD")
+	r.term = &fakeTerm{interactive: true, lines: []string{"u"}, secrets: []string{"p"}}
+	r.want(exitcode.MustAct, "login")
+	if len(r.term.linePrompts)+len(r.term.secretPrompts) != 0 {
+		t.Errorf("prompted before config.toml was checked: %v %v", r.term.linePrompts, r.term.secretPrompts)
+	}
+}
+
+func TestDefaultServiceReadsConfigToml(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.mk = nil // the default service points at the fake only through config.toml
+	r.want(exitcode.OK, "status", "--json")
+	if n := r.f.Calls("", "/auth/v4"); n != 0 {
+		t.Errorf("status called Proton (%d)", n)
 	}
 }

@@ -14,7 +14,7 @@ func (a *app) newLogout() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer closeService(svc)
+			defer a.closeService(svc)
 			res, err := svc.Logout(cmd.Context())
 			if err != nil {
 				return Finish(cmd, nil, "", err)
