@@ -6,7 +6,7 @@ Nothing below has been run: no live result exists yet.
 
 ## Rules for the whole run
 
-- Test account only (vault `pcb-dev`, item `proton-calendar-bridge-test`), credentials through `pass-cli run --env-file scripts/lab.env.example --` (never typed, never in argv). `pass-cli` must be logged in on blackwater (not checked).
+- Test account only (vault `pcb-dev`, item `proton-calendar-bridge-test`), credentials through `pass-cli run --env-file scripts/lab.env.example --` (never typed, never in argv). `pass-cli` must be logged in on blackwater (pre-check in step 2).
 - At most one login per step, **at least 60 s between any two logins** (the guard refuses sooner with exit 20; it is per state dir, so across dirs the agent keeps the time of the last login by hand). Honour `Retry-After`.
 - Keep a login log while running (step, UTC time, outcome); E02 counts logins from it and E03's pending section asks for it.
 - Stop conditions (stop the whole sequence, record what happened, report; do not retry in a loop):
@@ -29,9 +29,9 @@ The first `pcb-lab login` on blackwater (2026-11-10 23:47 UTC) was answered with
 
 The agent then continues alone with step 2. If Proton refuses the hours-old token (new HV at step 2), the agent starts one fresh login, you solve the new URL right away, and the agent resumes within a minute (E02 learns the limit; protocol in `E02-captcha-token.md`).
 
-## 2. Agent: build, then the E03/E02/E01 login sequence
+## 2. Agent: pre-check, build, then the E03/E02/E01 login sequence
 
-From `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0`: `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`. Commands and result tables: `E03-client-identity.md` ("Pending live run").
+Pre-check first: `PROTON_PASS_AGENT_REASON="<why>" pass-cli info` must succeed. If not, log pass-cli in again with the PAT file `~/.config/pcb-dev/pass-pat`, passed through the environment variable `PROTON_PASS_PERSONAL_ACCESS_TOKEN` (never argv), then repeat the check. Then, from `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0`: `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`. Commands and result tables: `E03-client-identity.md` ("Pending live run").
 
 | # | Login (state dir) | Then, on that session | Experiment |
 |---|---|---|---|
@@ -39,13 +39,12 @@ From `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0`: `go build -o ~
 | 2b | `linux-mail@1.0.0`, +60 s | `probe calendar-access` | E03 |
 | 2c | `web-calendar@5.0.131.2`, +60 s | `probe calendar-access` | E03 |
 | 2d | `external-drive-caloxide@0.2.1-stable`, +60 s (negative control) | `probe calendar-access` | E03 |
-| 2e | default dir, `Other`, +60 s (E03 step 5; the seeder uses proton-cal's own login in step 4, not this one) | none | - |
 
 Then fill the E03 results table and decide: set decision 0011 final (or revise it) and turn SPEC §5.1 to `[verified: E03]`; fill E02 row 1 and the E01 "Results" immediate part. Raw redacted recordings go to `spec/experiments/raw/E03/` and `raw/E01/` (redaction by `internal/lab/redact` only).
 
 ## 3. Agent: E01 long probe (its own dedicated session)
 
-At least 60 s after 2e. Nothing else ever uses this state dir. Commands in `E01-session-lifetime.md`: `pcb-lab login --state-dir ~/.local/state/pcb-lab-e01`, first `probe alive` sample, install and enable the user timer `pcb-lab-e01.timer` (every 6 h, `Persistent=true`). It samples for 14 days; afterwards the agent copies `e01.jsonl` to `raw/E01/alive.jsonl`, fills the E01 results (age and code when the session ended, or "survived 14 days of 6-hourly refresh") and uninstalls the timer. E01's questions 1 to 3 are answered by step 2a; question 4 only after the 14 days.
+At least 60 s after 2d. Nothing else ever uses this state dir. Commands in `E01-session-lifetime.md`: `pcb-lab login --state-dir ~/.local/state/pcb-lab-e01`, first `probe alive` sample, install and enable the user timer `pcb-lab-e01.timer` (every 6 h, `Persistent=true`). It samples for 14 days; afterwards the agent copies `e01.jsonl` to `raw/E01/alive.jsonl`, fills the E01 results (age and code when the session ended, or "survived 14 days of 6-hourly refresh") and uninstalls the timer. E01's questions 1 to 3 are answered by step 2a; question 4 only after the 14 days.
 
 ## 4. Agent: seed the synthetic data set
 

@@ -54,10 +54,7 @@ PCB_LAB_APPVERSION=web-calendar@5.0.131.2 pcb-lab probe calendar-access $REC
 PCB_LAB_APPVERSION=external-drive-caloxide@0.2.1-stable $ENV pcb-lab login
 PCB_LAB_APPVERSION=external-drive-caloxide@0.2.1-stable pcb-lab probe calendar-access $REC
 
-# 5. the default session for the seeder, >= 60 s later
-$ENV pcb-lab login
-
-# 6. E01's dedicated session in its own state dir, >= 60 s later (see E01)
+# 5. E01's dedicated session in its own state dir, >= 60 s later (see E01)
 $ENV pcb-lab login --state-dir ~/.local/state/pcb-lab-e01
 ```
 
