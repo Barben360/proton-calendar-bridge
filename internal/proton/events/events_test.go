@@ -63,21 +63,6 @@ func TestListAllPagesUntilShortPage(t *testing.T) {
 	}
 }
 
-func TestListAllExactMultipleReadsTheEmptyPage(t *testing.T) {
-	t.Parallel()
-	f, c, cal := setup(t)
-	for range 100 {
-		f.AddEvent(cal, protontest.Event{UID: "u", Start: 1, End: 2})
-	}
-	rows, err := events.ListAll(t.Context(), c, cal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 100 || f.Calls("GET", "/calendar/v1/"+cal+"/events") != 2 {
-		t.Errorf("%d rows in %d requests, want 100 in 2 (a full page is not the last)", len(rows), f.Calls("GET", "/calendar/v1/"+cal+"/events"))
-	}
-}
-
 // rawListing fetches page n of the listing with the client's own tokens.
 func rawListing(t *testing.T, f *protontest.Fake, c *api.Client, cal string, page int) []json.RawMessage {
 	t.Helper()

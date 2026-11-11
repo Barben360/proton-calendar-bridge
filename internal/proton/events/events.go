@@ -20,6 +20,9 @@ import (
 const PageSize = 100
 
 // ErrGone means the row no longer exists (HTTP 404, or 422 with code 2501).
+// Proton answers 2501 for a calendar that no longer exists too: the syncer
+// re-reads the calendar list first, so a missing calendar is handled there
+// before a row is read.
 var ErrGone = errors.New("event no longer exists")
 
 // Row is one event row: the plaintext columns and the row as received.
@@ -64,11 +67,15 @@ func parseRow(raw json.RawMessage) (Row, error) {
 }
 
 // ListAll returns every row of the calendar: pages of PageSize from page 0
-// until a page shorter than PageSize.
+// until a page shorter than PageSize, or until Total rows when the answer
+// carries it. A server that never ends is cut off after maxPages pages.
 func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
 	var rows []Row
-	for page := 0; ; page++ {
-		var out struct{ Events []json.RawMessage }
+	for page := 0; page < maxPages; page++ {
+		var out struct {
+			Events []json.RawMessage
+			Total  *int
+		}
 		q := url.Values{"Page": {strconv.Itoa(page)}, "PageSize": {strconv.Itoa(PageSize)}}
 		if err := c.Get(ctx, "/calendar/v1/"+url.PathEscape(calID)+"/events", q, &out); err != nil {
 			return nil, fmt.Errorf("listing events (page %d): %w", page, err)
@@ -80,14 +87,22 @@ func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
 			}
 			rows = append(rows, r)
 		}
-		if len(out.Events) < PageSize {
+		if len(out.Events) < PageSize || (out.Total != nil && len(rows) >= *out.Total) {
 			return rows, nil
 		}
 	}
+	return nil, fmt.Errorf("listing events: more than %d pages, giving up", maxPages)
 }
+
+// maxPages bounds ListAll (a variable for the tests): 10000 pages is a million
+// rows, far beyond a calendar.
+var maxPages = 10000
 
 // Get returns one row, or ErrGone when it no longer exists.
 func Get(ctx context.Context, c *api.Client, calID, id string) (Row, error) {
+	if id == "" {
+		return Row{}, errors.New("reading an event: empty event ID")
+	}
 	var out struct{ Event json.RawMessage }
 	err := c.Get(ctx, "/calendar/v1/"+url.PathEscape(calID)+"/events/"+url.PathEscape(id), nil, &out)
 	var ae *api.Error

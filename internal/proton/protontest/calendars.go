@@ -176,7 +176,7 @@ func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
 	if segs, ok := eventSegments(r); ok {
 		// Rows and the feed need no address keys, so a Session works here.
 		if r.Method != http.MethodGet {
-			reply(w, http.StatusNotFound, 2000, "fake: route not implemented")
+			reply(w, http.StatusBadRequest, 2000, "fake: route not implemented")
 			return
 		}
 		f.serveEvents(w, r, u, segs)

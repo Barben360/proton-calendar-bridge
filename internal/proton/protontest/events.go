@@ -51,7 +51,7 @@ type eventState struct {
 	rows []*eventRec // creation order, deleted rows removed
 	feed []feedEntry
 	seq  int    // position of the newest change (0: none yet)
-	salt string // makes cursors of this calendar opaque and unguessable across calendars
+	salt string // from the full calendar ID: a cursor of another calendar is unknown here
 	// Cursors at or below expired answer 422/2001.
 	expired int
 	refresh bool // the next feed page answers Refresh 1
@@ -59,7 +59,7 @@ type eventState struct {
 
 func (c *calendarRec) events() *eventState {
 	if c.ev == nil {
-		c.ev = &eventState{salt: "mev" + hex.EncodeToString([]byte(c.id))[:8], expired: -1}
+		c.ev = &eventState{salt: "mev" + hex.EncodeToString([]byte(c.id)), expired: -1}
 	}
 	return c.ev
 }
@@ -89,7 +89,7 @@ func (s *eventState) find(id string) int {
 	return slices.IndexFunc(s.rows, func(r *eventRec) bool { return r.id == id })
 }
 
-// calendar returns the record of calID, failing the test when unknown.
+// calendarForEvents returns the record of calID, failing the test when unknown.
 // Caller holds f.cal.mu.
 func (f *Fake) calendarForEvents(calID string) *calendarRec {
 	rec := f.cal.byID[calID]
@@ -255,12 +255,12 @@ func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {
 	}
 	var entries []any
 	last, more := seq, 0
-	max := f.feedPageSize()
+	pageSize := f.feedPageSize()
 	for _, e := range s.feed {
 		if e.seq <= seq {
 			continue
 		}
-		if len(entries) == max {
+		if len(entries) == pageSize {
 			more = 1
 			break
 		}
