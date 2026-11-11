@@ -64,6 +64,24 @@ func retryAfter(err error) time.Duration {
 	return 0
 }
 
+// ErrInvalidSyncToken is the cause of the error Changes returns for a sync
+// token it cannot answer from (another cache life, a position the calendar
+// never reached, or not a token of ours): the client must list the calendar
+// in full (CalDAV: 403 valid-sync-token).
+var ErrInvalidSyncToken = errors.New("the sync token is not valid for this calendar")
+
+// ErrNoSuchCalendar is the cause of the error a read returns for a calendar
+// the cache does not hold or never synced (CalDAV: 404).
+var ErrNoSuchCalendar = errors.New("no such calendar in the event cache")
+
+func invalidSyncToken() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: ErrInvalidSyncToken, Hint: "list the calendar in full (an empty sync token)"}
+}
+
+func noSuchCalendar() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: ErrNoSuchCalendar, Hint: "pcb calendar list shows your calendars; one added since the last sync needs pcb sync first"}
+}
+
 func usage(msg, hint string) *exitcode.Error   { return fail(exitcode.Usage, msg, hint) }
 func mustAct(msg, hint string) *exitcode.Error { return fail(exitcode.MustAct, msg, hint) }
 func blocked(msg, hint string) *exitcode.Error { return fail(exitcode.Blocked, msg, hint) }

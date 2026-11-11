@@ -25,6 +25,10 @@ type Calendar struct {
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
 	ExtraLockedKey           bool // a second calendar key no passphrase opens, listed first
 	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
+	// The calendar's default reminders, as its bootstrap serves them; nil:
+	// one DISPLAY reminder, -PT1H for part-day events and -PT15H for full-day
+	// ones (see SetDefaultNotifications).
+	PartDayNotifications, FullDayNotifications []Notification
 }
 
 // calendars holds the fake's calendar state, guarded by mu.
@@ -125,6 +129,19 @@ func (f *Fake) SetDefaultCalendar(username, id string) {
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
 	f.cal.user(username).defaultID = id
+}
+
+// SetDefaultNotifications replaces the calendar's default reminders (nil
+// restores the fake's defaults), as a change in Proton's calendar settings.
+func (f *Fake) SetDefaultNotifications(id string, partDay, fullDay []Notification) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	rec.def.PartDayNotifications, rec.def.FullDayNotifications = partDay, fullDay
 }
 
 // EncryptToCalendar encrypts plaintext to the calendar's key and returns the
@@ -392,8 +409,21 @@ func (c *calendarRec) bootstrap() map[string]any {
 		"Members": c.members(),
 		"CalendarSettings": map[string]any{
 			"ID": "set1", "CalendarID": c.id, "DefaultEventDuration": 30, "MakesUserBusy": 1,
-			"DefaultPartDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT1H"}},
-			"DefaultFullDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT15H"}},
+			"DefaultPartDayNotifications": notifications(c.def.PartDayNotifications, "-PT1H"),
+			"DefaultFullDayNotifications": notifications(c.def.FullDayNotifications, "-PT15H"),
 		},
 	}
+}
+
+// notifications serves a default reminder list; nil is one DISPLAY reminder
+// at trigger.
+func notifications(list []Notification, trigger string) []any {
+	if list == nil {
+		return []any{map[string]any{"Type": 1, "Trigger": trigger}}
+	}
+	out := make([]any, 0, len(list))
+	for _, n := range list {
+		out = append(out, map[string]any{"Type": n.Type, "Trigger": n.Trigger})
+	}
+	return out
 }

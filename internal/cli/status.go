@@ -71,7 +71,16 @@ func statusText(s service.Status) string {
 			if c.Error != "" {
 				v += ", last error: " + c.Error
 			}
+			if c.KeysError != "" {
+				v += ", keys: " + c.KeysError + " (its events are shown as placeholders)"
+			}
 			line("sync", v)
+		}
+		if s.Sync.Undecryptable > 0 {
+			line("undecryptable", fmt.Sprintf("%d events served as placeholders", s.Sync.Undecryptable))
+		}
+		if s.Sync.DuplicateMasters > 0 {
+			line("duplicate_masters", fmt.Sprintf("%d left out (the most recently edited one is served)", s.Sync.DuplicateMasters))
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")

@@ -109,6 +109,20 @@ func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event,
 	return nil, nil
 }
 
+func (*stubAPI) Collections(context.Context) ([]service.Collection, error) { return nil, nil }
+
+func (*stubAPI) Objects(context.Context, string) ([]service.ObjectInfo, string, error) {
+	return nil, "", nil
+}
+
+func (*stubAPI) ObjectsByUID(context.Context, string, []string) ([]service.Object, error) {
+	return nil, nil
+}
+
+func (*stubAPI) Changes(context.Context, string, string) (service.ChangeSet, error) {
+	return service.ChangeSet{}, nil
+}
+
 func (s *stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return nil, nil }
 func (s *stubAPI) Close() error                                          { s.closed++; return s.closeErr }
 

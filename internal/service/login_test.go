@@ -929,11 +929,19 @@ func TestEveryMethodAfterCloseIsBlocked(t *testing.T) {
 	}
 	ctx := t.Context()
 	calls := map[string]func() error{
-		"Login":      func() error { _, err := e.svc.Login(ctx, e.req()); return err },
-		"SubmitTOTP": func() error { _, err := e.svc.SubmitTOTP(ctx, "123456"); return err },
-		"Logout":     func() error { _, err := e.svc.Logout(ctx); return err },
-		"Status":     func() error { _, err := e.svc.Status(ctx); return err },
-		"Calendars":  func() error { _, err := e.svc.Calendars(ctx); return err },
+		"Login":       func() error { _, err := e.svc.Login(ctx, e.req()); return err },
+		"SubmitTOTP":  func() error { _, err := e.svc.SubmitTOTP(ctx, "123456"); return err },
+		"Logout":      func() error { _, err := e.svc.Logout(ctx); return err },
+		"Status":      func() error { _, err := e.svc.Status(ctx); return err },
+		"Calendars":   func() error { _, err := e.svc.Calendars(ctx); return err },
+		"Collections": func() error { _, err := e.svc.Collections(ctx); return err },
+		"Objects":     func() error { _, _, err := e.svc.Objects(ctx, "cal"); return err },
+		"ObjectsByUID": func() error {
+			_, err := e.svc.ObjectsByUID(ctx, "cal", []string{"a@x"})
+			return err
+		},
+		"Changes": func() error { _, err := e.svc.Changes(ctx, "cal", ""); return err },
+		"Serve":   func() error { return e.svc.Serve(ctx, service.ServeOptions{}) },
 	}
 	for name, call := range calls {
 		ee := wantExit(t, call(), exitcode.Blocked)

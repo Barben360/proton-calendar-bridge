@@ -32,6 +32,18 @@ type API interface {
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
+	// Collections lists the synced calendars of the event cache with their
+	// CTag and sync token; no cache is a MustAct.
+	Collections(ctx context.Context) ([]Collection, error)
+	// Objects lists a calendar's objects (one per UID) with their ETags, and
+	// the calendar's current sync token.
+	Objects(ctx context.Context, calID string) ([]ObjectInfo, string, error)
+	// ObjectsByUID returns the rendered objects of uids, in their order.
+	ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error)
+	// Changes returns what changed in a calendar since a sync token ("" for
+	// everything); a token it cannot answer from is an error whose cause is
+	// ErrInvalidSyncToken.
+	Changes(ctx context.Context, calID, token string) (ChangeSet, error)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
 }
@@ -109,11 +121,16 @@ type SyncStatus struct {
 	Calendars []CalendarStatus `json:"calendars"`
 	// Error is set when a cache exists but cannot be read (secret-free).
 	Error string `json:"error,omitempty"`
+	// Undecryptable counts the event rows this process served as
+	// placeholders (ruling M3-R4) since it unlocked the keys;
+	// DuplicateMasters the duplicate masters it left out (ruling M3-R3).
+	Undecryptable    int `json:"undecryptable,omitempty"`
+	DuplicateMasters int `json:"duplicate_masters,omitempty"`
 }
 
 // CalendarStatus is one cached calendar. SyncedAt is its last successful
 // pass and FullAt its last full listing (nil: never). Error is its last
-// failure ("" if none).
+// sync failure ("" if none).
 type CalendarStatus struct {
 	ID       string     `json:"id"`
 	Name     string     `json:"name"`
@@ -121,6 +138,10 @@ type CalendarStatus struct {
 	SyncedAt *time.Time `json:"synced_at,omitempty"`
 	FullAt   *time.Time `json:"full_at,omitempty"`
 	Error    string     `json:"error,omitempty"`
+	// KeysError is why this process could not unlock the calendar's keys
+	// (every event of it is then a placeholder), "" if it could or did not
+	// try.
+	KeysError string `json:"keys_error,omitempty"`
 }
 
 // SyncRequest asks for a sync pass; Full lists every calendar in full.
@@ -202,4 +223,43 @@ type Calendar struct {
 	Default     bool   `json:"default"`
 	Keys        string `json:"keys"`
 	KeysError   string `json:"keys_error,omitempty"`
+}
+
+// Collection is a synced calendar as the read API serves it. CTag is
+// "<epoch>:<seq>:<settings hash>": it changes with any row of the calendar,
+// the calendar settings the rendering uses, and the cache's life. SyncToken
+// is "urn:pcb:sync:1:<epoch>:<seq>".
+type Collection struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Color       string `json:"color,omitempty"`
+	Description string `json:"description,omitempty"`
+	ReadOnly    bool   `json:"read_only"`
+	CTag        string `json:"ctag"`
+	SyncToken   string `json:"sync_token"`
+}
+
+// ObjectInfo names one object: the UID of its rows and its ETag (quoted, as
+// HTTP sends it). The adapter derives the object's href from the UID.
+type ObjectInfo struct {
+	UID  string `json:"uid"`
+	ETag string `json:"etag"`
+}
+
+// Object is a rendered object: a VCALENDAR (CRLF line ends) holding the
+// UID's master and exceptions, decrypted. Missing: the UID has no live row.
+// Data is shared with the service's in-memory cache: never modify it.
+type Object struct {
+	UID     string `json:"uid"`
+	ETag    string `json:"etag,omitempty"`
+	Data    []byte `json:"data,omitempty"`
+	Missing bool   `json:"missing,omitempty"`
+}
+
+// ChangeSet is what changed since a sync token: the objects to fetch, the
+// UIDs with no live row left, and the token to ask from next.
+type ChangeSet struct {
+	Changed []ObjectInfo `json:"changed"`
+	Deleted []string     `json:"deleted"`
+	Token   string       `json:"token"`
 }

@@ -19,3 +19,13 @@ func (l *Local) HasCachedClient() bool {
 	defer l.cmu.Unlock()
 	return l.cached != nil
 }
+
+// Decrypts counts the rows decrypted so far.
+func (l *Local) Decrypts() int64 { return l.r.decrypts.Load() }
+
+// HasKeys reports whether unlocked keys are held.
+func (l *Local) HasKeys() bool {
+	l.r.kmu.RLock()
+	defer l.r.kmu.RUnlock()
+	return l.r.ks != nil
+}

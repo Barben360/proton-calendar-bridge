@@ -54,6 +54,11 @@ type Local struct {
 
 	cmu    sync.Mutex // guards cached; never held across a network call
 	cached *cachedClient
+
+	r renderer // keys and rendered objects of the read API, dropped with cached
+
+	smu    sync.RWMutex // guards served; held for reading while a read uses it
+	served *served      // Serve's cache handle, nil outside Serve
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -63,11 +68,13 @@ type cachedClient struct {
 	c              *api.Client
 }
 
-// dropClient forgets the cached session client (login, logout, Close).
+// dropClient forgets the cached session client, the unlocked keys and the
+// rendered objects (login, relogin, logout, Close).
 func (l *Local) dropClient() {
 	l.cmu.Lock()
 	l.cached = nil
 	l.cmu.Unlock()
+	l.r.drop()
 }
 
 var _ API = (*Local)(nil)
@@ -86,11 +93,13 @@ func NewLocal(o Options) (*Local, error) {
 	if o.Sleep == nil {
 		o.Sleep = sleep
 	}
-	return &Local{
+	l := &Local{
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
-	}, nil
+	}
+	l.r.lru = newLRU(lruCapacity)
+	return l, nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

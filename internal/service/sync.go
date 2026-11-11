@@ -68,24 +68,41 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 	if l.closed.Load() {
 		return errClosed()
 	}
-	if interval == 0 {
-		interval = DefaultWatchInterval
-	}
-	if interval < MinWatchInterval {
-		return usage("the watch interval is below "+MinWatchInterval.String(), "use an interval of "+MinWatchInterval.String()+" or more")
+	interval, err := watchInterval(interval)
+	if err != nil {
+		return err
 	}
 	unlock, err := l.lockSync()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	return l.watch(ctx, req, interval, onPass, l.syncPass)
+}
+
+// watchInterval is interval with its default, or a Usage error below the
+// minimum.
+func watchInterval(interval time.Duration) (time.Duration, error) {
+	if interval == 0 {
+		interval = DefaultWatchInterval
+	}
+	if interval < MinWatchInterval {
+		return 0, usage("the watch interval is below "+MinWatchInterval.String(), "use an interval of "+MinWatchInterval.String()+" or more")
+	}
+	return interval, nil
+}
+
+// watch runs pass every interval until ctx ends (nil) or a pass needs a
+// person (that error); the caller holds the sync lock.
+func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass),
+	pass func(context.Context, SyncRequest) (SyncResult, error)) error {
 	var (
 		last    SyncResult
 		lastErr error
 		full    = req.Full
 	)
-	err = syncer.Watch(ctx, func(ctx context.Context) (syncer.Report, error) {
-		last, lastErr = l.syncPass(ctx, SyncRequest{Full: full})
+	err := syncer.Watch(ctx, func(ctx context.Context) (syncer.Report, error) {
+		last, lastErr = pass(ctx, SyncRequest{Full: full})
 		if lastErr == nil || exitcode.From(lastErr) == exitcode.Partial {
 			// The pass got through: --full is done, and a partial pass is
 			// no session-wide failure (no back-off for the other calendars).
@@ -125,14 +142,27 @@ func watchError(err error) error {
 
 // syncPass runs one pass on the stored session, without the sync lock.
 func (l *Local) syncPass(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	return l.syncPassOn(ctx, req, nil, "")
+}
+
+// syncPassOn is syncPass on db, the cache Serve opened for account; with db
+// nil the pass opens the cache itself. A pass on db for another account
+// stops (the cache is the served account's).
+func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache, account string) (SyncResult, error) {
 	var res SyncResult
 	err := l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
 		res = SyncResult{}
-		db, err := cache.Open(cache.Path(l.o.Dirs.State), acc.ID)
-		if err != nil {
-			return cacheError(err)
+		db := db
+		switch {
+		case db == nil:
+			var err error
+			if db, err = cache.Open(cache.Path(l.o.Dirs.State), acc.ID); err != nil {
+				return cacheError(err)
+			}
+			defer func() { _ = db.Close() }()
+		case acc.ID != account:
+			return final("pcb is now logged in to another Proton account than pcb serve started with", "restart pcb serve")
 		}
-		defer func() { _ = db.Close() }()
 		describe := func(err error) string { return calendarError(ctx, err) }
 		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe})
 		if err != nil {
@@ -207,8 +237,9 @@ func cacheError(err error) error {
 	return blocked("the event cache cannot be opened", "run pcb sync (it updates an older cache), then pcb doctor if it persists")
 }
 
-// openCache opens the cache of the logged account for reading only. The
-// cache is nil (and err nil) when there is none for this account.
+// openCache opens the cache of the logged account for reading only (outside
+// Serve: see readCache). The cache is nil (and err nil) when there is none
+// for this account.
 func (l *Local) openCache() (*cache.Cache, error) {
 	st, err := store.LoadState(l.o.Dirs.State)
 	if err != nil {
@@ -230,21 +261,25 @@ func (l *Local) openCache() (*cache.Cache, error) {
 // syncStatus is the Status section: nil when there is no cache for the
 // account, with Error set when there is one that cannot be read.
 func (l *Local) syncStatus() *SyncStatus {
-	db, err := l.openCache()
+	db, release, err := l.readCache()
 	if err != nil {
 		return &SyncStatus{Calendars: []CalendarStatus{}, Error: err.Error()}
 	}
+	defer release()
 	if db == nil {
 		return nil
 	}
-	defer func() { _ = db.Close() }()
 	cals, err := db.Calendars(context.Background())
 	if err != nil {
 		return &SyncStatus{Calendars: []CalendarStatus{}, Error: cacheError(err).Error()}
 	}
 	out := &SyncStatus{Calendars: make([]CalendarStatus, 0, len(cals))}
+	out.Undecryptable, out.DuplicateMasters = l.r.counts()
 	for _, c := range cals {
 		cs := CalendarStatus{ID: c.ID, Name: c.Name, Events: c.Events, Error: c.Error}
+		if ck := l.r.calKeys(c.ID); ck != nil {
+			cs.KeysError = ck.err
+		}
 		if !c.SyncedAt.IsZero() {
 			cs.SyncedAt = &c.SyncedAt
 		}
@@ -268,21 +303,20 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 	if err != nil {
 		return nil, err
 	}
-	db, err := l.openCache()
+	db, release, err := l.readCache()
 	if err != nil {
 		return nil, err
 	}
-	notSynced := mustAct("no events are cached yet", "run pcb sync")
+	defer release()
 	if db == nil {
-		return nil, notSynced
+		return nil, notSynced()
 	}
-	defer func() { _ = db.Close() }()
 	cals, err := db.Calendars(ctx)
 	if err != nil {
 		return nil, l.fail(cacheError(err))
 	}
 	if len(cals) == 0 {
-		return nil, notSynced
+		return nil, notSynced()
 	}
 	cal, err := pickCalendar(cals, req.Calendar)
 	if errors.Is(err, errNotCached) {

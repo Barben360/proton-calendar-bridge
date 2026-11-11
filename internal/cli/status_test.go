@@ -39,6 +39,32 @@ func TestStatusTextIsOneKeyValuePerLine(t *testing.T) {
 	}
 }
 
+type renderStatusStub struct{ stubAPI }
+
+func (*renderStatusStub) Status(context.Context) (service.Status, error) {
+	return service.Status{Phase: "ready", Secrets: "sealed", Sync: &service.SyncStatus{
+		Calendars:     []service.CalendarStatus{{ID: "c1", Name: "Locked", KeysError: "the calendar keys do not unlock with the account keys"}},
+		Undecryptable: 3, DuplicateMasters: 1,
+	}}, nil
+}
+
+// What the read API could not render is in the text, not only in --json.
+func TestStatusTextNamesPlaceholders(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, nil)
+	r.svc = &renderStatusStub{}
+	r.want(exitcode.OK, "status")
+	got := r.out.String()
+	for _, want := range []string{
+		"keys: the calendar keys do not unlock with the account keys (its events are shown as placeholders)\n",
+		"undecryptable: 3 events served as placeholders\n", "duplicate_masters: 1 left out",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status lacks %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestStatusWhenLoggedOutExits0(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
