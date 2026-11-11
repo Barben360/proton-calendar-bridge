@@ -29,3 +29,7 @@ func (l *Local) HasKeys() bool {
 	defer l.r.kmu.RUnlock()
 	return l.r.ks != nil
 }
+
+// BeforeKeyLoad makes fn run as each key load starts (set it before any
+// read).
+func (l *Local) BeforeKeyLoad(fn func()) { l.r.beforeLoad = fn }

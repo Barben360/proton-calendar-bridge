@@ -39,17 +39,22 @@ var keysUnavailable = []byte("keys-unavailable")
 // unlocked keys, the rendered objects and the counters Status reports. All
 // of it is dropped with the session client (login, relogin, logout, Close).
 type renderer struct {
-	load sync.Mutex   // serialises key loading; held across Proton calls
-	kmu  sync.RWMutex // guards gen and ks; held for reading while keys are used
+	load sync.Mutex   // serialises key loads and refreshes; held across Proton calls
+	kmu  sync.RWMutex // guards gen, ks, refreshedAt and ks.users; held for reading while keys are used
 	gen  uint64       // bumped by drop, so a load that raced it is discarded
 	ks   *keyState
+	// refreshedAt is when the calendars' settings were last read from
+	// their bootstraps (Serve refreshes them every settingsRefresh).
+	refreshedAt time.Time
 
 	lru      *lru
 	decrypts atomic.Int64 // rows decrypted (tests)
+	// beforeLoad, when set (tests), runs as a key load starts.
+	beforeLoad func()
 
 	smu           sync.Mutex
 	undecryptable map[string]bool // row IDs served as placeholders
-	duplicates    map[string]bool // duplicate masters left out (M3-R3)
+	duplicates    map[string]int  // masters left out (M3-R3) by calendar ID and UID, as last rendered
 }
 
 // keyState is the unlocked keys of one account: its address keys and each
@@ -58,31 +63,63 @@ type keyState struct {
 	account string
 	u       *keys.Unlocked
 	own     map[string]*crypto.KeyRing // address keyring by lower-case email
-	cals    map[string]*calKeys
+	// cals is written under both load and kmu, so a holder of load may read
+	// it without kmu.
+	cals map[string]*calKeys
+	// users counts the loads using u outside kmu (acquire); a dropped state
+	// is closed by its last user.
+	users   int
+	dropped bool
 }
 
-// calKeys is one calendar's keys and the settings its rendering uses. It is
-// never modified once built.
+// calKeys is one calendar's keys and the inputs its rendering uses besides
+// the rows. It is never modified once built (a refresh replaces it).
 type calKeys struct {
 	access *calendar.Access // nil when the keys did not unlock
 	err    string           // the secret-free reason they did not
-	// settings is what the render reads from the calendar (its default
-	// notifications), as folded into the object ETags; hash names it in the
-	// CTag.
+	// settings is every non-row input of the render: the calendar's default
+	// notifications and the IDs of the keys that open it (sorted calendar
+	// keys, sorted address keys), so a settings change or a key rotation
+	// changes the object ETags, the CTag (hash) and the token generation
+	// (gen, ruling M3-R11).
 	settings         []byte
-	hash             string
+	hash, gen        string
 	partDay, fullDay json.RawMessage
 }
 
-func newCalKeys(a *calendar.Access) *calKeys {
+func newCalKeys(calID string, a *calendar.Access, u *keys.Unlocked) *calKeys {
 	partDay, _ := json.Marshal(a.Settings.DefaultPartDayNotifications)
 	fullDay, _ := json.Marshal(a.Settings.DefaultFullDayNotifications)
-	settings, _ := json.Marshal(struct{ PartDay, FullDay json.RawMessage }{partDay, fullDay})
-	return &calKeys{access: a, settings: settings, hash: settingsHash(settings), partDay: partDay, fullDay: fullDay}
+	calKeyIDs := slices.Sorted(slices.Values(a.KeyIDs))
+	var addrKeyIDs []string
+	for _, addr := range u.Addresses {
+		for _, k := range addr.Keys {
+			addrKeyIDs = append(addrKeyIDs, k.ID)
+		}
+	}
+	slices.Sort(addrKeyIDs)
+	settings, _ := json.Marshal(struct {
+		PartDay, FullDay          json.RawMessage
+		CalendarKeys, AddressKeys []string
+	}{partDay, fullDay, calKeyIDs, addrKeyIDs})
+	return &calKeys{access: a, settings: settings, hash: settingsHash(settings), gen: tokenGen(calID, settings),
+		partDay: partDay, fullDay: fullDay}
 }
 
-func failedCalKeys(reason string) *calKeys {
-	return &calKeys{err: reason, settings: keysUnavailable, hash: settingsHash(keysUnavailable)}
+func failedCalKeys(calID, reason string) *calKeys {
+	return &calKeys{err: reason, settings: keysUnavailable, hash: settingsHash(keysUnavailable), gen: tokenGen(calID, keysUnavailable)}
+}
+
+// tokenGen is the generation part of calendar calID's sync tokens: 8 hex of
+// the SHA-256 of the render version, the calendar ID and the settings (key
+// IDs included). A token of another generation was minted under other
+// render inputs, or for another calendar (ruling M3-R11).
+func tokenGen(calID string, settings []byte) string {
+	h := sha256.New()
+	field(h, []byte("pcb-token "+strconv.Itoa(renderVersion)))
+	field(h, []byte(calID))
+	field(h, settings)
+	return hex.EncodeToString(h.Sum(nil))[:8]
 }
 
 func settingsHash(settings []byte) string {
@@ -132,15 +169,51 @@ func (r *renderer) calKeys(id string) *calKeys {
 	return r.ks.cals[id]
 }
 
+// acquire returns the generation and the keys, counting the caller as a
+// user of the keys until release: a load or refresh uses them across
+// Proton calls without holding kmu.
+func (r *renderer) acquire() (uint64, *keyState) {
+	r.kmu.Lock()
+	defer r.kmu.Unlock()
+	if r.ks != nil {
+		r.ks.users++
+	}
+	return r.gen, r.ks
+}
+
+// release ends a use started by acquire; the last user of dropped keys
+// closes them.
+func (r *renderer) release(ks *keyState) {
+	if ks == nil {
+		return
+	}
+	r.kmu.Lock()
+	defer r.kmu.Unlock()
+	ks.users--
+	if ks.dropped && ks.users == 0 {
+		ks.close()
+	}
+}
+
+// retire forgets the current keys, closing them unless a load still uses
+// them (its release does). The caller holds kmu.
+func (r *renderer) retire() {
+	if r.ks == nil {
+		return
+	}
+	r.ks.dropped = true
+	if r.ks.users == 0 {
+		r.ks.close()
+	}
+	r.ks = nil
+}
+
 // drop forgets the keys (clearing their private parameters), the rendered
 // objects and the counters. It waits for the renders using the keys.
 func (r *renderer) drop() {
 	r.kmu.Lock()
 	r.gen++
-	if r.ks != nil {
-		r.ks.close()
-		r.ks = nil
-	}
+	r.retire()
 	r.kmu.Unlock()
 	r.lru.clear()
 	r.smu.Lock()
@@ -148,18 +221,34 @@ func (r *renderer) drop() {
 	r.smu.Unlock()
 }
 
-// note adds row id to the counted set (on) or removes it from it.
-func (r *renderer) note(set *map[string]bool, id string, on bool) {
+// noteRow records whether row id rendered as a placeholder.
+func (r *renderer) noteRow(id string, placeholder bool) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	if on {
-		if *set == nil {
-			*set = map[string]bool{}
+	if placeholder {
+		if r.undecryptable == nil {
+			r.undecryptable = map[string]bool{}
 		}
-		(*set)[id] = true
+		r.undecryptable[id] = true
 	} else {
-		delete(*set, id)
+		delete(r.undecryptable, id)
 	}
+}
+
+// noteDuplicates records how many masters the last render of a UID left
+// out, so a duplicate that is gone stops being counted.
+func (r *renderer) noteDuplicates(calID, uid string, n int) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	key := calID + "\x00" + uid
+	if n == 0 {
+		delete(r.duplicates, key)
+		return
+	}
+	if r.duplicates == nil {
+		r.duplicates = map[string]int{}
+	}
+	r.duplicates[key] = n
 }
 
 // counts returns the placeholders served and the duplicate masters left
@@ -167,7 +256,10 @@ func (r *renderer) note(set *map[string]bool, id string, on bool) {
 func (r *renderer) counts() (undecryptable, duplicates int) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	return len(r.undecryptable), len(r.duplicates)
+	for _, n := range r.duplicates {
+		duplicates += n
+	}
+	return len(r.undecryptable), duplicates
 }
 
 // objectETag is the ETag of g's object: "v1-" and 32 hex of the SHA-256 of
@@ -198,28 +290,25 @@ func field(h hash.Hash, b []byte) {
 // A row that does not decrypt or parse, or every row of a calendar whose
 // keys failed, renders as a placeholder (ruling M3-R4). The caller holds
 // kmu for reading; ks and ck are the keys under it.
-func (l *Local) render(g cache.Group, ks *keyState, ck *calKeys) []byte {
+func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) []byte {
 	var master *cache.StoredRow
 	var exceptions []ical.Exception
+	masters := 0
 	for i := range g.Rows {
 		row := &g.Rows[i]
 		if row.RecurrenceID != nil {
 			exceptions = append(exceptions, ical.Exception{Comp: l.renderRow(row, ks, ck), RecurrenceID: *row.RecurrenceID})
 			continue
 		}
+		masters++
 		// Rows come in ID order: on a tie, the later ID wins.
 		if master == nil || row.LastEdit >= master.LastEdit {
-			if master != nil {
-				l.r.note(&l.r.duplicates, master.ID, true)
-			}
 			master = row
-		} else {
-			l.r.note(&l.r.duplicates, row.ID, true)
 		}
 	}
+	l.r.noteDuplicates(calID, g.UID, max(masters-1, 0))
 	var m *ical.Component
 	if master != nil {
-		l.r.note(&l.r.duplicates, master.ID, false)
 		c := l.renderRow(master, ks, ck)
 		m = &c
 	}
@@ -230,7 +319,7 @@ func (l *Local) render(g cache.Group, ks *keyState, ck *calKeys) []byte {
 // placeholder.
 func (l *Local) renderRow(row *cache.StoredRow, ks *keyState, ck *calKeys) ical.Component {
 	ev, ok := l.decryptRow(row, ks, ck)
-	l.r.note(&l.r.undecryptable, row.ID, !ok)
+	l.r.noteRow(row.ID, !ok)
 	if !ok {
 		return placeholder(row)
 	}

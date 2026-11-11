@@ -303,34 +303,32 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 	if err != nil {
 		return nil, err
 	}
-	db, release, err := l.readCache()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	if db == nil {
-		return nil, notSynced()
-	}
-	cals, err := db.Calendars(ctx)
-	if err != nil {
-		return nil, l.fail(cacheError(err))
-	}
-	if len(cals) == 0 {
-		return nil, notSynced()
-	}
-	cal, err := pickCalendar(cals, req.Calendar)
+	var cal cache.Calendar
+	var rows []cache.Event
+	err = l.withCache(func(db *cache.Cache) error {
+		cals, err := db.Calendars(ctx)
+		if err != nil {
+			return l.fail(cacheError(err))
+		}
+		if len(cals) == 0 {
+			return notSynced()
+		}
+		if cal, err = pickCalendar(cals, req.Calendar); err != nil {
+			return err
+		}
+		if cal.SyncedAt.IsZero() {
+			return mustAct("calendar "+cal.ID+" has not been synced yet", "run pcb sync")
+		}
+		if rows, err = db.Events(ctx, cal.ID); err != nil {
+			return l.fail(cacheError(err))
+		}
+		return nil
+	})
 	if errors.Is(err, errNotCached) {
-		return nil, l.notCached(ctx, req.Calendar)
+		return nil, l.notCached(ctx, req.Calendar) // the cache is released: this may call Proton
 	}
 	if err != nil {
 		return nil, err
-	}
-	if cal.SyncedAt.IsZero() {
-		return nil, mustAct("calendar "+cal.ID+" has not been synced yet", "run pcb sync")
-	}
-	rows, err := db.Events(ctx, cal.ID)
-	if err != nil {
-		return nil, l.fail(cacheError(err))
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {

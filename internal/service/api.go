@@ -32,8 +32,14 @@ type API interface {
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
+	// The read methods below read the event cache: during Serve, Serve's
+	// own handle; otherwise a read-only handle opened for each call. They
+	// call Proton only to unlock a calendar's keys and read its settings,
+	// the first time the process reads that calendar.
+
 	// Collections lists the synced calendars of the event cache with their
-	// CTag and sync token; no cache is a MustAct.
+	// CTag and sync token; no cache is a MustAct. It may call Proton (the
+	// CTag holds each calendar's settings, ruling M3-R14).
 	Collections(ctx context.Context) ([]Collection, error)
 	// Objects lists a calendar's objects (one per UID) with their ETags, and
 	// the calendar's current sync token.
@@ -227,8 +233,9 @@ type Calendar struct {
 
 // Collection is a synced calendar as the read API serves it. CTag is
 // "<epoch>:<seq>:<settings hash>": it changes with any row of the calendar,
-// the calendar settings the rendering uses, and the cache's life. SyncToken
-// is "urn:pcb:sync:1:<epoch>:<seq>".
+// the calendar settings and keys the rendering uses, and the cache's life.
+// SyncToken is "urn:pcb:sync:1:<epoch>:<seq>:<gen>" (gen names the render
+// inputs, ruling M3-R11).
 type Collection struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`

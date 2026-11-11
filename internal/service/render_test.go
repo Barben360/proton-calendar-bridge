@@ -1,13 +1,19 @@
 package service_test
 
 import (
+	"database/sql"
+	"errors"
+	"net/http"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
 func (e *env) changes(t *testing.T, cal, token string) service.ChangeSet {
@@ -25,6 +31,15 @@ func changedUIDs(cs service.ChangeSet) []string {
 		out = append(out, c.UID)
 	}
 	return out
+}
+
+func (e *env) status(t *testing.T) service.Status {
+	t.Helper()
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Sync == nil {
+		t.Fatalf("Status = %+v, %v", st, err)
+	}
+	return st
 }
 
 func (e *env) collection(t *testing.T, id string) service.Collection {
@@ -54,6 +69,10 @@ func TestObjectChanges(t *testing.T) {
 		Card: card("s@x", "Standup", base, "RRULE:FREQ=DAILY")})
 	exc := e.f.AddEvent(work, protontest.Event{UID: "s@x", Start: rid, End: rid + 3600, RecurrenceID: &rid,
 		Card: card("s@x", "Standup moved", rid, "RECURRENCE-ID:"+stamp(rid))})
+	oldDup := e.f.AddEvent(work, protontest.Event{UID: "d@x", Start: base, End: base + 60, Card: card("d@x", "Old", base)})
+	e.f.AddEvent(work, protontest.Event{UID: "d@x", Start: base, End: base + 60, Card: card("d@x", "New", base)})
+	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other"})
+	e.f.AddEvent(other, protontest.Event{UID: "o1@x", Start: base, End: base + 60})
 	e.login(t, e.req())
 	e.sync(t, false)
 	etags0, tok0 := e.listing(t, work)
@@ -78,6 +97,41 @@ func TestObjectChanges(t *testing.T) {
 			t.Errorf("Changes(before the edit) = %+v, want s@x changed and token %q", cs, tok)
 		}
 		tok1 = tok
+	})
+
+	// Ruling M3-R11: the calendar ID is in the token's generation, so a
+	// token of another calendar never reads as a delta.
+	t.Run("TokenOfAnotherCalendarListsInFull", func(t *testing.T) {
+		e.f.AddEvent(other, protontest.Event{UID: "o2@x", Start: base, End: base + 60})
+		e.sync(t, false) // other now stands past work's token, o1@x below it
+		cs := e.changes(t, other, tok1)
+		if !slices.Equal(changedUIDs(cs), []string{"o1@x", "o2@x"}) {
+			t.Errorf("Changes(other, work's token) = %+v, want every object of other", cs)
+		}
+	})
+
+	// Ruling M3-R12: a calendar dropped and created again under its ID
+	// refuses the tokens of its former life (whose deletions it lost).
+	t.Run("RecreatedCalendarRefusesOldTokens", func(t *testing.T) {
+		_, tokO := e.listing(t, other)
+		db, err := cache.Open(cache.Path(e.dirs.State), e.f.UserID(e.f.Username))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = db.DropCalendar(t.Context(), other)
+		_ = db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.sync(t, false) // other is listed again and created anew
+		_, err = e.svc.Changes(t.Context(), other, tokO)
+		if !errors.Is(err, service.ErrInvalidSyncToken) {
+			t.Errorf("Changes(token of the former calendar) = %v, want ErrInvalidSyncToken", err)
+		}
+		_, tok := e.listing(t, other)
+		if cs := e.changes(t, other, tok); len(cs.Changed)+len(cs.Deleted) != 0 {
+			t.Errorf("Changes(token of the new calendar) = %+v, want nothing", cs)
+		}
 	})
 
 	t.Run("TestChangesSinceToken", func(t *testing.T) {
@@ -115,10 +169,27 @@ func TestObjectChanges(t *testing.T) {
 		if got := e.objects(t, work, "a@x")["a@x"]; !got.Missing {
 			t.Errorf("deleted a@x = %+v, want Missing", got)
 		}
+		// A deletion recorded without its UID (early M2 files) cannot be
+		// named: a token from before it is refused, a later one is not.
+		raw, err := sql.Open("sqlite", cache.Path(e.dirs.State))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = raw.ExecContext(t.Context(), `UPDATE tombstones SET uid = ''`)
+		_ = raw.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.Changes(t.Context(), work, tok1); !errors.Is(err, service.ErrInvalidSyncToken) {
+			t.Errorf("Changes(token before an unnamed deletion) = %v, want ErrInvalidSyncToken", err)
+		}
+		if _, err := e.svc.Changes(t.Context(), work, cs.Token); err != nil {
+			t.Errorf("Changes(token after the unnamed deletion) = %v", err)
+		}
 	})
 
 	t.Run("TestObjectETagChangesWithDefaultNotifications", func(t *testing.T) {
-		before, _ := e.listing(t, work)
+		before, beforeTok := e.listing(t, work)
 		beforeCTag := e.collection(t, work).CTag
 		e.f.SetDefaultNotifications(work, []protontest.Notification{{Type: 1, Trigger: "-PT30M"}}, nil)
 		// The settings are read with the keys, once per process: a new one.
@@ -129,6 +200,36 @@ func TestObjectChanges(t *testing.T) {
 			t.Errorf("same rows, new default notifications: ETag %q -> %q, CTag %q -> %q; want both changed", before["s@x"], after["s@x"], beforeCTag, afterCTag)
 		}
 		contains(t, "s@x", e.objects(t, work, "s@x")["s@x"].Data, "TRIGGER:-PT30M\r\n")
+		if cs := e.changes(t, work, beforeTok); len(cs.Changed) != len(after) {
+			t.Errorf("Changes(token before the change) = %+v, want all %d objects", cs, len(after))
+		}
+	})
+
+	t.Run("KeyRotationChangesETagsAndGeneration", func(t *testing.T) {
+		before, beforeTok := e.listing(t, work)
+		e.f.RotateCalendarKey(work)
+		e.svc = e.open(top) // a restart reads the bootstrap again
+		after, tok := e.listing(t, work)
+		if after["s@x"] == before["s@x"] || tok == beforeTok {
+			t.Errorf("after a key rotation: ETag %q -> %q, token %q -> %q; want both changed", before["s@x"], after["s@x"], beforeTok, tok)
+		}
+		if cs := e.changes(t, work, beforeTok); len(cs.Changed) != len(after) {
+			t.Errorf("Changes(token before the rotation) = %+v, want all %d objects", cs, len(after))
+		}
+		contains(t, "s@x", e.objects(t, work, "s@x")["s@x"].Data, "SUMMARY:Standup\r\n")
+	})
+
+	t.Run("DuplicateCountFollowsTheRows", func(t *testing.T) {
+		contains(t, "d@x", e.objects(t, work, "d@x")["d@x"].Data, "SUMMARY:New\r\n")
+		if st := e.status(t); st.Sync.DuplicateMasters != 1 {
+			t.Errorf("DuplicateMasters = %d, want 1", st.Sync.DuplicateMasters)
+		}
+		e.f.DeleteEvent(work, oldDup)
+		e.sync(t, false)
+		e.objects(t, work, "d@x")
+		if st := e.status(t); st.Sync.DuplicateMasters != 0 {
+			t.Errorf("DuplicateMasters after the duplicate is gone = %d, want 0", st.Sync.DuplicateMasters)
+		}
 	})
 
 	t.Run("TestKeysDroppedOnLogout", func(t *testing.T) {
@@ -136,9 +237,20 @@ func TestObjectChanges(t *testing.T) {
 		if !e.svc.HasKeys() {
 			t.Fatal("no keys held after a read")
 		}
+		// Reads running while the logout drops the keys (go test -race): they
+		// answer or fail, never use cleared keys.
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				for range 5 {
+					_, _ = e.svc.ObjectsByUID(t.Context(), work, []string{"s@x", "d@x"})
+				}
+			})
+		}
 		if _, err := e.svc.Logout(t.Context()); err != nil {
 			t.Fatal(err)
 		}
+		wg.Wait()
 		if e.svc.HasKeys() {
 			t.Error("keys held after logout")
 		}
@@ -156,4 +268,62 @@ func TestObjectChanges(t *testing.T) {
 			t.Error("the read after a new login decrypted nothing: the rendered objects outlived the logout")
 		}
 	})
+
+	t.Run("CloseDropsKeysAndALoadRacingItInstallsNothing", func(t *testing.T) {
+		gate := &bootstrapGate{entered: make(chan struct{}), release: make(chan struct{})}
+		svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+			HTTP: &http.Client{Transport: gate}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := svc.ObjectsByUID(t.Context(), work, []string{"s@x"})
+			done <- err
+		}()
+		<-gate.entered // the load is fetching the bootstrap
+		if err := svc.Close(); err != nil {
+			t.Fatal(err)
+		}
+		close(gate.release)
+		_ = wantExit(t, <-done, exitcode.Blocked)
+		if svc.HasKeys() {
+			t.Error("a load that raced Close installed its keys")
+		}
+		// Close completing before a load reads the generation: the load
+		// must still install nothing.
+		late, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep})
+		if err != nil {
+			t.Fatal(err)
+		}
+		late.BeforeKeyLoad(func() { _ = late.Close() })
+		_, err = late.ObjectsByUID(t.Context(), work, []string{"s@x"})
+		_ = wantExit(t, err, exitcode.Blocked)
+		if late.HasKeys() {
+			t.Error("a load starting after Close installed its keys")
+		}
+		e.objects(t, work, "s@x")
+		if err := e.svc.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if e.svc.HasKeys() {
+			t.Error("keys held after Close")
+		}
+	})
+}
+
+// bootstrapGate holds the first calendar bootstrap request until release.
+type bootstrapGate struct {
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (g *bootstrapGate) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(r.URL.Path, "/bootstrap") {
+		g.once.Do(func() {
+			close(g.entered)
+			<-g.release
+		})
+	}
+	return http.DefaultTransport.RoundTrip(r)
 }

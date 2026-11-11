@@ -131,6 +131,32 @@ func (f *Fake) SetDefaultCalendar(username, id string) {
 	f.cal.user(username).defaultID = id
 }
 
+// RotateCalendarKey adds a new calendar key, locked with the calendar's
+// passphrase and listed last, as a key rotation does; the rows keep their
+// key packets to the former key, which stays listed.
+func (f *Fake) RotateCalendarKey(id string) {
+	f.t.Helper()
+	key, err := crypto.GenerateKey("Calendar key", "", "x25519", 0)
+	if err != nil {
+		f.t.Fatalf("protontest: calendar key: %v", err)
+	}
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	locked, err := key.Lock([]byte(rec.passphrase))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	armored, err := locked.Armor()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	rec.armored = append(rec.armored, armored)
+}
+
 // SetDefaultNotifications replaces the calendar's default reminders (nil
 // restores the fake's defaults), as a change in Proton's calendar settings.
 func (f *Fake) SetDefaultNotifications(id string, partDay, fullDay []Notification) {

@@ -33,6 +33,9 @@ type Access struct {
 	CalendarID, MemberID, AddressID string
 	KR                              *crypto.KeyRing
 	Settings                        Settings
+	// KeyIDs are the IDs of the calendar keys the bootstrap lists, in its
+	// order (unlocked or not): they change when the calendar key rotates.
+	KeyIDs []string
 }
 
 // Close clears the keyring's private parameters. It is idempotent and
@@ -46,7 +49,7 @@ func (a *Access) Close() {
 }
 
 type bootstrap struct {
-	Keys []struct{ PrivateKey string }
+	Keys []struct{ ID, PrivateKey string }
 	// Passphrase.MemberPassphrases[].Signature is deliberately not decoded.
 	Passphrase struct {
 		MemberPassphrases []struct {
@@ -88,6 +91,10 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 	}
 	defer clear(passphrase)
 	var kr *crypto.KeyRing
+	ids := make([]string, 0, len(b.Keys))
+	for _, k := range b.Keys {
+		ids = append(ids, k.ID)
+	}
 	for _, k := range b.Keys {
 		key, err := crypto.NewKeyFromArmored(k.PrivateKey)
 		if err != nil {
@@ -112,7 +119,7 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 	if kr == nil {
 		return nil, fmt.Errorf("calendar %s: the passphrase unlocks no calendar key", cal.ID)
 	}
-	return &Access{CalendarID: cal.ID, MemberID: memberID, AddressID: addressID, KR: kr, Settings: b.CalendarSettings}, nil
+	return &Access{CalendarID: cal.ID, MemberID: memberID, AddressID: addressID, KR: kr, Settings: b.CalendarSettings, KeyIDs: ids}, nil
 }
 
 func ownsEmail(u *keys.Unlocked, email string) bool {

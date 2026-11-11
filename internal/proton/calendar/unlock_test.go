@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -127,6 +128,11 @@ func TestUnlockSkipsUndecryptableKey(t *testing.T) {
 	defer a.Close()
 	if n := a.KR.CountEntities(); n != 1 {
 		t.Fatalf("keyring holds %d keys, want 1", n)
+	}
+	// Every listed key is named, the locked one too: the list changes on a
+	// rotation.
+	if !slices.Equal(a.KeyIDs, []string{"key0", "key1"}) {
+		t.Errorf("KeyIDs = %v, want both listed keys", a.KeyIDs)
 	}
 	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 }

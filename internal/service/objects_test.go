@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -19,7 +21,7 @@ import (
 
 var (
 	ctagRE  = regexp.MustCompile(`^([0-9a-f]{32}):([0-9]+):[0-9a-f]{16}$`)
-	tokenRE = regexp.MustCompile(`^urn:pcb:sync:1:([0-9a-f]{32}):([0-9]+)$`)
+	tokenRE = regexp.MustCompile(`^urn:pcb:sync:1:([0-9a-f]{32}):([0-9]+):([0-9a-f]{8})$`)
 	etagRE  = regexp.MustCompile(`^"v1-[0-9a-f]{32}"$`)
 )
 
@@ -107,6 +109,13 @@ func TestObjectReads(t *testing.T) {
 		Card: card("series@x", "Standup", base, "RRULE:FREQ=DAILY")})
 	e.f.AddEvent(work, protontest.Event{UID: "series@x", Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
 		Card: card("series@x", "Standup moved", rid+1800, "RECURRENCE-ID:"+stamp(rid)), Notifications: []protontest.Notification{}})
+	// An exception that does not decrypt is a placeholder that keeps its
+	// RECURRENCE-ID; an exception whose master is gone is served alone.
+	rid2 := base + 2*day
+	e.f.AddEvent(work, protontest.Event{UID: "series@x", Start: rid2, End: rid2 + 3600, RecurrenceID: &rid2,
+		BrokenPart: protontest.SharedEncryptedPart, Card: card("series@x", "Hidden change", rid2, "RECURRENCE-ID:"+stamp(rid2))})
+	e.f.AddEvent(work, protontest.Event{UID: "orphan@x", Start: rid, End: rid + 3600, RecurrenceID: &rid,
+		Card: card("orphan@x", "Orphan", rid, "RECURRENCE-ID:"+stamp(rid))})
 	e.f.AddEvent(work, protontest.Event{UID: "allday@x", Start: base - 8*3600, End: base - 8*3600 + day, FullDay: true})
 	e.f.AddEvent(work, protontest.Event{UID: "broken@x", Start: base, End: base + 3600, BrokenPart: protontest.SharedEncryptedPart,
 		Card: card("broken@x", "Secret plan", base)})
@@ -177,10 +186,10 @@ func TestObjectReads(t *testing.T) {
 		if token != colls[work].SyncToken {
 			t.Errorf("Objects token %q, collection's %q", token, colls[work].SyncToken)
 		}
-		if len(etags) != 5 {
-			t.Errorf("listing = %v, want the 5 UIDs", etags)
+		if len(etags) != 6 {
+			t.Errorf("listing = %v, want the 6 UIDs", etags)
 		}
-		got := e.objects(t, work, "rich@x", "series@x", "allday@x", "nobody@x")
+		got := e.objects(t, work, "rich@x", "series@x", "allday@x", "orphan@x", "nobody@x")
 		rich := got["rich@x"].Data
 		contains(t, "rich@x", rich, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//pcb//proton-calendar-bridge//EN\r\n",
 			"SUMMARY:Lunch with Zoé\r\n", "X-UNKNOWN-PROP;X-PARAM=1:keep me\r\n", "X-PM-FOO:bar\r\n", "COMMENT:note\r\n",
@@ -192,10 +201,18 @@ func TestObjectReads(t *testing.T) {
 			t.Errorf("rich@x does not end with END:VCALENDAR CRLF")
 		}
 		series := got["series@x"].Data
-		if bytes.Count(series, []byte("BEGIN:VEVENT")) != 2 || bytes.Index(series, []byte("SUMMARY:Standup\r\n")) > bytes.Index(series, []byte("SUMMARY:Standup moved")) {
-			t.Errorf("series@x: want the master then its exception:\n%s", series)
+		if bytes.Count(series, []byte("BEGIN:VEVENT")) != 3 || bytes.Index(series, []byte("SUMMARY:Standup\r\n")) > bytes.Index(series, []byte("SUMMARY:Standup moved")) {
+			t.Errorf("series@x: want the master then its exceptions:\n%s", series)
 		}
-		contains(t, "series@x", series, "RECURRENCE-ID:"+stamp(rid), "RRULE:FREQ=DAILY")
+		contains(t, "series@x", series, "RECURRENCE-ID:"+stamp(rid), "RRULE:FREQ=DAILY",
+			// The undecryptable exception: a placeholder still bound to its occurrence.
+			"RECURRENCE-ID:"+stamp(rid2)+"\r\nSUMMARY:(pcb could not decrypt this event)\r\nX-PCB-PLACEHOLDER:1\r\n")
+		lacks(t, "series@x", series, "Hidden change")
+		orphan := got["orphan@x"].Data
+		contains(t, "orphan@x", orphan, "RECURRENCE-ID:"+stamp(rid)+"\r\n", "SUMMARY:Orphan\r\n")
+		if bytes.Count(orphan, []byte("BEGIN:VEVENT")) != 1 {
+			t.Errorf("orphan@x: want its one exception, served alone:\n%s", orphan)
+		}
 		if bytes.Count(series, []byte("RRULE")) != 1 || bytes.Count(series, []byte("BEGIN:VALARM")) != 1 {
 			t.Errorf("series@x: want one RRULE (the master's) and one alarm (the exception has none):\n%s", series)
 		}
@@ -220,6 +237,10 @@ func TestObjectReads(t *testing.T) {
 		contains(t, "broken@x", b.Data, "BEGIN:VEVENT\r\nUID:broken@x\r\n", "DTSTART:"+stamp(base)+"\r\n", "DTEND:"+stamp(base+3600)+"\r\n",
 			"SUMMARY:(pcb could not decrypt this event)\r\n", "X-PCB-PLACEHOLDER:1\r\n")
 		lacks(t, "broken@x", b.Data, "Secret plan")
+		comps, err := ical.Parse(b.Data)
+		if err != nil || len(comps) != 1 || len(comps[0].Subs("VEVENT")) != 1 {
+			t.Errorf("the placeholder does not parse as one VCALENDAR with one VEVENT: %v", err)
+		}
 		if b.ETag != etags["broken@x"] || b.Missing {
 			t.Errorf("placeholder ETag %q, listing %q", b.ETag, etags["broken@x"])
 		}
@@ -232,8 +253,8 @@ func TestObjectReads(t *testing.T) {
 		if err != nil || st.Sync == nil {
 			t.Fatalf("Status = %+v, %v", st, err)
 		}
-		if st.Sync.Undecryptable != 2 {
-			t.Errorf("Undecryptable = %d, want 2 (broken@x and locked@x)", st.Sync.Undecryptable)
+		if st.Sync.Undecryptable != 3 {
+			t.Errorf("Undecryptable = %d, want 3 (broken@x, series@x's second exception and locked@x)", st.Sync.Undecryptable)
 		}
 		for _, c := range st.Sync.Calendars {
 			switch {
@@ -279,10 +300,12 @@ func TestObjectReads(t *testing.T) {
 		_, token := e.listing(t, work)
 		m := tokenRE.FindStringSubmatch(token)
 		bad := []string{
-			"urn:pcb:sync:1:" + strings.Repeat("0", 32) + ":" + m[2], // another epoch
-			"urn:pcb:sync:1:" + m[1] + ":99999",                      // above the current seq
-			"urn:pcb:sync:1:" + m[1] + ":-1",
-			"urn:pcb:sync:2:" + m[1] + ":" + m[2],
+			"urn:pcb:sync:1:" + strings.Repeat("0", 32) + ":" + m[2] + ":" + m[3], // another epoch
+			"urn:pcb:sync:1:" + m[1] + ":99999:" + m[3],                           // above the current seq
+			"urn:pcb:sync:1:" + m[1] + ":" + m[2],                                 // the format before generations
+			"urn:pcb:sync:1:" + m[1] + ":-1:" + m[3],
+			"urn:pcb:sync:1:" + m[1] + ":" + m[2] + ":XYZ",
+			"urn:pcb:sync:2:" + m[1] + ":" + m[2] + ":" + m[3],
 			"http://example.org/sync/1",
 			"garbage",
 		}
@@ -298,7 +321,7 @@ func TestObjectReads(t *testing.T) {
 			t.Errorf("Changes(current token) = %+v, %v; want nothing and the same token", cs, err)
 		}
 		full, err := e.svc.Changes(t.Context(), work, "")
-		if err != nil || len(full.Changed) != 5 || len(full.Deleted) != 0 || full.Token != token {
+		if err != nil || len(full.Changed) != 6 || len(full.Deleted) != 0 || full.Token != token {
 			t.Errorf("Changes(empty token) = %+v, %v; want every object", full, err)
 		}
 	})
@@ -316,6 +339,57 @@ func TestObjectReads(t *testing.T) {
 	})
 }
 
+// serving is a Serve running in the background, one pass at a time: each
+// pass waits in OnPass until the test resumes it.
+type serving struct {
+	passes chan service.WatchPass
+	resume chan struct{}
+	done   chan error
+	cancel context.CancelFunc
+}
+
+func (e *env) serve(t *testing.T) *serving {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	s := &serving{passes: make(chan service.WatchPass), resume: make(chan struct{}), done: make(chan error, 1), cancel: cancel}
+	go func() {
+		s.done <- e.svc.Serve(ctx, service.ServeOptions{OnPass: func(p service.WatchPass) {
+			s.passes <- p
+			<-s.resume
+		}})
+	}()
+	t.Cleanup(cancel)
+	return s
+}
+
+// next lets the paused pass go on (but before the first) and waits for the
+// next one.
+func (s *serving) next(t *testing.T, first bool) service.WatchPass {
+	t.Helper()
+	if !first {
+		s.resume <- struct{}{}
+	}
+	select {
+	case p := <-s.passes:
+		if p.Err != nil {
+			t.Fatalf("pass: %v", p.Err)
+		}
+		return p
+	case err := <-s.done:
+		t.Fatalf("Serve returned %v before its pass", err)
+	}
+	return service.WatchPass{}
+}
+
+func (s *serving) stop(t *testing.T) {
+	t.Helper()
+	s.cancel()
+	close(s.resume)
+	if err := <-s.done; err != nil {
+		t.Errorf("Serve after the caller cancelled = %v, want nil", err)
+	}
+}
+
 // TestServeReadsOnItsOwnHandle: Serve holds the sync lock, syncs on its
 // writer handle and serves the reads from it (M3-R6); once it ends, the reads
 // open the cache per call again.
@@ -325,70 +399,139 @@ func TestServeReadsOnItsOwnHandle(t *testing.T) {
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
 	e.login(t, e.req())
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	passes, resume, done := make(chan service.WatchPass), make(chan struct{}), make(chan error, 1)
-	go func() {
-		done <- e.svc.Serve(ctx, service.ServeOptions{OnPass: func(p service.WatchPass) {
-			passes <- p
-			<-resume
-		}})
-	}()
-	next := func() service.WatchPass {
-		t.Helper()
-		select {
-		case p := <-passes:
-			if p.Err != nil {
-				t.Fatalf("pass: %v", p.Err)
-			}
-			return p
-		case err := <-done:
-			t.Fatalf("Serve returned %v before its pass", err)
-		}
-		return service.WatchPass{}
-	}
-	if p := next(); calSync(t, p.Result, work).Mode != "initial" {
+	s := e.serve(t)
+	if p := s.next(t, true); calSync(t, p.Result, work).Mode != "initial" {
 		t.Errorf("first pass = %+v", p.Result)
 	}
 	_, err := e.svc.Sync(t.Context(), service.SyncRequest{})
 	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Error(), "a sync is already running") {
 		t.Errorf("Sync during Serve = %v", err)
 	}
-	// The cache file no longer opens: only Serve's open handle reads it.
-	path := cache.Path(e.dirs.State)
-	unreadable := os.Geteuid() != 0
-	if err := os.Chmod(path, 0); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chmod(path, 0o600) }()
 	_, tok := e.listing(t, work)
-	contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "UID:a@x")
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e.f.AddEvent(work, protontest.Event{UID: "n@x", Start: base, End: base + 60})
-	resume <- struct{}{}
-	next()
-	if cs := e.changes(t, work, tok); !slices.Equal(changedUIDs(cs), []string{"n@x"}) {
-		t.Errorf("Changes after Serve's second pass = %+v, want n@x", cs)
-	}
-	cancel()
-	close(resume)
-	if err := <-done; err != nil {
-		t.Errorf("Serve after the caller cancelled = %v, want nil", err)
-	}
-	if unreadable {
+	path := cache.Path(e.dirs.State)
+	unreadable := func(t *testing.T) {
+		t.Helper()
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a file of mode 0: this check needs another user")
+		}
 		if err := os.Chmod(path, 0); err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	}
+	t.Run("ReadsUseServesOpenHandle", func(t *testing.T) {
+		unreadable(t) // the file no longer opens: only Serve's open handle reads it
+		contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "UID:a@x")
+		if _, again := e.listing(t, work); again != tok {
+			t.Errorf("token %q, then %q", tok, again)
+		}
+	})
+	e.f.AddEvent(work, protontest.Event{UID: "n@x", Start: base, End: base + 60})
+	s.next(t, false)
+	if cs := e.changes(t, work, tok); !slices.Equal(changedUIDs(cs), []string{"n@x"}) {
+		t.Errorf("Changes after Serve's second pass = %+v, want n@x", cs)
+	}
+	s.stop(t)
+	t.Run("AfterServeReadsOpenTheFile", func(t *testing.T) {
+		unreadable(t)
 		_, _, err := e.svc.Objects(t.Context(), work)
 		_ = wantExit(t, err, exitcode.Blocked)
-		if err := os.Chmod(path, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	})
 	if etags, _ := e.listing(t, work); len(etags) != 2 {
 		t.Errorf("listing after Serve = %v", etags)
 	}
 	e.sync(t, false) // the lock is free again
+}
+
+// Ruling M3-R10/R11: Serve reads the calendars' bootstraps again every 10
+// minutes; a changed default notification, or keys that now unlock, change
+// the ETags, and a token of the former generation lists every object.
+func TestServeRefreshesCalendarSettings(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other"})
+	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.f.AddEvent(work, protontest.Event{UID: "b@x", Start: base, End: base + 60})
+	e.f.AddEvent(other, protontest.Event{UID: "o@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	e.f.FailNext("GET", "/calendar/v2/"+other+"/bootstrap", 422, 2501, 0) // Other's keys fail at first
+	etags, tokW := e.listing(t, work)
+	_, tokO := e.listing(t, other)
+	contains(t, "o@x", e.objects(t, other, "o@x")["o@x"].Data, "X-PCB-PLACEHOLDER:1")
+	boots := e.f.Calls("GET", "/calendar/v2/")
+	e.f.SetDefaultNotifications(work, []protontest.Notification{{Type: 1, Trigger: "-PT30M"}}, nil)
+
+	s.next(t, false) // not due yet
+	if n := e.f.Calls("GET", "/calendar/v2/") - boots; n != 0 {
+		t.Errorf("a pass before the refresh is due read %d bootstraps", n)
+	}
+	if again, tok := e.listing(t, work); again["a@x"] != etags["a@x"] || tok != tokW {
+		t.Errorf("before the refresh: ETag %q -> %q, token %q -> %q", etags["a@x"], again["a@x"], tokW, tok)
+	}
+
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	if n := e.f.Calls("GET", "/calendar/v2/") - boots; n != 2 {
+		t.Errorf("the refresh read %d bootstraps, want one per calendar (2)", n)
+	}
+	after, tok := e.listing(t, work)
+	if after["a@x"] == etags["a@x"] || after["b@x"] == etags["b@x"] || tok == tokW {
+		t.Errorf("after the refresh: ETags %v (were %v), token %q (was %q); want all changed", after, etags, tok, tokW)
+	}
+	contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "TRIGGER:-PT30M\r\n")
+	// No row changed, yet a client holding the former token fetches all.
+	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || len(cs.Deleted) != 0 || cs.Token != tok {
+		t.Errorf("Changes(token before the settings change) = %+v, want every object", cs)
+	}
+	// Other's keys now unlock: its objects decrypt, and its former token
+	// lists them again.
+	lacks(t, "o@x", e.objects(t, other, "o@x")["o@x"].Data, "X-PCB-PLACEHOLDER")
+	if cs := e.changes(t, other, tokO); !slices.Equal(changedUIDs(cs), []string{"o@x"}) {
+		t.Errorf("Changes(token of the keys-unavailable state) = %+v, want o@x", cs)
+	}
+	s.stop(t)
+}
+
+// A read unlocking keys (a Proton call) holds no lock Serve needs: Serve
+// stops while the read waits for Proton.
+func TestServeStopsWhileAReadUnlocksKeys(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	gate := &bootstrapGate{entered: make(chan struct{}), release: make(chan struct{})}
+	svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		HTTP: &http.Client{Transport: gate}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	e.svc = svc
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	read := make(chan error, 1)
+	go func() {
+		_, _, err := e.svc.Objects(t.Context(), work)
+		read <- err
+	}()
+	<-gate.entered // the read waits for the calendar's bootstrap
+	stopped := make(chan struct{})
+	go func() {
+		s.stop(t)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second): // a failure bound, not a synchronisation
+		close(gate.release)
+		t.Fatal("Serve did not stop while a read was unlocking keys")
+	}
+	close(gate.release)
+	if err := <-read; err != nil {
+		t.Errorf("the read = %v, want it served (from the file once Serve ended)", err)
+	}
 }
