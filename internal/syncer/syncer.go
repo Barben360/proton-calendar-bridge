@@ -1,0 +1,218 @@
+// Package syncer is C4: it brings the cache up to date with Proton, one pass
+// over every calendar, and repeats passes in a watch loop. A calendar is
+// listed in full when it was never synced, when Proton asks, when its cursor
+// is refused, or when its last listing is older than FullEvery; otherwise its
+// change feed is read and every changed ID re-read. A cursor is only stored
+// in the transaction that stores the rows read up to it, so a failure never
+// loses a change: the next pass reads it again. Nothing is decrypted, keys
+// are never unlocked, and nothing is logged.
+package syncer
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/calendar"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
+)
+
+// DefaultFullEvery is how old a calendar's last full listing may get.
+const DefaultFullEvery = 24 * time.Hour
+
+// Modes of a calendar's sync in a pass.
+const (
+	ModeInitial     = "initial"     // never synced: listed in full
+	ModeIncremental = "incremental" // change feed read from the stored cursor
+	ModeFull        = "full"        // listed in full again
+)
+
+// Options tune a pass. The zero value is a normal pass.
+type Options struct {
+	Full      bool             // list every calendar in full
+	Now       func() time.Time // default time.Now
+	FullEvery time.Duration    // default DefaultFullEvery
+}
+
+// Report is what a pass did, one entry per listed calendar in API order.
+type Report struct{ Calendars []CalendarReport }
+
+// CalendarReport is one calendar's outcome. Err is set when this calendar
+// failed (the pass went on with the others); Events is the calendar's row
+// count in the cache after the pass.
+type CalendarReport struct {
+	ID, Name string
+	Mode     string // ModeInitial, ModeIncremental or ModeFull
+	Changes  cache.Changes
+	Events   int
+	Err      error
+}
+
+// Pass syncs every calendar once. A session-wide failure (api.SessionWide)
+// or a failure to read or record the cache's calendar state is returned at
+// once, without a report; any other failure is recorded on its calendar
+// (CalendarReport.Err and the cached Error) and the pass goes on. A
+// calendar's Error is cleared when it syncs.
+func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Report, error) {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.FullEvery <= 0 {
+		o.FullEvery = DefaultFullEvery
+	}
+	cals, err := calendar.List(ctx, c)
+	if err != nil {
+		return Report{}, err
+	}
+	known, err := db.Calendars(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("reading the cache: %w", err)
+	}
+	listed := make(map[string]bool, len(cals))
+	for _, cal := range cals {
+		listed[cal.ID] = true
+	}
+	prev := make(map[string]cache.Calendar, len(known))
+	for _, k := range known {
+		prev[k.ID] = k
+		if !listed[k.ID] {
+			if err := db.DropCalendar(ctx, k.ID); err != nil {
+				return Report{}, fmt.Errorf("dropping calendar %s from the cache: %w", k.ID, err)
+			}
+		}
+	}
+	for _, cal := range cals {
+		// Keep the last error until this pass knows better.
+		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String(), Error: prev[cal.ID].Error}
+		if err := db.PutCalendar(ctx, rec); err != nil {
+			return Report{}, fmt.Errorf("recording calendar %s in the cache: %w", cal.ID, err)
+		}
+	}
+	rep := Report{Calendars: make([]CalendarReport, 0, len(cals))}
+	for _, cal := range cals {
+		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o)
+		r.ID, r.Name = cal.ID, cal.Name
+		if r.Err != nil && api.SessionWide(ctx, r.Err) {
+			return Report{}, r.Err
+		}
+		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String()}
+		if r.Err != nil {
+			rec.Error = r.Err.Error()
+		}
+		if err := db.PutCalendar(ctx, rec); err != nil {
+			return Report{}, fmt.Errorf("recording calendar %s in the cache: %w", cal.ID, err)
+		}
+		rep.Calendars = append(rep.Calendars, r)
+	}
+	after, err := db.Calendars(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("reading the cache: %w", err)
+	}
+	count := make(map[string]int, len(after))
+	for _, a := range after {
+		count[a.ID] = a.Events
+	}
+	for i := range rep.Calendars {
+		rep.Calendars[i].Events = count[rep.Calendars[i].ID]
+	}
+	return rep, nil
+}
+
+// syncCalendar brings one calendar up to date; prev is its cached state
+// (zero for a calendar never seen). ID and Name are left to the caller.
+func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID string, prev cache.Calendar, o Options) CalendarReport {
+	now := o.Now()
+	var r CalendarReport
+	switch {
+	case prev.Cursor == "":
+		r.Mode = ModeInitial
+	case o.Full || now.Sub(prev.FullAt) > o.FullEvery:
+		r.Mode = ModeFull
+	default:
+		r.Mode = ModeIncremental
+		ch, resync, err := incremental(ctx, c, db, calID, prev.Cursor, now)
+		if !resync {
+			r.Changes, r.Err = ch, err
+			return r
+		}
+		r.Mode = ModeFull
+	}
+	r.Changes, r.Err = full(ctx, c, db, calID, now)
+	return r
+}
+
+// full lists the calendar and makes the listing its content. The baseline
+// cursor is the feed head read before the listing: a change made while the
+// listing runs is then read again from the feed, never skipped.
+func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now time.Time) (cache.Changes, error) {
+	head, err := events.Latest(ctx, c, calID)
+	if err != nil {
+		return cache.Changes{}, err
+	}
+	rows, err := events.ListAll(ctx, c, calID)
+	if err != nil {
+		return cache.Changes{}, err
+	}
+	out := make([]cache.Row, len(rows))
+	for i, row := range rows {
+		out[i] = toCache(row)
+	}
+	ch, err := db.ReplaceCalendar(ctx, calID, head, out, now)
+	if err != nil {
+		return cache.Changes{}, fmt.Errorf("storing calendar %s: %w", calID, err)
+	}
+	return ch, nil
+}
+
+// incremental applies the feed after cursor. resync is true when the
+// calendar must be listed instead: Proton asked (Refresh, or too many
+// pages), or refused the cursor with a 4xx other than 429. Every listed ID
+// is re-read: a row Proton says is gone is deleted, whatever the feed said.
+// Nothing is stored unless every row was read.
+func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cursor string, now time.Time) (ch cache.Changes, resync bool, err error) {
+	d, err := events.Changes(ctx, c, calID, cursor)
+	if err != nil {
+		return cache.Changes{}, !api.SessionWide(ctx, err) && cursorRefused(err), err
+	}
+	if d.Refresh {
+		return cache.Changes{}, true, nil
+	}
+	var upserts []cache.Row
+	var gone []string
+	for _, id := range d.IDs {
+		row, err := events.Get(ctx, c, calID, id)
+		switch {
+		case errors.Is(err, events.ErrGone):
+			gone = append(gone, id)
+		case err != nil:
+			return cache.Changes{}, false, fmt.Errorf("event %s: %w", id, err)
+		default:
+			upserts = append(upserts, toCache(row))
+		}
+	}
+	ch, err = db.ApplyDelta(ctx, calID, d.Cursor, upserts, gone, now)
+	if err != nil {
+		return cache.Changes{}, false, fmt.Errorf("storing calendar %s: %w", calID, err)
+	}
+	return ch, false, nil
+}
+
+// cursorRefused reports whether the feed answered a 4xx other than 429 (and
+// 401, which the client already turned into a refresh or a session end).
+func cursorRefused(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 &&
+		ae.Status != http.StatusTooManyRequests && ae.Status != http.StatusUnauthorized
+}
+
+// toCache converts a Proton row to the cache's own type (ruling R6).
+func toCache(r events.Row) cache.Row {
+	return cache.Row{
+		ID: r.ID, UID: r.UID, Start: r.Start, End: r.End, FullDay: r.FullDay,
+		RecurrenceID: r.RecurrenceID, RRule: r.RRule, LastEditTime: r.LastEditTime, Raw: r.Raw,
+	}
+}

@@ -272,3 +272,36 @@ func TestSessionTokensFollowTheFakesRules(t *testing.T) {
 		t.Errorf("revoked session: HTTP %d, want 401", st)
 	}
 }
+
+func TestFakeOnListPageRunsBeforeThePageIsSent(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	first := f.AddEvent(cal, protontest.Event{UID: "a", Start: 1, End: 2})
+	var added string
+	var pages []int
+	f.OnListPage(func(calID string, page int) {
+		pages = append(pages, page)
+		if calID == cal && added == "" {
+			added = f.AddEvent(cal, protontest.Event{UID: "b", Start: 1, End: 2})
+		}
+	})
+	type listing struct{ Events []struct{ ID string } }
+	var out listing
+	if st, _ := rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100", &out); st != 200 {
+		t.Fatalf("list: HTTP %d", st)
+	}
+	f.OnListPage(nil) // takes the fake's lock: the hook's writes are visible after it
+	if len(out.Events) != 1 || out.Events[0].ID != first {
+		t.Fatalf("page served while the hook added a row = %+v, want only %s", out.Events, first)
+	}
+	if added == "" || len(pages) != 1 || pages[0] != 0 {
+		t.Fatalf("hook ran for pages %v (added %q), want once for page 0", pages, added)
+	}
+	out = listing{}
+	rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100", &out)
+	if len(out.Events) != 2 || len(pages) != 1 {
+		t.Errorf("after removing the hook: %d rows, hook calls %v; want 2 rows, no new call", len(out.Events), pages)
+	}
+}

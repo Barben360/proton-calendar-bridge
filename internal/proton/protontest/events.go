@@ -181,6 +181,16 @@ func (f *Fake) SetFeedPageSize(n int) {
 	f.cal.feedPage = n
 }
 
+// OnListPage makes fn run each time a listing page of a calendar's events
+// (page 0-based) has been read from the calendar and before it is sent: a
+// row fn adds is not on that page, and the client sees the page only after
+// fn returns. fn may call the fake (AddEvent…); nil removes the hook.
+func (f *Fake) OnListPage(fn func(calID string, page int)) {
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	f.cal.onList = fn
+}
+
 func (f *Fake) feedPageSize() int {
 	if f.cal.feedPage > 0 {
 		return f.cal.feedPage
@@ -244,7 +254,14 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 	for _, r := range s.rows[lo:hi] {
 		rows = append(rows, r.json(cal.id))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": len(s.rows)})
+	total := len(s.rows)
+	if fn := f.cal.onList; fn != nil {
+		// The caller holds f.cal.mu; fn may need it (AddEvent).
+		f.cal.mu.Unlock()
+		fn(cal.id, page)
+		f.cal.mu.Lock()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": total})
 }
 
 func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {

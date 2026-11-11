@@ -30,10 +30,11 @@ type Calendar struct {
 // calendars holds the fake's calendar state, guarded by mu.
 type calendars struct {
 	mu       sync.Mutex
-	byUser   map[string]*userCalendars // username → state
-	byID     map[string]*calendarRec   // calendar ID → record
-	clock    int64                     // fake timestamps issued (see tick)
-	feedPage int                       // SetFeedPageSize, 0: default
+	byUser   map[string]*userCalendars    // username → state
+	byID     map[string]*calendarRec      // calendar ID → record
+	clock    int64                        // fake timestamps issued (see tick)
+	feedPage int                          // SetFeedPageSize, 0: default
+	onList   func(calID string, page int) // OnListPage, nil: none
 }
 
 // user returns username's state, creating it. Caller holds mu.
