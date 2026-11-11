@@ -211,26 +211,33 @@ func TestEventCreatedDuringListingIsNotLost(t *testing.T) {
 	f, c, db := setup(t)
 	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
 	addEvents(f, a, 1)
-	var late string
+	// A row is created during every listing, so none of them is stable
+	// (ruling R17 re-lists at most twice): the union holds the rows created
+	// during the first two, not the one created during the last.
+	var late []string
 	f.OnListPage(func(calID string, page int) {
-		if calID == a && page == 0 && late == "" {
-			late = f.AddEvent(a, protontest.Event{UID: "late", Start: 1, End: 2})
+		if calID == a && page == 0 {
+			late = append(late, f.AddEvent(a, protontest.Event{UID: "late", Start: 1, End: 2}))
 		}
 	})
 	pass(t, c, db, at(t0))
 	f.OnListPage(nil)
-	if late == "" {
-		t.Fatal("the listing hook did not run")
+	if len(late) != syncer.MaxListings {
+		t.Fatalf("%d listings, want %d (an unstable listing is repeated)", len(late), syncer.MaxListings)
 	}
-	if _, ok := etags(t, db, a)[late]; ok {
-		t.Fatal("the row created during the listing is already cached: the test proves nothing")
+	last := late[len(late)-1]
+	if _, ok := etags(t, db, a)[last]; ok {
+		t.Fatal("the row created during the last listing is already cached: the test proves nothing")
 	}
 	r := report(t, pass(t, c, db, at(t0.Add(time.Minute))), a)
-	if r.Mode != "incremental" || r.Changes.Added != 1 {
-		t.Errorf("second pass %+v, want incremental adding the late row", r)
+	if r.Mode != "incremental" || r.Changes != (cache.Changes{Added: 1}) {
+		t.Errorf("second pass %+v, want incremental adding the late row %s", r, last)
 	}
-	if _, ok := etags(t, db, a)[late]; !ok {
-		t.Error("the row created during the listing was lost")
+	cachedRows := etags(t, db, a)
+	for _, id := range late {
+		if _, ok := cachedRows[id]; !ok {
+			t.Errorf("the row %s created during the listing was lost", id)
+		}
 	}
 	matches(t, c, db, a)
 }
@@ -741,30 +748,17 @@ func latestCalls(f *protontest.Fake, cal string) int {
 
 // The listing pages by offset: a row deleted or inserted before a page
 // already served shifts the later pages, so one unchanged row is skipped
-// (or one read twice). A cached row missing from such a listing is re-read
-// before it is tombstoned; a quiet listing costs no extra row read.
-func TestListingShiftedByAConcurrentEditKeepsUnchangedRows(t *testing.T) {
+// (or one read twice). Ruling R17: an unstable listing is repeated and the
+// first stable one is the content; a quiet listing is listed once.
+func TestListingShiftedByAConcurrentEditIsRepeated(t *testing.T) {
 	t.Parallel()
 	f, c, db := setup(t)
 	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
 	ids := addEvents(f, a, 150) // two pages
-	pass(t, c, db, at(t0))
-	full := func(now time.Time) syncer.Options {
-		return syncer.Options{Now: func() time.Time { return now }, Full: true}
-	}
-
-	// Quiet: two pages, latest before and after, no row read.
-	list0, latest0, get0 := listCalls(f, a), latestCalls(f, a), getCalls(f, a)
-	if r := report(t, pass(t, c, db, full(t0.Add(time.Hour))), a); r.Err != nil || r.Changes != (cache.Changes{}) {
-		t.Errorf("quiet listing: %+v, want no change", r)
-	}
-	if lists, latests, gets := listCalls(f, a)-list0, latestCalls(f, a)-latest0, getCalls(f, a)-get0; lists != 2 || latests != 2 || gets != 0 {
-		t.Errorf("quiet listing: %d pages, %d latest, %d row reads; want 2, 2, 0", lists, latests, gets)
-	}
-
-	// Deleted while page 0 is served (after its rows were read): page 1
-	// starts one row later, so ids[100] is in neither page.
-	hook := func(fn func()) {
+	// The review's scenario on the FIRST listing: ids[0] is deleted while
+	// page 0 is served (after its rows were read), so page 1 starts one row
+	// later and ids[100] is in neither page.
+	once := func(fn func()) {
 		done := false
 		f.OnListPage(func(calID string, page int) {
 			if calID == a && page == 0 && !done {
@@ -773,39 +767,116 @@ func TestListingShiftedByAConcurrentEditKeepsUnchangedRows(t *testing.T) {
 			}
 		})
 	}
-	hook(func() { f.DeleteEvent(a, ids[0]) })
-	get0 = getCalls(f, a)
-	r := report(t, pass(t, c, db, full(t0.Add(2*time.Hour))), a)
+	once(func() { f.DeleteEvent(a, ids[0]) })
+	list0 := listCalls(f, a)
+	r := report(t, pass(t, c, db, at(t0)), a)
 	f.OnListPage(nil)
-	if r.Err != nil || r.Changes != (cache.Changes{}) || r.Events != 150 {
-		t.Errorf("delete during the listing: %+v, want no change, 150 events", r)
+	if r.Mode != "initial" || r.Err != nil || r.Events != 149 || r.Changes != (cache.Changes{Added: 149}) {
+		t.Errorf("initial listing shifted by a delete: %+v, want the 149 survivors added", r)
 	}
-	if got := etags(t, db, a); got[ids[100]] == "" {
-		t.Errorf("delete during the listing: the unchanged row %s skipped by the shift was tombstoned", ids[100])
+	if got := etags(t, db, a); got[ids[100]] == "" || got[ids[0]] != "" {
+		t.Errorf("survivor %s cached %v, deleted %s cached %v; want every survivor and not the deleted row",
+			ids[100], got[ids[100]] != "", ids[0], got[ids[0]] != "")
 	}
-	if n := getCalls(f, a) - get0; n != 1 {
-		t.Errorf("%d row reads, want 1: the cached row missing from the listing", n)
+	if n := listCalls(f, a) - list0; n != 4 {
+		t.Errorf("%d listing pages, want 4: the shifted listing and one stable repeat", n)
 	}
-	// The delete is after the baseline: the feed brings it.
-	if r := report(t, pass(t, c, db, at(t0.Add(2*time.Hour+time.Minute))), a); r.Mode != "incremental" || r.Changes != (cache.Changes{Deleted: 1}) {
-		t.Errorf("next pass: %+v, want incremental deleting %s", r, ids[0])
+	matches(t, c, db, a)
+	full := func(now time.Time) syncer.Options {
+		return syncer.Options{Now: func() time.Time { return now }, Full: true}
+	}
+
+	// Quiet: one listing (two pages), latest before and after, no row read.
+	list0, latest0, get0 := listCalls(f, a), latestCalls(f, a), getCalls(f, a)
+	if r := report(t, pass(t, c, db, full(t0.Add(time.Hour))), a); r.Err != nil || r.Changes != (cache.Changes{}) {
+		t.Errorf("quiet listing: %+v, want no change", r)
+	}
+	if lists, latests, gets := listCalls(f, a)-list0, latestCalls(f, a)-latest0, getCalls(f, a)-get0; lists != 2 || latests != 2 || gets != 0 {
+		t.Errorf("quiet listing: %d pages, %d latest, %d row reads; want 2, 2, 0", lists, latests, gets)
+	}
+
+	// The same on a cached calendar: the unchanged row skipped by the shift
+	// is not tombstoned, the deleted one is, and no row is read.
+	once(func() { f.DeleteEvent(a, ids[1]) })
+	get0 = getCalls(f, a)
+	r = report(t, pass(t, c, db, full(t0.Add(2*time.Hour))), a)
+	f.OnListPage(nil)
+	if r.Err != nil || r.Changes != (cache.Changes{Deleted: 1}) || r.Events != 148 || getCalls(f, a) != get0 {
+		t.Errorf("delete during a listing: %+v, %d row reads; want %s deleted, 148 events, none", r, getCalls(f, a)-get0, ids[1])
 	}
 	matches(t, c, db, a)
 
-	// Inserted at the front while page 0 is served: page 1 repeats the last
-	// row of page 0; the head moved, but no cached row is missing, so
-	// nothing is re-read and nothing changes.
+	// Inserted at the front while page 0 is served: page 1 repeats a row;
+	// the repeat listing holds the new row.
 	var front string
-	hook(func() { front = f.AddEventAt(a, 0, protontest.Event{UID: "front", Start: 1, End: 2}) })
-	get0 = getCalls(f, a)
+	once(func() { front = f.AddEventAt(a, 0, protontest.Event{UID: "front", Start: 1, End: 2}) })
 	r = report(t, pass(t, c, db, full(t0.Add(3*time.Hour))), a)
 	f.OnListPage(nil)
-	if r.Err != nil || r.Changes != (cache.Changes{}) || r.Events != 149 || getCalls(f, a) != get0 {
-		t.Errorf("insert during the listing: %+v, %d row reads; want no change, 149 events, none", r, getCalls(f, a)-get0)
-	}
-	// The inserted row is after the baseline: the feed brings it.
-	if r := report(t, pass(t, c, db, at(t0.Add(4*time.Hour))), a); r.Mode != "incremental" || r.Changes != (cache.Changes{Added: 1}) {
-		t.Errorf("next pass: %+v, want incremental adding %s", r, front)
+	if r.Err != nil || r.Changes != (cache.Changes{Added: 1}) || r.Events != 149 || etags(t, db, a)[front] == "" {
+		t.Errorf("insert during a listing: %+v, want %s added, 149 events", r, front)
 	}
 	matches(t, c, db, a)
+}
+
+// When no listing settles (MaxListings in a row shifted), the content is
+// the union of their rows: a row one listing skipped, another holds. A
+// cached row missing from all of them is re-read: gone is tombstoned, a
+// refused read keeps it as cached with a note, the rest is stored.
+func TestListingThatNeverSettlesUsesTheUnion(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ids := addEvents(f, a, 150)
+	every := func(fn func(n int)) *int {
+		n := new(int)
+		f.OnListPage(func(calID string, page int) {
+			if calID == a && page == 0 {
+				fn(*n)
+				*n++
+			}
+		})
+		return n
+	}
+	// Initial: each listing loses a row to a delete, so each skips another.
+	n := every(func(i int) { f.DeleteEvent(a, ids[i]) })
+	r := report(t, pass(t, c, db, at(t0)), a)
+	f.OnListPage(nil)
+	if *n != syncer.MaxListings || r.Err != nil {
+		t.Fatalf("%d listings, report %+v; want %d, no error", *n, r, syncer.MaxListings)
+	}
+	got := etags(t, db, a)
+	for _, id := range ids[syncer.MaxListings:] {
+		if got[id] == "" {
+			t.Errorf("survivor %s missing: the union lost it", id)
+		}
+	}
+	// The deleted rows the listings read before their delete are in the
+	// union; the feed removes them.
+	if r := report(t, pass(t, c, db, at(t0.Add(time.Minute))), a); r.Mode != "incremental" || r.Changes.Deleted != syncer.MaxListings {
+		t.Errorf("next pass: %+v, want incremental deleting the %d rows", r, syncer.MaxListings)
+	}
+	matches(t, c, db, a)
+
+	// Cached rows absent from every listing: one gone, one Proton refuses
+	// to read (kept as cached, with a note); a row created during each
+	// listing keeps them all unstable.
+	gone, refused := ids[10], ids[20]
+	f.DeleteEvent(a, gone)
+	f.DeleteEvent(a, refused)
+	f.FailNext("GET", "/calendar/v1/"+a+"/events/"+refused, http.StatusForbidden, 2011, 0)
+	every(func(int) { f.AddEvent(a, protontest.Event{UID: "late", Start: 1, End: 2}) })
+	r = report(t, pass(t, c, db, syncer.Options{Now: func() time.Time { return t0.Add(time.Hour) }, Full: true}), a)
+	f.OnListPage(nil)
+	var ue *syncer.UnverifiedError
+	if !errors.As(r.Err, &ue) || ue.Rows != 1 || r.Changes.Deleted != 1 {
+		t.Errorf("unverifiable row: %+v, want an UnverifiedError for 1 row and %s tombstoned", r, gone)
+	}
+	got = etags(t, db, a)
+	if got[refused] == "" || got[gone] != "" {
+		t.Errorf("refused %s cached %v, gone %s cached %v; want the refused row kept, the gone one tombstoned",
+			refused, got[refused] != "", gone, got[gone] != "")
+	}
+	if cal := cached(t, db, a); !cal.FullAt.Equal(t0.Add(time.Hour)) || cal.Error != ue.Error() {
+		t.Errorf("cached %+v, want the listing stored (FullAt %v) and the note recorded", cal, t0.Add(time.Hour))
+	}
 }

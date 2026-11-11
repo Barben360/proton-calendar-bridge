@@ -31,7 +31,7 @@ How does `GET /calendar/v1/{cal}/modelevents/{cursor}` behave: payload, cursor s
 - Shapes as in the table; unknown extra keys are ignored.
 - `Action` and `Event` are **ignored** (ruling R3): every listed ID is re-read with `GET /calendar/v1/{cal}/events/{id}`; 404, or 422 with code 2501, is a delete. Robust to unknown `Action` values and to create-then-delete.
 - Baseline cursor = `latest` read before the full listing; the returned cursor is stored in the same transaction as the row changes it produced.
-- The listing pages by offset and may shift under a concurrent edit: rows are deduped by ID, and when `latest` moved during the listing or the unique count differs from `Total`, each cached row missing from the listing is re-read before it is tombstoned (question 7).
+- The listing pages by offset and may shift under a concurrent edit: rows are deduped by ID; a listing during which `latest` moved, or whose unique count differs from `Total`, is repeated (at most 3 listings, R17); with none stable, the union is used and each cached row missing from all of them is re-read before it is tombstoned (question 7).
 - Full resync when: never synced; `Refresh != 0`; the feed answers a 4xx other than 429; more than 50 pages in one pass; the last full sync is older than 24 h; a row re-read answers a non-gone 4xx other than 429/401 (R8). Fallback resyncs are limited to one per calendar per 5 min (R10; a calendar deferred by that gap makes the pass partial, exit 40, R11, and its feed is not read again until the gap is over).
 - Cadence: 30 s default, at least 10 s between passes, backoff x2 up to 10 min with jitter on session-wide failures. No push.
 
@@ -47,7 +47,7 @@ Read the recordings and fill:
 4. Lag between an edit and its appearance (run `pcb sync` immediately and again 5 s later).
 5. Push route `/event-notifier/v1/events`: status with the test account.
 6. Whether the engine's assumptions held: no spurious full resync, no lost edit (`pcb event list` equals the web app).
-7. Listing order and paging stability under concurrent edits: is the `/events` listing ordered (by creation, start, ID?), and does a row created or deleted while a multi-page listing runs shift the later pages (offset paging: a skipped or repeated row) or not (keyset or snapshot paging)? Does `Total` move between pages? The engine assumes offset paging: it dedupes by ID, re-reads `latest` after the listing, and re-reads every cached row missing from the listing before tombstoning it when `latest` moved or the unique count differs from the first page's `Total`; a row created and skipped that way waits for the next listing.
+7. Listing order and paging stability under concurrent edits: is the `/events` listing ordered (by creation, start, ID?), and does a row created or deleted while a multi-page listing runs shift the later pages (offset paging: a skipped or repeated row) or not (keyset or snapshot paging)? Does `Total` move between pages? The engine assumes offset paging: it dedupes by ID, re-reads `latest` after each listing, lists again (at most twice, R17) while `latest` moved or the unique count differs from the first page's `Total`, and when no listing settles uses their union and re-reads every cached row missing from all of them before tombstoning it.
 
 Results: not run yet.
 

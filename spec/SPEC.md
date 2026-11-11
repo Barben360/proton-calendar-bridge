@@ -208,10 +208,14 @@ the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
   read returns is stored in the same transaction as the row changes it
   produced [assumed → E04].
 - The listing pages by offset, so a concurrent create or delete can shift a
-  page [assumed → E04]: rows are deduped by ID, `latest` is read again after
-  the listing, and when it moved or the unique count differs from the first
-  page's `Total`, every cached row missing from the listing is re-read before
-  it is tombstoned (gone: tombstoned; found: kept). A quiet listing costs one
+  page [assumed → E04]: rows are deduped by ID and `latest` is read again
+  after each listing. A listing is stable when `latest` did not move during
+  it and its unique count equals the first page's `Total`; an unstable one is
+  listed again, at most twice (R17), and the first stable listing is the
+  content. When none of the 3 is stable, the content is their union, and
+  every cached row missing from all of them is re-read before it is
+  tombstoned (gone: tombstoned; found: kept; unreadable: kept as cached, the
+  rest stored, and the calendar carries a note). A quiet listing costs one
   extra `latest` and no row read.
 - Full resync of a calendar when: never synced; `Refresh != 0`; the feed
   answers a 4xx other than 429 (cursor unusable); more than 50 pages in one

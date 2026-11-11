@@ -227,56 +227,101 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 	return r
 }
 
+// MaxListings bounds the listings of one full sync: a listing that looks
+// unstable is repeated, at most MaxListings-1 more times (ruling R17).
+const MaxListings = 3
+
+// UnverifiedError is a calendar's note when its listing never settled and
+// some cached rows missing from every listing could not be re-read: they
+// were kept as cached. The rest of the listing was stored; the note says
+// the next listing should check again.
+type UnverifiedError struct{ Rows int }
+
+// Error implements error.
+func (e *UnverifiedError) Error() string {
+	return fmt.Sprintf("the listing kept changing and %d cached events could not be checked; they were kept, the next listing checks again", e.Rows)
+}
+
 // full lists the calendar and makes the listing its content. The baseline
-// cursor is the feed head read before the listing: a change made while the
-// listing runs is then read again from the feed, never skipped. The listing
-// pages by offset, so such a change can also shift a page and skip an
-// unchanged row: when the head moved during the listing, or the listing
-// holds fewer or more unique rows than its Total, every cached row missing
-// from it is re-read before it is tombstoned (gone: tombstoned; found:
-// kept). A row created and skipped that way is not cached yet: the next
-// listing finds it.
+// cursor is the feed head read before the first listing: a change made
+// while a listing runs is then read again from the feed, never skipped.
+//
+// The listing pages by offset, so a concurrent create or delete can shift a
+// page: a row is read twice (List dedupes it) or an unchanged row is
+// skipped. A listing is stable when the head did not move while it ran and
+// it holds as many unique rows as its Total; an unstable one is repeated
+// (ruling R17), and the first stable listing is the content. When none of
+// MaxListings is stable, the content is the union of their rows, and every
+// cached row missing from all of them is re-read before it is tombstoned
+// (gone: tombstoned; found: kept as read; unreadable: kept as cached, and
+// the result is an *UnverifiedError note with the changes stored). The
+// quiet case costs one listing and one extra head read.
 func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now time.Time) (cache.Changes, error) {
-	head, err := events.Latest(ctx, c, calID)
+	baseline, err := events.Latest(ctx, c, calID)
 	if err != nil {
 		return cache.Changes{}, err
 	}
-	l, err := events.List(ctx, c, calID)
-	if err != nil {
-		return cache.Changes{}, err
+	var (
+		rows   []events.Row
+		stable bool
+		at     = map[string]int{} // union: ID -> index in rows
+		before = baseline
+	)
+	for range MaxListings {
+		l, err := events.List(ctx, c, calID)
+		if err != nil {
+			return cache.Changes{}, err
+		}
+		after, err := events.Latest(ctx, c, calID)
+		if err != nil {
+			return cache.Changes{}, err
+		}
+		if after == before && (l.Total < 0 || len(l.Rows) == l.Total) {
+			rows, stable = l.Rows, true
+			break
+		}
+		for _, r := range l.Rows { // the later copy wins
+			if i, ok := at[r.ID]; ok {
+				rows[i] = r
+				continue
+			}
+			at[r.ID] = len(rows)
+			rows = append(rows, r)
+		}
+		before = after
 	}
-	after, err := events.Latest(ctx, c, calID)
-	if err != nil {
-		return cache.Changes{}, err
-	}
-	out := make([]cache.Row, 0, len(l.Rows))
-	listed := make(map[string]bool, len(l.Rows))
-	for _, row := range l.Rows {
+	out := make([]cache.Row, 0, len(rows))
+	listed := make(map[string]bool, len(rows))
+	for _, row := range rows {
 		out = append(out, toCache(row))
 		listed[row.ID] = true
 	}
-	if after != head || (l.Total >= 0 && len(l.Rows) != l.Total) {
-		kept, err := missing(ctx, c, db, calID, listed)
+	var note error
+	if !stable {
+		kept, unverified, err := missing(ctx, c, db, calID, listed)
 		if err != nil {
 			return cache.Changes{}, err
 		}
 		out = append(out, kept...)
+		if unverified > 0 {
+			note = &UnverifiedError{Rows: unverified}
+		}
 	}
-	ch, err := db.ReplaceCalendar(ctx, calID, head, out, now)
+	ch, err := db.ReplaceCalendar(ctx, calID, baseline, out, now)
 	if err != nil {
 		return cache.Changes{}, storeErr("storing calendar %s: %w", calID, err)
 	}
-	return ch, nil
+	return ch, note
 }
 
 // missing re-reads the cached rows of calID absent from listed and returns
-// those Proton still has.
-func missing(ctx context.Context, c *api.Client, db *cache.Cache, calID string, listed map[string]bool) ([]cache.Row, error) {
+// those to keep: as Proton returned them, or as cached when Proton refused
+// the read (counted in unverified). A session-wide failure is returned.
+func missing(ctx context.Context, c *api.Client, db *cache.Cache, calID string, listed map[string]bool) (kept []cache.Row, unverified int, err error) {
 	cached, err := db.Events(ctx, calID)
 	if err != nil {
-		return nil, storeErr("reading calendar %s: %w", calID, err)
+		return nil, 0, storeErr("reading calendar %s: %w", calID, err)
 	}
-	var kept []cache.Row
 	for _, e := range cached {
 		if listed[e.ID] {
 			continue
@@ -284,13 +329,21 @@ func missing(ctx context.Context, c *api.Client, db *cache.Cache, calID string, 
 		row, err := events.Get(ctx, c, calID, e.ID)
 		switch {
 		case errors.Is(err, events.ErrGone):
+		case err != nil && api.SessionWide(ctx, err):
+			return nil, 0, fmt.Errorf("event %s: %w", e.ID, err)
 		case err != nil:
-			return nil, fmt.Errorf("event %s: %w", e.ID, err)
+			raw, err := db.Raw(ctx, calID, e.ID)
+			if err != nil {
+				return nil, 0, storeErr("reading event %s: %w", e.ID, err)
+			}
+			kept = append(kept, cache.Row{ID: e.ID, UID: e.UID, Start: e.Start, End: e.End, FullDay: e.FullDay,
+				RecurrenceID: e.RecurrenceID, RRule: e.RRule, LastEditTime: e.LastEditTime, Raw: raw})
+			unverified++
 		default:
 			kept = append(kept, toCache(row))
 		}
 	}
-	return kept, nil
+	return kept, unverified, nil
 }
 
 // incremental applies the feed after cursor. cause is set (one of the Cause

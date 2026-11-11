@@ -136,3 +136,13 @@ func TestWatchReadsTheMappedError(t *testing.T) {
 		}
 	}
 }
+
+// The note of a listing that never settled is shown as is: it holds a count
+// only.
+func TestCalendarErrorShowsTheUnverifiedNote(t *testing.T) {
+	t.Parallel()
+	note := &syncer.UnverifiedError{Rows: 2}
+	if got := calendarError(context.Background(), fmt.Errorf("x: %w", note)); got != note.Error() {
+		t.Errorf("calendarError = %q, want %q", got, note.Error())
+	}
+}

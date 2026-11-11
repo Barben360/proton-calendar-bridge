@@ -179,11 +179,14 @@ func syncResult(rep syncer.Report, describe func(error) string) SyncResult {
 func calendarError(ctx context.Context, err error) string {
 	var (
 		de *syncer.ResyncDeferredError
+		ue *syncer.UnverifiedError
 		ae *api.Error
 	)
 	switch {
 	case errors.As(err, &de):
 		return de.Error()
+	case errors.As(err, &ue):
+		return ue.Error()
 	case errors.As(err, &ae):
 		return protonDown(ae).Error()
 	case ctx.Err() != nil:
