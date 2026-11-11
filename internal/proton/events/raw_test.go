@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,5 +97,41 @@ func TestGetRefusesEmptyID(t *testing.T) {
 	}
 	if n := f.Calls("GET", "/calendar/v1/"+cal+"/events/"); n != 0 {
 		t.Errorf("%d requests sent for an empty ID", n)
+	}
+}
+
+// Without Total, a page shorter than PageSize ends the listing.
+func TestListAllStopsOnShortPageWithoutTotal(t *testing.T) {
+	t.Parallel()
+	page := func(from, n int) string {
+		rows := make([]string, n)
+		for i := range rows {
+			rows[i] = fmt.Sprintf(`{"ID":"e%d","UID":"u"}`, from+i)
+		}
+		return `{"Code":1000,"Events":[` + strings.Join(rows, ",") + `]}`
+	}
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("Page") {
+		case "0":
+			_, _ = fmt.Fprint(w, page(0, events.PageSize))
+		case "1":
+			_, _ = fmt.Fprint(w, page(events.PageSize, 50))
+		default:
+			http.Error(w, `{"Code":2000}`, http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	c := api.New(api.Tokens{UID: "u", AccessToken: "a", RefreshToken: "r"}, api.Options{
+		BaseURL: ts.URL, Limiter: rate.NewLimiter(rate.Inf, 1), HTTP: &http.Client{Timeout: 5 * time.Second},
+	})
+	rows, err := events.ListAll(t.Context(), c, "c")
+	if err != nil || len(rows) != events.PageSize+50 {
+		t.Fatalf("ListAll: %v, %d rows; want %d", err, len(rows), events.PageSize+50)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Errorf("%d requests, want 2 (the short page ends the listing)", n)
 	}
 }
