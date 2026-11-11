@@ -120,8 +120,10 @@ type rig struct {
 	mk   func() (service.API, error)
 	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
 	ctrlC bool
-	out   bytes.Buffer
-	errb  bytes.Buffer
+	// cancelled is when ctrlC fired during the last run; zero if it did not.
+	cancelled time.Time
+	out       bytes.Buffer
+	errb      bytes.Buffer
 }
 
 // stubRig is a rig on a stub service, without a Proton: nothing can reach one.
@@ -183,6 +185,7 @@ func (r *rig) run(args ...string) exitcode.Code {
 	r.t.Helper()
 	r.out.Reset()
 	r.errb.Reset()
+	r.cancelled = time.Time{}
 	io := cli.IO{Stdout: &r.out, Stderr: &r.errb, Term: r.term, Env: func(k string) string { return r.env[k] }}
 	switch {
 	case r.svc != nil:
@@ -193,7 +196,10 @@ func (r *rig) run(args ...string) exitcode.Code {
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()
 	if r.ctrlC {
-		r.term.onBlock = cancel
+		r.term.onBlock = func() {
+			r.cancelled = time.Now()
+			cancel()
+		}
 	}
 	return cli.Main(ctx, args, io)
 }

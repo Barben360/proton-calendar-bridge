@@ -325,9 +325,13 @@ func TestCtrlCEndsEveryPrompt(t *testing.T) {
 			}
 			r.term = &fakeTerm{interactive: true, block: true}
 			r.ctrlC = true
-			start := time.Now()
 			r.want(exitcode.Blocked, "login", "--json")
-			if d := time.Since(start); d > 10*time.Second {
+			// Timed from the cancellation, not the start: SRP and the key
+			// derivation before the prompt are slow under -race.
+			if r.cancelled.IsZero() {
+				t.Fatal("the command never waited on the terminal")
+			}
+			if d := time.Since(r.cancelled); d > 10*time.Second {
 				t.Errorf("the prompt outlived the cancellation by %v", d)
 			}
 			e := r.envelope()
