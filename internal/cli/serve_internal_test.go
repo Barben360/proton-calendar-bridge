@@ -97,11 +97,23 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 // Go's server default is TLS 1.2 today; the listener does not rely on it.
 func TestListenerTLSNeedsTLS12(t *testing.T) {
 	t.Parallel()
-	conf, fp, err := listenerTLS(slog.New(slog.DiscardHandler), net.IPv4zero, filepath.Join(t.TempDir(), "tls"), config.CalDAV{Listen: "0.0.0.0:8443"})
+	conf, fp, err := listenerTLS(slog.New(slog.DiscardHandler), io.Discard, net.IPv4zero, filepath.Join(t.TempDir(), "tls"), config.CalDAV{Listen: "0.0.0.0:8443"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if conf == nil || conf.MinVersion != tls.VersionTLS12 || len(conf.Certificates) != 1 || fp == "" {
 		t.Fatalf("TLS config = %+v, fingerprint %q; want TLS 1.2 minimum and the certificate", conf, fp)
+	}
+}
+
+func TestURLHostIsLocalhostOnlyForTheUsualLoopbacks(t *testing.T) {
+	t.Parallel()
+	for ip, want := range map[string]string{"127.0.0.1": "localhost", "::1": "localhost", "127.0.0.2": "127.0.0.2", "192.168.1.5": "192.168.1.5"} {
+		if got := urlHost(config.CalDAV{}, net.ParseIP(ip)); got != want {
+			t.Errorf("urlHost(%s) = %q, want %q", ip, got, want)
+		}
+	}
+	if got := urlHost(config.CalDAV{Hostnames: []string{"pcb.lan"}}, net.ParseIP("127.0.0.1")); got != "pcb.lan" {
+		t.Errorf("urlHost with a hostname = %q", got)
 	}
 }

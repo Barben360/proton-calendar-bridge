@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -63,12 +64,21 @@ type Result struct {
 	Fingerprint string
 	Generated   bool
 	Reason      string
+	// Unusable: the stored pair could not be read or did not match, and was
+	// replaced (pcb serve warns: a new fingerprint to accept).
+	Unusable bool
+	// Repaired lists the paths whose too-wide modes were narrowed (the
+	// directory to 0700, the key to 0600).
+	Repaired []string
 }
 
 // SelfSigned returns the generated certificate of o.Dir, reusing it unless
 // it is missing or unusable, does not cover a configured hostname or a
 // specific bind IP, or expires within RenewBefore; then it generates a new
 // one (ECDSA P-256, Validity) and writes it atomically, the key 0600.
+// On Unix, a directory or a reused key owned by another user is refused,
+// and a directory wider than 0700 or a reused key wider than 0600 is
+// narrowed (ruling M3-R32).
 func SelfSigned(o Options) (Result, error) {
 	if o.Now == nil {
 		o.Now = time.Now
@@ -77,24 +87,60 @@ func SelfSigned(o Options) (Result, error) {
 		o.InterfaceAddrs = net.InterfaceAddrs
 	}
 	now := o.Now()
-	reason := "no certificate yet"
+	repaired, err := secure(o.Dir, 0o700, true)
+	if err != nil {
+		return Result{}, err
+	}
+	reason, unusable := "no certificate yet", false
 	cert, leaf, err := LoadPair(CertPath(o.Dir), KeyPath(o.Dir))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		reason = "the stored certificate or key is unusable"
+		reason, unusable = "the stored certificate or key is unusable", true
 	default:
 		reason = staleReason(leaf, o, now)
 		if reason == "" {
-			return Result{Certificate: cert, Leaf: leaf, Fingerprint: Fingerprint(leaf.Raw)}, nil
+			fixed, err := secure(KeyPath(o.Dir), 0o600, false)
+			if err != nil {
+				return Result{}, err
+			}
+			return Result{Certificate: cert, Leaf: leaf, Fingerprint: Fingerprint(leaf.Raw), Repaired: append(repaired, fixed...)}, nil
 		}
 	}
 	res, err := generate(o, now)
 	if err != nil {
 		return Result{}, err
 	}
-	res.Generated, res.Reason = true, reason
+	res.Generated, res.Reason, res.Unusable, res.Repaired = true, reason, unusable, repaired
 	return res, nil
+}
+
+// secure refuses path when another user owns it and narrows its mode to
+// want; it returns path when it narrowed it. A missing path is left to be
+// created. Nothing is checked on Windows (no Unix modes or owners).
+func secure(path string, want fs.FileMode, dir bool) ([]string, error) {
+	if runtime.GOOS == "windows" {
+		return nil, nil
+	}
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case info.IsDir() != dir:
+		return nil, fmt.Errorf("%s is not a %s", path, map[bool]string{true: "directory", false: "regular file"}[dir])
+	}
+	if uid, ok := ownerOf(info); ok && uid != os.Getuid() {
+		return nil, fmt.Errorf("%s is owned by another user (uid %d): pcb will not use it", path, uid)
+	}
+	if info.Mode().Perm()&^want == 0 {
+		return nil, nil
+	}
+	if err := os.Chmod(path, want); err != nil {
+		return nil, fmt.Errorf("restrict %s: %w", path, err)
+	}
+	return []string{path}, nil
 }
 
 // staleReason says why leaf must be replaced, "" if it can be kept.

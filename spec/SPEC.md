@@ -489,7 +489,8 @@ neither; when set, TLS on any bind).
 
 ## 15. Observability
 
-Structured JSON logs (no event content, no secrets; IDs only), `pcb status`,
+Structured text logs on stderr (`log/slog` key=value lines, M3 `pcb serve`;
+no event content, no secrets; IDs only), `pcb status`,
 `pcb doctor`, optional Prometheus endpoint (sync lag, Proton errors, rate
 limit waits, login state), and alerts as status entries (session lost,
 captcha needed, sync stalled) that `doctor` and `status` surface [call].

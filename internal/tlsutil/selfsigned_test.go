@@ -278,3 +278,104 @@ func TestLoadPairReadsAUserCertificate(t *testing.T) {
 		t.Fatal("LoadPair of a missing file succeeded")
 	}
 }
+
+// The fields NSS (Thunderbird) checks on a self-signed server certificate:
+// an end entity (a CA is refused as a server certificate), digital
+// signature only, server auth, and a new serial on each generation (a
+// reused issuer and serial is refused after a replacement).
+func TestSelfSignedCertFieldsForNSS(t *testing.T) {
+	dir := t.TempDir()
+	at := now
+	o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&at), InterfaceAddrs: noInterfaces(t)}
+	first, err := tlsutil.SelfSigned(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := first.Leaf
+	if !leaf.BasicConstraintsValid || leaf.IsCA {
+		t.Errorf("basic constraints valid=%v CA=%v, want an end entity", leaf.BasicConstraintsValid, leaf.IsCA)
+	}
+	if leaf.KeyUsage != x509.KeyUsageDigitalSignature {
+		t.Errorf("key usage = %v, want digital signature only", leaf.KeyUsage)
+	}
+	if !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}) {
+		t.Errorf("ext key usage = %v, want server auth only", leaf.ExtKeyUsage)
+	}
+	at = leaf.NotAfter.Add(-time.Hour) // forces a regeneration
+	second, err := tlsutil.SelfSigned(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Generated || second.Leaf.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
+		t.Errorf("regenerated=%v with serial %v, want a new serial (first %v)", second.Generated, second.Leaf.SerialNumber, leaf.SerialNumber)
+	}
+}
+
+func TestSelfSignedRepairsModesOnReuse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	dir := filepath.Join(t.TempDir(), "tls")
+	o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&now), InterfaceAddrs: noInterfaces(t)}
+	first, err := tlsutil.SelfSigned(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tlsutil.KeyPath(dir), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tlsutil.SelfSigned(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Generated || res.Fingerprint != first.Fingerprint {
+		t.Fatalf("reuse regenerated (%q)", res.Reason)
+	}
+	for path, want := range map[string]fs.FileMode{dir: 0o700, tlsutil.KeyPath(dir): 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("%s mode %o after reuse, want %o", path, info.Mode().Perm(), want)
+		}
+	}
+	if len(res.Repaired) != 2 {
+		t.Errorf("Repaired = %v, want the directory and the key", res.Repaired)
+	}
+}
+
+func TestSelfSignedRefusesFilesOfAnotherUser(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix owners")
+	}
+	for _, foreign := range []string{"directory", "key"} {
+		t.Run(foreign, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "tls")
+			o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&now), InterfaceAddrs: noInterfaces(t)}
+			if _, err := tlsutil.SelfSigned(o); err != nil {
+				t.Fatal(err)
+			}
+			target := map[string]string{"directory": dir, "key": tlsutil.KeyPath(dir)}[foreign]
+			target, _ = filepath.Abs(target)
+			restore := tlsutil.SetOwner(func(fi fs.FileInfo) (int, bool) {
+				if fi.Name() == filepath.Base(target) {
+					return os.Getuid() + 1, true
+				}
+				return os.Getuid(), true
+			})
+			defer restore()
+			before, _ := os.ReadFile(tlsutil.KeyPath(dir))
+			_, err := tlsutil.SelfSigned(o)
+			if err == nil || !strings.Contains(err.Error(), "owned by another user") {
+				t.Fatalf("SelfSigned with a foreign %s = %v, want a refusal", foreign, err)
+			}
+			if after, _ := os.ReadFile(tlsutil.KeyPath(dir)); !slices.Equal(before, after) {
+				t.Error("the refused start replaced the key")
+			}
+		})
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,19 +153,36 @@ type serveStub struct {
 	clients  []service.Client
 	stopWith chan error
 	served   chan struct{} // closed when Serve returns
+	// stopOnCancel is what Serve returns when its context ends (nil: a
+	// normal stop): an error the loop stops on while pcb serve stops.
+	stopOnCancel error
+
+	// blockCheck makes CheckClient (the first call of every authenticated
+	// request) wait, after closing checkEntered, until checkRelease is
+	// closed or Serve's context ends, which it records in cancelledInFlight.
+	blockCheck        bool
+	checkEntered      chan struct{}
+	checkRelease      chan struct{}
+	cancelledInFlight atomic.Bool
+	mu                sync.Mutex
+	serveCtx          context.Context
 }
 
 func newServeStub() *serveStub {
-	return &serveStub{stopWith: make(chan error, 1), served: make(chan struct{})}
+	return &serveStub{stopWith: make(chan error, 1), served: make(chan struct{}),
+		checkEntered: make(chan struct{}), checkRelease: make(chan struct{})}
 }
 
 func (s *serveStub) Serve(ctx context.Context, o service.ServeOptions) error {
 	defer close(s.served)
+	s.mu.Lock()
+	s.serveCtx = ctx
+	s.mu.Unlock()
 	o.Ready()
 	o.OnPass(service.WatchPass{Result: service.SyncResult{Calendars: []service.CalendarSync{{ID: "cal-1", Name: "Secret name", Mode: "incremental", Added: 1, Events: 2}}}, Next: 30 * time.Second})
 	select {
 	case <-ctx.Done():
-		return nil
+		return s.stopOnCancel
 	case err := <-s.stopWith:
 		o.OnPass(service.WatchPass{Err: err})
 		return err
@@ -172,6 +190,22 @@ func (s *serveStub) Serve(ctx context.Context, o service.ServeOptions) error {
 }
 
 func (s *serveStub) Clients(context.Context) ([]service.Client, error) { return s.clients, nil }
+
+func (s *serveStub) CheckClient(context.Context, string, string) (bool, time.Duration) {
+	if !s.blockCheck {
+		return false, 0
+	}
+	close(s.checkEntered)
+	s.mu.Lock()
+	ctx := s.serveCtx
+	s.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		s.cancelledInFlight.Store(true)
+	case <-s.checkRelease:
+	}
+	return false, 0
+}
 
 func options(t *testing.T, client *http.Client, url string) *http.Response {
 	t.Helper()
@@ -517,4 +551,160 @@ func TestServeEndToEndPropfindsTheHomeSet(t *testing.T) {
 	if strings.Contains(s.out.String()+s.errb.String(), sec.Password) {
 		t.Error("the client password reached pcb serve's output")
 	}
+}
+
+// failingListener accepts nothing: the server's Serve returns its error.
+type failingListener struct{ net.Listener }
+
+func (failingListener) Accept() (net.Conn, error) {
+	return nil, errors.New("accept: the listener broke")
+}
+
+func TestServeListenerFailureIsExit20(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, func(ln net.Listener) net.Listener { return failingListener{ln} })
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if !strings.Contains(s.errb.String(), "Error: the CalDAV listener failed") {
+		t.Errorf("stderr = %q", s.errb.String())
+	}
+	select {
+	case <-stub.served:
+	default:
+		t.Error("pcb serve exited with the sync loop still running")
+	}
+}
+
+// The listener fails while the sync loop stops on an error of its own: the
+// loop's error (a person is needed) wins over the listener's.
+func TestServeSyncStopErrorWinsOverAListenerFailure(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.stopOnCancel = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("Proton ended the session"), Hint: "run pcb login"}
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, func(ln net.Listener) net.Listener { return failingListener{ln} })
+	if code := s.exit(); code != exitcode.MustAct {
+		t.Fatalf("exit %d, want 10 (the sync loop's)\nstderr: %s", code, s.errb.String())
+	}
+	if !strings.Contains(s.errb.String(), "Hint: run pcb login") {
+		t.Errorf("stderr = %q", s.errb.String())
+	}
+}
+
+// closeSignal closes closed when the server closes its listener: the first
+// step of Shutdown, before it waits for the requests in flight.
+type closeSignal struct {
+	net.Listener
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *closeSignal) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Listener.Close()
+}
+
+// On a signal the listener drains first: a request in flight finishes with
+// the sync loop (and its cache handle) still running; the loop is cancelled
+// after.
+func TestServeDrainsBeforeCancellingTheSyncLoop(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.blockCheck = true
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	closed := make(chan struct{})
+	s := startServe(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} })
+	addr := s.listening()
+	status := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(context.Background(), "PROPFIND", "http://"+addr+"/dav/calendars/me/", nil)
+		req.SetBasicAuth("u", "p")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	<-stub.checkEntered
+	s.stop() // SIGTERM with the request in flight
+	<-closed // the drain has begun
+	close(stub.checkRelease)
+	if got := <-status; got != http.StatusUnauthorized {
+		t.Errorf("the request in flight got %d, want its own answer (401)", got)
+	}
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d", code)
+	}
+	if stub.cancelledInFlight.Load() {
+		t.Error("the sync loop was cancelled while a request was still in flight")
+	}
+}
+
+func TestServeWarnsAboutCertificatesToCheck(t *testing.T) {
+	t.Parallel()
+	userCert := func(t *testing.T, issued time.Time) string {
+		dir := t.TempDir()
+		if _, err := tlsutil.SelfSigned(tlsutil.Options{Dir: dir, Hostnames: []string{"pcb.example"}, BindIP: net.ParseIP("192.0.2.1"),
+			Now: func() time.Time { return issued }, InterfaceAddrs: func() ([]net.Addr, error) { return nil, nil }}); err != nil {
+			t.Fatal(err)
+		}
+		return "[caldav]\ntls_cert = \"" + tlsutil.CertPath(dir) + "\"\ntls_key = \"" + tlsutil.KeyPath(dir) + "\"\n"
+	}
+	run := func(t *testing.T, r *rig, wrap func(net.Listener) net.Listener) string {
+		r.svc = newServeStub()
+		s := startServe(t, r, wrap)
+		s.listening()
+		s.stop()
+		if code := s.exit(); code != exitcode.OK {
+			t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+		}
+		return s.errb.String()
+	}
+	withConfig := func(t *testing.T, extra string) *rig {
+		r := stubRig(t, &newServeStub().stubAPI)
+		if err := os.WriteFile(config.Path(r.dirs), []byte("[proton]\nbase_url = \"http://127.0.0.1:1\"\n"+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	validity := tlsutil.Validity
+	for name, tc := range map[string]struct {
+		issued time.Time
+		want   string
+	}{
+		"valid":           {time.Now(), ""},
+		"under 30 days":   {time.Now().Add(-validity + 10*24*time.Hour), "Warning: the certificate of caldav.tls_cert expires on "},
+		"already expired": {time.Now().Add(-validity - 24*time.Hour), "Warning: the certificate of caldav.tls_cert expired on "},
+	} {
+		t.Run("user certificate "+name, func(t *testing.T) {
+			t.Parallel()
+			errs := run(t, withConfig(t, userCert(t, tc.issued)), nil)
+			if tc.want == "" && strings.Contains(errs, "Warning:") || tc.want != "" && !strings.Contains(errs, tc.want) {
+				t.Errorf("stderr = %q, want %q", errs, tc.want)
+			}
+		})
+	}
+	t.Run("unusable self-signed pair", func(t *testing.T) {
+		t.Parallel()
+		r := withConfig(t, "")
+		unspecified := func(ln net.Listener) net.Listener { return fakeAddr{ln, net.IPv4zero} }
+		if errs := run(t, r, unspecified); strings.Contains(errs, "Warning:") {
+			t.Fatalf("first generation warned: %q", errs)
+		}
+		dir := filepath.Join(r.dirs.State, "tls")
+		if err := os.WriteFile(tlsutil.KeyPath(dir), []byte("garbage"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if errs := run(t, r, unspecified); !strings.Contains(errs, "Warning: the stored self-signed certificate was unusable") {
+			t.Errorf("stderr = %q", errs)
+		}
+	})
 }

@@ -158,3 +158,74 @@ func TestClientsCheck(t *testing.T) {
 		t.Errorf("unreadable list: %+v", got)
 	}
 }
+
+func TestBindResolvesOnceWithATimeoutAndListensFamily(t *testing.T) {
+	calls := 0
+	var budget time.Duration
+	b := &doctor.Bind{Listen: "pcb.lan:8443", Lookup: func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		calls++
+		if d, ok := ctx.Deadline(); ok {
+			budget = time.Until(d)
+		}
+		if host != "pcb.lan" {
+			t.Errorf("looked up %q", host)
+		}
+		// net.Listen("tcp", …) binds the first IPv4 address.
+		return []net.IPAddr{{IP: net.ParseIP("fd00::7")}, {IP: net.ParseIP("192.168.1.5")}}, nil
+	}}
+	cc := config.CalDAV{Listen: b.Listen}
+	ctx := context.Background()
+	lr := doctor.ListenerCheck{CalDAV: cc, Bind: b}.Run(ctx)
+	cr := doctor.CertificateCheck{CalDAV: cc, TLSDir: filepath.Join(t.TempDir(), "tls"), Bind: b}.Run(ctx)
+	if calls != 1 {
+		t.Errorf("%d lookups in one doctor run, want 1", calls)
+	}
+	if budget <= 2*time.Second || budget > 3*time.Second {
+		t.Errorf("lookup budget %v, want 3 s", budget)
+	}
+	if ip, err := b.IP(ctx); err != nil || !ip.Equal(net.ParseIP("192.168.1.5")) {
+		t.Errorf("IP = %v, %v; want the IPv4 address net.Listen binds", ip, err)
+	}
+	if lr.Status != doctor.StatusOK || cr.Status != doctor.StatusSkip {
+		t.Errorf("listener %+v, certificate %+v", lr, cr)
+	}
+}
+
+func TestBindLookupEndsWithTheContext(t *testing.T) {
+	blocking := func(ctx context.Context, _ string) ([]net.IPAddr, error) { <-ctx.Done(); return nil, ctx.Err() }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "pcb.lan:8443"}, Bind: &doctor.Bind{Listen: "pcb.lan:8443", Lookup: blocking}}.Run(ctx)
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "cannot resolve pcb.lan") {
+		t.Errorf("cancelled run: %+v", got)
+	}
+	b := &doctor.Bind{Listen: "pcb.lan:8443", Lookup: blocking, Timeout: 10 * time.Millisecond}
+	if _, err := b.IP(context.Background()); err == nil {
+		t.Error("a lookup past its timeout succeeded")
+	}
+}
+
+func TestCertificateCheckBindIPAndDirectoryMode(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	selfSigned(t, dir) // covers 192.168.1.5
+	moved := config.CalDAV{Listen: "10.0.0.7:8443"}
+	got := doctor.CertificateCheck{CalDAV: moved, TLSDir: dir, Now: func() time.Time { return day0 }}.Run(ctx)
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "10.0.0.7") {
+		t.Errorf("uncovered bind IP: %+v", got)
+	}
+	same := config.CalDAV{Listen: "192.168.1.5:8443"}
+	if got := (doctor.CertificateCheck{CalDAV: same, TLSDir: dir, Now: func() time.Time { return day0 }}).Run(ctx); got.Status != doctor.StatusOK {
+		t.Errorf("covered bind IP: %+v", got)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.CertificateCheck{CalDAV: same, TLSDir: dir, Now: func() time.Time { return day0 }}.Run(ctx)
+	if got.Status != doctor.StatusError || !strings.Contains(got.Fix, "chmod 700") {
+		t.Errorf("directory 0755: %+v", got)
+	}
+}

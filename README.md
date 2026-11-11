@@ -80,8 +80,10 @@ hostnames = ["pcb.lan"]        # names clients use; the first one is in the prin
 A loopback address serves plain HTTP; any other one serves TLS 1.2+ only (with `tls_cert`/`tls_key`, every
 address does). Without `tls_cert`/`tls_key`, pcb
 generates a self-signed certificate (ECDSA P-256, 825 days, for the hostnames, `localhost` and the bind address
-or, on `0.0.0.0`/`[::]`, every interface address) in `tls/` of the state directory (key 0600), reuses it, and
-replaces it when a hostname is no longer covered or under 30 days remain. `pcb serve` and `pcb doctor` print its
+or, on `0.0.0.0`/`[::]`, every interface address) in `tls/` of the state directory (directory 0700, key 0600,
+narrowed again at each start; files of another user are refused), reuses it, and replaces it when a hostname or
+a specific bind address is no longer covered, under 30 days remain, or the stored pair is unreadable or
+mismatched (with a warning). A user certificate expired or within 30 days of expiry gets a warning at start. `pcb serve` and `pcb doctor` print its
 SHA-256 fingerprint: Thunderbird shows a certificate exception dialog on first use; confirm the exception only
 when its SHA-256 fingerprint is the printed one (again after a replacement).
 

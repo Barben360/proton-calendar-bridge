@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -95,10 +96,12 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 			OnPass: func(p service.WatchPass) { logPass(log, p) },
 		})
 	}()
+	// finish stops the sync loop and returns its error over err: a person
+	// is needed, which matters more than a listener that failed meanwhile.
 	finish := func(err error) error {
 		stopSync()
-		if serr := <-synced; err == nil {
-			err = serr
+		if serr := <-synced; serr != nil {
+			return serr
 		}
 		return err
 	}
@@ -116,7 +119,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 			Hint: "stop what uses that address, or choose another with --listen or [caldav] listen"})
 	}
 	ip := bindIP(ln.Addr())
-	tlsConf, fingerprint, err := listenerTLS(log, ip, tlsDir, cc)
+	tlsConf, fingerprint, err := listenerTLS(log, a.Stderr, ip, tlsDir, cc)
 	if err != nil {
 		_ = ln.Close()
 		return finish(err)
@@ -182,7 +185,11 @@ func bindIP(a net.Addr) net.IP {
 // certificate when [caldav] names one (on any bind: the user asked for
 // TLS), else plain HTTP on a loopback bind, else the self-signed certificate
 // of tlsDir. An address that is not a TCP one counts as non-loopback.
-func listenerTLS(log *slog.Logger, ip net.IP, tlsDir string, cc config.CalDAV) (*tls.Config, string, error) {
+// Certificates a person should look at get a "Warning:" line on warn (the
+// human-readable stderr): a user certificate expired or within 30 days of
+// expiry (ruling M3-R32), a stored self-signed pair that was unusable and
+// replaced (ruling M3-R31: a new fingerprint to accept).
+func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc config.CalDAV) (*tls.Config, string, error) {
 	var cert tls.Certificate
 	var fingerprint string
 	switch {
@@ -195,6 +202,13 @@ func listenerTLS(log *slog.Logger, ip net.IP, tlsDir string, cc config.CalDAV) (
 		}
 		cert, fingerprint = c, tlsutil.Fingerprint(leaf.Raw)
 		log.Info("tls certificate from the configuration", "fingerprint", fingerprint, "not_after", leaf.NotAfter.UTC().Format(time.RFC3339))
+		expires, now := leaf.NotAfter.UTC().Format(time.DateOnly), time.Now()
+		switch {
+		case !now.Before(leaf.NotAfter):
+			fmt.Fprintf(warn, "Warning: the certificate of caldav.tls_cert expired on %s: clients will refuse it; replace it\n", expires)
+		case !now.Add(tlsutil.RenewBefore).Before(leaf.NotAfter):
+			fmt.Fprintf(warn, "Warning: the certificate of caldav.tls_cert expires on %s, in less than 30 days: renew it\n", expires)
+		}
 	case ip != nil && ip.IsLoopback():
 		return nil, "", nil
 	default:
@@ -205,6 +219,12 @@ func listenerTLS(log *slog.Logger, ip net.IP, tlsDir string, cc config.CalDAV) (
 		}
 		cert, fingerprint = res.Certificate, res.Fingerprint
 		notAfter := res.Leaf.NotAfter.UTC().Format(time.RFC3339)
+		for _, p := range res.Repaired {
+			log.Warn("tls permissions narrowed", "path", p)
+		}
+		if res.Unusable {
+			fmt.Fprintf(warn, "Warning: the stored self-signed certificate was unusable and was replaced: accept the new one in Thunderbird after checking its fingerprint %s\n", fingerprint)
+		}
 		if res.Generated {
 			log.Info("tls certificate generated", "fingerprint", fingerprint, "reason", res.Reason, "not_after", notAfter)
 		} else {
@@ -240,13 +260,14 @@ func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, 
 }
 
 // urlHost is the host of the printed URL: the first configured hostname,
-// else localhost on loopback, else the bind IP; for an unspecified bind,
-// the first non-loopback interface address (IPv4 first), else localhost.
+// else localhost for 127.0.0.1 and ::1 (what localhost resolves to), else
+// the bind IP; for an unspecified bind, the first non-loopback interface
+// address (IPv4 first), else localhost.
 func urlHost(cc config.CalDAV, ip net.IP) string {
 	switch {
 	case len(cc.Hostnames) > 0:
 		return cc.Hostnames[0]
-	case ip == nil || ip.IsLoopback():
+	case ip == nil || ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback):
 		return "localhost"
 	case !ip.IsUnspecified():
 		return ip.String()

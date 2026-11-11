@@ -59,13 +59,14 @@ func doctorChecks() []doctor.Check {
 	if err != nil { // ConfigCheck already reports it
 		return checks
 	}
+	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
 	return append(checks,
 		doctor.FileModeCheck{Label: "key file", Path: cfg.Secrets.KeyFile, Want: 0o600},
 		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
 		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile},
 		doctor.CacheCheck{StateDir: dirs.State},
-		doctor.ListenerCheck{CalDAV: cfg.CalDAV},
-		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls")},
+		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind},
+		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind},
 		doctor.ClientsCheck{StateDir: dirs.State})
 }
 
