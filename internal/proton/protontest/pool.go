@@ -17,7 +17,9 @@ import (
 // lock, so sharing it would make parallel logins queue). What a test changes
 // lives in its Fake (calendars, challenges, failures, issued tokens) and the
 // sessions it opened die with it; a backend whose account a test changed
-// (AddAddress) is closed instead of given back.
+// (AddAddress) is closed instead of given back. Accounts other tests created
+// stay on a reused backend: a test must never assume an unknown username is
+// absent. Pooled backends are not closed at exit; the process ends anyway.
 var pool struct {
 	mu   sync.Mutex
 	idle []*pooled
