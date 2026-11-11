@@ -54,6 +54,7 @@ type userCalendars struct {
 
 type calendarRec struct {
 	id         string
+	owner      string // username
 	def        Calendar
 	passphrase string
 	ring       *crypto.KeyRing // unlocked calendar key
@@ -95,7 +96,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	rec := &calendarRec{id: id, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
+	rec := &calendarRec{id: id, owner: username, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
 	if c.ExtraLockedKey {
 		other, err := crypto.GenerateKey("Old calendar key", "", "x25519", 0)
 		if err != nil {

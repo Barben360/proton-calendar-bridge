@@ -1,11 +1,16 @@
 package protontest_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -326,5 +331,122 @@ func TestFakeAddEventAtPlacesTheRowInTheListing(t *testing.T) {
 	}
 	if ans, _, _ := feed(t, f, tk, cal, head); len(ans.CalendarEvents) != 1 || ans.CalendarEvents[0].ID != mid || ans.CalendarEvents[0].Action != 1 {
 		t.Errorf("feed after the head = %+v, want the create of %s", ans, mid)
+	}
+}
+
+// servedParts is a row's crypto fields as served.
+type servedParts struct {
+	Author                             string
+	SharedKeyPacket, CalendarKeyPacket *string
+	SharedEvents, CalendarEvents       []servedPart
+	AttendeesEvents, PersonalEvents    []servedPart
+}
+
+type servedPart struct {
+	Type                    int
+	Data, Signature, Author string
+}
+
+func getParts(t *testing.T, f *protontest.Fake, tk api.Tokens, cal, id string) (servedParts, json.RawMessage) {
+	t.Helper()
+	var out struct{ Event json.RawMessage }
+	if st, _ := rawGet(t, f, tk, "/calendar/v1/"+cal+"/events/"+url.PathEscape(id), &out); st != 200 {
+		t.Fatalf("get: HTTP %d", st)
+	}
+	var p servedParts
+	if err := json.Unmarshal(out.Event, &p); err != nil {
+		t.Fatal(err)
+	}
+	return p, out.Event
+}
+
+// TestFakePartsAreRealPGP checks the parts with gopenpgp alone: an event
+// without Card (as M2 tests add them) gets a minimal card, signed in clear by
+// the address key and encrypted under a session key wrapped to the calendar
+// key; with nothing for them, the calendar encrypted, attendees and personal
+// parts are absent.
+func TestFakePartsAreRealPGP(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "A"})
+	id := f.AddEvent(cal, protontest.Event{UID: "u1", Start: 1762851600, End: 1762855200})
+	p, _ := getParts(t, f, tk, cal, id)
+
+	if len(p.SharedEvents) != 2 || len(p.CalendarEvents) != 1 || len(p.AttendeesEvents) != 0 || len(p.PersonalEvents) != 0 {
+		t.Fatalf("parts: %d shared, %d calendar, %d attendees, %d personal; want 2, 1, 0, 0",
+			len(p.SharedEvents), len(p.CalendarEvents), len(p.AttendeesEvents), len(p.PersonalEvents))
+	}
+	if p.SharedKeyPacket == nil || p.CalendarKeyPacket != nil {
+		t.Fatalf("key packets: shared %v calendar %v; want one, null", p.SharedKeyPacket, p.CalendarKeyPacket)
+	}
+	addr := f.AddressKeyRing()
+	signed := p.SharedEvents[0]
+	if signed.Type != 2 || signed.Author == "" || signed.Author != p.Author {
+		t.Errorf("shared signed part: Type %d Author %q (row %q); want 2 and the row's author", signed.Type, signed.Author, p.Author)
+	}
+	for _, l := range []string{"\r\nUID:u1\r\n", "\r\nDTSTART:20251111T090000Z\r\n", "\r\nDTEND:20251111T100000Z\r\n"} {
+		if !strings.Contains(signed.Data, l) {
+			t.Errorf("minimal card lacks %q: %q", l, signed.Data)
+		}
+	}
+	verify := func(name string, text []byte, armored string) {
+		t.Helper()
+		sig, err := crypto.NewPGPSignatureFromArmored(armored)
+		if err != nil {
+			t.Fatalf("%s signature: %v", name, err)
+		}
+		if err := addr.VerifyDetached(crypto.NewPlainMessage(text), sig, 0); err != nil {
+			t.Errorf("%s signature does not verify with the address key: %v", name, err)
+		}
+	}
+	verify("shared signed", []byte(signed.Data), signed.Signature)
+
+	enc := p.SharedEvents[1]
+	kp, err := base64.StdEncoding.DecodeString(*p.SharedKeyPacket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := f.CalendarKeyRing(cal).DecryptSessionKey(kp)
+	if err != nil {
+		t.Fatalf("the shared key packet does not open with the calendar key: %v", err)
+	}
+	data, err := base64.StdEncoding.DecodeString(enc.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := sk.Decrypt(data)
+	if err != nil {
+		t.Fatalf("shared encrypted part: %v", err)
+	}
+	if enc.Type != 3 || !strings.Contains(string(plain.GetBinary()), "\r\nUID:u1\r\n") {
+		t.Errorf("shared encrypted part: Type %d, text %q", enc.Type, plain.GetBinary())
+	}
+	verify("shared encrypted", plain.GetBinary(), enc.Signature)
+}
+
+// TestFakePartsStayUntilAnEdit: a row's bytes are the same on every read
+// (the cache's ETag hashes them) and change with an edit.
+func TestFakePartsStayUntilAnEdit(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "A"})
+	id := f.AddEvent(cal, protontest.Event{UID: "u1", Start: 1, End: 2, Card: "SUMMARY:x"})
+	_, first := getParts(t, f, tk, cal, id)
+	_, again := getParts(t, f, tk, cal, id)
+	if !bytes.Equal(first, again) {
+		t.Fatal("two reads of an unchanged row differ")
+	}
+	f.UpdateEvent(cal, id, protontest.Event{UID: "u1", Start: 1, End: 2, Card: "SUMMARY:x"})
+	after, _ := getParts(t, f, tk, cal, id)
+	before, _ := getParts(t, f, tk, cal, id)
+	if before.SharedEvents[1].Data != after.SharedEvents[1].Data {
+		t.Fatal("reads after the edit differ")
+	}
+	var old servedParts
+	_ = json.Unmarshal(first, &old)
+	if old.SharedEvents[1].Data == after.SharedEvents[1].Data {
+		t.Error("an edit must re-encrypt the parts")
 	}
 }
