@@ -457,8 +457,11 @@ it imports `service` and the standard library only [verified:
   [verified: `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`; the client
   store and limiter: `internal/access` tests, e.g. `TestAddedPasswordChecksAndIsNeverStored`, `TestRemovedClientIsRefused`].
 - Limits: request bodies 8 MiB, XML names and attributes capped, multiget 1 000 hrefs,
-  `ReadHeaderTimeout` 10 s, no error text, Proton text or other users' IDs in bodies
-  [verified: `TestBodiesOver8MiBAre413`, `TestPropertyListsOver64NamesAre400`,
+  `calendar-data` in a PROPFIND Depth 1 or a sync-collection rendered for the first
+  1 000 objects only (the others keep `getetag` and get `calendar-data` in a 404
+  propstat, M3-R35), `ReadHeaderTimeout` 10 s, no error text, Proton text or other
+  users' IDs in bodies [verified: `TestBodiesOver8MiBAre413`,
+  `TestPropertyListsOver64NamesAre400`, `TestCalendarDataInListingsIsCapped`,
   `TestAvoidErrorTextInBodies`].
 - Library (E17, M3-R5): our own server. emersion/go-webdav v0.7.0 has no server-side
   sync-collection, `getctag` or `supported-report-set`, hard-codes privileges and

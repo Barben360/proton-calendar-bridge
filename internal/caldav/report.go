@@ -36,7 +36,8 @@ func (s *server) report(w http.ResponseWriter, r *http.Request, t target) {
 // deletions as response-level 404s, and the new token. An empty token lists
 // everything; one the service cannot answer from is 403 valid-sync-token.
 // Depth is ignored (Thunderbird sends Depth: 1), and so is a DAV:limit: the
-// answer is never paged (ruling M3-R23).
+// answer is never paged (ruling M3-R23); calendar-data is rendered for the
+// first maxCalendarData changed objects only (ruling M3-R35).
 func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target, root *node) {
 	tok, sel := root.child(dav("sync-token")), root.child(dav("prop"))
 	if tok == nil || sel == nil {
@@ -68,22 +69,11 @@ func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target
 	ms := newMultistatus()
 	deleted := cs.Deleted
 	if q.wants(caldav("calendar-data")) {
-		uids := make([]string, len(cs.Changed))
-		for i, o := range cs.Changed {
-			uids[i] = o.UID
-		}
-		objs, err := s.api.ObjectsByUID(r.Context(), c.ID, uids)
-		if err != nil {
-			s.fail(w, r, err)
+		gone, ok := s.withData(w, r, ms, c.ID, cs.Changed, q)
+		if !ok {
 			return
 		}
-		for _, o := range objs {
-			if o.Missing { // deleted since the changes were read
-				deleted = append(deleted, o.UID)
-				continue
-			}
-			objectResource(c.ID, o.UID, o.ETag, o.Data, true).write(ms, q)
-		}
+		deleted = append(deleted, gone...) // deleted since the changes were read
 	} else {
 		for _, o := range cs.Changed {
 			objectResource(c.ID, o.UID, o.ETag, nil, false).write(ms, q)

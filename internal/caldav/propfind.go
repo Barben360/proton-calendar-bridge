@@ -293,7 +293,8 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 }
 
 // listObjects writes the calendar's objects into ms: from the listing (no
-// decryption) unless calendar-data is asked for.
+// decryption) unless calendar-data is asked for, then rendered up to the
+// cap (withData); an object gone since the listing is left out.
 func (s *server) listObjects(w http.ResponseWriter, r *http.Request, ms *multistatus, c service.Collection, q propRequest) bool {
 	infos, _, err := s.api.Objects(r.Context(), c.ID)
 	if err != nil {
@@ -306,19 +307,6 @@ func (s *server) listObjects(w http.ResponseWriter, r *http.Request, ms *multist
 		}
 		return true
 	}
-	uids := make([]string, len(infos))
-	for i, o := range infos {
-		uids[i] = o.UID
-	}
-	objs, err := s.api.ObjectsByUID(r.Context(), c.ID, uids)
-	if err != nil {
-		s.fail(w, r, err)
-		return false
-	}
-	for _, o := range objs {
-		if !o.Missing { // gone since the listing
-			objectResource(c.ID, o.UID, o.ETag, o.Data, true).write(ms, q)
-		}
-	}
-	return true
+	_, ok := s.withData(w, r, ms, c.ID, infos, q)
+	return ok
 }

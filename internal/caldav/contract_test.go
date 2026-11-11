@@ -1121,6 +1121,46 @@ func TestDepth1ListingServesCalendarDataWhenAsked(t *testing.T) {
 	parseMS(t, do(h, "PROPFIND", calPath(workID), "", "Depth", "0")).get(t, calPath(workID)).prop(t, nsCS, "getctag")
 }
 
+// Ruling M3-R35 (final review, minor 2): a PROPFIND Depth 1 or a
+// sync-collection asking for calendar-data renders at most the cap of
+// objects (1 000; 2 here), in listing order; every other object keeps its
+// getetag and gets calendar-data in a 404 propstat, so the client fetches it
+// with a multiget.
+func TestCalendarDataInListingsIsCapped(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.HandlerWithDataCap(s, caldav.Options{}, 2)
+	objs := s.objs[workID]
+	check := func(what string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		ms := parseMS(t, rec)
+		for i, o := range objs {
+			r := ms.get(t, objPath(workID, o.UID))
+			if e := r.prop(t, nsD, "getetag").Text; e != o.ETag {
+				t.Errorf("%s, %s: getetag %q, want %q", what, o.UID, e, o.ETag)
+			}
+			data, has := r.props[n(nsC, "calendar-data")]
+			switch {
+			case i < 2 && (!has || data.Text != string(o.Data)):
+				t.Errorf("%s, %s (within the cap): calendar-data %v %q", what, o.UID, has, data.Text)
+			case i >= 2 && (has || !r.missing[n(nsC, "calendar-data")]):
+				t.Errorf("%s, %s (past the cap): calendar-data served %v, in a 404 propstat %v", what, o.UID, has, r.missing[n(nsC, "calendar-data")])
+			}
+		}
+		s.mu.Lock()
+		last := s.uidReqs[len(s.uidReqs)-1]
+		s.mu.Unlock()
+		if len(last) != 2 {
+			t.Errorf("%s rendered %d objects, want the cap (2)", what, len(last))
+		}
+	}
+	body := `<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop></D:propfind>`
+	check("PROPFIND Depth 1", do(h, "PROPFIND", calPath(workID), body, "Depth", "1"))
+	sync := `<D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:sync-token/><D:sync-level>1</D:sync-level>` +
+		`<D:prop><D:getetag/><C:calendar-data/></D:prop></D:sync-collection>`
+	check("sync-collection", do(h, "REPORT", calPath(workID), sync, "Depth", "1"))
+}
+
 // --- AVOID ----------------------------------------------------------------
 
 // 403 only for a genuine refusal: anonymous or wrong credentials and the

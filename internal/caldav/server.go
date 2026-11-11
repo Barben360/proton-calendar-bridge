@@ -52,6 +52,11 @@ const (
 	// maxHrefs bounds a calendar-multiget (Thunderbird sends 100); more is
 	// 413, the request being too large rather than forbidden.
 	maxHrefs = 1000
+	// maxCalendarData bounds the objects whose calendar-data one PROPFIND
+	// Depth 1 or sync-collection renders (ruling M3-R35): past it, an object
+	// keeps its getetag and gets calendar-data in a 404 propstat, and the
+	// client multigets it. Thunderbird never asks for calendar-data there.
+	maxCalendarData = 1000
 
 	unavailableRetry = 30 * time.Second
 
@@ -72,12 +77,13 @@ func Handler(api service.API, o Options) http.Handler {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &server{api: api, log: o.Logger}
+	return &server{api: api, log: o.Logger, dataCap: maxCalendarData}
 }
 
 type server struct {
-	api service.API
-	log *slog.Logger
+	api     service.API
+	log     *slog.Logger
+	dataCap int // maxCalendarData (tests lower it)
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +182,38 @@ func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) 
 	}
 	empty(w, http.StatusNotFound)
 	return service.Collection{}, false
+}
+
+// withData writes the objects of infos into ms with the properties q asks;
+// calendar-data only for the first dataCap of them, rendered in one
+// ObjectsByUID (the others answer it in a 404 propstat). It returns the UIDs
+// rendered as missing (deleted since infos was read); false when it
+// answered a service failure itself.
+func (s *server) withData(w http.ResponseWriter, r *http.Request, ms *multistatus, calID string, infos []service.ObjectInfo, q propRequest) ([]string, bool) {
+	n := min(len(infos), s.dataCap)
+	uids := make([]string, n)
+	for i, o := range infos[:n] {
+		uids[i] = o.UID
+	}
+	var gone []string
+	if n > 0 {
+		objs, err := s.api.ObjectsByUID(r.Context(), calID, uids)
+		if err != nil {
+			s.fail(w, r, err)
+			return nil, false
+		}
+		for _, o := range objs {
+			if o.Missing {
+				gone = append(gone, o.UID)
+				continue
+			}
+			objectResource(calID, o.UID, o.ETag, o.Data, true).write(ms, q)
+		}
+	}
+	for _, o := range infos[n:] {
+		objectResource(calID, o.UID, o.ETag, nil, false).write(ms, q)
+	}
+	return gone, true
 }
 
 // object reads one object; it answers the failure itself (404 when the UID
