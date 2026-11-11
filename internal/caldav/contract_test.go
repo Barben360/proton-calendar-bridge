@@ -1247,6 +1247,31 @@ func TestUnknownCalendarsAre404(t *testing.T) {
 	}
 }
 
+// Ruling M3-R35 (final review, minor 4): while a calendar is pending (or
+// none is synced), a segment that names no listed calendar may be one the
+// pass has not recorded yet: 503 + Retry-After 30, which Thunderbird retries,
+// never the 404 that disables the calendar for good (E08 §2.2). Once every
+// calendar is synced, it is 404.
+func TestUnknownCalendarIs503WhileACalendarIsPending(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.colls[1].Pending = true
+	h := caldav.Handler(s, caldav.Options{})
+	for _, tc := range []struct{ method, path, body, depth string }{
+		{"PROPFIND", calPath("not-recorded-yet"), tbServerInfo, "0"},
+		{"REPORT", calPath("not-recorded-yet"), tbSync(""), "1"},
+		{"REPORT", calPath("not-recorded-yet"), tbMultiget(tbHref("not-recorded-yet", plainUID)), "1"},
+		{"GET", objPath("not-recorded-yet", plainUID), "", ""},
+	} {
+		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
+			t.Errorf("%s %s with a pending calendar: %d, Retry-After %q; want 503, 30", tc.method, tc.path, rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+	s.colls[1].Pending = false
+	wantStatus(t, do(h, "PROPFIND", calPath("not-recorded-yet"), tbServerInfo, "Depth", "0"), http.StatusNotFound)
+}
+
 // A request whose context ended still gets its 503 (a live client must
 // never see an empty 200), but it is not logged as a service failure.
 func TestCancelledRequestsAreNotReportedAsFailures(t *testing.T) {

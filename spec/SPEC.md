@@ -442,12 +442,15 @@ it imports `service` and the standard library only [verified:
   are refused until M4; subscribed, holiday and other calendars read only. M4 must
   derive writability from member permissions (M3-R15, `OPEN.md`) [verified:
   `TestShouldPrivilegesFollowReadOnly`].
-- Availability (M3-R22, R25, R26, R30): while the service cannot answer (logged out, no
+- Availability (M3-R22, R25, R26, R30, R35): while the service cannot answer (logged out, no
   cache yet, Proton 5xx), a calendar is not yet synced, or an IP is rate limited, the
   answer is 503 + `Retry-After`, never 4xx: a 4xx on the first PROPFIND, OPTIONS or
-  empty-token sync disables the calendar in Thunderbird (E08) [verified:
+  empty-token sync disables the calendar in Thunderbird (E08). A calendar path that
+  names no known calendar is 503 too while any calendar is pending (the first pass
+  records them one by one), 404 otherwise [verified:
   `TestAvoid4xxWhenTheServiceIsUnavailable`,
   `TestPendingCalendarsAre503AndLeftOutOfTheHomeSet`,
+  `TestUnknownCalendarIs503WhileACalendarIsPending`,
   `TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter`].
 - Auth (M3-R17 to R21): HTTP Basic, any username; the password is an app password from
   `pcb client add NAME` (24 random bytes, base64url, printed once), stored as a salted

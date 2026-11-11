@@ -163,14 +163,17 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 }
 
 // collection finds the calendar of segment seg; it answers the failure
-// itself: 404 when no calendar has that segment, 503 while it is pending
-// (ruling M3-R25).
+// itself: 503 while it is pending (ruling M3-R25); for a segment no calendar
+// has, 503 too while any calendar is pending or none is synced (a first pass
+// records the calendars one by one, and a 404 would disable one not
+// recorded yet in Thunderbird, E08 §2.2), else 404 (ruling M3-R35).
 func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) (service.Collection, bool) {
 	colls, err := s.api.Collections(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return service.Collection{}, false
 	}
+	pending := false
 	for _, c := range colls {
 		if calendarSegment(c.ID) == seg {
 			if c.Pending {
@@ -179,6 +182,11 @@ func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) 
 			}
 			return c, true
 		}
+		pending = pending || c.Pending
+	}
+	if pending || len(colls) == 0 { // calendars are being recorded
+		unavailable(w)
+		return service.Collection{}, false
 	}
 	empty(w, http.StatusNotFound)
 	return service.Collection{}, false
