@@ -30,7 +30,7 @@ func TestLoginRefusedWhileLockHeld(t *testing.T) {
 	}
 	_, err = session.Login(t.Context(), o)
 	e := exitErr(t, err)
-	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another pcb-lab login is running") {
+	if e.Code != exitcode.Blocked || !strings.Contains(e.Error(), "another login is running") {
 		t.Fatalf("got %v", err)
 	}
 	if f.Requests != 0 {

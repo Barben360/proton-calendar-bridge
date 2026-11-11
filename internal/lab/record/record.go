@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/redact"
 )
 
@@ -115,9 +116,10 @@ func (r *Recorder) Save(name string, e Exchange) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(r.Dir, name+".json")
-	if err := os.WriteFile(path, out, 0o644); err != nil {
+	if err := atomicfile.Write(path, out); err != nil {
 		return "", err
 	}
+	// Recordings are committed fixtures: readable, unlike secrets.
 	if err := os.Chmod(path, 0o644); err != nil {
 		return "", err
 	}
