@@ -149,6 +149,14 @@ func TestSyncPartialExits40(t *testing.T) {
 	if err != nil || st.Sync == nil || len(st.Sync.Calendars) != 2 {
 		t.Fatalf("status = %+v, %v", st.Sync, err)
 	}
+	// Status shows the same secret-free text as the pass, not the raw error
+	// (request path, Proton's own message).
+	want := calSync(t, res, bad).Error
+	for _, c := range st.Sync.Calendars {
+		if c.ID == bad && (c.Error != want || strings.Contains(c.Error, "/calendar/v1/")) {
+			t.Errorf("status error %q, want the pass's %q", c.Error, want)
+		}
+	}
 	healed := calSync(t, e.sync(t, false), bad)
 	if healed.Error != "" || healed.Mode != "initial" {
 		t.Errorf("after retry = %+v", healed)

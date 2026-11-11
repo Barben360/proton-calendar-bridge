@@ -93,6 +93,10 @@ type Options struct {
 	Full      bool             // list every calendar in full
 	Now       func() time.Time // default time.Now
 	FullEvery time.Duration    // default DefaultFullEvery
+	// Describe is the text a calendar's failure is stored as (Calendar.Error,
+	// what pcb status shows); default err.Error(). The service passes its
+	// secret-free describer, so the cache never holds Proton's raw text.
+	Describe func(error) string
 }
 
 // Report is what a pass did, one entry per listed calendar in API order.
@@ -120,6 +124,9 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	}
 	if o.FullEvery <= 0 {
 		o.FullEvery = DefaultFullEvery
+	}
+	if o.Describe == nil {
+		o.Describe = func(err error) string { return err.Error() }
 	}
 	cals, err := calendar.List(ctx, c)
 	if err != nil {
@@ -159,7 +166,7 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 		}
 		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String()}
 		if r.Err != nil {
-			rec.Error = r.Err.Error()
+			rec.Error = o.Describe(r.Err)
 		}
 		if err := db.PutCalendar(ctx, rec); err != nil {
 			return Report{}, storeErr("recording calendar %s in the cache: %w", cal.ID, err)

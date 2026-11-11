@@ -110,11 +110,12 @@ func (l *Local) syncPass(ctx context.Context, req SyncRequest) (SyncResult, erro
 			return cacheError(err)
 		}
 		defer func() { _ = db.Close() }()
-		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now})
+		describe := func(err error) string { return calendarError(ctx, err) }
+		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe})
 		if err != nil {
 			return err
 		}
-		res = syncResult(ctx, rep)
+		res = syncResult(rep, describe)
 		return nil
 	})
 	if err != nil {
@@ -133,7 +134,9 @@ func (l *Local) syncPass(ctx context.Context, req SyncRequest) (SyncResult, erro
 	return res, nil
 }
 
-func syncResult(ctx context.Context, rep syncer.Report) SyncResult {
+// syncResult is the pass's report, each calendar's failure described as
+// the cache stored it.
+func syncResult(rep syncer.Report, describe func(error) string) SyncResult {
 	res := SyncResult{Calendars: make([]CalendarSync, 0, len(rep.Calendars))}
 	for _, r := range rep.Calendars {
 		cs := CalendarSync{
@@ -141,7 +144,7 @@ func syncResult(ctx context.Context, rep syncer.Report) SyncResult {
 			Added: r.Changes.Added, Updated: r.Changes.Updated, Deleted: r.Changes.Deleted,
 		}
 		if r.Err != nil {
-			cs.Error = calendarError(ctx, r.Err)
+			cs.Error = describe(r.Err)
 		}
 		res.Calendars = append(res.Calendars, cs)
 	}
