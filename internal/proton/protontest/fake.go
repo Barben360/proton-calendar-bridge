@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"github.com/ProtonMail/go-proton-api/server"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
 
 // Proton codes the fake answers with. CodeTOTPWrong is assumed: callers must
@@ -74,15 +76,16 @@ type Fake struct {
 
 	mu        sync.Mutex
 	calls     []call
-	failures  map[string][]failure // "METHOD /path" → queued answers
-	issued    map[string]bool      // access tokens handed out, not yet expired
-	minted    []string             // every access token handed out, in order
-	expired   map[string]bool      // access tokens that answer 401
-	unlocked  map[string]bool      // UIDs holding the locked scope
-	users     map[string]string    // username → user ID
-	passwords map[string]string    // username → password
-	captcha   string               // Options.Captcha, changed by SetCaptcha
-	codes     []string             // 2FA codes received, in order
+	failures  map[string][]failure  // "METHOD /path" → queued answers
+	issued    map[string]bool       // access tokens handed out, not yet expired
+	minted    []string              // every access token handed out, in order
+	expired   map[string]bool       // access tokens that answer 401
+	unlocked  map[string]bool       // UIDs holding the locked scope
+	users     map[string]string     // username → user ID
+	passwords map[string]string     // username → password
+	captcha   string                // Options.Captcha, changed by SetCaptcha
+	codes     []string              // 2FA codes received, in order
+	sessions  map[string]sessionRec // access token minted by Session → session
 
 	cal calendars
 }
@@ -128,6 +131,7 @@ func New(t testing.TB, o Options) *Fake {
 		unlocked:  map[string]bool{},
 		users:     map[string]string{},
 		passwords: map[string]string{},
+		sessions:  map[string]sessionRec{},
 		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
@@ -246,7 +250,44 @@ func (f *Fake) RevokeSessions() {
 		}
 	}
 	clear(f.unlocked)
+	clear(f.sessions)
 }
+
+// Session returns live tokens for username's account without an SRP login:
+// the fake mints them itself and accepts them on the calendar events and
+// change-feed routes (/calendar/v1/{cal}/events, /events/{id},
+// /modelevents/...), where it owns the answer. The backend does not know them,
+// so every other route (calendar list and bootstrap, keys, addresses) answers
+// 401 and a refresh fails: a test needing those logs in. The tokens expire
+// (ExpireAccessTokens) and die (RevokeSessions) like issued ones.
+func (f *Fake) Session(t testing.TB, username string) api.Tokens {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[username]; !ok {
+		t.Fatalf("protontest: unknown user %q", username)
+	}
+	tk := api.Tokens{
+		UID:          "fakeuid" + hex.EncodeToString(random(t, 8)),
+		AccessToken:  "fakeacc" + hex.EncodeToString(random(t, 16)),
+		RefreshToken: "fakeref" + hex.EncodeToString(random(t, 16)),
+	}
+	f.sessions[tk.AccessToken] = sessionRec{username, tk.UID}
+	f.issued[tk.AccessToken] = true
+	f.minted = append(f.minted, tk.AccessToken)
+	return tk
+}
+
+// sessionUser returns the user of a token minted by Session. The token must
+// not have expired (serve answers 401 before a route sees an expired one).
+func (f *Fake) sessionUser(r *http.Request) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[bearer(r)]
+	return s.user, ok && s.uid == r.Header.Get("x-pm-uid")
+}
+
+type sessionRec struct{ user, uid string }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + r.URL.Path

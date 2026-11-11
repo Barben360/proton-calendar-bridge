@@ -14,7 +14,9 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
+	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
 )
 
 // This file is the only place the service builds *exitcode.Error. Failures
@@ -24,6 +26,42 @@ import (
 
 func fail(code exitcode.Code, msg, hint string) *exitcode.Error {
 	return &exitcode.Error{Code: code, Err: errors.New(msg), Hint: hint}
+}
+
+// detail is the cause of an *exitcode.Error built here when a watch needs
+// more than its code: how long Proton asked to wait, or that no retry can
+// help. Its text is the message.
+type detail struct {
+	msg        string
+	limited    bool          // Proton is rate limiting (a 429): the hint is a one-shot "retry in X"
+	retryAfter time.Duration // Proton's Retry-After, 0 if none
+	final      bool          // a retry cannot help: a person must change something
+}
+
+func (d *detail) Error() string { return d.msg }
+
+// final is a Blocked error that no retry can fix.
+func final(msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: msg, final: true}, Hint: hint}
+}
+
+// stopsWatch reports whether a watch must stop on err: a person must act
+// (MustAct), or the failure is final (a newer cache, an unsupported system).
+func stopsWatch(err error) bool {
+	var (
+		ee *exitcode.Error
+		d  *detail
+	)
+	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && d.final)
+}
+
+// retryAfter is how long err asks a watch to wait before the next pass.
+func retryAfter(err error) time.Duration {
+	var d *detail
+	if errors.As(err, &d) {
+		return d.retryAfter
+	}
+	return 0
 }
 
 func usage(msg, hint string) *exitcode.Error   { return fail(exitcode.Usage, msg, hint) }
@@ -42,6 +80,7 @@ func mapError(err error, keyFile string) error {
 		ne  net.Error
 		ue  *url.Error
 	)
+	cf := cacheFailure(err)
 	switch {
 	case err == nil:
 		return nil
@@ -52,6 +91,8 @@ func mapError(err error, keyFile string) error {
 		return ee
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
+	case cf != nil:
+		return cf
 	case errors.Is(err, auth.ErrBadCredentials):
 		return mustAct("wrong Proton username or password", "check them, then run pcb login again (Proton allows one attempt per minute)")
 	case errors.Is(err, auth.ErrTOTPRejected):
@@ -97,7 +138,8 @@ func protonDown(e *api.Error) error {
 		if e.RetryAfter > 0 {
 			wait = e.RetryAfter.Round(time.Second).String()
 		}
-		return blocked("Proton is rate limiting requests", "retry in "+wait)
+		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter},
+			Hint: "retry in " + wait}
 	case e.Status >= 500:
 		return blocked("Proton is unavailable", "try again later")
 	}
@@ -134,18 +176,45 @@ func acquireError(err error, stateDir string) error {
 	case errors.As(err, &ee):
 		return err
 	case errors.Is(err, filelock.ErrUnsupported):
-		return blocked("login locking needs a Unix system", "run pcb on Linux or macOS")
+		return final("login locking needs a Unix system", "run pcb on Linux or macOS")
 	}
 	return blocked("cannot take the login lock", "make sure "+stateDir+" is writable by this user")
 }
 
 // keysError is the secret-free reason a calendar's keys did not unlock:
 // Proton refusing the calendar (a 4xx; transient failures stop the whole
-// listing, see sessionWide) says so; anything else is the keys themselves.
+// listing, see api.SessionWide) says so; anything else is the keys themselves.
 func keysError(err error) string {
 	var ae *api.Error
 	if errors.As(err, &ae) {
 		return protonDown(ae).Error()
 	}
 	return "the calendar keys do not unlock with the account keys"
+}
+
+// cacheFailure classifies a failure of the event cache by type, or returns
+// nil when err is not one: a newer schema needs a newer pcb; a file that is
+// not a database needs a person to remove it (MustAct, so a watch stops);
+// a file-system error of the cache files (cache.IOError: permissions,
+// disk; other files' errors are not matched) is Blocked with the operating system's
+// reason and no advice to remove anything; any other failure of the cache
+// during a pass (*syncer.StoreError) is Blocked.
+func cacheFailure(err error) *exitcode.Error {
+	var (
+		ioe *cache.IOError
+		se  *syncer.StoreError
+	)
+	switch {
+	case errors.Is(err, cache.ErrChanged):
+		return fail(exitcode.Blocked, "the event cache changed while reading", "run the command again")
+	case errors.Is(err, cache.ErrNewerSchema):
+		return final("the event cache was written by a newer pcb", "upgrade pcb (or remove pcb.db from the state directory and run pcb sync --full)")
+	case errors.Is(err, cache.ErrCorrupt):
+		return fail(exitcode.MustAct, "the event cache is damaged", "remove pcb.db (and its -wal and -shm files) from the state directory, then run pcb sync --full")
+	case errors.As(err, &ioe):
+		return fail(exitcode.Blocked, "the event cache cannot be used: "+ioe.Reason(), "check the permissions and the free space of the state directory")
+	case errors.As(err, &se):
+		return fail(exitcode.Blocked, "the event cache could not be updated", "run pcb doctor to check it, then pcb sync again")
+	}
+	return nil
 }

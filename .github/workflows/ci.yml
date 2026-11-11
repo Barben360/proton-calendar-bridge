@@ -8,7 +8,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -20,7 +20,7 @@ jobs:
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - run: make lint test
+      - run: make lint
       - name: Vet for Windows
         run: GOOS=windows go vet ./...
       - name: Build is stamped
@@ -30,3 +30,29 @@ jobs:
             echo "make build did not stamp the version" >&2
             exit 1
           fi
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two heaviest packages (real SRP logins under -race) run apart
+        # from the rest; together the shards cover ./... (checked below).
+        shard: [service-cli, rest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Race tests
+        run: |
+          heavy='internal/(service|cli)$'
+          if [ "${{ matrix.shard }}" = service-cli ]; then
+            pkgs=$(go list ./... | grep -E "$heavy" | tr "\n" " ")
+          else
+            pkgs=$(go list ./... | grep -vE "$heavy" | tr "\n" " ")
+          fi
+          test -n "$pkgs"
+          make test PKGS="$pkgs"

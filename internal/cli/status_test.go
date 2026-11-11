@@ -63,3 +63,25 @@ func TestLogoutText(t *testing.T) {
 		t.Errorf("stdout = %q", r.out.String())
 	}
 }
+
+type neverSyncedStub struct{ stubAPI }
+
+func (*neverSyncedStub) Status(context.Context) (service.Status, error) {
+	return service.Status{Phase: "ready", Username: "alice", AccountID: "id1", Secrets: "sealed"}, nil
+}
+
+// Logged in but never synced: status says what to run.
+func TestStatusNeverSynced(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, nil)
+	r.svc = &neverSyncedStub{}
+	r.want(exitcode.OK, "status")
+	if !strings.Contains(r.out.String(), "sync: never (run pcb sync)\n") {
+		t.Errorf("status = %q, want the never-synced line", r.out.String())
+	}
+	r.svc = &statusStub{} // no account: no sync line
+	r.want(exitcode.OK, "status")
+	if strings.Contains(r.out.String(), "sync:") {
+		t.Errorf("logged-out status shows a sync line: %q", r.out.String())
+	}
+}

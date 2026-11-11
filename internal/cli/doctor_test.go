@@ -56,12 +56,12 @@ func TestDoctorExitCode(t *testing.T) {
 		names = append(names, r.Name)
 		statuses = append(statuses, r.Status)
 	}
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets"; got != want {
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -78,8 +78,8 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("stdout = %q, want 7 lines", out)
+	if len(lines) != 8 {
+		t.Fatalf("stdout = %q, want 8 lines", out)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)
@@ -95,6 +95,9 @@ func TestDoctorTextOK(t *testing.T) {
 	}
 	if want := "–  secrets: no secrets stored yet"; lines[6] != want {
 		t.Errorf("line 6 = %q, want %q", lines[6], want)
+	}
+	if want := "✓  cache: no cache yet"; lines[7] != want {
+		t.Errorf("line 7 = %q, want %q", lines[7], want)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -50,6 +51,23 @@ type Local struct {
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
 	closed  atomic.Bool
+
+	cmu    sync.Mutex // guards cached; never held across a network call
+	cached *cachedClient
+}
+
+// cachedClient is the one API client of a stored session, so its limiter and
+// refreshed tokens last across calls.
+type cachedClient struct {
+	accountID, uid string
+	c              *api.Client
+}
+
+// dropClient forgets the cached session client (login, logout, Close).
+func (l *Local) dropClient() {
+	l.cmu.Lock()
+	l.cached = nil
+	l.cmu.Unlock()
 }
 
 var _ API = (*Local)(nil)
@@ -128,6 +146,7 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, errClosed()
 	}
 	l.dropPending(ctx)
+	l.dropClient()
 	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
 	defer cancel()
 	var res LogoutResult
@@ -159,6 +178,10 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 				return LogoutResult{}, storeError(err, l.keyFile())
 			}
 		}
+	}
+	if err := cache.Remove(cache.Path(l.o.Dirs.State)); err != nil {
+		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
+			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
 	}
 	if err := store.SaveState(l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut}); err != nil {
 		return LogoutResult{}, storeError(err, l.keyFile())
@@ -206,6 +229,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 	if l.waiting.Load() {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
 	}
+	s.Sync = l.syncStatus()
 	return s, nil
 }
 
@@ -218,6 +242,7 @@ func (l *Local) Close() error {
 		return nil
 	}
 	l.dropPending(context.Background())
+	l.dropClient()
 	l.mgr.Close()
 	return nil
 }

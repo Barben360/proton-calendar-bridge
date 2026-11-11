@@ -21,12 +21,13 @@ caloxide.
 
 ## Status
 
-Design phase, milestone M1 (Proton core, read): `pcb login` (password, TOTP,
-CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status` and
-`pcb calendar list` are built and tested against a fake Proton; there is no
-bridge (daemon, sync, CalDAV) yet. The live session against the test account
-is deferred until the author can solve a CAPTCHA (`spec/HUMAN-CHECKS.md`,
-"M1 live session"). The design is in `spec/SPEC.md`.
+Design phase, milestone M2 (store and sync): `pcb login` (password, TOTP,
+CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status`,
+`pcb calendar list`, `pcb sync` and `pcb event list` are built and tested
+against a fake Proton; there is no bridge (daemon, CalDAV) yet. The live
+sessions against the test account (M1, then M2 for the change feed, `pcb-lab probe feed`) are deferred until the author can solve a
+CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session" and "M2 live session"); the cache and sync rules are source-based until then. The design is in
+`spec/SPEC.md`.
 
 ## Usage
 
@@ -38,6 +39,9 @@ pcb login --unattended-relogin         # store the credentials so pcb can log in
 pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
 pcb status                             # the login state, no network call
 pcb calendar list [--json]
+pcb sync [--full]                      # fill or refresh the local event cache from Proton
+pcb sync --watch --interval 30s        # keep it current until Ctrl-C (at least 10s; not with --json)
+pcb event list --calendar NAME [--from 2026-11-01] [--to 2026-12-01]   # cached events, no network call
 pcb logout
 ```
 
@@ -60,4 +64,5 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **go-proton-api**, **go-srp**, **gopenpgp** (MIT, used as libraries). go-proton-api's in-memory test server pattern is the model for and the engine behind our shared fake Proton (`internal/proton/protontest`, an httptest front over its server, which the lab's `internal/lab/labtest` builds on).
 - **develonrails/carbonate**, **WentTheFox/caloxide**, **ProtonMail/WebClients** (GPL-3.0): read only for the client identity strings tried in experiment E03 (`spec/experiments/E03-client-identity.md`). No code from any of them; WebClients is never copied.
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
-- jmdlab/cal-gateway and the other prior art listed in spec §20: design references only; nothing from them is used in this repository so far.
+- **develonrails/carbonate** (MIT), **jmdlab/cal-gateway** (MIT) and **WentTheFox/caloxide** (MIT; derives from hydroxide, ferroxide and protoxide, all MIT), for the M2 sync design notes (ideas audited, no code copied; the feed research is in `spec/experiments/raw/m2-feed-research.md`, citations by file and line): carbonate's measured pitfall that a cursor derived at `latest` loses events and its ID-driven re-read that ignores `Action`; jmdlab's order (read the feed head before the full listing) and its rule that a re-read row answering 404 is a delete; caloxide's feed endpoint shapes and its 30 s poll with exponential backoff. Rewritten with our own tests (`internal/syncer`, `internal/store/cache`).
+- The other prior art listed in spec §20: design references only; nothing from them is used in this repository so far.

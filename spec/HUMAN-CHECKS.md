@@ -102,3 +102,39 @@ Real-Proton answers that `internal/proton/auth` classifies on assumption (ruling
 - Refused or expired CAPTCHA token on `POST /auth/v4`: assumed code 12087, mapped to `ErrCaptchaRejected` (a fresh 9001 challenge instead is also possible); record what Proton sends.
 - Locked scope on fresh sessions: whether salts need `PUT /core/v4/users/unlock` (403 with code 9101) at all with this client identity; record whether elevation happened.
 - Calendar bootstrap on holidays and subscribed calendars: whether member passphrase and keys exist for them (`keys` `ok` or `error` per type).
+
+## M2 live session (after the M1 live session; author edits in the web app, agent runs the commands)
+
+Proves the cache and sync against the test account and settles E04, E05, E07. Worktree `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m2` (or main once merged). Same rules as above, plus:
+
+- **No new login is needed**: `pcb` resumes the session left by the M1 live session (a relogin only if Proton ended it, then within the M1 budget rules: at least 60 s after the last login). `pcb-lab` resumes the lab session of step 2a. If either session is gone, stop and say so.
+- Reuse the M1 isolated dirs (`XDG_CONFIG_HOME`/`XDG_STATE_HOME` under `$HOME/.local/share/pcb-m1-live`, still present only if M1.8's clean-up was skipped; otherwise log in again per M1 and count it). `pcb-lab` keeps its own state dir.
+- The author's actions below are web-app edits on the **test account**, one per step, with the time noted, so the recordings can be matched. Stop conditions are the M0 ones; any 429: wait it out, never faster.
+- Nothing here ever runs against the author's own account.
+
+**M2.1 Build.** `make build` and `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`. `bin/pcb version`.
+
+**M2.2 Initial sync (agent).** `bin/pcb sync --json; echo $?`. Expect exit 0, one entry per calendar in `data.calendars` with `mode` `initial`, `added` equal to the calendar's event count and no `error`; the seeded data set gives about 370 events in the seeded calendar(s) (`DATASET.md`). Then `bin/pcb sync --json` again at once: expect `mode` `incremental` and `added` `updated` `deleted` all 0. `bin/pcb event list --calendar <name> --json | jq '.data.events | length'` equals `added` from the first pass (and equals the count shown in the web app). Record the pass duration (`time bin/pcb sync`); no request count is printed.
+
+**M2.3 Author: create, edit, move, delete, one edit at a time (author action; agent notes the UTC time of each).** In the web app, on one calendar (call it C), one event each, in this order, waiting 5 s between edits:
+1. create a new event `E-m2-create`;
+2. change its title;
+3. change its start and end time;
+4. change its description;
+5. add a notification only (reminder), changing nothing else;
+6. change its colour only, changing nothing else;
+7. move it to a second calendar;
+8. delete it;
+9. (if an invite exists in the test account) answer an RSVP;
+10. create, rename, recolour, set as default and delete a throw-away calendar (E05).
+The author says "edits done at HH:MM".
+
+**M2.4 Record the feed (agent; steps M2.3 and M2.4 interleave).** Run it from a terminal: with stdin not a terminal the probe waits the whole `--wait` (it prints which mode it is in). The probe takes the feed heads **before** the edits, so start it first and edit during its wait: `bin/pcb-lab probe feed --calendar <C id from pcb calendar list --json> --wait 15m` (records under `spec/experiments/raw/E04/`; press Enter when the author says "edits done"). Expect: prints the number of pages, entries, rows re-read and gone, `refresh false`, and `feed-latest.json`, `feed-core-latest.json`, `feed-page-NN.json`, `feed-row-NN.json`, `feed-core-events.json` in `raw/E04/`. Open each file and check by eye that no token, key block, email or ciphertext is in it (the recorder refuses anything it recognises; `Data`, `Signature` and `Author` are redacted). Exit 20 or an HTTP 4xx in `statuses`: record the status and Proton code and stop (the probe never retries).
+
+**M2.5 Sync follows the edits (agent).** `bin/pcb sync --json; echo $?`. Expect exit 0, `mode` `incremental` for C and the second calendar, `added` `updated` `deleted` reflecting the net change since M2.2, not the number of edits: an event created and deleted between two syncs never enters the cache (not counted), so expect `E-m2-create` absent from both calendars, and the sums to match the difference between `pcb event list` counts before and after (or, if the author synced in between, the moved event deleted from C and added to the second calendar), no full resync. Record the timing if run within 2 s of the last edit (lag, E04). `bin/pcb event list --calendar C --json` and the second calendar's list match the web app: the edited event shows the last title and time, the deleted one is gone. Also `bin/pcb calendar list --json` shows the throw-away calendar's creation and deletion (E05).
+
+**M2.6 Watch follows a new edit within one interval (agent + author).** `bin/pcb sync --watch --interval 30s` in a terminal (Ctrl-C ends it with exit 0). Expect a timestamped line per calendar every 30 s, `+0 ~0 -0` while idle (a pass that fails prints its error on stderr with "next try in X"; one calendar failing does not slow the others). The author edits one event title in the web app; within one interval (30 s, plus Proton's lag) the next pass prints `~1`, and `pcb event list` shows the new title. Ctrl-C: exit 0.
+
+**M2.7 Stale cursor and fallback (agent, optional).** With no `pcb sync` running (stop any `--watch` first: the sync lock is held for the whole watch), corrupt one calendar's cursor **in place**: `sqlite3 $XDG_STATE_HOME/pcb/pcb.db "update calendars set cursor='garbage' where id='<C>'"`. Never run pcb on a copy of the state directory: the copy holds the same single-use refresh token, so a refresh in the copy spends the original's and the next real command must log in again (on the CAPTCHA-gated account). Then `bin/pcb sync --json`. Expect one of: the calendar `mode` `full`, `error` empty, exit 0 (Proton refused the cursor with a 4xx or answered `Refresh`, and the calendar's last listing is more than 5 min old); or, when its last listing is under 5 min old (`pcb status` shows `full <time>`), exit 40 with the calendar's `error` naming the cause ("Proton refused the feed cursor" or "Proton asked to refresh the feed") and the time it retries (M2-R10, M2-R11); or an error naming another status and code. Record which, with the status and code (E04 question 3). Then run `bin/pcb sync --json` again: after a listing, expect `incremental`, exit 0 (the new cursor works); after a deferral, expect exit 40 again with no `modelevents` request for that calendar until the stated time (the feed is not read during the gap), and `full`, exit 0, on the first pass after it.
+
+**M2.8 Clean up and write up.** Remove the throw-away data created above (events and calendar). Fill `spec/experiments/E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md` (each "Results" and the E07 table), turn the `[assumed → E04/E05/E07]` markers in SPEC §5.5, §7.2, §8.1, §8.2 and §17, fix `internal/proton/events` or the syncer rules where Proton differs (test first, own commit), commit `🧪 M2 live session against the test account`.

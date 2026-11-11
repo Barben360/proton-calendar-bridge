@@ -13,8 +13,11 @@ OUT     ?= bin/pcb
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
 
+# PKGS narrows the packages (CI runs two shards in parallel).
+PKGS ?= ./...
+
 test:
-	go test -race ./...
+	go test -race $(PKGS)
 
 # Formatting, vet, then golangci-lint, as CI runs it.
 lint:

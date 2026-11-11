@@ -56,5 +56,30 @@ func statusText(s service.Status) string {
 	optional("captcha_url", s.CaptchaURL)
 	optional("last_login", at(s.LastLogin))
 	optional("last_relogin", at(s.LastRelogin))
+	if s.Sync == nil && s.Phase == string(service.StateReady) {
+		line("sync", "never (run pcb sync)")
+	}
+	if s.Sync != nil {
+		if s.Sync.Error != "" {
+			line("sync", "cache unreadable: "+s.Sync.Error)
+		}
+		if len(s.Sync.Calendars) == 0 && s.Sync.Error == "" {
+			line("sync", "no calendars cached")
+		}
+		for _, c := range s.Sync.Calendars {
+			v := fmt.Sprintf("%s (%s): %d events, synced %s, full %s", c.Name, c.ID, c.Events, orNever(at(c.SyncedAt)), orNever(at(c.FullAt)))
+			if c.Error != "" {
+				v += ", last error: " + c.Error
+			}
+			line("sync", v)
+		}
+	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func orNever(s string) string {
+	if s == "" {
+		return "never"
+	}
+	return s
 }

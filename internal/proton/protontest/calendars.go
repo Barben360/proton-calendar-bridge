@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,9 +29,12 @@ type Calendar struct {
 
 // calendars holds the fake's calendar state, guarded by mu.
 type calendars struct {
-	mu     sync.Mutex
-	byUser map[string]*userCalendars // username → state
-	byID   map[string]*calendarRec   // calendar ID → record
+	mu       sync.Mutex
+	byUser   map[string]*userCalendars    // username → state
+	byID     map[string]*calendarRec      // calendar ID → record
+	clock    int64                        // fake timestamps issued (see tick)
+	feedPage int                          // SetFeedPageSize, 0: default
+	onList   func(calID string, page int) // OnListPage, nil: none
 }
 
 // user returns username's state, creating it. Caller holds mu.
@@ -60,6 +64,7 @@ type calendarRec struct {
 	address  gpa.Address
 	encPass  string
 	foreign  foreignMember // set with ForeignMemberFirst
+	ev       *eventState   // rows and feed, see events.go
 }
 
 // foreignMember is another member of a shared calendar.
@@ -158,14 +163,30 @@ func (f *Fake) AddAddress(username, email string) (addrID string) {
 }
 
 func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
-	name, ok := f.whoami(r)
-	if !ok {
-		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
-		return
+	name, front := f.sessionUser(r)
+	if !front {
+		var ok bool
+		if name, ok = f.whoami(r); !ok {
+			reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
+			return
+		}
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
 	u := f.cal.user(name)
+	if segs, ok := eventSegments(r); ok {
+		// Rows and the feed need no address keys, so a Session works here.
+		if r.Method != http.MethodGet {
+			reply(w, http.StatusBadRequest, 2000, "fake: route not implemented")
+			return
+		}
+		f.serveEvents(w, r, u, segs)
+		return
+	}
+	if front { // the backend, which the other routes need, does not know the token
+		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
+		return
+	}
 	if !f.materialize(u, r) {
 		reply(w, http.StatusInternalServerError, 0, "fake: cannot prepare calendars")
 		return
@@ -197,6 +218,28 @@ func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(w, http.StatusNotFound, 2000, "fake: route not implemented")
 	}
+}
+
+// eventSegments returns the unescaped path segments after /calendar/v1/ when
+// r targets a calendar's events or model events. An ID holding "/" arrives
+// escaped and stays one segment, like in Proton's router.
+func eventSegments(r *http.Request) ([]string, bool) {
+	rest, ok := strings.CutPrefix(r.URL.EscapedPath(), "/calendar/v1/")
+	if !ok {
+		return nil, false
+	}
+	segs := strings.Split(rest, "/")
+	if len(segs) < 2 || (segs[1] != "events" && segs[1] != "modelevents") {
+		return nil, false
+	}
+	for i, s := range segs {
+		v, err := url.PathUnescape(s)
+		if err != nil {
+			return nil, false
+		}
+		segs[i] = v
+	}
+	return segs, true
 }
 
 // materialize encrypts the passphrases of the user's new calendars to the

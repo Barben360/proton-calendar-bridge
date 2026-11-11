@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"strings"
 	"testing"
@@ -15,7 +16,9 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
+	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
 )
 
 // TestMapError pins the exit code of every failure kind, by type (R23a).
@@ -48,6 +51,14 @@ func TestMapError(t *testing.T) {
 		{"network", &net.OpError{Op: "dial", Err: errors.New("refused")}, exitcode.Blocked, "network", "reach Proton"},
 		{"no key", fmt.Errorf("%w: %s", seal.ErrNoKey, keyFile), exitcode.Blocked, "restore", keyFile},
 		{"corrupt store", seal.ErrCorrupt, exitcode.Blocked, "pcb logout", keyFile},
+		{"cache newer schema", fmt.Errorf("reading the cache: %w", cache.ErrNewerSchema), exitcode.Blocked, "upgrade pcb", "newer pcb"},
+		{"cache corrupt", fmt.Errorf("x: %w", cache.ErrCorrupt), exitcode.MustAct, "pcb sync --full", "damaged"},
+		{"cache permission", fmt.Errorf("x: %w", &cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}), exitcode.Blocked, "permissions", "permission denied"},
+		{"cache refusing a write", &syncer.StoreError{Err: errors.New("constraint failed hunter2")}, exitcode.Blocked, "pcb doctor", "event cache"},
+		{"cache damaged during a pass", &syncer.StoreError{Err: fmt.Errorf("x: %w", cache.ErrCorrupt)}, exitcode.MustAct, "pcb sync --full", "damaged"},
+		{"cache changed while reading", fmt.Errorf("x: %w", cache.ErrChanged), exitcode.Blocked, "run the command again", "changed while reading"},
+		// A path error of another file (the key file, a state file) is not the cache's.
+		{"non-cache path error", &fs.PathError{Op: "open", Path: "/k/secrets.key", Err: fs.ErrPermission}, exitcode.Blocked, "doctor", "unexpected"},
 		{"cancelled", context.Canceled, exitcode.Blocked, "", ""},
 		{"unexpected", errors.New("secret-looking detail hunter2"), exitcode.Blocked, "", "unexpected"},
 	}
@@ -89,5 +100,49 @@ func TestAcquireErrorIsBlocked(t *testing.T) {
 	guard := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("busy"), Hint: "wait for it to finish"}
 	if got := acquireError(guard, "/state"); got != guard { //nolint:errorlint // identity is the point
 		t.Errorf("a guard refusal was rewrapped: %v", got)
+	}
+}
+
+// What a watch reads from a mapped error: how long Proton asked to wait,
+// and whether retrying can help at all.
+func TestWatchReadsTheMappedError(t *testing.T) {
+	t.Parallel()
+	limited := mapError(&api.Error{Status: 429, RetryAfter: 20 * time.Minute}, "")
+	if got := retryAfter(limited); got != 20*time.Minute {
+		t.Errorf("retryAfter(429 with Retry-After 20m) = %v", got)
+	}
+	if h := exitcode.HintOf(limited); h != "retry in 20m0s" {
+		t.Errorf("one-shot hint = %q, want the retry-in hint kept", h)
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+		stop bool
+	}{
+		{"must act", mapError(api.ErrSessionEnded, ""), true},
+		{"newer schema", mapError(fmt.Errorf("x: %w", cache.ErrNewerSchema), ""), true},
+		{"no login locks", acquireError(filelock.ErrUnsupported, "/s"), true},
+		{"rate limited", limited, false},
+		{"Proton down", mapError(&api.Error{Status: 503}, ""), false},
+		{"network", mapError(&net.OpError{Op: "dial", Err: errors.New("refused")}, ""), false},
+		{"cache permission", mapError(&cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}, ""), false},
+		{"partial", partial("1 of 2 calendars failed to sync", "run pcb sync again"), false},
+	} {
+		if got := stopsWatch(c.err); got != c.stop {
+			t.Errorf("%s: stopsWatch = %v, want %v", c.name, got, c.stop)
+		}
+		if c.name != "rate limited" && retryAfter(c.err) != 0 {
+			t.Errorf("%s: retryAfter = %v, want 0", c.name, retryAfter(c.err))
+		}
+	}
+}
+
+// The note of a listing that never settled is shown as is: it holds a count
+// only.
+func TestCalendarErrorShowsTheUnverifiedNote(t *testing.T) {
+	t.Parallel()
+	note := &syncer.UnverifiedError{Rows: 2}
+	if got := calendarError(context.Background(), fmt.Errorf("x: %w", note)); got != note.Error() {
+		t.Errorf("calendarError = %q, want %q", got, note.Error())
 	}
 }

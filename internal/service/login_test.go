@@ -945,3 +945,52 @@ func TestEveryMethodAfterCloseIsBlocked(t *testing.T) {
 		t.Errorf("%d requests after Close", n)
 	}
 }
+
+// uidRecorder remembers the x-pm-uid of the requests it carries.
+type uidRecorder struct {
+	mu   sync.Mutex
+	uids []string
+}
+
+func (u *uidRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	u.mu.Lock()
+	u.uids = append(u.uids, r.Header.Get("x-pm-uid"))
+	u.mu.Unlock()
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// A refresh during the key calls spends the refresh token SRP returned; when
+// the login then fails, the abort must revoke the refreshed session, not try
+// (and fail) with the spent pair.
+func TestAbortAfterRefreshRevokesLiveSession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	rec := &uidRecorder{}
+	svc, err := service.NewLocal(service.Options{
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		HTTP: &http.Client{Transport: rec, Timeout: 10 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	e.f.FailNext("GET", "/core/v4/keys/salts", 401, 401, 0)
+	e.f.FailNext("GET", "/core/v4/addresses", 400, 2000, 0)
+	if _, err := svc.Login(t.Context(), e.req()); err == nil {
+		t.Fatal("the login succeeded")
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Fatalf("%d refreshes during the login, want 1", n)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Fatal("a failed login sealed a session")
+	}
+	minted := e.f.AccessTokens()
+	rec.mu.Lock()
+	uid := rec.uids[len(rec.uids)-1]
+	rec.mu.Unlock()
+	live := api.Tokens{UID: uid, AccessToken: minted[len(minted)-1]}
+	if sessionAlive(t, e, live) {
+		t.Error("the refreshed session is still alive after the failed login")
+	}
+}

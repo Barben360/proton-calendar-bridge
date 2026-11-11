@@ -673,3 +673,22 @@ func TestRedirectIsNeverFollowed(t *testing.T) {
 		})
 	}
 }
+
+func TestSetTokensReplacesWhatIsSent(t *testing.T) {
+	t.Parallel()
+	var seen []string
+	var mu sync.Mutex
+	c, _ := newClient(t, bearerHandler(&seen, &mu), api.Options{})
+	_ = c.Get(t.Context(), "/x", nil, nil)
+	next := api.Tokens{UID: "uid-1", AccessToken: "access-other", RefreshToken: "refresh-other"}
+	c.SetTokens(next)
+	if c.Tokens() != next {
+		t.Fatalf("Tokens() = %+v", c.Tokens())
+	}
+	_ = c.Get(t.Context(), "/x", nil, nil)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[1] != "Bearer access-other" {
+		t.Errorf("bearers sent = %v", seen)
+	}
+}
