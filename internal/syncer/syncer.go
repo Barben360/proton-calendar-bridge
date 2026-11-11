@@ -151,7 +151,7 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	}
 	for _, cal := range cals {
 		// Keep the last error until this pass knows better.
-		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String(), Error: prev[cal.ID].Error}
+		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String(), Color: cal.Color, Description: cal.Description, Error: prev[cal.ID].Error}
 		if err := db.PutCalendar(ctx, rec); err != nil {
 			return Report{}, storeErr("recording calendar %s in the cache: %w", cal.ID, err)
 		}
@@ -164,7 +164,7 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 		if r.Err != nil && (errors.As(r.Err, &se) || api.SessionWide(ctx, r.Err)) {
 			return Report{}, r.Err
 		}
-		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String()}
+		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String(), Color: cal.Color, Description: cal.Description}
 		if r.Err != nil {
 			rec.Error = o.Describe(r.Err)
 		}

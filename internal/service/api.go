@@ -29,9 +29,50 @@ type API interface {
 	// ctx ends (nil: a normal stop) or a person is needed (that error), calling
 	// onPass after every pass.
 	WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass)) error
+	// Serve runs serve mode's sync loop until ctx ends (nil) or a person is
+	// needed (that error): the sync lock held throughout, and the read
+	// methods below answered from its own cache handle (ruling M3-R6). It
+	// needs a ready login; a start it refuses never calls o.Ready.
+	Serve(ctx context.Context, o ServeOptions) error
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
+	// The read methods below read the event cache: during Serve, Serve's
+	// own handle; otherwise a read-only handle opened for each call. They
+	// call Proton only to unlock a calendar's keys and read its settings,
+	// the first time the process reads that calendar.
+
+	// Collections lists the calendars of the event cache with their CTag
+	// and sync token, and those not synced yet as Pending; no cache is a
+	// MustAct. It may call Proton (the
+	// CTag holds each calendar's settings, ruling M3-R14).
+	Collections(ctx context.Context) ([]Collection, error)
+	// Objects lists a calendar's objects (one per UID) with their ETags, and
+	// the calendar's current sync token.
+	Objects(ctx context.Context, calID string) ([]ObjectInfo, string, error)
+	// ObjectsByUID returns the rendered objects of uids, in their order.
+	ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error)
+	// Changes returns what changed in a calendar since a sync token ("" for
+	// everything); a token it cannot answer from is an error whose cause is
+	// ErrInvalidSyncToken.
+	Changes(ctx context.Context, calID, token string) (ChangeSet, error)
+	// The client methods manage the CalDAV app passwords in
+	// <state>/clients.json. They need no login and no network, and logout
+	// leaves them (ruling M3-R17).
+
+	// AddClient creates a client and returns its password, this once. A bad
+	// or taken name is a Usage error.
+	AddClient(ctx context.Context, name string) (ClientSecret, error)
+	// Clients lists the clients, without secrets.
+	Clients(ctx context.Context) ([]Client, error)
+	// RemoveClient deletes the client with this ID or (case-insensitive)
+	// name; an unknown one is a Usage error.
+	RemoveClient(ctx context.Context, idOrName string) (Client, error)
+	// CheckClient reports whether password is a client's, for a request
+	// from remote ("ip:port"). A remote with 5 failures in the last minute
+	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
+	// otherwise a refusal has retryAfter 0 (401).
+	CheckClient(ctx context.Context, password, remote string) (ok bool, retryAfter time.Duration)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
 }
@@ -113,7 +154,7 @@ type SyncStatus struct {
 
 // CalendarStatus is one cached calendar. SyncedAt is its last successful
 // pass and FullAt its last full listing (nil: never). Error is its last
-// failure ("" if none).
+// sync failure ("" if none).
 type CalendarStatus struct {
 	ID       string     `json:"id"`
 	Name     string     `json:"name"`
@@ -141,6 +182,30 @@ type WatchPass struct {
 	Result SyncResult
 	Err    error
 	Next   time.Duration
+	// Render is the process's render counters after the pass; set by
+	// Serve only (ruling M3-R34: pcb serve logs them).
+	Render *RenderCounts
+}
+
+// RenderCounts is what the renders of this process met, in memory only, as
+// of now (ruling M3-R34): only the process that serves can see it, so
+// pcb serve logs it and pcb status does not show it (M5's local socket
+// will). Since the keys were last loaded: Undecryptable counts the rows
+// served as placeholders (ruling M3-R4), Unverified the rows rendered with
+// X-PCB-INTEGRITY:unverified (ruling M3-R33), DuplicateMasters the masters
+// left out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
+// did not unlock (every event of them is a placeholder), sorted, nil if
+// none.
+type RenderCounts struct {
+	Undecryptable    int
+	Unverified       int
+	DuplicateMasters int
+	KeysErrors       []string
+}
+
+// Zero reports whether every counter is zero.
+func (c RenderCounts) Zero() bool {
+	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or
@@ -202,4 +267,48 @@ type Calendar struct {
 	Default     bool   `json:"default"`
 	Keys        string `json:"keys"`
 	KeysError   string `json:"keys_error,omitempty"`
+}
+
+// Collection is a synced calendar as the read API serves it. CTag is
+// "<epoch>:<seq>:<settings hash>": it changes with any row of the calendar,
+// the calendar settings and keys the rendering uses, and the cache's life.
+// SyncToken is "urn:pcb:sync:1:<epoch>:<seq>:<gen>" (gen names the render
+// inputs, ruling M3-R11).
+type Collection struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Color       string `json:"color,omitempty"`
+	Description string `json:"description,omitempty"`
+	ReadOnly    bool   `json:"read_only"`
+	// Pending: the cache knows the calendar but has not synced it yet (a
+	// first pass is on its way to it, or it failed): no CTag, no sync token,
+	// and its reads return ErrCalendarPending (ruling M3-R25).
+	Pending   bool   `json:"pending,omitempty"`
+	CTag      string `json:"ctag"`
+	SyncToken string `json:"sync_token"`
+}
+
+// ObjectInfo names one object: the UID of its rows and its ETag (quoted, as
+// HTTP sends it). The adapter derives the object's href from the UID.
+type ObjectInfo struct {
+	UID  string `json:"uid"`
+	ETag string `json:"etag"`
+}
+
+// Object is a rendered object: a VCALENDAR (CRLF line ends) holding the
+// UID's master and exceptions, decrypted. Missing: the UID has no live row.
+// Data is shared with the service's in-memory cache: never modify it.
+type Object struct {
+	UID     string `json:"uid"`
+	ETag    string `json:"etag,omitempty"`
+	Data    []byte `json:"data,omitempty"`
+	Missing bool   `json:"missing,omitempty"`
+}
+
+// ChangeSet is what changed since a sync token: the objects to fetch, the
+// UIDs with no live row left, and the token to ask from next.
+type ChangeSet struct {
+	Changed []ObjectInfo `json:"changed"`
+	Deleted []string     `json:"deleted"`
+	Token   string       `json:"token"`
 }

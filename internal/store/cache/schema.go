@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS calendars (
 	full_at   INTEGER NOT NULL DEFAULT 0,
 	synced_at INTEGER NOT NULL DEFAULT 0,
 	error     TEXT NOT NULL DEFAULT '',
-	resync    TEXT NOT NULL DEFAULT ''
+	resync    TEXT NOT NULL DEFAULT '',
+	color       TEXT NOT NULL DEFAULT '',
+	description TEXT NOT NULL DEFAULT '',
+	floor       INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS events (
 	calendar_id   TEXT NOT NULL CHECK (calendar_id <> ''),
@@ -37,6 +40,7 @@ CREATE TABLE IF NOT EXISTS events (
 	UNIQUE (calendar_id, id)
 );
 CREATE INDEX IF NOT EXISTS events_seq ON events (calendar_id, seq);
+CREATE INDEX IF NOT EXISTS events_uid ON events (calendar_id, uid);
 CREATE TABLE IF NOT EXISTS tombstones (
 	calendar_id TEXT NOT NULL,
 	id          TEXT NOT NULL,

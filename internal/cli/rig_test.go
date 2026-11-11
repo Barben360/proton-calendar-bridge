@@ -105,9 +105,34 @@ func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, f
 	return nil
 }
 
+func (*stubAPI) Serve(context.Context, service.ServeOptions) error { return nil }
+
 func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event, error) {
 	return nil, nil
 }
+
+func (*stubAPI) Collections(context.Context) ([]service.Collection, error) { return nil, nil }
+
+func (*stubAPI) Objects(context.Context, string) ([]service.ObjectInfo, string, error) {
+	return nil, "", nil
+}
+
+func (*stubAPI) ObjectsByUID(context.Context, string, []string) ([]service.Object, error) {
+	return nil, nil
+}
+
+func (*stubAPI) Changes(context.Context, string, string) (service.ChangeSet, error) {
+	return service.ChangeSet{}, nil
+}
+
+func (*stubAPI) AddClient(context.Context, string) (service.ClientSecret, error) {
+	return service.ClientSecret{}, nil
+}
+func (*stubAPI) Clients(context.Context) ([]service.Client, error) { return nil, nil }
+func (*stubAPI) RemoveClient(context.Context, string) (service.Client, error) {
+	return service.Client{}, nil
+}
+func (*stubAPI) CheckClient(context.Context, string, string) (bool, time.Duration) { return false, 0 }
 
 func (s *stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return nil, nil }
 func (s *stubAPI) Close() error                                          { s.closed++; return s.closeErr }

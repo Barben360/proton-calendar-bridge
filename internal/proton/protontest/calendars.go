@@ -25,6 +25,10 @@ type Calendar struct {
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
 	ExtraLockedKey           bool // a second calendar key no passphrase opens, listed first
 	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
+	// The calendar's default reminders, as its bootstrap serves them; nil:
+	// one DISPLAY reminder, -PT1H for part-day events and -PT15H for full-day
+	// ones (see SetDefaultNotifications).
+	PartDayNotifications, FullDayNotifications []Notification
 }
 
 // calendars holds the fake's calendar state, guarded by mu.
@@ -54,10 +58,12 @@ type userCalendars struct {
 
 type calendarRec struct {
 	id         string
+	owner      string // username
 	def        Calendar
 	passphrase string
 	ring       *crypto.KeyRing // unlocked calendar key
 	armored    []string        // calendar keys as served
+	extra      *crypto.Key     // the key no passphrase opens (ExtraLockedKey), unlocked
 	// Filled on the first request of the user, from the address list.
 	ready    bool
 	memberID string
@@ -95,7 +101,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	rec := &calendarRec{id: id, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
+	rec := &calendarRec{id: id, owner: username, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
 	if c.ExtraLockedKey {
 		other, err := crypto.GenerateKey("Old calendar key", "", "x25519", 0)
 		if err != nil {
@@ -110,6 +116,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 			f.t.Fatal(err)
 		}
 		rec.armored = []string{a, armored}
+		rec.extra = other
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
@@ -124,6 +131,82 @@ func (f *Fake) SetDefaultCalendar(username, id string) {
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
 	f.cal.user(username).defaultID = id
+}
+
+// RotateCalendarKey adds a new calendar key, locked with the calendar's
+// passphrase and listed last, as a key rotation does; the rows keep their
+// key packets to the former key, which stays listed.
+func (f *Fake) RotateCalendarKey(id string) {
+	f.t.Helper()
+	key, err := crypto.GenerateKey("Calendar key", "", "x25519", 0)
+	if err != nil {
+		f.t.Fatalf("protontest: calendar key: %v", err)
+	}
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	locked, err := key.Lock([]byte(rec.passphrase))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	armored, err := locked.Armor()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	rec.armored = append(rec.armored, armored)
+}
+
+// ReactivateCalendarKey locks the calendar's extra key (ExtraLockedKey) with
+// the calendar passphrase, listed under the same ID: the key now opens, as
+// after a key reactivation.
+func (f *Fake) ReactivateCalendarKey(id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil || rec.extra == nil {
+		f.t.Fatalf("protontest: calendar %q has no extra key", id)
+	}
+	locked, err := rec.extra.Lock([]byte(rec.passphrase))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	armored, err := locked.Armor()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	rec.armored[0] = armored
+}
+
+// RemoveCalendar takes the calendar out of username's list, as if deleted
+// in Proton: the list no longer shows it and its routes answer as unknown.
+func (f *Fake) RemoveCalendar(username, id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	u := f.cal.user(username)
+	i := slices.IndexFunc(u.list, func(r *calendarRec) bool { return r.id == id })
+	if i < 0 {
+		f.t.Fatalf("protontest: user %q has no calendar %q", username, id)
+	}
+	u.list = slices.Delete(u.list, i, i+1)
+	delete(f.cal.byID, id)
+}
+
+// SetDefaultNotifications replaces the calendar's default reminders (nil
+// restores the fake's defaults), as a change in Proton's calendar settings.
+func (f *Fake) SetDefaultNotifications(id string, partDay, fullDay []Notification) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	rec.def.PartDayNotifications, rec.def.FullDayNotifications = partDay, fullDay
 }
 
 // EncryptToCalendar encrypts plaintext to the calendar's key and returns the
@@ -391,8 +474,21 @@ func (c *calendarRec) bootstrap() map[string]any {
 		"Members": c.members(),
 		"CalendarSettings": map[string]any{
 			"ID": "set1", "CalendarID": c.id, "DefaultEventDuration": 30, "MakesUserBusy": 1,
-			"DefaultPartDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT1H"}},
-			"DefaultFullDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT15H"}},
+			"DefaultPartDayNotifications": notifications(c.def.PartDayNotifications, "-PT1H"),
+			"DefaultFullDayNotifications": notifications(c.def.FullDayNotifications, "-PT15H"),
 		},
 	}
+}
+
+// notifications serves a default reminder list; nil is one DISPLAY reminder
+// at trigger.
+func notifications(list []Notification, trigger string) []any {
+	if list == nil {
+		return []any{map[string]any{"Type": 1, "Trigger": trigger}}
+	}
+	out := make([]any, 0, len(list))
+	for _, n := range list {
+		out = append(out, map[string]any{"Type": n.Type, "Trigger": n.Trigger})
+	}
+	return out
 }

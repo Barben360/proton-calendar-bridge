@@ -64,6 +64,34 @@ func retryAfter(err error) time.Duration {
 	return 0
 }
 
+// ErrInvalidSyncToken is the cause of the error Changes returns for a sync
+// token it cannot answer from (another cache life, a position the calendar
+// never reached, or not a token of ours): the client must list the calendar
+// in full (CalDAV: 403 valid-sync-token).
+var ErrInvalidSyncToken = errors.New("the sync token is not valid for this calendar")
+
+// ErrNoSuchCalendar is the cause of the error a read returns for a calendar
+// the cache does not hold or never synced (CalDAV: 404).
+var ErrNoSuchCalendar = errors.New("no such calendar in the event cache")
+
+// ErrCalendarPending is the cause of the error a read returns for a
+// calendar the cache knows but has not synced yet (ruling M3-R25): it will
+// answer once a pass reaches it (CalDAV: 503, never a 4xx that would disable
+// the calendar in Thunderbird).
+var ErrCalendarPending = errors.New("the calendar is not synced yet")
+
+func invalidSyncToken() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: ErrInvalidSyncToken, Hint: "list the calendar in full (an empty sync token)"}
+}
+
+func calendarPending() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: ErrCalendarPending, Hint: "wait for the sync pass to reach it, or run pcb sync"}
+}
+
+func noSuchCalendar() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: ErrNoSuchCalendar, Hint: "pcb calendar list shows your calendars; one added since the last sync needs pcb sync first"}
+}
+
 func usage(msg, hint string) *exitcode.Error   { return fail(exitcode.Usage, msg, hint) }
 func mustAct(msg, hint string) *exitcode.Error { return fail(exitcode.MustAct, msg, hint) }
 func blocked(msg, hint string) *exitcode.Error { return fail(exitcode.Blocked, msg, hint) }

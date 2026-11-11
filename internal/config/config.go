@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -23,12 +25,25 @@ import (
 const (
 	DefaultBaseURL    = "https://mail-api.proton.me"
 	DefaultAppVersion = "Other"
+	// DefaultListen is where pcb serve listens for CalDAV: loopback only.
+	DefaultListen = "127.0.0.1:1080"
 )
 
 // Config is the content of config.toml.
 type Config struct {
 	Proton  Proton  `toml:"proton"`
 	Secrets Secrets `toml:"secrets"`
+	CalDAV  CalDAV  `toml:"caldav"`
+}
+
+// CalDAV is the listener of pcb serve. A loopback bind serves plain HTTP;
+// any other bind serves TLS, with TLSCert and TLSKey (set together) or, when
+// both are empty, a self-signed certificate pcb generates and keeps.
+type CalDAV struct {
+	Listen    string   `toml:"listen"`    // HOST:PORT, the host explicit (0.0.0.0 or [::] for every interface)
+	Hostnames []string `toml:"hostnames"` // names clients use, put in the generated certificate; the first one is in the printed URL
+	TLSCert   string   `toml:"tls_cert"`  // absolute path of a PEM certificate (chain)
+	TLSKey    string   `toml:"tls_key"`   // absolute path of its PEM private key
 }
 
 // Proton is how pcb presents itself to Proton.
@@ -51,6 +66,7 @@ func Defaults(d paths.Dirs) Config {
 	return Config{
 		Proton:  Proton{BaseURL: DefaultBaseURL, AppVersion: DefaultAppVersion},
 		Secrets: Secrets{KeyFile: filepath.Join(d.Config, "secrets.key")},
+		CalDAV:  CalDAV{Listen: DefaultListen},
 	}
 }
 
@@ -126,7 +142,75 @@ func (c Config) validate() error {
 	if !filepath.IsAbs(c.Secrets.KeyFile) {
 		return errors.New("secrets.key_file must be an absolute path")
 	}
+	return c.CalDAV.validate()
+}
+
+func (c CalDAV) validate() error {
+	if err := ValidateListen(c.Listen); err != nil {
+		return fmt.Errorf("caldav.listen %w", err)
+	}
+	if c.Hostnames != nil && len(c.Hostnames) == 0 {
+		return errors.New("caldav.hostnames must not be an empty list (leave the key out instead)")
+	}
+	for i, h := range c.Hostnames {
+		if net.ParseIP(h) == nil && !validDNSName(h) {
+			return fmt.Errorf("caldav.hostnames entry %d must be a DNS name or an IP address", i+1)
+		}
+	}
+	switch {
+	case c.TLSCert != "" && c.TLSKey == "":
+		return errors.New("caldav.tls_key must be set with caldav.tls_cert")
+	case c.TLSKey != "" && c.TLSCert == "":
+		return errors.New("caldav.tls_cert must be set with caldav.tls_key")
+	case c.TLSCert != "" && !filepath.IsAbs(c.TLSCert):
+		return errors.New("caldav.tls_cert must be an absolute path")
+	case c.TLSKey != "" && !filepath.IsAbs(c.TLSKey):
+		return errors.New("caldav.tls_key must be an absolute path")
+	}
 	return nil
+}
+
+// ValidateListen checks a listen address the way [caldav] listen is checked
+// (pcb serve --listen uses it too): HOST:PORT, the host an IP address or a
+// DNS name (never empty: 0.0.0.0 or [::] say "every interface"), the port
+// 0 to 65535 (0: any free port). The message never echoes the value.
+func ValidateListen(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("must be HOST:PORT, such as 127.0.0.1:1080")
+	}
+	if host == "" {
+		return errors.New("must name its host (0.0.0.0 or [::] for every interface)")
+	}
+	if net.ParseIP(host) == nil && !validDNSName(host) {
+		return errors.New("must have an IP address or a DNS name as its host")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 || strings.ContainsAny(port, "+-") {
+		return errors.New("must have a port number from 0 to 65535")
+	}
+	return nil
+}
+
+// validDNSName reports whether s is a DNS name: dot-separated labels of
+// 1 to 63 letters, digits or hyphens, no label starting or ending with a
+// hyphen, 253 characters at most.
+func validDNSName(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+			if !alnum && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validAppVersion(v string) error {

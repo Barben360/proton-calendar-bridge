@@ -11,6 +11,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -47,6 +48,17 @@ type Local struct {
 	secrets *store.Secrets
 	mgr     *gpa.Manager
 
+	clients *access.Store   // CalDAV app passwords, <state>/clients.json; survives logout (ruling M3-R17)
+	limiter *access.Limiter // failed CalDAV password checks per remote IP
+
+	tmu          sync.Mutex // guards touching and the start of touches
+	touching     map[string]bool
+	twg          sync.WaitGroup
+	tctx         context.Context // ends the background touches (Close)
+	tcancel      context.CancelFunc
+	touchHook    func(phase, id string) // tests only
+	touchTimeout time.Duration
+
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
@@ -54,6 +66,11 @@ type Local struct {
 
 	cmu    sync.Mutex // guards cached; never held across a network call
 	cached *cachedClient
+
+	r renderer // keys and rendered objects of the read API, dropped with cached
+
+	smu    sync.RWMutex // guards served; held for reading while a read uses it
+	served *served      // Serve's cache handle, nil outside Serve
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -63,11 +80,13 @@ type cachedClient struct {
 	c              *api.Client
 }
 
-// dropClient forgets the cached session client (login, logout, Close).
+// dropClient forgets the cached session client, the unlocked keys and the
+// rendered objects (login, relogin, logout, Close).
 func (l *Local) dropClient() {
 	l.cmu.Lock()
 	l.cached = nil
 	l.cmu.Unlock()
+	l.r.drop()
 }
 
 var _ API = (*Local)(nil)
@@ -86,11 +105,19 @@ func NewLocal(o Options) (*Local, error) {
 	if o.Sleep == nil {
 		o.Sleep = sleep
 	}
-	return &Local{
+	l := &Local{
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
-	}, nil
+		clients: access.NewStore(o.Dirs.State, o.Now),
+		limiter: access.NewLimiter(o.Now),
+
+		touching:     map[string]bool{},
+		touchTimeout: defaultTouchTimeout,
+	}
+	l.tctx, l.tcancel = context.WithCancel(context.Background())
+	l.r.lru = newLRU(lruCapacity)
+	return l, nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -243,6 +270,10 @@ func (l *Local) Close() error {
 	}
 	l.dropPending(context.Background())
 	l.dropClient()
+	l.tmu.Lock() // no touch starts after this: touch checks closed under tmu
+	l.tcancel()
+	l.tmu.Unlock()
+	l.twg.Wait()
 	l.mgr.Close()
 	return nil
 }

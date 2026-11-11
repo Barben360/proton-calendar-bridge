@@ -1,7 +1,6 @@
 package protontest
 
 import (
-	"encoding/base64"
 	"encoding/hex"
 	"net/http"
 	"net/url"
@@ -18,6 +17,29 @@ type Event struct {
 	FullDay      bool
 	RRule        string
 	RecurrenceID *int64
+	// Card is the VEVENT body (content lines, CRLF or LF separated; folded
+	// lines and nested components stay with their property), split into
+	// Proton's parts per the merge table (see splitCard). Empty: a minimal
+	// card from UID, Start, End, FullDay, RRule and RecurrenceID. A card
+	// without UID gets UID's.
+	Card string
+	// Author names the parts' signer; empty: the email of the calendar's
+	// address. The parts are signed with the address key whatever the
+	// Author, unless ForeignKey.
+	Author string
+	// ForeignKey signs the parts with an unrelated key (one per test binary)
+	// instead of the address key: a signature that must not verify.
+	ForeignKey bool
+	Color      string // "" serves null
+	// Notifications: nil serves null (the calendar's defaults), an empty
+	// slice [] (none).
+	Notifications []Notification
+	// AddressKeyPacket wraps the shared session key to the address key
+	// (AddressKeyPacket, AddressID) instead of the calendar key
+	// (SharedKeyPacket), as on a Proton-to-Proton invitation.
+	AddressKeyPacket bool
+	BrokenPart       Part // that part is encrypted under an unrelated session key
+	Unsigned         Part // that part is served without a signature (see unsign)
 }
 
 // Feed actions, as the change feed names them.
@@ -37,6 +59,9 @@ type eventRec struct {
 	id, sharedID                 string
 	ev                           Event
 	createTime, lastEdit, modify int64
+	// parts are the crypto fields, built on the row's first read after each
+	// edit and kept, so a row reads the same until edited.
+	parts map[string]any
 }
 
 // feedEntry is one change in a calendar's feed; seq is its position.
@@ -157,7 +182,7 @@ func (f *Fake) UpdateEvent(calID, id string, e Event) {
 		f.t.Fatalf("protontest: no event %q in calendar %q", id, calID)
 	}
 	now := f.tick()
-	s.rows[i].ev, s.rows[i].lastEdit, s.rows[i].modify = e, now, now
+	s.rows[i].ev, s.rows[i].lastEdit, s.rows[i].modify, s.rows[i].parts = e, now, now, nil
 	s.record(id, actionUpdate)
 }
 
@@ -243,7 +268,12 @@ func (f *Fake) serveEvents(w http.ResponseWriter, r *http.Request, u *userCalend
 			reply(w, http.StatusUnprocessableEntity, 2501, "Event does not exist")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Event": s.rows[j].json(cal.id)})
+		row, ok := f.rowJSON(cal, s.rows[j])
+		if !ok {
+			reply(w, http.StatusInternalServerError, 0, "fake: cannot build the event parts")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Event": row})
 	case len(segs) == 3 && segs[1] == "modelevents" && segs[2] == "latest":
 		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "CalendarModelEventID": s.cursor(s.seq)})
 	case len(segs) == 3 && segs[1] == "modelevents":
@@ -277,7 +307,12 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 	hi := min(lo+size, len(s.rows))
 	rows := make([]any, 0, hi-lo)
 	for _, r := range s.rows[lo:hi] {
-		rows = append(rows, r.json(cal.id))
+		row, ok := f.rowJSON(cal, r)
+		if !ok {
+			reply(w, http.StatusInternalServerError, 0, "fake: cannot build the event parts")
+			return
+		}
+		rows = append(rows, row)
 	}
 	total := len(s.rows)
 	if fn := f.cal.onList; fn != nil {
@@ -321,41 +356,43 @@ func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {
 	})
 }
 
-// json is the row as the API serves it: the plaintext columns of the
-// research's field set, and opaque parts (see parts).
-func (r *eventRec) json(calID string) map[string]any {
-	var recurrence, rrule any
+// rowJSON is the row as the API serves it: the plaintext columns of the
+// research's field set and real parts (see buildParts). It reports false,
+// after failing the test, when the parts cannot be built. Caller holds
+// f.cal.mu.
+func (f *Fake) rowJSON(cal *calendarRec, r *eventRec) (map[string]any, bool) {
+	if r.parts == nil {
+		parts, err := f.buildParts(cal, r)
+		if err != nil {
+			f.t.Errorf("protontest: event parts: %v", err) // a handler goroutine: no Fatal
+			return nil, false
+		}
+		r.parts = parts
+	}
+	var recurrence, rrule, color any
 	if r.ev.RecurrenceID != nil {
 		recurrence = *r.ev.RecurrenceID
 	}
 	if r.ev.RRule != "" {
 		rrule = r.ev.RRule
 	}
+	if r.ev.Color != "" {
+		color = r.ev.Color
+	}
 	fullDay := 0
 	if r.ev.FullDay {
 		fullDay = 1
 	}
-	shared, calendar, personal, attendees := r.parts()
-	return map[string]any{
-		"ID": r.id, "CalendarID": calID, "SharedEventID": r.sharedID,
+	row := map[string]any{
+		"ID": r.id, "CalendarID": cal.id, "SharedEventID": r.sharedID,
 		"CreateTime": r.createTime, "ModifyTime": r.modify, "LastEditTime": r.lastEdit,
 		"StartTime": r.ev.Start, "EndTime": r.ev.End, "StartTimezone": "UTC", "EndTimezone": "UTC",
 		"FullDay": fullDay, "UID": r.ev.UID, "IsOrganizer": 1,
 		"RecurrenceID": recurrence, "Exdates": []int64{}, "RRule": rrule,
-		"Author": "fake@example.org", "Permissions": 127, "Color": nil, "Notifications": nil,
-		"SharedKeyPacket":   base64.StdEncoding.EncodeToString([]byte("shared-key-" + r.id)),
-		"CalendarKeyPacket": base64.StdEncoding.EncodeToString([]byte("calendar-key-" + r.id)),
-		"SharedEvents":      shared, "CalendarEvents": calendar, "PersonalEvents": personal,
-		"AttendeesEvents": attendees, "Attendees": []any{},
+		"Permissions": 127, "Color": color, "Notifications": r.ev.Notifications,
 	}
-}
-
-// parts builds the row's card parts: the one place to replace with real
-// encrypted cards. Today they are opaque placeholders (Type 3: encrypted and
-// signed) that change with the row's LastEditTime, so an edit changes bytes.
-func (r *eventRec) parts() (shared, calendar, personal, attendees []any) {
-	part := func(kind string) map[string]any {
-		return map[string]any{"Type": 3, "Data": "placeholder-" + kind + "-" + r.id + "-" + strconv.FormatInt(r.lastEdit, 10), "Signature": ""}
+	for k, v := range r.parts {
+		row[k] = v
 	}
-	return []any{part("shared")}, []any{part("calendar")}, []any{}, []any{}
+	return row, true
 }
