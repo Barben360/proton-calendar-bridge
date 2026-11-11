@@ -32,14 +32,16 @@ is deferred until the author can solve a CAPTCHA (`spec/HUMAN-CHECKS.md`,
 
 ```sh
 pcb login                              # prompts for what is missing; or set PCB_USERNAME, PCB_PASSWORD, PCB_TOTP
+pcb login --username alice             # the username may be a flag (default: $PCB_USERNAME, else asked)
 pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
+pcb login --unattended-relogin         # store the credentials so pcb can log in again without you
 pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
 pcb status                             # the login state, no network call
 pcb calendar list [--json]
 pcb logout
 ```
 
-Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
+Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
 
 ## Build
 

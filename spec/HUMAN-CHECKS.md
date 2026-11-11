@@ -58,7 +58,7 @@ Update `E01`, `E02`, `E03`, `DATASET.md`, SPEC §5.1/§5.2 markers, `spec/OPEN.m
 
 Placeholder, to be written when the adapter exists. Scope: a real Thunderbird (local, then over the network) subscribes to the bridge, shows every calendar and stays in sync; confirms the E08 source findings live (discovery through `/.well-known/caldav`, Basic 401 challenge, `sync-collection` with the empty token, `calendar-multiget`, PUT/DELETE precondition handling, no VTIMEZONE needed in responses, dismissed alarms not re-firing after an edit). Needs the author because it is a GUI client. Source-based expectations: `spec/experiments/E08-thunderbird-caldav.md`.
 
-## M1 live session (after steps 1 to 5; agent-run except two author actions)
+## M1 live session (after steps 1 to 5; agent-run except three author actions)
 
 Proves `pcb` against the test account. Worktree `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m1` (or main once merged). Same rules as above, plus:
 
@@ -85,7 +85,7 @@ Proves `pcb` against the test account. Worktree `/home/jduff/Workspace/worktrees
 
 **M1.6 Signals to confirm.** For each item of "Signals to confirm" below, record the real HTTP status and Proton code seen in M1.2 to M1.7 (the JSON `error.message` of the failing command), or "not exercised". Items that need a deliberate failure (wrong TOTP, wrong password) are exercised only if the login budget has room (a wrong password at `pcb login` costs a login); otherwise leave them `[assumed]` and say so in the write-up. If Proton answers differently, adjust the classification in `internal/proton/auth` or `internal/proton/api` test first, in its own commit.
 
-**M1.7 Unattended relogin after a revoke (L3).** The author revokes the `pcb` session (account.proton.me, Security, Sessions; the one created at M1.2/M1.3) and says "revoked at HH:MM". The agent, at least 60 s after the last login: `pass-cli run --env-file scripts/pcb.env.example -- bin/pcb calendar list --json`, then `bin/pcb status --json`. Expect exit 0 with the calendar list after exactly one unattended relogin (`status.last_relogin` set), or exit 10 with a CAPTCHA (`status.phase` `needs-login` / `captcha_url` set): both are results to record, and the first confirms the refusal signal for a revoked session (item "Refused refresh"). If the author is away, record "revoke skipped" and go on.
+**M1.7 Unattended relogin after a revoke (L3).** The author revokes the `pcb` session (account.proton.me, Security, Sessions; the one created at M1.2/M1.3) and says "revoked at HH:MM". The agent, at least 60 s after the last login: `pass-cli run --env-file scripts/pcb.env.example -- bin/pcb calendar list --json`, then `bin/pcb status --json`. Expect exit 0 with the calendar list after exactly one unattended relogin (`status.last_relogin` set), or exit 10 with a CAPTCHA (`status.phase` `needs-captcha`, `captcha_url` set): both are results to record, and the first confirms the refusal signal for a revoked session (item "Refused refresh"). If the author is away, record "revoke skipped" and go on.
 
 **M1.8 Logout and clean up.** `bin/pcb logout --json` (expect `revoked` true if the session was alive, then `bin/pcb status --json` shows `logged-out`). Check the revoke at account.proton.me if the author is present, else rely on `revoked`. Then `rm -rf ~/.local/share/pcb-m1-live`.
 

@@ -352,7 +352,7 @@ pcb uninstall [--delete-data] [--plan]
 pcb doctor                                  # every check, with the fix to apply
 pcb serve                                   # the daemon (what the unit and the container run)
 pcb service start|stop|restart|status|logs
-pcb login [--password-fd N] [--unattended-relogin]
+pcb login [--username U] [--password-fd N] [--unattended-relogin]
 pcb login resume --captcha-token T          # (--totp CODE moves to M5: the daemon must hold the half-authenticated session; until then the 2FA code comes from PCB_TOTP or a prompt in the same process)
 pcb logout
 pcb status                                  # login state, sync state, listeners, alerts
