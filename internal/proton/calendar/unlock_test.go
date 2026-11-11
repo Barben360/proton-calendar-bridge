@@ -129,10 +129,10 @@ func TestUnlockSkipsUndecryptableKey(t *testing.T) {
 	if n := a.KR.CountEntities(); n != 1 {
 		t.Fatalf("keyring holds %d keys, want 1", n)
 	}
-	// Every listed key is named, the locked one too: the list changes on a
-	// rotation.
-	if !slices.Equal(a.KeyIDs, []string{"key0", "key1"}) {
-		t.Errorf("KeyIDs = %v, want both listed keys", a.KeyIDs)
+	// Every listed key is named, the locked one too, with whether it
+	// unlocked: the list changes on a rotation and on a reactivation.
+	if want := []calendar.KeyState{{ID: "key0"}, {ID: "key1", Unlocked: true}}; !slices.Equal(a.Keys, want) {
+		t.Errorf("Keys = %+v, want %+v", a.Keys, want)
 	}
 	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
 }

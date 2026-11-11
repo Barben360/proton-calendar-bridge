@@ -353,6 +353,9 @@ func TestFloorIsSetWhenTheCalendarIsCreated(t *testing.T) {
 	}
 	var floor0 int64
 	snap(t, c, "cal", func(v View) { floor0 = v.Floor() })
+	if got := seq(t, c); got != floor0 || got == 0 {
+		t.Errorf("Seq after a calendar creation = %d, want the floor it took (%d)", got, floor0)
+	}
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{urow("e1", "u1", 0, 1)}, time.Unix(100, 0)); err != nil {
 		t.Fatal(err)
 	}

@@ -63,6 +63,7 @@ type calendarRec struct {
 	passphrase string
 	ring       *crypto.KeyRing // unlocked calendar key
 	armored    []string        // calendar keys as served
+	extra      *crypto.Key     // the key no passphrase opens (ExtraLockedKey), unlocked
 	// Filled on the first request of the user, from the address list.
 	ready    bool
 	memberID string
@@ -115,6 +116,7 @@ func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
 			f.t.Fatal(err)
 		}
 		rec.armored = []string{a, armored}
+		rec.extra = other
 	}
 	f.cal.mu.Lock()
 	defer f.cal.mu.Unlock()
@@ -155,6 +157,43 @@ func (f *Fake) RotateCalendarKey(id string) {
 		f.t.Fatal(err)
 	}
 	rec.armored = append(rec.armored, armored)
+}
+
+// ReactivateCalendarKey locks the calendar's extra key (ExtraLockedKey) with
+// the calendar passphrase, listed under the same ID: the key now opens, as
+// after a key reactivation.
+func (f *Fake) ReactivateCalendarKey(id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil || rec.extra == nil {
+		f.t.Fatalf("protontest: calendar %q has no extra key", id)
+	}
+	locked, err := rec.extra.Lock([]byte(rec.passphrase))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	armored, err := locked.Armor()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	rec.armored[0] = armored
+}
+
+// RemoveCalendar takes the calendar out of username's list, as if deleted
+// in Proton: the list no longer shows it and its routes answer as unknown.
+func (f *Fake) RemoveCalendar(username, id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	u := f.cal.user(username)
+	i := slices.IndexFunc(u.list, func(r *calendarRec) bool { return r.id == id })
+	if i < 0 {
+		f.t.Fatalf("protontest: user %q has no calendar %q", username, id)
+	}
+	u.list = slices.Delete(u.list, i, i+1)
+	delete(f.cal.byID, id)
 }
 
 // SetDefaultNotifications replaces the calendar's default reminders (nil

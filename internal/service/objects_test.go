@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"regexp"
@@ -453,6 +454,7 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other"})
 	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
 	e.f.AddEvent(work, protontest.Event{UID: "b@x", Start: base, End: base + 60})
+	c := e.f.AddEvent(work, protontest.Event{UID: "c@x", Start: base, End: base + 60})
 	e.f.AddEvent(other, protontest.Event{UID: "o@x", Start: base, End: base + 60})
 	e.login(t, e.req())
 	s := e.serve(t)
@@ -472,6 +474,8 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 		t.Errorf("before the refresh: ETag %q -> %q, token %q -> %q", etags["a@x"], again["a@x"], tokW, tok)
 	}
 
+	// c@x is deleted in the pass that also refreshes the settings.
+	e.f.DeleteEvent(work, c)
 	e.clk.advance(10*time.Minute + time.Second)
 	s.next(t, false)
 	if n := e.f.Calls("GET", "/calendar/v2/") - boots; n != 2 {
@@ -482,15 +486,55 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 		t.Errorf("after the refresh: ETags %v (were %v), token %q (was %q); want all changed", after, etags, tok, tokW)
 	}
 	contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "TRIGGER:-PT30M\r\n")
-	// No row changed, yet a client holding the former token fetches all.
-	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || len(cs.Deleted) != 0 || cs.Token != tok {
-		t.Errorf("Changes(token before the settings change) = %+v, want every object", cs)
+	// a@x and b@x did not change, yet a client holding the former token
+	// fetches them all, and still learns that c@x is gone.
+	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || !slices.Equal(cs.Deleted, []string{"c@x"}) || cs.Token != tok {
+		t.Errorf("Changes(token before the settings change) = %+v, want a@x and b@x changed, c@x deleted", cs)
 	}
 	// Other's keys now unlock: its objects decrypt, and its former token
 	// lists them again.
 	lacks(t, "o@x", e.objects(t, other, "o@x")["o@x"].Data, "X-PCB-PLACEHOLDER")
 	if cs := e.changes(t, other, tokO); !slices.Equal(changedUIDs(cs), []string{"o@x"}) {
 		t.Errorf("Changes(token of the keys-unavailable state) = %+v, want o@x", cs)
+	}
+
+	// A refresh that fails keeps the working keys: a calendar's own refusal
+	// (422), then Proton unavailable (503, retried at the next pass).
+	held, heldTok := e.listing(t, work)
+	unchanged := func(when string) {
+		t.Helper()
+		if again, tok := e.listing(t, work); !maps.Equal(again, held) || tok != heldTok {
+			t.Errorf("%s: ETags %v (were %v), token %q (was %q); want unchanged", when, again, held, tok, heldTok)
+		}
+		d := e.objects(t, work, "a@x")["a@x"].Data
+		contains(t, "a@x "+when, d, "TRIGGER:-PT30M\r\n")
+		lacks(t, "a@x "+when, d, "X-PCB-PLACEHOLDER")
+	}
+	e.clk.advance(10*time.Minute + time.Second)
+	e.f.FailNext("GET", "/calendar/v2/"+work+"/bootstrap", 422, 2501, 0)
+	s.next(t, false)
+	unchanged("after a refresh refused for the calendar")
+	e.clk.advance(10*time.Minute + time.Second)
+	for range 3 { // the client retries a 503 twice
+		e.f.FailNext("GET", "/calendar/v2/"+work+"/bootstrap", 503, 0, 0)
+	}
+	s.next(t, false)
+	unchanged("after a refresh that could not reach Proton")
+	boots = e.f.Calls("GET", "/calendar/v2/")
+	s.next(t, false) // no time passed: only the failed refresh is due again
+	if n := e.f.Calls("GET", "/calendar/v2/") - boots; n != 2 {
+		t.Errorf("the pass after a failed refresh read %d bootstraps, want it retried (2)", n)
+	}
+	unchanged("after the retried refresh")
+
+	// A calendar gone from Proton (and so from the cache) is no longer
+	// refreshed.
+	e.f.RemoveCalendar(e.f.Username, other)
+	e.clk.advance(10*time.Minute + time.Second)
+	boots = e.f.Calls("GET", "/calendar/v2/")
+	s.next(t, false)
+	if n := e.f.Calls("GET", "/calendar/v2/") - boots; n != 1 {
+		t.Errorf("the refresh after Other was removed read %d bootstraps, want 1 (Work only)", n)
 	}
 	s.stop(t)
 }

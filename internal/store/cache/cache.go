@@ -469,8 +469,8 @@ func (c *Cache) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-// Seq is the change counter: the value taken by the latest row write or
-// tombstone, 0 for a cache never written.
+// Seq is the change counter: the value taken by the latest row write,
+// tombstone or calendar creation (its floor), 0 for a cache never written.
 func (c *Cache) Seq(ctx context.Context) (int64, error) {
 	n, err := readSeq(ctx, c.db)
 	return n, c.classify(err)

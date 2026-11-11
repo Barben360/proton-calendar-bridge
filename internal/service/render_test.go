@@ -71,7 +71,12 @@ func TestObjectChanges(t *testing.T) {
 		Card: card("s@x", "Standup moved", rid, "RECURRENCE-ID:"+stamp(rid))})
 	oldDup := e.f.AddEvent(work, protontest.Event{UID: "d@x", Start: base, End: base + 60, Card: card("d@x", "Old", base)})
 	e.f.AddEvent(work, protontest.Event{UID: "d@x", Start: base, End: base + 60, Card: card("d@x", "New", base)})
-	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other"})
+	e.f.AddEvent(work, protontest.Event{UID: "e@x", Start: base, End: base + 60, Card: card("e@x", "E1", base)})
+	e.f.AddEvent(work, protontest.Event{UID: "e@x", Start: base, End: base + 60, Card: card("e@x", "E2", base)})
+	e.f.AddEvent(work, protontest.Event{UID: "f@x", Start: base, End: base + 60, Card: card("f@x", "F1", base)})
+	e.f.AddEvent(work, protontest.Event{UID: "f@x", Start: base, End: base + 60, Card: card("f@x", "F2", base)})
+	// Other's first listed key opens with no passphrase (until reactivated).
+	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other", ExtraLockedKey: true})
 	e.f.AddEvent(other, protontest.Event{UID: "o1@x", Start: base, End: base + 60})
 	e.login(t, e.req())
 	e.sync(t, false)
@@ -219,16 +224,52 @@ func TestObjectChanges(t *testing.T) {
 		contains(t, "s@x", e.objects(t, work, "s@x")["s@x"].Data, "SUMMARY:Standup\r\n")
 	})
 
+	// Ruling M3-R16: a key that opens now under the same ID (reactivation)
+	// changes the render inputs.
+	t.Run("KeyReactivationChangesETagsAndGeneration", func(t *testing.T) {
+		before, beforeTok := e.listing(t, other)
+		e.f.ReactivateCalendarKey(other)
+		e.svc = e.open(top) // a restart reads the bootstrap again
+		after, tok := e.listing(t, other)
+		if after["o1@x"] == before["o1@x"] || tok == beforeTok {
+			t.Errorf("after a key reactivation: ETag %q -> %q, token %q -> %q; want both changed", before["o1@x"], after["o1@x"], beforeTok, tok)
+		}
+	})
+
 	t.Run("DuplicateCountFollowsTheRows", func(t *testing.T) {
 		contains(t, "d@x", e.objects(t, work, "d@x")["d@x"].Data, "SUMMARY:New\r\n")
-		if st := e.status(t); st.Sync.DuplicateMasters != 1 {
-			t.Errorf("DuplicateMasters = %d, want 1", st.Sync.DuplicateMasters)
+		e.objects(t, work, "e@x", "f@x")
+		if st := e.status(t); st.Sync.DuplicateMasters != 3 {
+			t.Errorf("DuplicateMasters = %d, want 3 (d@x, e@x, f@x)", st.Sync.DuplicateMasters)
 		}
 		e.f.DeleteEvent(work, oldDup)
 		e.sync(t, false)
 		e.objects(t, work, "d@x")
+		if st := e.status(t); st.Sync.DuplicateMasters != 2 {
+			t.Errorf("DuplicateMasters after d@x's duplicate is gone = %d, want 2", st.Sync.DuplicateMasters)
+		}
+		// A UID deleted whole stops counting once a read sees it gone: a
+		// listing, or a delta (sync-collection).
+		deleteUID := func(uid string) {
+			t.Helper()
+			for _, ev := range e.events(t, service.EventsRequest{Calendar: work}) {
+				if ev.UID == uid {
+					e.f.DeleteEvent(work, ev.ID)
+				}
+			}
+			e.sync(t, false)
+		}
+		deleteUID("e@x")
+		_, tok := e.listing(t, work)
+		if st := e.status(t); st.Sync.DuplicateMasters != 1 {
+			t.Errorf("DuplicateMasters after a listing without e@x = %d, want 1 (f@x)", st.Sync.DuplicateMasters)
+		}
+		deleteUID("f@x")
+		if cs := e.changes(t, work, tok); !slices.Equal(cs.Deleted, []string{"f@x"}) {
+			t.Fatalf("Changes = %+v, want f@x deleted", cs)
+		}
 		if st := e.status(t); st.Sync.DuplicateMasters != 0 {
-			t.Errorf("DuplicateMasters after the duplicate is gone = %d, want 0", st.Sync.DuplicateMasters)
+			t.Errorf("DuplicateMasters after a delta named f@x deleted = %d, want 0", st.Sync.DuplicateMasters)
 		}
 	})
 

@@ -60,9 +60,10 @@ type renderer struct {
 // keyState is the unlocked keys of one account: its address keys and each
 // calendar's keys, unlocked on the first read of the calendar.
 type keyState struct {
-	account string
-	u       *keys.Unlocked
-	own     map[string]*crypto.KeyRing // address keyring by lower-case email
+	account  string
+	u        *keys.Unlocked
+	own      map[string]*crypto.KeyRing // address keyring by lower-case email
+	addrTags []string                   // addressKeyTags of u
 	// cals is written under both load and kmu, so a holder of load may read
 	// it without kmu.
 	cals map[string]*calKeys
@@ -87,23 +88,54 @@ type calKeys struct {
 	partDay, fullDay json.RawMessage
 }
 
-func newCalKeys(calID string, a *calendar.Access, u *keys.Unlocked) *calKeys {
+// newCalKeys builds calendar calID's keys from its unlocked access and the
+// address-key tags of the account (addressKeyTags).
+func newCalKeys(calID string, a *calendar.Access, addrTags []string) *calKeys {
 	partDay, _ := json.Marshal(a.Settings.DefaultPartDayNotifications)
 	fullDay, _ := json.Marshal(a.Settings.DefaultFullDayNotifications)
-	calKeyIDs := slices.Sorted(slices.Values(a.KeyIDs))
-	var addrKeyIDs []string
-	for _, addr := range u.Addresses {
-		for _, k := range addr.Keys {
-			addrKeyIDs = append(addrKeyIDs, k.ID)
-		}
+	calTags := make([]string, 0, len(a.Keys))
+	for _, k := range a.Keys {
+		calTags = append(calTags, keyTag(k.ID, k.Unlocked))
 	}
-	slices.Sort(addrKeyIDs)
+	slices.Sort(calTags)
 	settings, _ := json.Marshal(struct {
 		PartDay, FullDay          json.RawMessage
 		CalendarKeys, AddressKeys []string
-	}{partDay, fullDay, calKeyIDs, addrKeyIDs})
+	}{partDay, fullDay, calTags, addrTags})
 	return &calKeys{access: a, settings: settings, hash: settingsHash(settings), gen: tokenGen(calID, settings),
 		partDay: partDay, fullDay: fullDay}
+}
+
+// keyTag names a key ID with whether it unlocked (ruling M3-R16): a key
+// that opens again under the same ID (reactivation) changes the render.
+func keyTag(id string, unlocked bool) string {
+	if unlocked {
+		return id + ":unlocked"
+	}
+	return id + ":locked"
+}
+
+// addressKeyTags tags every address key ID with whether that key is in its
+// address's unlocked keyring (matched by fingerprint), sorted.
+func addressKeyTags(u *keys.Unlocked) []string {
+	var tags []string
+	for _, addr := range u.Addresses {
+		open := map[string]bool{}
+		if kr, ok := u.AddrKRs[addr.ID]; ok {
+			for _, k := range kr.GetKeys() {
+				open[k.GetFingerprint()] = true
+			}
+		}
+		for _, k := range addr.Keys {
+			unlocked := false
+			if key, err := crypto.NewKeyFromArmored(string(k.PrivateKey)); err == nil {
+				unlocked = open[key.GetFingerprint()]
+			}
+			tags = append(tags, keyTag(k.ID, unlocked))
+		}
+	}
+	slices.Sort(tags)
+	return tags
 }
 
 func failedCalKeys(calID, reason string) *calKeys {
@@ -127,8 +159,8 @@ func settingsHash(settings []byte) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func newKeyState(account string, u *keys.Unlocked) *keyState {
-	ks := &keyState{account: account, u: u, own: map[string]*crypto.KeyRing{}, cals: map[string]*calKeys{}}
+func newKeyState(account string, u *keys.Unlocked, addrTags []string) *keyState {
+	ks := &keyState{account: account, u: u, addrTags: addrTags, own: map[string]*crypto.KeyRing{}, cals: map[string]*calKeys{}}
 	for _, a := range u.Addresses {
 		if kr, ok := u.AddrKRs[a.ID]; ok {
 			ks.own[strings.ToLower(a.Email)] = kr
@@ -249,6 +281,20 @@ func (r *renderer) noteDuplicates(calID, uid string, n int) {
 		r.duplicates = map[string]int{}
 	}
 	r.duplicates[key] = n
+}
+
+// keepDuplicates forgets the counts of calendar calID's UIDs that live does
+// not hold: a UID deleted whole no longer renders, so only a read that sees
+// it gone can uncount it.
+func (r *renderer) keepDuplicates(calID string, live func(uid string) bool) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	prefix := calID + "\x00"
+	for key := range r.duplicates {
+		if uid, ok := strings.CutPrefix(key, prefix); ok && !live(uid) {
+			delete(r.duplicates, key)
+		}
+	}
 }
 
 // counts returns the placeholders served and the duplicate masters left

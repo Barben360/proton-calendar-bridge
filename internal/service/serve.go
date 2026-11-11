@@ -66,19 +66,26 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	return l.watch(ctx, SyncRequest{}, interval, o.OnPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
-			l.refreshSettings(ctx)
+			if cals, cerr := db.Calendars(ctx); cerr == nil {
+				live := make(map[string]bool, len(cals))
+				for _, c := range cals {
+					live[c.ID] = true
+				}
+				l.refreshSettings(ctx, live)
+			}
 		}
 		return res, err
 	})
 }
 
 // refreshSettings reads again the bootstrap of every calendar whose keys
-// are held, once settingsRefresh has passed since they were last read (one
-// Proton call per calendar). A calendar whose settings or key IDs changed,
+// are held and that the cache still has (live), once settingsRefresh has
+// passed since they were last read (one Proton call per calendar); the keys
+// of a calendar the cache no longer has are dropped. A calendar whose settings or key IDs changed,
 // or whose keys failed and now unlock, gets its new keys: its ETags, CTag
 // and token generation change, so clients fetch its objects again. A
 // failure keeps what is held (a transient one is tried at the next pass).
-func (l *Local) refreshSettings(ctx context.Context) {
+func (l *Local) refreshSettings(ctx context.Context, live map[string]bool) {
 	l.r.kmu.RLock()
 	due := l.r.ks != nil && !l.o.Now().Before(l.r.refreshedAt.Add(settingsRefresh))
 	l.r.kmu.RUnlock()
@@ -95,16 +102,21 @@ func (l *Local) refreshSettings(ctx context.Context) {
 		}
 		// ks.cals changes only under load, which is held.
 		fresh := map[string]*calKeys{}
+		var gone []string
 		discard := func() {
 			for _, ck := range fresh {
 				ck.access.Close()
 			}
 		}
 		for _, id := range slices.Sorted(maps.Keys(ks.cals)) {
+			if !live[id] {
+				gone = append(gone, id)
+				continue
+			}
 			a, err := calendar.Unlock(ctx, c, ks.u, calendar.Calendar{ID: id})
 			switch {
 			case err == nil:
-				ck := newCalKeys(id, a, ks.u)
+				ck := newCalKeys(id, a, ks.addrTags)
 				if old := ks.cals[id]; old.access != nil && bytes.Equal(old.settings, ck.settings) {
 					a.Close()
 					continue
@@ -125,6 +137,10 @@ func (l *Local) refreshSettings(ctx context.Context) {
 			old := ks.cals[id]
 			ks.cals[id] = ck
 			old.access.Close() // no render holds it: they hold kmu for reading
+		}
+		for _, id := range gone {
+			ks.cals[id].access.Close()
+			delete(ks.cals, id)
 		}
 		l.r.refreshedAt = l.o.Now()
 		return nil

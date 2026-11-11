@@ -175,6 +175,12 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 			return err
 		}
 	}
+	var addrTags []string
+	if cur != nil {
+		addrTags = cur.addrTags
+	} else {
+		addrTags = addressKeyTags(u)
+	}
 	fresh := map[string]*calKeys{}
 	discard := func() {
 		for _, ck := range fresh {
@@ -191,7 +197,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		a, err := calendar.Unlock(ctx, c, u, calendar.Calendar{ID: id})
 		switch {
 		case err == nil:
-			fresh[id] = newCalKeys(id, a, u)
+			fresh[id] = newCalKeys(id, a, addrTags)
 		case api.SessionWide(ctx, err):
 			discard()
 			return err
@@ -213,7 +219,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 	}
 	if cur == nil {
 		l.r.retire()
-		l.r.ks = newKeyState(acc.ID, u)
+		l.r.ks = newKeyState(acc.ID, u, addrTags)
 		l.r.refreshedAt = l.o.Now()
 	}
 	maps.Copy(l.r.ks.cals, fresh)
@@ -321,6 +327,15 @@ func infos(groups []cache.Group, ck *calKeys) []ObjectInfo {
 	return out
 }
 
+// liveIn reports whether a UID is one of groups'.
+func liveIn(groups []cache.Group) func(string) bool {
+	live := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		live[g.UID] = true
+	}
+	return func(uid string) bool { return live[uid] }
+}
+
 // Objects implements API: every object of the calendar with its ETag, and
 // the sync token of that state, from one read transaction. Outside Serve
 // it opens the cache read-only for the call; during Serve it reads Serve's
@@ -335,6 +350,7 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 				return err
 			}
 			out, token = infos(groups, ck), syncToken(v.Epoch(), position(v), ck.gen)
+			l.r.keepDuplicates(calID, liveIn(groups))
 			return nil
 		})
 		return l.cacheFail(err)
@@ -448,6 +464,12 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 				if uid != "" {
 					out.Deleted = append(out.Deleted, uid)
 				}
+			}
+			if full {
+				l.r.keepDuplicates(calID, liveIn(changed))
+			}
+			for _, uid := range deleted {
+				l.r.noteDuplicates(calID, uid, 0)
 			}
 			out.Token = syncToken(v.Epoch(), pos, ck.gen)
 			return nil
