@@ -271,6 +271,14 @@ func (c *Cache) Close() error { return c.db.Close() }
 // for another account, is ErrNoCache; a file that is not a database is
 // ErrCorrupt; a newer schema is ErrNewerSchema. Writing through the handle
 // fails.
+//
+// With no -wal file the handle reads the file as immutable=1: SQLite then
+// takes no lock and trusts nothing changes, so a writer that starts
+// meanwhile (its checkpoint rewriting pages) can make a read see a stale or
+// inconsistent snapshot, or fail with ErrChanged. That is fine for the CLI's
+// one-shot reads (status, event list), which a person repeats; it is not for
+// a long-lived reader such as M3's CalDAV read path, which must open a
+// normal shared-lock read handle instead (SPEC §7.2).
 func OpenReadOnly(path, accountID string) (*Cache, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {

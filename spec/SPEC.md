@@ -281,6 +281,11 @@ cache records its account in `meta` and is emptied when opened for another):
   where CalDAV first needs content; E09 decides there whether a sealed
   decrypted index is needed. Decrypted events live in an in-memory LRU,
   rebuilt on demand.
+- Read-only opens (`pcb status`, `pcb event list`) never create or migrate
+  the file; with no `-wal` present they read it as `immutable=1`, which may
+  return a stale or inconsistent snapshot if a writer starts meanwhile. Fine
+  for one-shot CLI reads; **M3's CalDAV read path must not use it** and opens
+  a normal shared-lock reader instead.
 - Errors: a corrupt cache is "you must act" (exit 10, hint: remove `pcb.db`,
   then `pcb sync --full`); a permission or disk error is blocked (exit 20)
   with the OS reason (R13). `pcb doctor` checks the file and its mode.
