@@ -121,7 +121,8 @@ type Unlocked struct {
 func Unlock(user gpa.User, addrs []gpa.Address, keyPass []byte) (*Unlocked, error) {
 	userKR, addrKRs, err := gpa.Unlock(user, addrs, keyPass, nil)
 	if err != nil {
-		return nil, ErrKeysLocked
+		// The library's text is dropped on purpose: it is not ours to vouch as secret-free.
+		return nil, fmt.Errorf("%w: no address key opened", ErrKeysLocked)
 	}
 	userKR.ClearPrivateParams()
 	return &Unlocked{User: user, Addresses: addrs, AddrKRs: addrKRs}, nil

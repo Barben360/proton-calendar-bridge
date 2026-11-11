@@ -219,6 +219,9 @@ func TestFetchSaltsLockFailureReturnedOnlyAfterSuccess(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "lock boom") || !api.IsCode(err, 2011) {
 		t.Fatalf("err = %v, want only the fetch failure (2011)", err)
 	}
+	if e2.lock.Load() != 1 {
+		t.Fatalf("Lock calls after a failed fetch = %d, want 1", e2.lock.Load())
+	}
 }
 
 func TestUnlockWithStoredKeyPassAfterRefresh(t *testing.T) {
@@ -277,17 +280,77 @@ func TestUnlockedCloseDropsKeyrings(t *testing.T) {
 		t.Fatal(err)
 	}
 	kr := u.AddrKRs[addrs[0].ID]
+	if kr.CountDecryptionEntities() == 0 {
+		t.Fatal("the keyring is not unlocked before Close")
+	}
+	priv, err := crypto.NewKey(addrs[0].Keys[0].PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := priv.ToPublic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubKR, err := crypto.NewKeyRing(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := pubKR.Encrypt(crypto.NewPlainMessageFromString("secret"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := kr.Decrypt(msg, nil, crypto.GetUnixTime()); err != nil || got.GetString() != "secret" {
+		t.Fatalf("Decrypt before Close = %q, %v", got.GetString(), err)
+	}
 	u.Close()
 	u.Close() // idempotent
 	if len(u.AddrKRs) != 0 {
 		t.Fatal("Close left keyrings in AddrKRs")
 	}
-	if kr.CountDecryptionEntities() != 0 {
-		// ClearPrivateParams zeroes the secret material: the keyring can no longer sign or decrypt.
-		if _, err := kr.Decrypt(&crypto.PGPMessage{Data: []byte("x")}, nil, 0); err == nil {
-			t.Fatal("keyring still usable after Close")
-		}
+	if n := kr.CountDecryptionEntities(); n != 0 {
+		t.Fatalf("keyring holds %d decryption entities after Close", n)
+	}
+	if _, err := kr.Decrypt(msg, nil, crypto.GetUnixTime()); err == nil {
+		t.Fatal("keyring still decrypts after Close")
 	}
 	var nilU *keys.Unlocked
 	nilU.Close() // nil-safe
+}
+
+func TestDeriveKeyPassUsesPrimaryKeySalt(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	real := user.Keys[0]
+	real.Primary = true
+	decoy := real
+	decoy.ID = "decoy-key"
+	decoy.Primary = false
+	user.Keys = gpa.Keys{decoy, real}
+	// Only the primary key has a salt: picking Keys[0] finds none.
+	pass, err := keys.DeriveKeyPass(user, addrs, salts, []byte(f.Password))
+	if err != nil || len(pass) == 0 {
+		t.Fatalf("DeriveKeyPass = %d bytes, %v", len(pass), err)
+	}
+}
+
+func TestDeriveKeyPassFirstKeyWhenNonePrimary(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	user.Keys[0].Primary = false
+	if _, err := keys.DeriveKeyPass(user, addrs, salts, []byte(f.Password)); err != nil {
+		t.Fatalf("DeriveKeyPass without a primary key: %v", err)
+	}
+}
+
+func TestDeriveKeyPassUserWithoutKey(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	user.Keys = nil
+	pass, err := keys.DeriveKeyPass(user, addrs, salts, []byte(f.Password))
+	if err == nil || pass != nil {
+		t.Fatalf("DeriveKeyPass = %v, %v; want an error and no passphrase", pass, err)
+	}
 }
