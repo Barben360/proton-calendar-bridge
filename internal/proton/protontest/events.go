@@ -1,0 +1,319 @@
+package protontest
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// Event describes an event for AddEvent and UpdateEvent. Times are unix
+// seconds; the fake serves them as UTC.
+type Event struct {
+	UID          string
+	Start, End   int64
+	FullDay      bool
+	RRule        string
+	RecurrenceID *int64
+}
+
+// Feed actions, as the change feed names them.
+const (
+	actionDelete = 0
+	actionCreate = 1
+	actionUpdate = 2
+)
+
+// maxListPageSize is the largest PageSize the listing accepts.
+const maxListPageSize = 100
+
+const defaultFeedPageSize = 50
+
+// eventRec is one stored row.
+type eventRec struct {
+	id, sharedID                 string
+	ev                           Event
+	createTime, lastEdit, modify int64
+}
+
+// feedEntry is one change in a calendar's feed; seq is its position.
+type feedEntry struct {
+	seq    int
+	id     string
+	action int
+}
+
+// eventState is a calendar's rows and feed, guarded by calendars.mu.
+type eventState struct {
+	rows []*eventRec // creation order, deleted rows removed
+	feed []feedEntry
+	seq  int    // position of the newest change (0: none yet)
+	salt string // makes cursors of this calendar opaque and unguessable across calendars
+	// Cursors at or below expired answer 422/2001.
+	expired int
+	refresh bool // the next feed page answers Refresh 1
+}
+
+func (c *calendarRec) events() *eventState {
+	if c.ev == nil {
+		c.ev = &eventState{salt: "mev" + hex.EncodeToString([]byte(c.id))[:8], expired: -1}
+	}
+	return c.ev
+}
+
+func (s *eventState) cursor(seq int) string { return s.salt + "-" + strconv.Itoa(seq) }
+
+// parseCursor returns the position a cursor names and whether the cursor is
+// known and not expired.
+func (s *eventState) parseCursor(cur string) (int, bool) {
+	rest, ok := strings.CutPrefix(cur, s.salt+"-")
+	if !ok {
+		return 0, false
+	}
+	seq, err := strconv.Atoi(rest)
+	if err != nil || seq < 0 || seq > s.seq || seq <= s.expired {
+		return 0, false
+	}
+	return seq, true
+}
+
+func (s *eventState) record(id string, action int) {
+	s.seq++
+	s.feed = append(s.feed, feedEntry{seq: s.seq, id: id, action: action})
+}
+
+func (s *eventState) find(id string) int {
+	return slices.IndexFunc(s.rows, func(r *eventRec) bool { return r.id == id })
+}
+
+// calendar returns the record of calID, failing the test when unknown.
+// Caller holds f.cal.mu.
+func (f *Fake) calendarForEvents(calID string) *calendarRec {
+	rec := f.cal.byID[calID]
+	if rec == nil {
+		f.t.Helper()
+		f.t.Fatalf("protontest: unknown calendar %q", calID)
+	}
+	return rec
+}
+
+// tick returns the next fake timestamp: strictly increasing, so an update
+// always moves LastEditTime. Caller holds f.cal.mu.
+func (f *Fake) tick() int64 {
+	f.cal.clock++
+	return 1700000000 + f.cal.clock
+}
+
+// AddEvent adds a row to the calendar, appends it to the calendar's change
+// feed and returns the row ID.
+func (f *Fake) AddEvent(calID string, e Event) (id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	s := f.calendarForEvents(calID).events()
+	now := f.tick()
+	id = "ev" + hex.EncodeToString(random(f.t, 8)) + "=="
+	s.rows = append(s.rows, &eventRec{
+		id: id, sharedID: "sev" + hex.EncodeToString(random(f.t, 8)) + "==",
+		ev: e, createTime: now, lastEdit: now, modify: now,
+	})
+	s.record(id, actionCreate)
+	return id
+}
+
+// UpdateEvent replaces the row's fields, bumps its LastEditTime and appends
+// it to the feed.
+func (f *Fake) UpdateEvent(calID, id string, e Event) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	s := f.calendarForEvents(calID).events()
+	i := s.find(id)
+	if i < 0 {
+		f.t.Fatalf("protontest: no event %q in calendar %q", id, calID)
+	}
+	now := f.tick()
+	s.rows[i].ev, s.rows[i].lastEdit, s.rows[i].modify = e, now, now
+	s.record(id, actionUpdate)
+}
+
+// DeleteEvent removes the row and appends the deletion to the feed.
+func (f *Fake) DeleteEvent(calID, id string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	s := f.calendarForEvents(calID).events()
+	i := s.find(id)
+	if i < 0 {
+		f.t.Fatalf("protontest: no event %q in calendar %q", id, calID)
+	}
+	s.rows = slices.Delete(s.rows, i, i+1)
+	s.record(id, actionDelete)
+}
+
+// ForceRefresh makes the next feed page of the calendar answer Refresh 1.
+func (f *Fake) ForceRefresh(calID string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	f.calendarForEvents(calID).events().refresh = true
+}
+
+// ExpireFeed makes every cursor issued so far answer 422 with code 2001, as
+// if Proton no longer remembered it. The head ("latest") moves on, so a
+// cursor read afterwards is valid.
+func (f *Fake) ExpireFeed(calID string) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	s := f.calendarForEvents(calID).events()
+	s.expired = s.seq
+	s.seq++ // a gap: no entry, but the old head is not the new head
+}
+
+// SetFeedPageSize sets how many entries a feed page holds (default 50).
+func (f *Fake) SetFeedPageSize(n int) {
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	f.cal.feedPage = n
+}
+
+func (f *Fake) feedPageSize() int {
+	if f.cal.feedPage > 0 {
+		return f.cal.feedPage
+	}
+	return defaultFeedPageSize
+}
+
+// serveEvents answers /calendar/v1/{cal}/events..., /modelevents... for the
+// calendars of u. segs are the unescaped path segments after /calendar/v1/.
+// Caller holds f.cal.mu.
+func (f *Fake) serveEvents(w http.ResponseWriter, r *http.Request, u *userCalendars, segs []string) {
+	i := slices.IndexFunc(u.list, func(c *calendarRec) bool { return c.id == segs[0] })
+	if i < 0 {
+		reply(w, http.StatusUnprocessableEntity, 2501, "Calendar does not exist")
+		return
+	}
+	cal := u.list[i]
+	s := cal.events()
+	switch {
+	case len(segs) == 2 && segs[1] == "events":
+		f.listEvents(w, r.URL.Query(), cal, s)
+	case len(segs) == 3 && segs[1] == "events":
+		j := s.find(segs[2])
+		if j < 0 {
+			reply(w, http.StatusUnprocessableEntity, 2501, "Event does not exist")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Event": s.rows[j].json(cal.id)})
+	case len(segs) == 3 && segs[1] == "modelevents" && segs[2] == "latest":
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "CalendarModelEventID": s.cursor(s.seq)})
+	case len(segs) == 3 && segs[1] == "modelevents":
+		f.feedPage(w, s, segs[2])
+	default:
+		// Not 404: a client treats that as "row gone", which would hide a path bug.
+		reply(w, http.StatusBadRequest, 2000, "fake: route not implemented")
+	}
+}
+
+func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec, s *eventState) {
+	page, size := 0, maxListPageSize
+	var err error
+	if v := q.Get("Page"); v != "" {
+		if page, err = strconv.Atoi(v); err != nil || page < 0 {
+			reply(w, http.StatusBadRequest, 2001, "Invalid Page")
+			return
+		}
+	}
+	if v := q.Get("PageSize"); v != "" {
+		if size, err = strconv.Atoi(v); err != nil || size < 1 {
+			reply(w, http.StatusBadRequest, 2001, "Invalid PageSize")
+			return
+		}
+	}
+	if size > maxListPageSize {
+		reply(w, http.StatusBadRequest, 2021, "PageSize is too large")
+		return
+	}
+	lo := min(page*size, len(s.rows))
+	hi := min(lo+size, len(s.rows))
+	rows := make([]any, 0, hi-lo)
+	for _, r := range s.rows[lo:hi] {
+		rows = append(rows, r.json(cal.id))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": len(s.rows)})
+}
+
+func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {
+	seq, ok := s.parseCursor(cursor)
+	if !ok {
+		reply(w, http.StatusUnprocessableEntity, 2001, "Invalid or expired event ID")
+		return
+	}
+	var entries []any
+	last, more := seq, 0
+	max := f.feedPageSize()
+	for _, e := range s.feed {
+		if e.seq <= seq {
+			continue
+		}
+		if len(entries) == max {
+			more = 1
+			break
+		}
+		entries = append(entries, map[string]any{"ID": e.id, "Action": e.action})
+		last = e.seq
+	}
+	refresh := 0
+	if s.refresh {
+		refresh, s.refresh = 1, false
+	}
+	if entries == nil {
+		entries = []any{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"Code": 1000, "CalendarModelEventID": s.cursor(last), "More": more, "Refresh": refresh, "CalendarEvents": entries,
+	})
+}
+
+// json is the row as the API serves it: the plaintext columns of the
+// research's field set, and opaque parts (see parts).
+func (r *eventRec) json(calID string) map[string]any {
+	var recurrence, rrule any
+	if r.ev.RecurrenceID != nil {
+		recurrence = *r.ev.RecurrenceID
+	}
+	if r.ev.RRule != "" {
+		rrule = r.ev.RRule
+	}
+	fullDay := 0
+	if r.ev.FullDay {
+		fullDay = 1
+	}
+	shared, calendar, personal, attendees := r.parts()
+	return map[string]any{
+		"ID": r.id, "CalendarID": calID, "SharedEventID": r.sharedID,
+		"CreateTime": r.createTime, "ModifyTime": r.modify, "LastEditTime": r.lastEdit,
+		"StartTime": r.ev.Start, "EndTime": r.ev.End, "StartTimezone": "UTC", "EndTimezone": "UTC",
+		"FullDay": fullDay, "UID": r.ev.UID, "IsOrganizer": 1,
+		"RecurrenceID": recurrence, "Exdates": []int64{}, "RRule": rrule,
+		"Author": "fake@example.org", "Permissions": 127, "Color": nil, "Notifications": nil,
+		"SharedKeyPacket":   base64.StdEncoding.EncodeToString([]byte("shared-key-" + r.id)),
+		"CalendarKeyPacket": base64.StdEncoding.EncodeToString([]byte("calendar-key-" + r.id)),
+		"SharedEvents":      shared, "CalendarEvents": calendar, "PersonalEvents": personal,
+		"AttendeesEvents": attendees, "Attendees": []any{},
+	}
+}
+
+// parts builds the row's card parts: the one place to replace with real
+// encrypted cards. Today they are opaque placeholders (Type 3: encrypted and
+// signed) that change with the row's LastEditTime, so an edit changes bytes.
+func (r *eventRec) parts() (shared, calendar, personal, attendees []any) {
+	part := func(kind string) map[string]any {
+		return map[string]any{"Type": 3, "Data": "placeholder-" + kind + "-" + r.id + "-" + strconv.FormatInt(r.lastEdit, 10), "Signature": ""}
+	}
+	return []any{part("shared")}, []any{part("calendar")}, []any{}, []any{}
+}
