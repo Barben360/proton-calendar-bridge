@@ -51,7 +51,7 @@ func init() {
 		"Passphrase", "Token", "HumanVerificationToken", "SessionKey",
 		"KeyPacket", "SharedKeyPacket", "CalendarKeyPacket", "Data",
 		"Signature", "Armored", "TOTP", "Password", "Email", "Address",
-		"Username", "TwoFactorCode", "Secret", "Cookie",
+		"Username", "TwoFactorCode", "Secret", "Cookie", "Author",
 	} {
 		secretKeys[strings.ToLower(k)] = true
 	}

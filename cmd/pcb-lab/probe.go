@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -16,7 +20,7 @@ import (
 
 func probeCmd() *cobra.Command {
 	c := cli.Group("probe", "Live measurements on the saved session (never log in again)",
-		calendarAccessCmd(), refreshCmd(), aliveCmd())
+		calendarAccessCmd(), refreshCmd(), aliveCmd(), feedCmd())
 	c.PersistentFlags().String("record-dir", "", "write redacted answers here (default: none)")
 	return c
 }
@@ -152,4 +156,68 @@ func aliveCmd() *cobra.Command {
 			}{res, res.Over}, text, nil)
 		},
 	}
+}
+
+// defaultFeedDir is where `probe feed` records when --record-dir is not given.
+const defaultFeedDir = "spec/experiments/raw/E04"
+
+func feedCmd() *cobra.Command {
+	var calendar string
+	var wait time.Duration
+	c := &cobra.Command{
+		Use:   "feed",
+		Short: "E04/E05/E07: record the calendar feed, the changed rows and the core events around your edits in the web app",
+		Long: "Records the feed heads, then waits (--wait, or until you press Enter) while you edit the calendar in the web app,\n" +
+			"then records every modelevents page, each listed row and /core/v4/events/{id}, redacted, under " + defaultFeedDir + ".",
+		Args: cli.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if calendar == "" {
+				return cli.Finish(cmd, nil, "", &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("--calendar is required")})
+			}
+			o, err := options(cmd)
+			if err != nil {
+				return cli.Finish(cmd, nil, "", err)
+			}
+			rec := recorder(cmd)
+			if rec == nil {
+				rec = &record.Recorder{Dir: defaultFeedDir}
+			}
+			o.Recorder = rec
+			s, err := session.Resume(cmd.Context(), o)
+			if err != nil {
+				return cli.Finish(cmd, nil, "", err)
+			}
+			defer s.Close()
+			enter := make(chan struct{}, 1)
+			go func() {
+				_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+				enter <- struct{}{}
+			}()
+			res, err := probe.Feed(cmd.Context(), s, rec, calendar, func(ctx context.Context) error {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Feed head recorded. Edit the calendar in the web app now; press Enter when done (or wait %s).\n", wait)
+				select {
+				case <-time.After(wait):
+				case <-enter:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return nil
+			})
+			if err != nil {
+				return cli.Finish(cmd, nil, "", err)
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "feed: %d page(s), %d entr(ies), %d row(s) re-read (%d gone), refresh %v, last cursor recorded in %s", res.Pages, res.Entries, res.Rows, res.Gone, res.Refresh, rec.Dir)
+			for _, st := range res.Statuses {
+				fmt.Fprintf(&b, "\n  %s", st)
+			}
+			if res.Stopped != "" {
+				fmt.Fprintf(&b, "\nstopped early: %s", res.Stopped)
+			}
+			return cli.Finish(cmd, res, b.String(), nil)
+		},
+	}
+	c.Flags().StringVar(&calendar, "calendar", "", "calendar ID to record (required)")
+	c.Flags().DurationVar(&wait, "wait", 2*time.Minute, "how long to wait for your edits before reading the feed")
+	return c
 }
