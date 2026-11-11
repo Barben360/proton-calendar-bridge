@@ -288,7 +288,10 @@ cache records its account in `meta` and is emptied when opened for another):
   a normal shared-lock reader instead.
 - Errors: a corrupt cache is "you must act" (exit 10, hint: remove `pcb.db`,
   then `pcb sync --full`); a permission or disk error is blocked (exit 20)
-  with the OS reason (R13). `pcb doctor` checks the file and its mode.
+  with the OS reason (R13), whether at open or during any read or write
+  (SQLite's result code is classified on every operation). A cache failure
+  during a sync stops the whole pass, never just one calendar.
+  `pcb doctor` checks the file and its mode.
 
 ### 7.3 Secrets
 Sealed with a data key held by, in order, per environment (what each backend

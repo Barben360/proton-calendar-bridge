@@ -664,7 +664,7 @@ func TestReadOnlyMidQueryCorruptionIsChangedNotCorrupt(t *testing.T) {
 
 func TestReadErrClassification(t *testing.T) {
 	plain := errors.New("disk I/O")
-	if got := (&Cache{readOnly: true}).readErr(plain); got != plain { //nolint:errorlint // identity is the point
+	if got := (&Cache{readOnly: true}).classify(plain); got != plain { //nolint:errorlint // identity is the point
 		t.Errorf("a plain error was rewrapped: %v", got)
 	}
 }
@@ -719,5 +719,90 @@ func TestEpochMarksEachLifeOfTheCounter(t *testing.T) {
 	again := openAt(t, path, "acct-2")
 	if got := epoch(t, again); got == first || got == switched {
 		t.Errorf("recreated file: epoch %q, want a new one (had %q, %q)", got, first, switched)
+	}
+}
+
+// Ruling R13 on every operation, not only Open: SQLite's result codes are
+// classified, so a caller can tell a damaged file (ErrCorrupt) from a file
+// system refusing (IOError, with a reason that names no path).
+func TestOperationErrorsAreClassified(t *testing.T) {
+	t.Run("read-only file system", func(t *testing.T) {
+		c, _ := openNew(t)
+		c.db.SetMaxOpenConns(1)
+		if _, err := c.db.ExecContext(bg, `PRAGMA query_only = 1`); err != nil { // SQLITE_READONLY on writes
+			t.Fatal(err)
+		}
+		for name, op := range map[string]func() error{
+			"PutCalendar":  func() error { return c.PutCalendar(bg, Calendar{ID: "cal"}) },
+			"DropCalendar": func() error { return c.DropCalendar(bg, "cal") },
+			"ReplaceCalendar": func() error {
+				_, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0))
+				return err
+			},
+			"ApplyDelta": func() error {
+				_, err := c.ApplyDelta(bg, "cal", "c1", []Row{row("e1", 1)}, nil, time.Unix(100, 0))
+				return err
+			},
+		} {
+			err := op()
+			var ioe *IOError
+			if !errors.As(err, &ioe) || !strings.Contains(ioe.Reason(), "read-only") {
+				t.Errorf("%s: err = %v, want an *IOError whose reason says read-only", name, err)
+			}
+			if errors.Is(err, ErrCorrupt) {
+				t.Errorf("%s: a refused write is called corrupt: %v", name, err)
+			}
+		}
+	})
+	t.Run("damaged table", func(t *testing.T) {
+		path := Path(t.TempDir())
+		c := openAt(t, path, "acct-1")
+		if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0)); err != nil {
+			t.Fatal(err)
+		}
+		var size int64
+		if err := c.db.QueryRowContext(bg, `PRAGMA page_size`).Scan(&size); err != nil {
+			t.Fatal(err)
+		}
+		var roots []int64 // the events table and its indexes
+		rows, err := c.db.QueryContext(bg, `SELECT rootpage FROM sqlite_schema WHERE tbl_name = 'events'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var r int64
+			if err := rows.Scan(&r); err != nil {
+				t.Fatal(err)
+			}
+			roots = append(roots, r)
+		}
+		if err := rows.Close(); err != nil || len(roots) < 2 {
+			t.Fatalf("roots %v, %v", roots, err)
+		}
+		_ = c.Close() // checkpoints the WAL into the file
+		for _, r := range roots {
+			corruptPage(t, path, r, size)
+		}
+		d := openAt(t, path, "acct-1") // the header and meta are intact
+		_, rerr := d.Calendars(bg)
+		_, werr := d.ReplaceCalendar(bg, "cal", "c2", []Row{row("e2", 1)}, time.Unix(200, 0))
+		for name, err := range map[string]error{"Calendars": rerr, "ReplaceCalendar": werr} {
+			if !errors.Is(err, ErrCorrupt) {
+				t.Errorf("%s on a damaged events table: err = %v, want ErrCorrupt", name, err)
+			}
+		}
+	})
+}
+
+// corruptPage overwrites page n (1-based) of the file with garbage.
+func corruptPage(t *testing.T, path string, n, size int64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt([]byte(strings.Repeat("\xff", int(size))), (n-1)*size); err != nil {
+		t.Fatal(err)
 	}
 }

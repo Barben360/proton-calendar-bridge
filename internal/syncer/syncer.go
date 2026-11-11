@@ -40,6 +40,22 @@ func (e *ResyncDeferredError) Error() string {
 	return "Proton asked for a full resync again; retrying after " + e.Until.UTC().Format(time.RFC3339)
 }
 
+// StoreError is a failure of the cache itself during a pass (reading or
+// writing it). It stops the whole pass: the cache is shared by every
+// calendar, so it is never one calendar's failure. Err keeps the cache's
+// typed cause (cache.ErrCorrupt, *cache.IOError) for the caller to map.
+type StoreError struct{ Err error }
+
+// Error implements error.
+func (e *StoreError) Error() string { return "event cache: " + e.Err.Error() }
+
+// Unwrap returns the cache's error.
+func (e *StoreError) Unwrap() error { return e.Err }
+
+func storeErr(format string, args ...any) error {
+	return &StoreError{Err: fmt.Errorf(format, args...)}
+}
+
 // Modes of a calendar's sync in a pass.
 const (
 	ModeInitial     = "initial"     // never synced: listed in full
@@ -69,8 +85,8 @@ type CalendarReport struct {
 }
 
 // Pass syncs every calendar once. A session-wide failure (api.SessionWide)
-// or a failure to read or record the cache's calendar state is returned at
-// once, without a report; any other failure is recorded on its calendar
+// or any failure of the cache (*StoreError) is returned at once, without a
+// report; any other failure is recorded on its calendar
 // (CalendarReport.Err and the cached Error) and the pass goes on. A
 // calendar's Error is cleared when it syncs.
 func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Report, error) {
@@ -86,7 +102,7 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	}
 	known, err := db.Calendars(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("reading the cache: %w", err)
+		return Report{}, storeErr("reading the cache: %w", err)
 	}
 	listed := make(map[string]bool, len(cals))
 	for _, cal := range cals {
@@ -97,7 +113,7 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 		prev[k.ID] = k
 		if !listed[k.ID] {
 			if err := db.DropCalendar(ctx, k.ID); err != nil {
-				return Report{}, fmt.Errorf("dropping calendar %s from the cache: %w", k.ID, err)
+				return Report{}, storeErr("dropping calendar %s from the cache: %w", k.ID, err)
 			}
 		}
 	}
@@ -105,14 +121,15 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 		// Keep the last error until this pass knows better.
 		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String(), Error: prev[cal.ID].Error}
 		if err := db.PutCalendar(ctx, rec); err != nil {
-			return Report{}, fmt.Errorf("recording calendar %s in the cache: %w", cal.ID, err)
+			return Report{}, storeErr("recording calendar %s in the cache: %w", cal.ID, err)
 		}
 	}
 	rep := Report{Calendars: make([]CalendarReport, 0, len(cals))}
 	for _, cal := range cals {
 		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o)
 		r.ID, r.Name = cal.ID, cal.Name
-		if r.Err != nil && api.SessionWide(ctx, r.Err) {
+		var se *StoreError
+		if r.Err != nil && (errors.As(r.Err, &se) || api.SessionWide(ctx, r.Err)) {
 			return Report{}, r.Err
 		}
 		rec := cache.Calendar{ID: cal.ID, Name: cal.Name, Type: cal.Type.String()}
@@ -120,13 +137,13 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 			rec.Error = r.Err.Error()
 		}
 		if err := db.PutCalendar(ctx, rec); err != nil {
-			return Report{}, fmt.Errorf("recording calendar %s in the cache: %w", cal.ID, err)
+			return Report{}, storeErr("recording calendar %s in the cache: %w", cal.ID, err)
 		}
 		rep.Calendars = append(rep.Calendars, r)
 	}
 	after, err := db.Calendars(ctx)
 	if err != nil {
-		return Report{}, fmt.Errorf("reading the cache: %w", err)
+		return Report{}, storeErr("reading the cache: %w", err)
 	}
 	count := make(map[string]int, len(after))
 	for _, a := range after {
@@ -184,7 +201,7 @@ func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now
 	}
 	ch, err := db.ReplaceCalendar(ctx, calID, head, out, now)
 	if err != nil {
-		return cache.Changes{}, fmt.Errorf("storing calendar %s: %w", calID, err)
+		return cache.Changes{}, storeErr("storing calendar %s: %w", calID, err)
 	}
 	return ch, nil
 }
@@ -219,7 +236,7 @@ func incremental(ctx context.Context, c *api.Client, db *cache.Cache, calID, cur
 	}
 	ch, err = db.ApplyDelta(ctx, calID, d.Cursor, upserts, gone, now)
 	if err != nil {
-		return cache.Changes{}, false, fmt.Errorf("storing calendar %s: %w", calID, err)
+		return cache.Changes{}, false, storeErr("storing calendar %s: %w", calID, err)
 	}
 	return ch, false, nil
 }

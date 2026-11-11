@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
+
+	_ "modernc.org/sqlite" // the "sqlite" driver, to damage a cache file
 )
 
 const day = 24 * 3600
@@ -514,4 +517,75 @@ func TestEventsWindowAllDayByDate(t *testing.T) {
 	}
 	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work", FromDate: "01/16/2027"})
 	_ = wantExit(t, err, exitcode.Usage)
+}
+
+// Ruling R13 during a pass, not only at Open: a cache whose tables are
+// damaged is MustAct with the way out, and a watch stops on it.
+func TestSyncOnDamagedTablesMustAct(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	e.sync(t, false)
+	damageTables(t, cache.Path(e.dirs.State), "calendars", "events")
+
+	_, err := e.svc.Sync(t.Context(), service.SyncRequest{})
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "damaged") || !strings.Contains(ee.Hint, "pcb sync --full") {
+		t.Errorf("error %q, hint %q; want the damaged cache and its way out", ee.Error(), ee.Hint)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	passes := 0
+	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.SyncResult, error) {
+		if passes++; passes == 3 {
+			cancel() // the watch did not stop by itself: end the test
+		}
+	})
+	_ = wantExit(t, err, exitcode.MustAct)
+	if passes != 1 {
+		t.Errorf("the watch ran %d passes on a damaged cache, want it to stop after 1", passes)
+	}
+}
+
+// damageTables overwrites the root pages of the named tables (and their
+// indexes) with garbage, leaving the header and meta readable.
+func damageTables(t *testing.T, path string, tables ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var size int64
+	if err := db.QueryRowContext(t.Context(), `PRAGMA page_size`).Scan(&size); err != nil {
+		t.Fatal(err)
+	}
+	var roots []int64
+	for _, tbl := range tables {
+		rows, err := db.QueryContext(t.Context(), `SELECT rootpage FROM sqlite_schema WHERE tbl_name = ?`, tbl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var r int64
+			if err := rows.Scan(&r); err != nil {
+				t.Fatal(err)
+			}
+			roots = append(roots, r)
+		}
+		_ = rows.Close()
+	}
+	if err := db.Close(); err != nil || len(roots) < len(tables) {
+		t.Fatalf("roots %v, close %v", roots, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	for _, r := range roots {
+		if _, err := f.WriteAt([]byte(strings.Repeat("\xff", int(size))), (r-1)*size); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

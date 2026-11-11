@@ -18,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
+	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
 )
 
 // TestMapError pins the exit code of every failure kind, by type (R23a).
@@ -53,6 +54,8 @@ func TestMapError(t *testing.T) {
 		{"cache newer schema", fmt.Errorf("reading the cache: %w", cache.ErrNewerSchema), exitcode.Blocked, "upgrade pcb", "newer pcb"},
 		{"cache corrupt", fmt.Errorf("x: %w", cache.ErrCorrupt), exitcode.MustAct, "pcb sync --full", "damaged"},
 		{"cache permission", fmt.Errorf("x: %w", &cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}), exitcode.Blocked, "permissions", "permission denied"},
+		{"cache refusing a write", &syncer.StoreError{Err: errors.New("constraint failed hunter2")}, exitcode.Blocked, "pcb doctor", "event cache"},
+		{"cache damaged during a pass", &syncer.StoreError{Err: fmt.Errorf("x: %w", cache.ErrCorrupt)}, exitcode.MustAct, "pcb sync --full", "damaged"},
 		{"cache changed while reading", fmt.Errorf("x: %w", cache.ErrChanged), exitcode.Blocked, "run the command again", "changed while reading"},
 		// A path error of another file (the key file, a state file) is not the cache's.
 		{"non-cache path error", &fs.PathError{Op: "open", Path: "/k/secrets.key", Err: fs.ErrPermission}, exitcode.Blocked, "doctor", "unexpected"},

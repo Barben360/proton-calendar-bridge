@@ -41,6 +41,21 @@ func (e *IOError) Reason() string {
 	if errors.As(e.Err, &pe) {
 		return pe.Err.Error()
 	}
+	var se *sqlite.Error
+	if errors.As(e.Err, &se) {
+		switch se.Code() & 0xff {
+		case sqlitelib.SQLITE_FULL:
+			return "the disk is full"
+		case sqlitelib.SQLITE_READONLY:
+			return "the file is read-only"
+		case sqlitelib.SQLITE_PERM:
+			return "permission denied"
+		case sqlitelib.SQLITE_CANTOPEN:
+			return "the file cannot be opened"
+		case sqlitelib.SQLITE_IOERR:
+			return "an input/output error"
+		}
+	}
 	return e.Err.Error()
 }
 
@@ -162,7 +177,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		if errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
 			return fmt.Errorf("cache: %s is not a usable SQLite database: remove it (and its -wal and -shm files), then run `pcb sync --full`: %w: %w", path, ErrCorrupt, err)
 		}
-		return fmt.Errorf("cache: read %s: %w", path, err)
+		return fmt.Errorf("cache: read %s: %w", path, c.classify(err))
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`: %w", path, version, schemaVersion, ErrNewerSchema)
@@ -176,12 +191,12 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("cache: create schema: %w", err)
+			return fmt.Errorf("cache: create schema: %w", c.classify(err))
 		}
 	}
 	// Read first: opening for the same account must not take the write lock.
 	if got, err := c.account(ctx, c.db); err != nil {
-		return fmt.Errorf("cache: %w", err)
+		return fmt.Errorf("cache: %w", c.classify(err))
 	} else if got == account {
 		if _, err := c.Epoch(ctx); err == nil {
 			return nil
@@ -211,7 +226,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("cache: record account: %w", err)
+		return fmt.Errorf("cache: record account: %w", c.classify(err))
 	}
 	return nil
 }
@@ -236,7 +251,7 @@ func (c *Cache) Epoch(ctx context.Context) (string, error) {
 		return "", errNoEpoch
 	}
 	if err != nil {
-		return "", c.readErr(err)
+		return "", c.classify(err)
 	}
 	return e, nil
 }
@@ -323,12 +338,24 @@ func openReadOnly(abs, accountID string) (*Cache, error) {
 	return c, nil
 }
 
-// readErr turns a corrupt-looking failure of a read on a read-only handle
-// into ErrChanged: only the writer may conclude the file is damaged.
-func (c *Cache) readErr(err error) error {
+// classify types a failure of an operation by SQLite's primary result code
+// (ruling R13): a damaged file is ErrCorrupt, except on a read-only handle,
+// where it is ErrChanged (only the writer may conclude the file is damaged);
+// a file system refusing (disk full, I/O error, read-only, cannot open,
+// permission) is an *IOError. Anything else is returned as is.
+func (c *Cache) classify(err error) error {
 	var se *sqlite.Error
-	if c.readOnly && errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
-		return fmt.Errorf("%w: %w", ErrChanged, err)
+	if err == nil || !errors.As(err, &se) {
+		return err
+	}
+	switch se.Code() & 0xff {
+	case sqlitelib.SQLITE_CORRUPT, sqlitelib.SQLITE_NOTADB:
+		if c.readOnly {
+			return fmt.Errorf("%w: %w", ErrChanged, err)
+		}
+		return fmt.Errorf("%w: %w", ErrCorrupt, err)
+	case sqlitelib.SQLITE_FULL, sqlitelib.SQLITE_IOERR, sqlitelib.SQLITE_READONLY, sqlitelib.SQLITE_CANTOPEN, sqlitelib.SQLITE_PERM:
+		return &IOError{Err: err}
 	}
 	return err
 }
@@ -384,7 +411,8 @@ func (c *Cache) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 // Seq is the change counter: the value taken by the latest row write or
 // tombstone, 0 for a cache never written.
 func (c *Cache) Seq(ctx context.Context) (int64, error) {
-	return readSeq(ctx, c.db)
+	n, err := readSeq(ctx, c.db)
+	return n, c.classify(err)
 }
 
 func readSeq(ctx context.Context, q querier) (int64, error) {
@@ -539,7 +567,7 @@ func (c *Cache) ReplaceCalendar(ctx context.Context, calID, cursor string, rows 
 		return w.finish(cursor, at, true)
 	})
 	if err != nil {
-		return Changes{}, err
+		return Changes{}, c.classify(err)
 	}
 	return ch, nil
 }
@@ -572,7 +600,7 @@ func (c *Cache) ApplyDelta(ctx context.Context, calID, cursor string, upserts []
 		return w.finish(cursor, at, false)
 	})
 	if err != nil {
-		return Changes{}, err
+		return Changes{}, c.classify(err)
 	}
 	return ch, nil
 }
@@ -582,7 +610,7 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, c.cursor, c.full_at, c.synced_at, c.error,
 		(SELECT count(*) FROM events e WHERE e.calendar_id = c.id) FROM calendars c ORDER BY c.id`)
 	if err != nil {
-		return nil, c.readErr(err)
+		return nil, c.classify(err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Calendar
@@ -590,12 +618,12 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 		var cal Calendar
 		var full, synced int64
 		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Cursor, &full, &synced, &cal.Error, &cal.Events); err != nil {
-			return nil, c.readErr(err)
+			return nil, c.classify(err)
 		}
 		cal.FullAt, cal.SyncedAt = fromUnix(full), fromUnix(synced)
 		out = append(out, cal)
 	}
-	return out, c.readErr(rows.Err())
+	return out, c.classify(rows.Err())
 }
 
 func fromUnix(s int64) time.Time {
@@ -616,12 +644,12 @@ func (c *Cache) PutCalendar(ctx context.Context, cal Calendar) error {
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, error = excluded.error`,
 		cal.ID, cal.Name, cal.Type, cal.Error)
-	return err
+	return c.classify(err)
 }
 
 // DropCalendar removes a calendar with its rows and tombstones.
 func (c *Cache) DropCalendar(ctx context.Context, id string) error {
-	return c.tx(ctx, func(tx *sql.Tx) error {
+	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`DELETE FROM events WHERE calendar_id = ?`,
 			`DELETE FROM tombstones WHERE calendar_id = ?`,
@@ -632,7 +660,7 @@ func (c *Cache) DropCalendar(ctx context.Context, id string) error {
 			}
 		}
 		return nil
-	})
+	}))
 }
 
 // Events lists a calendar's rows (without Raw), ordered by start then ID.
@@ -640,7 +668,7 @@ func (c *Cache) Events(ctx context.Context, calID string) ([]Event, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT id, uid, start_at, end_at, full_day, recurrence_id, rrule, last_edit, etag, seq
 		FROM events WHERE calendar_id = ? ORDER BY start_at, id`, calID)
 	if err != nil {
-		return nil, c.readErr(err)
+		return nil, c.classify(err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Event
@@ -648,14 +676,14 @@ func (c *Cache) Events(ctx context.Context, calID string) ([]Event, error) {
 		var e Event
 		var rec sql.NullInt64
 		if err := rows.Scan(&e.ID, &e.UID, &e.Start, &e.End, &e.FullDay, &rec, &e.RRule, &e.LastEditTime, &e.ETag, &e.Seq); err != nil {
-			return nil, c.readErr(err)
+			return nil, c.classify(err)
 		}
 		if rec.Valid {
 			e.RecurrenceID = &rec.Int64
 		}
 		out = append(out, e)
 	}
-	return out, c.readErr(rows.Err())
+	return out, c.classify(rows.Err())
 }
 
 // Raw returns a row's JSON exactly as stored, or ErrNotFound.
@@ -666,7 +694,7 @@ func (c *Cache) Raw(ctx context.Context, calID, id string) (json.RawMessage, err
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, c.classify(err)
 	}
 	return json.RawMessage(b), nil
 }

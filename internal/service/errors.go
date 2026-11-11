@@ -16,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
+	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
 )
 
 // This file is the only place the service builds *exitcode.Error. Failures
@@ -159,9 +160,13 @@ func keysError(err error) string {
 // not a database needs a person to remove it (MustAct, so a watch stops);
 // a file-system error of the cache files (cache.IOError: permissions,
 // disk; other files' errors are not matched) is Blocked with the operating system's
-// reason and no advice to remove anything.
+// reason and no advice to remove anything; any other failure of the cache
+// during a pass (*syncer.StoreError) is Blocked.
 func cacheFailure(err error) *exitcode.Error {
-	var ioe *cache.IOError
+	var (
+		ioe *cache.IOError
+		se  *syncer.StoreError
+	)
 	switch {
 	case errors.Is(err, cache.ErrChanged):
 		return fail(exitcode.Blocked, "the event cache changed while reading", "run the command again")
@@ -171,6 +176,8 @@ func cacheFailure(err error) *exitcode.Error {
 		return fail(exitcode.MustAct, "the event cache is damaged", "remove pcb.db (and its -wal and -shm files) from the state directory, then run pcb sync --full")
 	case errors.As(err, &ioe):
 		return fail(exitcode.Blocked, "the event cache cannot be used: "+ioe.Reason(), "check the permissions and the free space of the state directory")
+	case errors.As(err, &se):
+		return fail(exitcode.Blocked, "the event cache could not be updated", "run pcb doctor to check it, then pcb sync again")
 	}
 	return nil
 }

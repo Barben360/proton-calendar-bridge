@@ -2,6 +2,7 @@ package syncer_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	_ "modernc.org/sqlite" // the "sqlite" driver, to plant a failing trigger
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
@@ -628,4 +630,37 @@ func TestFeedSecondPageFailureKeepsOldCursor(t *testing.T) {
 		t.Errorf("next pass %+v, want incremental adding 4", r)
 	}
 	matches(t, c, db, a)
+}
+
+// A cache that refuses a write fails the whole pass (ruling R13): it is not
+// one calendar's problem, and the next calendar would hit it too.
+func TestCacheWriteFailureStopsThePass(t *testing.T) {
+	t.Parallel()
+	f, c, _ := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "First"})
+	b := f.AddCalendar(f.Username, protontest.Calendar{Name: "Second"})
+	addEvents(f, a, 1)
+	addEvents(f, b, 1)
+	path := cache.Path(t.TempDir())
+	db, err := cache.Open(path, f.UserID(f.Username))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.ExecContext(t.Context(), `CREATE TRIGGER refuse BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := syncer.Pass(t.Context(), c, db, at(t0))
+	var se *syncer.StoreError
+	if !errors.As(err, &se) || len(rep.Calendars) != 0 {
+		t.Fatalf("Pass = %+v, %v; want a *syncer.StoreError and no report", rep, err)
+	}
+	if n := listCalls(f, b); n != 0 {
+		t.Errorf("the pass went on to the second calendar (%d listings) after the cache refused a write", n)
+	}
 }
