@@ -39,6 +39,11 @@ type View interface {
 	// so every since value >= 0 remains a valid sync-token position; a future
 	// pruning must make a token below the oldest retained tombstone invalid.
 	MinTombstoneSeq() int64
+	// UnnamedTombstoneSeq is the highest counter value of a tombstone
+	// recorded without a UID (files from early M2 builds), 0 when none.
+	// ChangedSince cannot name those deletions, so a sync token whose seq is
+	// below this value is invalid (403 valid-sync-token, full resync).
+	UnnamedTombstoneSeq() int64
 	// Groups returns every UID of the calendar with its rows, ordered by UID.
 	Groups() ([]Group, error)
 	// Group returns one UID's rows; false when it has no live row.
@@ -67,7 +72,8 @@ func (c *Cache) Snapshot(ctx context.Context, calID string, fn func(View) error)
 	defer func() { _ = tx.Rollback() }()
 	v := &view{c: c, ctx: ctx, tx: tx, cal: calID}
 	// modernc honours TxOptions.ReadOnly with a deferred BEGIN, whatever the
-	// DSN's _txlock says (tx.go), so no second handle is needed. The first read fixes the snapshot: read everything fixed up front.
+	// DSN's _txlock says (tx.go), so no second handle is needed.
+	// The first read fixes the snapshot, so the fixed values are read first.
 	if err := tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'epoch'`).Scan(&v.epoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errNoEpoch
@@ -76,10 +82,13 @@ func (c *Cache) Snapshot(ctx context.Context, calID string, fn func(View) error)
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT
 		MAX(COALESCE((SELECT MAX(seq) FROM events WHERE calendar_id = ?1), 0), COALESCE((SELECT MAX(seq) FROM tombstones WHERE calendar_id = ?1), 0)),
-		COALESCE((SELECT MIN(seq) FROM tombstones WHERE calendar_id = ?1), 0)`, calID).Scan(&v.maxSeq, &v.minTomb); err != nil {
+		COALESCE((SELECT MIN(seq) FROM tombstones WHERE calendar_id = ?1), 0),
+		COALESCE((SELECT MAX(seq) FROM tombstones WHERE calendar_id = ?1 AND uid = ''), 0)`, calID).Scan(&v.maxSeq, &v.minTomb, &v.unnamed); err != nil {
 		return c.classify(err)
 	}
-	if err := fn(v); err != nil {
+	err = fn(v)
+	v.ended = true
+	if err != nil {
 		return err
 	}
 	return c.classify(tx.Commit())
@@ -93,17 +102,26 @@ type view struct {
 	epoch   string
 	maxSeq  int64
 	minTomb int64
+	unnamed int64
+	ended   bool
 }
 
-func (v *view) Epoch() string          { return v.epoch }
-func (v *view) MaxSeq() int64          { return v.maxSeq }
-func (v *view) MinTombstoneSeq() int64 { return v.minTomb }
+func (v *view) Epoch() string              { return v.epoch }
+func (v *view) MaxSeq() int64              { return v.maxSeq }
+func (v *view) MinTombstoneSeq() int64     { return v.minTomb }
+func (v *view) UnnamedTombstoneSeq() int64 { return v.unnamed }
+
+// errEnded is returned by a View used after its Snapshot callback returned.
+var errEnded = errors.New("cache: snapshot used after it ended")
 
 const rowColumns = `uid, id, start_at, end_at, full_day, recurrence_id, last_edit, etag, seq, raw`
 const rowOrder = ` ORDER BY uid, recurrence_id IS NOT NULL, recurrence_id, id`
 
 // groups runs a query selecting rowColumns in rowOrder and groups it by UID.
 func (v *view) groups(query string, args ...any) ([]Group, error) {
+	if v.ended {
+		return nil, errEnded
+	}
 	rows, err := v.tx.QueryContext(v.ctx, query, args...)
 	if err != nil {
 		return nil, v.c.classify(err)
@@ -143,6 +161,9 @@ func (v *view) Group(uid string) (Group, bool, error) {
 }
 
 func (v *view) ChangedSince(since int64) ([]Group, []string, error) {
+	if v.ended {
+		return nil, nil, errEnded
+	}
 	changed, err := v.groups(`SELECT `+rowColumns+` FROM events WHERE calendar_id = ?1
 		AND (uid IN (SELECT uid FROM events WHERE calendar_id = ?1 AND seq > ?2)
 		OR uid IN (SELECT uid FROM tombstones WHERE calendar_id = ?1 AND seq > ?2 AND uid <> ''))`+rowOrder, v.cal, since)

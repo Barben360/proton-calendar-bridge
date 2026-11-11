@@ -275,10 +275,70 @@ func TestSnapshotOnReadOnlyCacheAndCallbackErrors(t *testing.T) {
 	if err := c.Snapshot(bg, "", func(View) error { return nil }); err == nil {
 		t.Error("empty calendar ID accepted")
 	}
-	wantErr := errCallback
+	wantErr := errors.New("callback failed")
 	if err := c.Snapshot(bg, "cal", func(View) error { return wantErr }); !errors.Is(err, wantErr) {
 		t.Errorf("callback error = %v, want it returned as is", err)
 	}
+	// The failed callback's transaction was rolled back: a write is not blocked.
+	if _, err := c.ApplyDelta(bg, "cal", "c2", []Row{urow("e2", "u2", 0, 1)}, nil, time.Unix(2, 0)); err != nil {
+		t.Errorf("write after a failed snapshot: %v", err)
+	}
 }
 
-var errCallback = &IOError{Err: errNoEpoch}
+func TestViewAfterSnapshotEnds(t *testing.T) {
+	c, _ := openNew(t)
+	var kept View
+	snap(t, c, "cal", func(v View) { kept = v })
+	if _, err := kept.Groups(); !errors.Is(err, errEnded) {
+		t.Errorf("Groups after the snapshot = %v, want errEnded", err)
+	}
+	if _, _, err := kept.ChangedSince(0); !errors.Is(err, errEnded) {
+		t.Errorf("ChangedSince after the snapshot = %v, want errEnded", err)
+	}
+}
+
+func TestUnnamedTombstoneSeq(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c", []Row{urow("e1", "u1", 0, 1)}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	snap(t, c, "cal", func(v View) {
+		if v.UnnamedTombstoneSeq() != 0 {
+			t.Errorf("no unnamed tombstone: %d, want 0", v.UnnamedTombstoneSeq())
+		}
+	})
+	// A tombstone as an early M2 build wrote it: no UID.
+	if _, err := c.db.ExecContext(bg, `INSERT INTO tombstones (calendar_id, id, uid, seq) VALUES ('cal', 'old', '', 7)`); err != nil {
+		t.Fatal(err)
+	}
+	snap(t, c, "cal", func(v View) {
+		if v.UnnamedTombstoneSeq() != 7 {
+			t.Errorf("UnnamedTombstoneSeq = %d, want 7", v.UnnamedTombstoneSeq())
+		}
+		if _, del, err := v.ChangedSince(0); err != nil || len(del) != 0 {
+			t.Errorf("an unnamed tombstone must not be named: %v %v", del, err)
+		}
+	})
+}
+
+func TestEventsUIDIndexExistsAlsoOnOldFiles(t *testing.T) {
+	c, path := openNew(t)
+	has := func(c *Cache) bool {
+		var n int
+		if err := c.db.QueryRowContext(bg, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='events_uid'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	if !has(c) {
+		t.Fatal("new file lacks events_uid")
+	}
+	if _, err := c.db.ExecContext(bg, `DROP INDEX events_uid`); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	c2 := openAt(t, path, "acct-1")
+	if !has(c2) {
+		t.Error("opening an existing file did not add events_uid")
+	}
+}

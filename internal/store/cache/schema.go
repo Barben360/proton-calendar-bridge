@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
 	UNIQUE (calendar_id, id)
 );
 CREATE INDEX IF NOT EXISTS events_seq ON events (calendar_id, seq);
+CREATE INDEX IF NOT EXISTS events_uid ON events (calendar_id, uid);
 CREATE TABLE IF NOT EXISTS tombstones (
 	calendar_id TEXT NOT NULL,
 	id          TEXT NOT NULL,

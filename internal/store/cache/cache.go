@@ -190,6 +190,10 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		if err := c.addLateColumns(ctx); err != nil {
 			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 		}
+		// Added after the first M3 build: Group(uid) reads by it.
+		if _, err := c.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS events_uid ON events (calendar_id, uid)`); err != nil {
+			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
+		}
 	}
 	if version < schemaVersion {
 		err := c.tx(ctx, func(tx *sql.Tx) error {
