@@ -150,11 +150,6 @@ type SyncStatus struct {
 	Calendars []CalendarStatus `json:"calendars"`
 	// Error is set when a cache exists but cannot be read (secret-free).
 	Error string `json:"error,omitempty"`
-	// Undecryptable counts the event rows this process served as
-	// placeholders (ruling M3-R4) since it unlocked the keys;
-	// DuplicateMasters the duplicate masters it left out (ruling M3-R3).
-	Undecryptable    int `json:"undecryptable,omitempty"`
-	DuplicateMasters int `json:"duplicate_masters,omitempty"`
 }
 
 // CalendarStatus is one cached calendar. SyncedAt is its last successful
@@ -167,10 +162,6 @@ type CalendarStatus struct {
 	SyncedAt *time.Time `json:"synced_at,omitempty"`
 	FullAt   *time.Time `json:"full_at,omitempty"`
 	Error    string     `json:"error,omitempty"`
-	// KeysError is why this process could not unlock the calendar's keys
-	// (every event of it is then a placeholder), "" if it could or did not
-	// try.
-	KeysError string `json:"keys_error,omitempty"`
 }
 
 // SyncRequest asks for a sync pass; Full lists every calendar in full.
@@ -191,6 +182,28 @@ type WatchPass struct {
 	Result SyncResult
 	Err    error
 	Next   time.Duration
+	// Render is the process's render counters after the pass; set by
+	// Serve only (ruling M3-R34: pcb serve logs them).
+	Render *RenderCounts
+}
+
+// RenderCounts is what the renders of this process met, in memory only, as
+// of now (ruling M3-R34): only the process that serves can see it, so
+// pcb serve logs it and pcb status does not show it (M5's local socket
+// will). Since the keys were last loaded: Undecryptable counts the rows
+// served as placeholders (ruling M3-R4), DuplicateMasters the masters left
+// out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
+// did not unlock (every event of them is a placeholder), sorted, nil if
+// none.
+type RenderCounts struct {
+	Undecryptable    int
+	DuplicateMasters int
+	KeysErrors       []string
+}
+
+// Zero reports whether every counter is zero.
+func (c RenderCounts) Zero() bool {
+	return c.Undecryptable == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or

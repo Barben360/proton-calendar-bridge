@@ -274,12 +274,8 @@ func (l *Local) syncStatus() *SyncStatus {
 		return &SyncStatus{Calendars: []CalendarStatus{}, Error: cacheError(err).Error()}
 	}
 	out := &SyncStatus{Calendars: make([]CalendarStatus, 0, len(cals))}
-	out.Undecryptable, out.DuplicateMasters = l.r.counts()
 	for _, c := range cals {
 		cs := CalendarStatus{ID: c.ID, Name: c.Name, Events: c.Events, Error: c.Error}
-		if ck := l.r.calKeys(c.ID); ck != nil {
-			cs.KeysError = ck.err
-		}
 		if !c.SyncedAt.IsZero() {
 			cs.SyncedAt = &c.SyncedAt
 		}

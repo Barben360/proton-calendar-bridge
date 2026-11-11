@@ -33,15 +33,6 @@ func changedUIDs(cs service.ChangeSet) []string {
 	return out
 }
 
-func (e *env) status(t *testing.T) service.Status {
-	t.Helper()
-	st, err := e.svc.Status(t.Context())
-	if err != nil || st.Sync == nil {
-		t.Fatalf("Status = %+v, %v", st, err)
-	}
-	return st
-}
-
 func (e *env) collection(t *testing.T, id string) service.Collection {
 	t.Helper()
 	list, err := e.svc.Collections(t.Context())
@@ -239,14 +230,14 @@ func TestObjectChanges(t *testing.T) {
 	t.Run("DuplicateCountFollowsTheRows", func(t *testing.T) {
 		contains(t, "d@x", e.objects(t, work, "d@x")["d@x"].Data, "SUMMARY:New\r\n")
 		e.objects(t, work, "e@x", "f@x")
-		if st := e.status(t); st.Sync.DuplicateMasters != 3 {
-			t.Errorf("DuplicateMasters = %d, want 3 (d@x, e@x, f@x)", st.Sync.DuplicateMasters)
+		if n := e.svc.RenderCounts().DuplicateMasters; n != 3 {
+			t.Errorf("DuplicateMasters = %d, want 3 (d@x, e@x, f@x)", n)
 		}
 		e.f.DeleteEvent(work, oldDup)
 		e.sync(t, false)
 		e.objects(t, work, "d@x")
-		if st := e.status(t); st.Sync.DuplicateMasters != 2 {
-			t.Errorf("DuplicateMasters after d@x's duplicate is gone = %d, want 2", st.Sync.DuplicateMasters)
+		if n := e.svc.RenderCounts().DuplicateMasters; n != 2 {
+			t.Errorf("DuplicateMasters after d@x's duplicate is gone = %d, want 2", n)
 		}
 		// A UID deleted whole stops counting once a read sees it gone: a
 		// listing, or a delta (sync-collection).
@@ -261,15 +252,15 @@ func TestObjectChanges(t *testing.T) {
 		}
 		deleteUID("e@x")
 		_, tok := e.listing(t, work)
-		if st := e.status(t); st.Sync.DuplicateMasters != 1 {
-			t.Errorf("DuplicateMasters after a listing without e@x = %d, want 1 (f@x)", st.Sync.DuplicateMasters)
+		if n := e.svc.RenderCounts().DuplicateMasters; n != 1 {
+			t.Errorf("DuplicateMasters after a listing without e@x = %d, want 1 (f@x)", n)
 		}
 		deleteUID("f@x")
 		if cs := e.changes(t, work, tok); !slices.Equal(cs.Deleted, []string{"f@x"}) {
 			t.Fatalf("Changes = %+v, want f@x deleted", cs)
 		}
-		if st := e.status(t); st.Sync.DuplicateMasters != 0 {
-			t.Errorf("DuplicateMasters after a delta named f@x deleted = %d, want 0", st.Sync.DuplicateMasters)
+		if n := e.svc.RenderCounts().DuplicateMasters; n != 0 {
+			t.Errorf("DuplicateMasters after a delta named f@x deleted = %d, want 0", n)
 		}
 	})
 

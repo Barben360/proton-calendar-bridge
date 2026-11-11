@@ -260,7 +260,9 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
   masters resolved to the most recently edited one, the others left out and counted
   (M3-R3). An event that cannot be decrypted or parsed is served as a placeholder
   VEVENT (`X-PCB-PLACEHOLDER:1`) rather than failing a report (M3-R4)
-  [verified: `TestUndecryptableEventDoesNotFailTheReport`].
+  [verified: `TestUndecryptableEventDoesNotFailTheReport`]. These counts live in the
+  serving process only: `pcb serve` logs them (§15), `pcb status` does not show them
+  (M3-R34).
 - VCALENDAR: `VERSION:2.0`, `PRODID:-//pcb//proton-calendar-bridge//EN`,
   `CALSCALE:GREGORIAN`, CRLF, lines folded at 75 octets, **no VTIMEZONE** emitted:
   Thunderbird resolves TZIDs from its own database [verified: E08 source, E11]; other
@@ -547,7 +549,13 @@ neither; when set, TLS on any bind).
 ## 15. Observability
 
 Structured text logs on stderr (`log/slog` key=value lines, M3 `pcb serve`;
-no event content, no secrets; IDs only), `pcb status`,
+no event content, no secrets; IDs only). `pcb serve` logs one `render counters`
+line per sync pass while a counter is non-zero, and once more when they change:
+`undecryptable` (placeholders served), `duplicate_masters` (left out) and
+`keys_error_ids` (calendars whose keys failed). Only the serving process holds
+them, so `pcb status` and `pcb doctor` do not show them until M5's local API
+socket (M3-R34) [verified: `TestServeLogsTheRenderCounters`,
+`TestServePassesCarryTheRenderCounters`]. Then `pcb status`,
 `pcb doctor`, optional Prometheus endpoint (sync lag, Proton errors, rate
 limit waits, login state), and alerts as status entries (session lost,
 captcha needed, sync stalled) that `doctor` and `status` surface [call].

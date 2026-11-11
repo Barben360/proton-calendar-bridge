@@ -90,10 +90,14 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 	syncCtx, stopSync := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopSync()
 	ready, synced := make(chan struct{}), make(chan error, 1)
+	var counters renderLog
 	go func() {
 		synced <- svc.Serve(syncCtx, service.ServeOptions{
-			Ready:  func() { close(ready) },
-			OnPass: func(p service.WatchPass) { logPass(log, p) },
+			Ready: func() { close(ready) },
+			OnPass: func(p service.WatchPass) {
+				logPass(log, p)
+				counters.log(log, p.Render)
+			},
 		})
 	}()
 	// finish stops the sync loop and returns its error over err: a person
@@ -290,6 +294,29 @@ func urlHost(cc config.CalDAV, ip net.IP) string {
 		return v6
 	}
 	return "localhost"
+}
+
+// renderLog logs the render counters of each pass (ruling M3-R34) while one
+// is non-zero, and once when they change (so a return to zero is logged);
+// counts and calendar IDs only. Serve calls OnPass from one goroutine.
+type renderLog struct {
+	last service.RenderCounts
+}
+
+func (rl *renderLog) log(log *slog.Logger, c *service.RenderCounts) {
+	if c == nil || c.Zero() && rl.last.Zero() {
+		return
+	}
+	rl.last = *c
+	attrs := []any{"undecryptable", c.Undecryptable, "duplicate_masters", c.DuplicateMasters}
+	if len(c.KeysErrors) > 0 {
+		attrs = append(attrs, "keys_error_ids", c.KeysErrors)
+	}
+	if c.Zero() {
+		log.Info("render counters", attrs...)
+		return
+	}
+	log.Warn("render counters", attrs...)
 }
 
 // logPass logs one sync pass: counts and calendar IDs, never names or

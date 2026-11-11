@@ -366,9 +366,8 @@ func TestUndecryptableEventDoesNotFailTheReport(t *testing.T) {
 			t.Errorf("%s:\n%q", uid, d)
 		}
 	}
-	st, err := r.svc.Status(t.Context())
-	if err != nil || st.Sync == nil || st.Sync.Undecryptable == 0 {
-		t.Errorf("the placeholder is not counted: %+v, %v", st.Sync, err)
+	if n := r.svc.RenderCounts().Undecryptable; n == 0 {
+		t.Errorf("the placeholder is not counted: Undecryptable = %d", n)
 	}
 }
 

@@ -156,6 +156,8 @@ type serveStub struct {
 	// stopOnCancel is what Serve returns when its context ends (nil: a
 	// normal stop): an error the loop stops on while pcb serve stops.
 	stopOnCancel error
+	// passes, when set, are the passes Serve reports after its first one.
+	passes []service.WatchPass
 
 	// blockCheck makes CheckClient (the first call of every authenticated
 	// request) wait, after closing checkEntered, until checkRelease is
@@ -180,6 +182,9 @@ func (s *serveStub) Serve(ctx context.Context, o service.ServeOptions) error {
 	s.mu.Unlock()
 	o.Ready()
 	o.OnPass(service.WatchPass{Result: service.SyncResult{Calendars: []service.CalendarSync{{ID: "cal-1", Name: "Secret name", Mode: "incremental", Added: 1, Events: 2}}}, Next: 30 * time.Second})
+	for _, p := range s.passes {
+		o.OnPass(p)
+	}
 	select {
 	case <-ctx.Done():
 		return s.stopOnCancel
@@ -332,6 +337,58 @@ func TestServeStopsOnSignal(t *testing.T) {
 	}
 	if strings.Contains(logs, "Secret name") {
 		t.Errorf("logs carry a calendar name (IDs only):\n%s", logs)
+	}
+}
+
+// Ruling M3-R34: pcb serve logs the render counters of each pass while one
+// is non-zero, and once more when they change (back to zero); IDs only.
+func TestServeLogsTheRenderCounters(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	zero := &service.RenderCounts{}
+	bad := &service.RenderCounts{Undecryptable: 2, DuplicateMasters: 1, KeysErrors: []string{"cal-locked", "cal-other"}}
+	stub.passes = []service.WatchPass{
+		{Render: zero},                    // nothing to say: no line
+		{Render: bad},                     // line 1
+		{Render: bad},                     // unchanged but non-zero: line 2
+		{Render: &service.RenderCounts{}}, // back to zero, a change: line 3
+		{Render: zero},                    // zero again: no line
+		{},                                // no counters (WatchSync's passes): no line
+		{Render: &service.RenderCounts{DuplicateMasters: 4}}, // line 4
+	}
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, nil)
+	s.listening()
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+	}
+	var lines []string
+	for l := range strings.SplitSeq(s.errb.String(), "\n") {
+		if strings.Contains(l, "render counters") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 4 {
+		t.Fatalf("%d render counter lines, want 4:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for i, want := range [][]string{
+		{"level=WARN", "undecryptable=2", "duplicate_masters=1", `keys_error_ids="[cal-locked cal-other]"`},
+		{"level=WARN", "undecryptable=2", "duplicate_masters=1", "keys_error_ids="},
+		{"level=INFO", "undecryptable=0", "duplicate_masters=0"},
+		{"level=WARN", "undecryptable=0", "duplicate_masters=4"},
+	} {
+		for _, w := range want {
+			if !strings.Contains(lines[i], w) {
+				t.Errorf("line %d lacks %q: %s", i+1, w, lines[i])
+			}
+		}
+	}
+	for _, i := range []int{2, 3} {
+		if strings.Contains(lines[i], "keys_error_ids") {
+			t.Errorf("line %d names keys errors although none: %s", i+1, lines[i])
+		}
 	}
 }
 

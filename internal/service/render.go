@@ -297,15 +297,28 @@ func (r *renderer) keepDuplicates(calID string, live func(uid string) bool) {
 	}
 }
 
-// counts returns the placeholders served and the duplicate masters left
-// out since the keys were loaded.
-func (r *renderer) counts() (undecryptable, duplicates int) {
-	r.smu.Lock()
-	defer r.smu.Unlock()
-	for _, n := range r.duplicates {
-		duplicates += n
+// RenderCounts returns the render counters of this process (ruling
+// M3-R34). It is not part of API: another process sees none of them. Serve
+// hands them to each pass (WatchPass.Render).
+func (l *Local) RenderCounts() RenderCounts {
+	var out RenderCounts
+	l.r.kmu.RLock()
+	if ks := l.r.ks; ks != nil {
+		for id, ck := range ks.cals {
+			if ck.err != "" {
+				out.KeysErrors = append(out.KeysErrors, id)
+			}
+		}
 	}
-	return len(r.undecryptable), duplicates
+	l.r.kmu.RUnlock()
+	slices.Sort(out.KeysErrors)
+	l.r.smu.Lock()
+	defer l.r.smu.Unlock()
+	for _, n := range l.r.duplicates {
+		out.DuplicateMasters += n
+	}
+	out.Undecryptable = len(l.r.undecryptable)
+	return out
 }
 
 // objectETag is the ETag of g's object: "v1-" and 32 hex of the SHA-256 of

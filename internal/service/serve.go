@@ -21,7 +21,8 @@ import (
 const settingsRefresh = 10 * time.Minute
 
 // ServeOptions tune Serve: the interval between sync passes (0:
-// DefaultWatchInterval) and a callback after each pass, as WatchSync.
+// DefaultWatchInterval) and a callback after each pass, as WatchSync, with
+// the render counters (WatchPass.Render).
 // Ready, when set, is called once Serve holds the sync lock, a ready login
 // and its cache handle, before the first pass: pcb serve binds its listener
 // then, so a refused start (logged out, a sync running) never binds it.
@@ -70,7 +71,15 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	if o.Ready != nil {
 		o.Ready()
 	}
-	return l.watch(ctx, SyncRequest{}, interval, o.OnPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	var onPass func(WatchPass)
+	if o.OnPass != nil {
+		onPass = func(p WatchPass) {
+			counts := l.RenderCounts()
+			p.Render = &counts
+			o.OnPass(p)
+		}
+	}
+	return l.watch(ctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
 			if cals, cerr := db.Calendars(ctx); cerr == nil {

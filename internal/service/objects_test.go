@@ -250,20 +250,12 @@ func TestObjectReads(t *testing.T) {
 		// the row's all-day dates.
 		l := e.objects(t, locked, "locked@x")["locked@x"].Data
 		contains(t, "locked@x", l, "DTSTART;VALUE=DATE:20270115\r\n", "DTEND;VALUE=DATE:20270117\r\n", "X-PCB-PLACEHOLDER:1\r\n")
-		st, err := e.svc.Status(t.Context())
-		if err != nil || st.Sync == nil {
-			t.Fatalf("Status = %+v, %v", st, err)
+		rc := e.svc.RenderCounts()
+		if rc.Undecryptable != 3 {
+			t.Errorf("Undecryptable = %d, want 3 (broken@x, series@x's second exception and locked@x)", rc.Undecryptable)
 		}
-		if st.Sync.Undecryptable != 3 {
-			t.Errorf("Undecryptable = %d, want 3 (broken@x, series@x's second exception and locked@x)", st.Sync.Undecryptable)
-		}
-		for _, c := range st.Sync.Calendars {
-			switch {
-			case c.ID == locked && c.KeysError != "the calendar keys do not unlock with the account keys":
-				t.Errorf("Locked calendar status = %+v, want its keys error", c)
-			case c.ID != locked && c.KeysError != "":
-				t.Errorf("calendar %s has keys error %q", c.Name, c.KeysError)
-			}
+		if !slices.Equal(rc.KeysErrors, []string{locked}) {
+			t.Errorf("KeysErrors = %v, want the Locked calendar's ID only", rc.KeysErrors)
 		}
 	})
 
@@ -291,9 +283,8 @@ func TestObjectReads(t *testing.T) {
 		if n := bytes.Count(d, []byte("BEGIN:VEVENT")); n != 1 {
 			t.Errorf("dup@x has %d VEVENTs, want 1", n)
 		}
-		st, err := e.svc.Status(t.Context())
-		if err != nil || st.Sync == nil || st.Sync.DuplicateMasters != 1 {
-			t.Errorf("Status = %+v, %v; want 1 duplicate master left out", st.Sync, err)
+		if n := e.svc.RenderCounts().DuplicateMasters; n != 1 {
+			t.Errorf("DuplicateMasters = %d; want 1 duplicate master left out", n)
 		}
 	})
 
@@ -442,6 +433,36 @@ func TestServeReadsOnItsOwnHandle(t *testing.T) {
 		t.Errorf("listing after Serve = %v", etags)
 	}
 	e.sync(t, false) // the lock is free again
+}
+
+// Ruling M3-R34: each pass of Serve carries the render counters of its
+// process (pcb serve logs them): the rows served as placeholders, the
+// duplicate masters left out and the calendars whose keys failed, by ID.
+func TestServePassesCarryTheRenderCounters(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	locked := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Locked", BrokenPassphrase: true})
+	e.f.AddEvent(work, protontest.Event{UID: "ok@x", Start: base, End: base + 60})
+	e.f.AddEvent(work, protontest.Event{UID: "broken@x", Start: base, End: base + 60, BrokenPart: protontest.SharedEncryptedPart})
+	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60})
+	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60})
+	e.f.AddEvent(locked, protontest.Event{UID: "l@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	s := e.serve(t)
+	if p := s.next(t, true); p.Render == nil || !p.Render.Zero() {
+		t.Fatalf("first pass Render = %+v, want zero counters (nothing rendered yet)", p.Render)
+	}
+	e.objects(t, work, "ok@x", "broken@x", "dup@x")
+	e.objects(t, locked, "l@x")
+	p := s.next(t, false)
+	if p.Render == nil {
+		t.Fatal("a pass of Serve without Render")
+	}
+	if rc := *p.Render; rc.Undecryptable != 2 || rc.DuplicateMasters != 1 || !slices.Equal(rc.KeysErrors, []string{locked}) {
+		t.Errorf("Render = %+v, want 2 placeholders (broken@x, l@x), 1 duplicate master, keys errors [%s]", rc, locked)
+	}
+	s.stop(t)
 }
 
 // Ruling M3-R10/R11: Serve reads the calendars' bootstraps again every 10
