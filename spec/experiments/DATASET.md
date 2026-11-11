@@ -4,6 +4,8 @@ Later milestones (sync, CalDAV) are tested against the Proton test account (vaul
 
 Status: built and tested offline; **not yet applied** (the account's login is blocked by a pending CAPTCHA, ruling R12/R20). See "Pending live run".
 
+**Never edit the data set between a partial `seed apply` and its resume**: the ids (`s001`...) are positional, so an edit shifts them and the resume would skip or duplicate the wrong events.
+
 ## Content
 
 The file holds generator parameters and explicit special cases. `internal/lab/seed` expands them deterministically (PCG generator, `seed: 42`; same file, same events, ids `s001`...). `pcb-lab seed plan` prints the result without touching the network.
