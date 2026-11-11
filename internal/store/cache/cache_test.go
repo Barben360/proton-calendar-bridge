@@ -333,14 +333,15 @@ func TestPutAndDropCalendar(t *testing.T) {
 	if _, err := c.ApplyDelta(bg, "cal", "cur", nil, []string{"e2"}, time.Unix(6, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work", Type: "personal", Cursor: "IGNORED", Error: "boom"}); err != nil {
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work", Type: "personal", Color: "#123456", Description: "Team", Cursor: "IGNORED", Error: "boom"}); err != nil {
 		t.Fatal(err)
 	}
 	cals, err := c.Calendars(bg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cals[0].Name != "Work" || cals[0].Type != "personal" || cals[0].Error != "boom" || cals[0].Cursor != "cur" || cals[0].Events != 1 ||
+	if cals[0].Name != "Work" || cals[0].Type != "personal" || cals[0].Color != "#123456" || cals[0].Description != "Team" ||
+		cals[0].Error != "boom" || cals[0].Cursor != "cur" || cals[0].Events != 1 ||
 		!cals[0].FullAt.Equal(time.Unix(5, 0)) || !cals[0].SyncedAt.Equal(time.Unix(6, 0)) {
 		t.Errorf("calendar = %+v", cals[0])
 	}
@@ -849,14 +850,15 @@ func TestDeferResyncLastsUntilAFullListing(t *testing.T) {
 	}
 }
 
-// A version 1 file from before calendars.resync and tombstones.uid existed
-// gains them on Open.
+// A version 1 file from before calendars.resync, tombstones.uid and the
+// calendars' colour and description existed gains them on Open.
 func TestOpenAddsTheLateColumns(t *testing.T) {
 	c, path := openNew(t)
 	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN resync`, `ALTER TABLE tombstones DROP COLUMN uid`} {
+	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN resync`, `ALTER TABLE tombstones DROP COLUMN uid`,
+		`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`} {
 		if _, err := c.db.ExecContext(bg, q); err != nil {
 			t.Fatal(err)
 		}
@@ -866,6 +868,9 @@ func TestOpenAddsTheLateColumns(t *testing.T) {
 	cals, err := c.Calendars(bg)
 	if err != nil || len(cals) != 1 || cals[0].Name != "kept" {
 		t.Fatalf("Calendars after the upgrade = %v, %v", cals, err)
+	}
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept", Color: "#abcdef"}); err != nil {
+		t.Fatalf("PutCalendar after the upgrade: %v", err)
 	}
 	if err := c.DeferResync(bg, "cal", "row"); err != nil {
 		t.Errorf("DeferResync after the upgrade: %v", err)
@@ -878,6 +883,29 @@ func TestOpenAddsTheLateColumns(t *testing.T) {
 	}
 	if ch, err := c.Changes(bg, "cal", 0); err != nil || len(ch) != 1 || ch[0].UID != "e1@proton" {
 		t.Errorf("Changes after the upgrade = %+v, %v", ch, err)
+	}
+}
+
+// A read-only handle never upgrades a file: on an M2 file (no colour or
+// description yet) it reads the calendars without them.
+func TestReadOnlyReadsCalendarsOfAnM2File(t *testing.T) {
+	c, path := openNew(t)
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept", Color: "#abcdef"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`} {
+		if _, err := c.db.ExecContext(bg, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = c.Close()
+	ro, err := OpenReadOnly(path, "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	if cals, err := ro.Calendars(bg); err != nil || len(cals) != 1 || cals[0].Name != "kept" || cals[0].Color != "" {
+		t.Errorf("read-only Calendars of an M2 file = %+v, %v", cals, err)
 	}
 }
 

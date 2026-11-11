@@ -112,10 +112,13 @@ type Event struct {
 // Calendar is a calendar's sync state.
 type Calendar struct {
 	ID, Name, Type string
-	Cursor         string
-	FullAt         time.Time // last full listing
-	SyncedAt       time.Time // last successful pass
-	Error          string    // last failure, "" if none
+	// Color and Description are the calendar's display metadata ("" when
+	// unknown: a read-only handle on a file from before they were kept).
+	Color, Description string
+	Cursor             string
+	FullAt             time.Time // last full listing
+	SyncedAt           time.Time // last successful pass
+	Error              string    // last failure, "" if none
 	// Resync is why a fallback full listing is pending (the caller's own
 	// short code), "" if none; only DeferResync sets it and only a full
 	// listing (ReplaceCalendar) clears it.
@@ -130,6 +133,9 @@ type Changes struct{ Added, Updated, Deleted int }
 type Cache struct {
 	db       *sql.DB
 	readOnly bool
+	// noMeta: the file lacks the calendars' color and description columns
+	// (a read-only handle on a file no writer upgraded yet).
+	noMeta bool
 }
 
 // Path is the cache file inside the state directory.
@@ -274,6 +280,9 @@ func (c *Cache) Epoch(ctx context.Context) (string, error) {
 var lateColumns = []struct{ table, column, def string }{
 	{"calendars", "resync", "TEXT NOT NULL DEFAULT ''"},
 	{"tombstones", "uid", "TEXT NOT NULL DEFAULT ''"},
+	// Added in M3 (released M2 files lack them): CalDAV collections show them.
+	{"calendars", "color", "TEXT NOT NULL DEFAULT ''"},
+	{"calendars", "description", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // addLateColumns adds the lateColumns a version 1 file lacks.
@@ -426,6 +435,11 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 	if got != account {
 		return ErrNoCache
 	}
+	var n int
+	if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name IN ('color', 'description')`).Scan(&n); err != nil {
+		return fmt.Errorf("cache: %w", c.classify(err))
+	}
+	c.noMeta = n != 2
 	return nil
 }
 
@@ -654,7 +668,11 @@ func (c *Cache) ApplyDelta(ctx context.Context, calID, cursor string, upserts []
 
 // Calendars lists the calendars, ordered by ID.
 func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
-	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, c.cursor, c.full_at, c.synced_at, c.error, c.resync,
+	meta := `c.color, c.description`
+	if c.noMeta {
+		meta = `'', ''`
+	}
+	rows, err := c.db.QueryContext(ctx, `SELECT c.id, c.name, c.type, `+meta+`, c.cursor, c.full_at, c.synced_at, c.error, c.resync,
 		(SELECT count(*) FROM events e WHERE e.calendar_id = c.id) FROM calendars c ORDER BY c.id`)
 	if err != nil {
 		return nil, c.classify(err)
@@ -664,7 +682,7 @@ func (c *Cache) Calendars(ctx context.Context) ([]Calendar, error) {
 	for rows.Next() {
 		var cal Calendar
 		var full, synced int64
-		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Cursor, &full, &synced, &cal.Error, &cal.Resync, &cal.Events); err != nil {
+		if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Color, &cal.Description, &cal.Cursor, &full, &synced, &cal.Error, &cal.Resync, &cal.Events); err != nil {
 			return nil, c.classify(err)
 		}
 		cal.FullAt, cal.SyncedAt = fromUnix(full), fromUnix(synced)
@@ -680,17 +698,19 @@ func fromUnix(s int64) time.Time {
 	return time.Unix(s, 0)
 }
 
-// PutCalendar records a calendar's name, type and error. The cursor, FullAt
-// and SyncedAt are only ever set by ReplaceCalendar and ApplyDelta, so a
-// caller cannot erase them (cal's own values for them are ignored).
+// PutCalendar records a calendar's name, type, colour, description and
+// error. The cursor, FullAt and SyncedAt are only ever set by ReplaceCalendar
+// and ApplyDelta, so a caller cannot erase them (cal's own values for them
+// are ignored).
 func (c *Cache) PutCalendar(ctx context.Context, cal Calendar) error {
 	if cal.ID == "" {
 		return errors.New("cache: empty calendar ID")
 	}
-	_, err := c.db.ExecContext(ctx, `INSERT INTO calendars (id, name, type, error)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, error = excluded.error`,
-		cal.ID, cal.Name, cal.Type, cal.Error)
+	_, err := c.db.ExecContext(ctx, `INSERT INTO calendars (id, name, type, color, description, error)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, color = excluded.color,
+			description = excluded.description, error = excluded.error`,
+		cal.ID, cal.Name, cal.Type, cal.Color, cal.Description, cal.Error)
 	return c.classify(err)
 }
 
