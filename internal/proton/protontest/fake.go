@@ -70,13 +70,16 @@ type Fake struct {
 	totp    *otp.TOTP
 	http    *http.Client
 
-	mu       sync.Mutex
-	calls    []call
-	failures map[string][]failure // "METHOD /path" → queued answers
-	issued   map[string]bool      // access tokens handed out, not yet expired
-	expired  map[string]bool      // access tokens that answer 401
-	unlocked map[string]bool      // UIDs holding the locked scope
-	users    map[string]string    // username → user ID
+	mu        sync.Mutex
+	calls     []call
+	failures  map[string][]failure // "METHOD /path" → queued answers
+	issued    map[string]bool      // access tokens handed out, not yet expired
+	expired   map[string]bool      // access tokens that answer 401
+	unlocked  map[string]bool      // UIDs holding the locked scope
+	users     map[string]string    // username → user ID
+	passwords map[string]string    // username → password
+
+	cal calendars
 }
 
 type call struct{ method, path string }
@@ -111,19 +114,21 @@ func New(t testing.TB, o Options) *Fake {
 		o.Password = "fake-" + hex.EncodeToString(random(t, 12))
 	}
 	f := &Fake{
-		Username: o.Username,
-		Password: o.Password,
-		TOTPURI:  "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
-		t:        t,
-		o:        o,
-		backend:  backend,
-		proxy:    httputil.NewSingleHostReverseProxy(target),
-		http:     &http.Client{Timeout: 10 * time.Second},
-		failures: map[string][]failure{},
-		issued:   map[string]bool{},
-		expired:  map[string]bool{},
-		unlocked: map[string]bool{},
-		users:    map[string]string{},
+		Username:  o.Username,
+		Password:  o.Password,
+		TOTPURI:   "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
+		t:         t,
+		o:         o,
+		backend:   backend,
+		proxy:     httputil.NewSingleHostReverseProxy(target),
+		http:      &http.Client{Timeout: 10 * time.Second},
+		failures:  map[string][]failure{},
+		issued:    map[string]bool{},
+		expired:   map[string]bool{},
+		unlocked:  map[string]bool{},
+		users:     map[string]string{},
+		passwords: map[string]string{},
+		cal:       calendars{byUser: map[string]*userCalendars{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)
@@ -155,6 +160,7 @@ func (f *Fake) AddUser(username, password string) (userID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.users[username] = id
+	f.passwords[username] = password
 	return id
 }
 
@@ -233,6 +239,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
 	case route == "POST /auth/v4" && f.challenged(r):
 		WriteChallenge(w, f.o.Captcha, f.o.CaptchaMethods)
+	case strings.HasPrefix(r.URL.Path, "/calendar/") || route == "GET /settings/calendar":
+		f.serveCalendar(w, r)
 	case route == "POST /auth/v4/2fa":
 		f.twoFA(w, r)
 	case route == "PUT /core/v4/users/unlock":

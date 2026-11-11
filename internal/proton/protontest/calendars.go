@@ -1,0 +1,320 @@
+package protontest
+
+import (
+	"cmp"
+	"encoding/base64"
+	"encoding/hex"
+	"net/http"
+	"slices"
+	"strings"
+	"sync"
+
+	gpa "github.com/ProtonMail/go-proton-api"
+	"github.com/ProtonMail/gopenpgp/v2/crypto"
+)
+
+// Calendar describes a calendar for AddCalendar.
+type Calendar struct {
+	Name, Description, Color string
+	Type                     int  // 0 normal, 1 subscribed, 2 holidays, anything else is served as is
+	LegacyTopLevel           bool // name, description and colour at the top level, not on the member
+	ToSecondAddress          bool // the member passphrase is encrypted to the user's second address key only
+	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
+	ExtraLockedKey           bool // a second calendar key no passphrase opens, listed first
+}
+
+// calendars holds the fake's calendar state, guarded by mu.
+type calendars struct {
+	mu     sync.Mutex
+	byUser map[string]*userCalendars // username → state
+	byID   map[string]*calendarRec   // calendar ID → record
+}
+
+type userCalendars struct {
+	list     []*calendarRec
+	defaultI string
+}
+
+type calendarRec struct {
+	id         string
+	def        Calendar
+	passphrase string
+	ring       *crypto.KeyRing // unlocked calendar key
+	armored    []string        // calendar keys as served
+	// Filled on the first request of the user, from the address list.
+	ready    bool
+	memberID string
+	address  gpa.Address
+	encPass  string
+}
+
+// AddCalendar adds a calendar for username and returns its ID. The calendar
+// key (x25519) is locked with a random base64 passphrase; that passphrase is
+// encrypted, on the user's first calendar request, to the public key of the
+// first address (the second with ToSecondAddress, an unrelated key with
+// BrokenPassphrase).
+func (f *Fake) AddCalendar(username string, c Calendar) (id string) {
+	f.t.Helper()
+	id = "cal" + hex.EncodeToString(random(f.t, 8)) + "=="
+	pass := base64.StdEncoding.EncodeToString(random(f.t, 32))
+	key, err := crypto.GenerateKey("Calendar key", "", "x25519", 0)
+	if err != nil {
+		f.t.Fatalf("protontest: calendar key: %v", err)
+	}
+	locked, err := key.Lock([]byte(pass))
+	if err != nil {
+		f.t.Fatalf("protontest: lock calendar key: %v", err)
+	}
+	armored, err := locked.Armor()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	ring, err := crypto.NewKeyRing(key)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	rec := &calendarRec{id: id, def: c, passphrase: pass, ring: ring, armored: []string{armored}}
+	if c.ExtraLockedKey {
+		other, err := crypto.GenerateKey("Old calendar key", "", "x25519", 0)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		lockedOther, err := other.Lock(random(f.t, 16))
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		a, err := lockedOther.Armor()
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		rec.armored = []string{a, armored}
+	}
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	if f.cal.byID == nil {
+		f.cal.byID = map[string]*calendarRec{}
+	}
+	u := f.cal.byUser[username]
+	if u == nil {
+		u = &userCalendars{}
+		f.cal.byUser[username] = u
+	}
+	u.list = append(u.list, rec)
+	f.cal.byID[id] = rec
+	return id
+}
+
+// SetDefaultCalendar makes id the default calendar of username.
+func (f *Fake) SetDefaultCalendar(username, id string) {
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	u := f.cal.byUser[username]
+	if u == nil {
+		u = &userCalendars{}
+		f.cal.byUser[username] = u
+	}
+	u.defaultI = id
+}
+
+// EncryptToCalendar encrypts plaintext to the calendar's key and returns the
+// armored message.
+func (f *Fake) EncryptToCalendar(id string, plaintext []byte) string {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	rec := f.cal.byID[id]
+	f.cal.mu.Unlock()
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	msg, err := rec.ring.Encrypt(crypto.NewPlainMessage(plaintext), nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	armored, err := msg.GetArmored()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return armored
+}
+
+// AddAddress gives username another address (with a key) and returns its ID.
+func (f *Fake) AddAddress(username, email string) (addrID string) {
+	f.t.Helper()
+	f.mu.Lock()
+	id, pw := f.users[username], f.passwords[username]
+	f.mu.Unlock()
+	addr, err := f.backend.CreateAddress(id, email, []byte(pw), true)
+	if err != nil {
+		f.t.Fatalf("protontest: add address: %v", err)
+	}
+	return addr
+}
+
+func (f *Fake) serveCalendar(w http.ResponseWriter, r *http.Request) {
+	name, ok := f.whoami(r)
+	if !ok {
+		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
+		return
+	}
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	u := f.cal.byUser[name]
+	if u == nil {
+		u = &userCalendars{}
+		f.cal.byUser[name] = u
+	}
+	if !f.materialize(u, r) {
+		reply(w, http.StatusInternalServerError, 0, "fake: cannot prepare calendars")
+		return
+	}
+	path := r.URL.Path
+	if r.Method != http.MethodGet {
+		reply(w, http.StatusNotFound, 2000, "fake: route not implemented")
+		return
+	}
+	switch {
+	case path == "/settings/calendar":
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "CalendarUserSettings": map[string]any{"DefaultCalendarID": u.defaultI}})
+	case path == "/calendar/v1":
+		cals := make([]any, 0, len(u.list))
+		for _, rec := range u.list {
+			cals = append(cals, rec.listEntry())
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Calendars": cals})
+	case strings.HasPrefix(path, "/calendar/v2/") && strings.HasSuffix(path, "/bootstrap") &&
+		!strings.Contains(strings.TrimSuffix(strings.TrimPrefix(r.URL.EscapedPath(), "/calendar/v2/"), "/bootstrap"), "/"):
+		// The ID is one escaped path segment, like Proton's router sees it.
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/calendar/v2/"), "/bootstrap")
+		i := slices.IndexFunc(u.list, func(c *calendarRec) bool { return c.id == id })
+		if i < 0 {
+			reply(w, http.StatusUnprocessableEntity, 2501, "Calendar does not exist")
+			return
+		}
+		writeJSON(w, http.StatusOK, u.list[i].bootstrap())
+	default:
+		reply(w, http.StatusNotFound, 2000, "fake: route not implemented")
+	}
+}
+
+// materialize encrypts the passphrases of the user's new calendars to the
+// address keys fetched from the backend with r's session. Caller holds mu.
+func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
+	var pending []*calendarRec
+	for _, rec := range u.list {
+		if !rec.ready {
+			pending = append(pending, rec)
+		}
+	}
+	if len(pending) == 0 {
+		return true
+	}
+	hdr := http.Header{"x-pm-uid": {r.Header.Get("x-pm-uid")}, "Authorization": {r.Header.Get("Authorization")}}
+	var out struct{ Addresses []gpa.Address }
+	if status, err := f.backendCall(http.MethodGet, "/core/v4/addresses", hdr, nil, &out); err != nil || status != http.StatusOK {
+		return false
+	}
+	slices.SortStableFunc(out.Addresses, func(a, b gpa.Address) int { return cmp.Compare(a.Order, b.Order) })
+	for _, rec := range pending {
+		idx := 0
+		if rec.def.ToSecondAddress {
+			idx = 1
+		}
+		if idx >= len(out.Addresses) {
+			f.t.Errorf("protontest: calendar %s needs address #%d, the user has %d", rec.id, idx+1, len(out.Addresses))
+			return false
+		}
+		rec.address = out.Addresses[idx]
+		rec.memberID = "mem" + hex.EncodeToString(random(f.t, 6)) + "=="
+		pub, err := recipientRing(rec)
+		if err != nil {
+			f.t.Errorf("protontest: recipient keys: %v", err)
+			return false
+		}
+		msg, err := pub.Encrypt(crypto.NewPlainMessage([]byte(rec.passphrase)), nil)
+		if err != nil {
+			f.t.Errorf("protontest: encrypt passphrase: %v", err)
+			return false
+		}
+		if rec.encPass, err = msg.GetArmored(); err != nil {
+			return false
+		}
+		rec.ready = true
+	}
+	return true
+}
+
+// recipientRing is the public keyring the passphrase is encrypted to.
+func recipientRing(rec *calendarRec) (*crypto.KeyRing, error) {
+	if rec.def.BrokenPassphrase {
+		k, err := crypto.GenerateKey("Unrelated", "", "x25519", 0)
+		if err != nil {
+			return nil, err
+		}
+		return crypto.NewKeyRing(k)
+	}
+	var kr *crypto.KeyRing
+	for _, k := range rec.address.Keys {
+		key, err := crypto.NewKey(k.PrivateKey)
+		if err != nil {
+			return nil, err
+		}
+		pub, err := key.ToPublic()
+		if err != nil {
+			return nil, err
+		}
+		if kr == nil {
+			kr, err = crypto.NewKeyRing(pub)
+		} else {
+			err = kr.AddKey(pub)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if kr == nil {
+		return nil, http.ErrNoCookie // unreachable in practice: addresses carry keys
+	}
+	return kr, nil
+}
+
+func (c *calendarRec) member() map[string]any {
+	m := map[string]any{
+		"ID": c.memberID, "CalendarID": c.id, "AddressID": c.address.ID, "Email": c.address.Email,
+		"Display": 1, "Permissions": 127, "Flags": 1,
+		"Name": c.def.Name, "Description": c.def.Description, "Color": c.def.Color,
+	}
+	if c.def.LegacyTopLevel {
+		m["Name"], m["Description"], m["Color"] = "", "", ""
+	}
+	return m
+}
+
+func (c *calendarRec) listEntry() map[string]any {
+	e := map[string]any{"ID": c.id, "Type": c.def.Type, "CreateTime": 1700000000, "Members": []any{c.member()}}
+	if c.def.LegacyTopLevel {
+		e["Name"], e["Description"], e["Color"] = c.def.Name, c.def.Description, c.def.Color
+	}
+	return e
+}
+
+func (c *calendarRec) bootstrap() map[string]any {
+	keys := make([]any, 0, len(c.armored))
+	for i, a := range c.armored {
+		keys = append(keys, map[string]any{"ID": "key" + string(rune('0'+i)), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": a, "Flags": 3})
+	}
+	return map[string]any{
+		"Code": 1000,
+		"Keys": keys,
+		"Passphrase": map[string]any{
+			"ID": "pass1", "Flags": 1,
+			// Signature is left empty: the client does not verify it in M1.
+			"MemberPassphrases": []any{map[string]any{"MemberID": c.memberID, "Passphrase": c.encPass, "Signature": ""}},
+		},
+		"Members": []any{c.member()},
+		"CalendarSettings": map[string]any{
+			"ID": "set1", "CalendarID": c.id, "DefaultEventDuration": 30, "MakesUserBusy": 1,
+			"DefaultPartDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT1H"}},
+			"DefaultFullDayNotifications": []any{map[string]any{"Type": 1, "Trigger": "-PT15H"}},
+		},
+	}
+}
