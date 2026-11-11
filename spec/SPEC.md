@@ -262,7 +262,11 @@ files 0600; `doctor` checks them.
 What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 1 in
 `PRAGMA user_version`; `sync.lock` beside it), all keyed by account ID (the
 cache records its account in `meta` and is emptied when opened for another):
-- `meta`: the account ID and schema facts.
+- `meta`: the account ID, the change counter and its epoch: 128 random bits
+  (hex) drawn when the file is created and again when it is emptied for
+  another account (R14). The counter restarts only under a new epoch, so M3's
+  CTags and sync tokens are `epoch:seq` and never recur with another content,
+  even after `pcb logout` removed the file.
 - `calendars`: ID, name, type, feed cursor, last full sync time, last sync
   time, last error.
 - `events`: per row, calendar ID, event ID, UID, start, end, full-day flag,

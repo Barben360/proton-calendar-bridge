@@ -668,3 +668,56 @@ func TestReadErrClassification(t *testing.T) {
 		t.Errorf("a plain error was rewrapped: %v", got)
 	}
 }
+
+func epoch(t *testing.T, c *Cache) string {
+	t.Helper()
+	e, err := c.Epoch(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(e) != 32 || strings.Trim(e, "0123456789abcdef") != "" {
+		t.Fatalf("epoch %q, want 32 lowercase hex characters (128 bits)", e)
+	}
+	return e
+}
+
+// Ruling R14: the epoch names one life of the change counter. It stays
+// across reopens (read-only included) and changes whenever the counter
+// starts again: a new file, or an account switch.
+func TestEpochMarksEachLifeOfTheCounter(t *testing.T) {
+	c, path := openNew(t)
+	first := epoch(t, c)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+
+	same := openAt(t, path, "acct-1")
+	if got := epoch(t, same); got != first {
+		t.Errorf("reopened: epoch %q, want %q kept", got, first)
+	}
+	_ = same.Close()
+	ro, err := OpenReadOnly(path, "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := epoch(t, ro); got != first {
+		t.Errorf("read-only: epoch %q, want %q", got, first)
+	}
+	_ = ro.Close()
+
+	other := openAt(t, path, "acct-2")
+	switched := epoch(t, other)
+	if switched == first {
+		t.Errorf("account switch kept epoch %q: the counter restarted under the same name", first)
+	}
+	_ = other.Close()
+
+	if err := Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	again := openAt(t, path, "acct-2")
+	if got := epoch(t, again); got == first || got == switched {
+		t.Errorf("recreated file: epoch %q, want a new one (had %q, %q)", got, first, switched)
+	}
+}

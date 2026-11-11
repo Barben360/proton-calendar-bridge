@@ -1,12 +1,15 @@
 // Package cache is C2: the SQLite cache holding every calendar's event rows
 // as Proton returned them (ciphertext and plaintext metadata, nothing
 // decrypted), tombstones, a per-calendar cursor and one monotonic change
-// counter. It depends on no Proton package: the syncer converts rows.
+// counter, named by a random epoch that changes whenever the counter
+// restarts. It depends on no Proton package: the syncer converts rows.
 package cache
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -180,11 +183,19 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 	if got, err := c.account(ctx, c.db); err != nil {
 		return fmt.Errorf("cache: %w", err)
 	} else if got == account {
-		return nil
+		if _, err := c.Epoch(ctx); err == nil {
+			return nil
+		} else if !errors.Is(err, errNoEpoch) {
+			return fmt.Errorf("cache: %w", err)
+		}
 	}
 	err := c.tx(ctx, func(tx *sql.Tx) error {
 		got, err := c.account(ctx, tx)
-		if err != nil || got == account { // lost a race to the same account
+		if err != nil {
+			return err
+		}
+		if got == account { // lost a race to the same account, or a cache from before the epoch
+			_, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO NOTHING`, newEpoch())
 			return err
 		}
 		if got != "" {
@@ -194,14 +205,40 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 				}
 			}
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('account', ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, account)
+		// A new life of the change counter: a new epoch (ruling R14).
+		_, err = tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('account', ?), ('epoch', ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, account, newEpoch())
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("cache: record account: %w", err)
 	}
 	return nil
+}
+
+// errNoEpoch: the cache has no epoch yet (a file written before it existed).
+var errNoEpoch = errors.New("cache: no epoch recorded")
+
+// newEpoch is 128 random bits in hex.
+func newEpoch() string {
+	return hex.EncodeToString(randomBytes(16))
+}
+
+// Epoch names this life of the change counter: 128 random bits in hex,
+// drawn when the file is created and again when it is emptied for another
+// account (ruling R14). Seq restarts only under a new epoch, so a token
+// built as "epoch:seq" (M3's CTags and sync tokens) never comes back with a
+// different content, even after pcb logout removed the file.
+func (c *Cache) Epoch(ctx context.Context) (string, error) {
+	var e string
+	err := c.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'epoch'`).Scan(&e)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errNoEpoch
+	}
+	if err != nil {
+		return "", c.readErr(err)
+	}
+	return e, nil
 }
 
 type querier interface {
@@ -215,6 +252,14 @@ func (c *Cache) account(ctx context.Context, q querier) (string, error) {
 		return "", nil
 	}
 	return a, err
+}
+
+// randomBytes reads n bytes from crypto/rand, which never fails on the
+// supported systems (it panics rather than return a short read).
+func randomBytes(n int) []byte {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return b
 }
 
 // Close closes the cache.
