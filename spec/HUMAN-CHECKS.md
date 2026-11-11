@@ -81,7 +81,7 @@ Then repeat the Thunderbird dialog once with the bare URL and once with `http://
 **6.4 Round trips (author edits in the web app on the test account, agent notes the time).**
 1. Edit an event's title in the web app: it shows in Thunderbird within one refresh (`pcb serve` syncs every 30 s; Thunderbird's own poll is 30 min by default, so use right-click > Synchronize Calendars [claim: from E08's source reading, the menu path was not checked]).
 2. Delete an event in the web app: it disappears in Thunderbird after the same refresh.
-3. Edit the same event again after Thunderbird showed an alarm for it, dismiss the alarm, refresh: it must not re-fire (E08 AVOID normalising).
+3. **Post-M4 check** (dismissing an alarm makes Thunderbird PUT `X-MOZ-LASTACK`, which M3 refuses with 403): edit the same event again after Thunderbird showed an alarm for it, dismiss the alarm, refresh: it must not re-fire (E08 AVOID normalising). On an M3-only server, skip it and say so.
 4. Stop `pcb serve`, restart Thunderbird: the calendars still show their cached events; start `pcb serve`, refresh: no error, no duplicated calendar.
 5. In Thunderbird, try to edit an event: M3 refuses with a generic error (403); after M4 this step becomes a real edit and the web app must show it.
 
