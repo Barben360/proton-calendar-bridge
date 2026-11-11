@@ -458,3 +458,186 @@ func TestTokensRedact(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshSurvivesRequesterCancel(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var refreshCtxErr atomic.Value
+	refresh := func(ctx context.Context, s api.Tokens) (api.Tokens, error) {
+		calls.Add(1)
+		close(started)
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+			return api.Tokens{}, errors.New("test timeout")
+		}
+		refreshCtxErr.Store(fmt.Sprint(ctx.Err()))
+		return api.Tokens{UID: s.UID, AccessToken: "access-2", RefreshToken: "refresh-2"}, nil
+	}
+	var seen []string
+	var mu sync.Mutex
+	c, _ := newClient(t, bearerHandler(&seen, &mu), api.Options{Refresh: refresh})
+
+	ctxA, cancelA := context.WithCancel(t.Context())
+	errA := make(chan error, 1)
+	go func() { errA <- c.Get(ctxA, "/p", nil, nil) }()
+	<-started
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() { errs <- c.Get(t.Context(), "/p", nil, nil) }()
+	}
+	time.Sleep(50 * time.Millisecond) // let the waiters reach the lock
+	cancelA()
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("waiter: %v", err)
+		}
+	}
+	if err := <-errA; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: %v", err)
+	}
+	if v := refreshCtxErr.Load(); v != "<nil>" {
+		t.Fatalf("Refresh ctx was cancelled: %v", v)
+	}
+	if calls.Load() != 1 || c.Tokens().AccessToken != "access-2" {
+		t.Fatalf("calls=%d tokens=%v", calls.Load(), c.Tokens())
+	}
+}
+
+func TestPathValidation(t *testing.T) {
+	var n atomic.Int32
+	c, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{})
+	for _, p := range []string{"core", "", "/a?x=1", "/a#f", "/a/../b", "/..", `/a\b`, "/a\nb", "/a\x00b", "/a\x7fb"} {
+		if err := c.Get(t.Context(), p, nil, nil); err == nil {
+			t.Errorf("path %q accepted", p)
+		}
+	}
+	if n.Load() != 0 {
+		t.Fatalf("%d requests sent for refused paths", n.Load())
+	}
+}
+
+func TestPathWithEscapedIDIsSentAsIs(t *testing.T) {
+	var raw string
+	c, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		raw = r.URL.EscapedPath()
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{})
+	id := "ab/c==" // escaped by the caller
+	if err := c.Get(t.Context(), "/calendar/v1/"+url.PathEscape(id)+"/events", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if raw != "/calendar/v1/ab%2Fc==/events" {
+		t.Fatalf("path %q", raw)
+	}
+}
+
+func TestBaseURLWithTrailingSlashHasNoDoubleSlash(t *testing.T) {
+	var p string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p = r.URL.Path
+		reply(w, 200, `{"Code":1000}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := api.New(tok, api.Options{BaseURL: srv.URL + "/", Limiter: rate.NewLimiter(rate.Inf, 1)})
+	if err := c.Get(t.Context(), "/a/b", nil, nil); err != nil || p != "/a/b" {
+		t.Fatalf("err=%v path=%q", err, p)
+	}
+}
+
+func TestLimiterErrorIsTerminal(t *testing.T) {
+	var n atomic.Int32
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{Limiter: rate.NewLimiter(1, 0)}) // burst 0: Wait always errors
+	if err := c.Get(t.Context(), "/p", nil, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	if n.Load() != 0 || len(s.d) != 0 {
+		t.Fatalf("requests=%d sleeps=%v", n.Load(), s.d)
+	}
+}
+
+func TestDefaultsAndMissingBaseURL(t *testing.T) {
+	var h http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h = r.Header.Clone()
+		reply(w, 200, `{"Code":1000}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := api.New(tok, api.Options{BaseURL: srv.URL, Limiter: rate.NewLimiter(rate.Inf, 1)})
+	if err := c.Get(t.Context(), "/p", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if h.Get("x-pm-appversion") != "Other" || !strings.HasPrefix(h.Get("User-Agent"), "pcb/") {
+		t.Fatalf("headers %v", h)
+	}
+	err := api.New(tok, api.Options{}).Get(t.Context(), "/p", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "BaseURL") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestWrite429RetriedAfterRetryAfter(t *testing.T) {
+	var n atomic.Int32
+	var bodies []string
+	var mu sync.Mutex
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "2")
+			reply(w, 429, `{"Code":85131,"Error":"slow down"}`)
+			return
+		}
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{})
+	if err := c.Put(t.Context(), "/p", map[string]int{"a": 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.d) != 1 || s.d[0] != 2*time.Second || len(bodies) != 2 || bodies[0] != bodies[1] || bodies[1] == "" {
+		t.Fatalf("sleeps=%v bodies=%q", s.d, bodies)
+	}
+}
+
+func TestHugeRetryAfterIsClampedAndNotRetried(t *testing.T) {
+	for _, v := range []string{"99999999999", "99999999999999999999999"} {
+		var n atomic.Int32
+		c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			n.Add(1)
+			w.Header().Set("Retry-After", v)
+			reply(w, 429, `{"Code":85131,"Error":"x"}`)
+		}, api.Options{})
+		err := c.Get(t.Context(), "/p", nil, nil)
+		var e *api.Error
+		if !errors.As(err, &e) || e.RetryAfter != time.Hour || n.Load() != 1 || len(s.d) != 0 {
+			t.Fatalf("%s: err=%#v requests=%d sleeps=%v", v, err, n.Load(), s.d)
+		}
+	}
+}
+
+func TestResponseTooLarge(t *testing.T) {
+	var n atomic.Int32
+	c, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(200)
+		chunk := []byte(strings.Repeat("a", 1<<20))
+		for range 33 {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}, api.Options{})
+	err := c.Get(t.Context(), "/p", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "response too large") || n.Load() != 1 {
+		t.Fatalf("got %v", err)
+	}
+}
