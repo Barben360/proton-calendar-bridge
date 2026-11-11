@@ -49,9 +49,12 @@ For M5 (daemon and ops):
 - Plain HTTP inside a container behind a reverse proxy, as an explicit opt-in (M3-R28): today a non-loopback bind needs TLS.
 - An unbounded wait after the drain, and a second Ctrl-C to force exit (Task 7 review, minor 10).
 - Placeholder reason categories for `pcb doctor` (secret-free; M3-R4, Task 4).
-- The render counters (placeholders, duplicate masters, keys errors) in `pcb status` and `pcb doctor` through the local API socket: until then only `pcb serve`'s log has them (M3-R34).
+- The render counters (placeholders, unverified, duplicate masters, keys errors) in `pcb status` and `pcb doctor` through the local API socket: until then only `pcb serve`'s log has them (M3-R34).
 - Address-key rotation is seen only on restart, login or relogin, since the 10-minute refresh reads calendar bootstraps only (M3-R10, Task 4 fix round 1): revisit.
 - `clients.json` removal at uninstall (M3-R17).
+- Integrity against a malicious server (M3 final re-review): bind each part's `Author` to the key that signed it, and refuse or mark unsigned cleartext attendees/personal parts, once E10 says which parts Proton signs with which key (SPEC §5.3).
+- M4: a decrypted part may itself carry `X-PCB-PLACEHOLDER`; the write refusal for placeholders must use the service's own placeholder state, never that property.
+- Final audit: `TestServeReadsOnItsOwnHandle` does not prove reads use Serve's handle (stays green with that branch disabled); a deleted calendar answers 503 instead of 404 while another calendar is pending or the account has none.
 
 For the final audit (parked minors):
 - Duplicate-count writes from unordered snapshots (diagnostic only, Task 4).

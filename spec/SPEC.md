@@ -181,6 +181,12 @@ unverified; an attendees or personal part of ours marks it only when it is
 signed and the signature fails. In CalDAV each affected VEVENT (the master or
 an exception) carries `X-PCB-INTEGRITY:unverified`, and `pcb serve` logs the
 count (`unverified`, §15); the event is never silently accepted or dropped.
+Scope of the marker [call, M3 final re-review]: it catches corrupted parts
+and edits that break or strip our signatures, not a server that rewrites a
+part's `Author` to an address not ours or adds an unsigned cleartext
+attendees or personal part (those parts merge EXDATE, RDATE, ATTENDEE,
+VALARM and missing single-value properties). Binding the author to the
+signing key and refusing unsigned parts wait for E10 (`OPEN.md`).
 A part authored by an address that is not ours (an invitation, another
 member of a shared calendar) is not verified in v1 and never marks the
 event: there is no public-key lookup, and invitations and shared calendars
