@@ -50,6 +50,23 @@ type API interface {
 	// everything); a token it cannot answer from is an error whose cause is
 	// ErrInvalidSyncToken.
 	Changes(ctx context.Context, calID, token string) (ChangeSet, error)
+	// The client methods manage the CalDAV app passwords in
+	// <state>/clients.json. They need no login and no network, and logout
+	// leaves them (ruling M3-R17).
+
+	// AddClient creates a client and returns its password, this once. A bad
+	// or taken name is a Usage error.
+	AddClient(ctx context.Context, name string) (ClientSecret, error)
+	// Clients lists the clients, without secrets.
+	Clients(ctx context.Context) ([]Client, error)
+	// RemoveClient deletes the client with this ID or (case-insensitive)
+	// name; an unknown one is a Usage error.
+	RemoveClient(ctx context.Context, idOrName string) (Client, error)
+	// CheckClient reports whether password is a client's, for a request
+	// from remote ("ip:port"). A remote with 5 failures in the last minute
+	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
+	// otherwise a refusal has retryAfter 0 (401).
+	CheckClient(ctx context.Context, password, remote string) (ok bool, retryAfter time.Duration)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
 }

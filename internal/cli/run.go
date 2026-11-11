@@ -78,6 +78,30 @@ func CommandName(cmd *cobra.Command) string {
 	return strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
 }
 
+// OperandsKey is the annotation naming how many operands a command takes
+// (set by OneOperand), so the usage contract can tell a missing or an extra one.
+const OperandsKey = "pcb/operands"
+
+// OneOperand makes c take exactly one operand, named what in its error
+// messages. Any other count is a usage error (exit 2) that names the extra
+// operand or the missing one.
+func OneOperand(c *cobra.Command, what string) *cobra.Command {
+	if c.Annotations == nil {
+		c.Annotations = map[string]string{}
+	}
+	c.Annotations[OperandsKey] = "1"
+	c.Args = func(cmd *cobra.Command, args []string) error {
+		switch {
+		case len(args) == 0:
+			return UsageError(fmt.Errorf("%q needs %s", cmd.CommandPath(), what))
+		case len(args) > 1:
+			return UsageError(fmt.Errorf("unexpected operand %q for %q: it takes one %s", args[1], cmd.CommandPath(), what))
+		}
+		return nil
+	}
+	return c
+}
+
 type jsonKey struct{}
 
 // JSONMode reports whether the running command was asked for --json. Run

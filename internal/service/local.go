@@ -11,6 +11,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -46,6 +47,9 @@ type Local struct {
 	o       Options
 	secrets *store.Secrets
 	mgr     *gpa.Manager
+
+	clients *access.Store   // CalDAV app passwords, <state>/clients.json; survives logout (ruling M3-R17)
+	limiter *access.Limiter // failed CalDAV password checks per remote IP
 
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
@@ -97,6 +101,8 @@ func NewLocal(o Options) (*Local, error) {
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
+		clients: access.NewStore(o.Dirs.State, o.Now),
+		limiter: access.NewLimiter(o.Now),
 	}
 	l.r.lru = newLRU(lruCapacity)
 	return l, nil

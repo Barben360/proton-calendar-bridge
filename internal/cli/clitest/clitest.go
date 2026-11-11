@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -39,6 +41,12 @@ func CheckUsageContract(t *testing.T, newRoot func() *cobra.Command) {
 		cases := map[string][]string{
 			"unknown flag":       {"--bogus-flag"},
 			"unexpected operand": {"nope"},
+		}
+		// A command that takes operands (cli.OneOperand) gets its valid ones
+		// first, so the extra one is what fails; without them it must fail too.
+		if n, _ := strconv.Atoi(find(newRoot(), path).Annotations[cli.OperandsKey]); n > 0 {
+			cases["unexpected operand"] = append(slices.Repeat([]string{"x"}, n), "nope")
+			cases["missing operand"] = nil
 		}
 		if len(path) == 0 || cli.IsGroup(find(newRoot(), path)) {
 			cases["no subcommand"] = nil

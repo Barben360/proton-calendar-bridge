@@ -42,10 +42,15 @@ pcb calendar list [--json]
 pcb sync [--full]                      # fill or refresh the local event cache from Proton
 pcb sync --watch --interval 30s        # keep it current until Ctrl-C (at least 10s; not with --json)
 pcb event list --calendar NAME [--from 2026-11-01] [--to 2026-12-01]   # cached events, no network call
+pcb client add NAME                    # a CalDAV app password for one client (printed once, never stored); works logged out
+pcb client list                        # the clients, never their passwords
+pcb client remove NAME|ID              # its password stops working at once, even for a running pcb serve
 pcb logout
 ```
 
 Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run).
+
+CalDAV clients (Thunderbird, a phone) sign in with an app password, not your Proton one: `pcb client add NAME` prints 24 random bytes (base64url) once and stores only a salted SHA-256 in `clients.json` (0600) in the state directory. Use any username, that password, and the URL `pcb serve` prints. Five wrong passwords from one IP in a minute are refused until the minute ends. `pcb logout` keeps the clients; uninstalling removes them.
 
 ## Build
 
