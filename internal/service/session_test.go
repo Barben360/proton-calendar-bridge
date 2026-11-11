@@ -512,26 +512,36 @@ func TestReloginDropsClient(t *testing.T) {
 	}
 }
 
-// Logout drops the client too: a login of the same Local afterwards must not
-// find it (the sealed UID differs anyway; this guards the explicit drop).
+// Logout and Close each drop the cached client directly.
 func TestLogoutDropsClient(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
-	c1, err := e.svc.SessionClient(t.Context())
-	if err != nil {
+	if _, err := e.svc.SessionClient(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	if !e.svc.HasCachedClient() {
+		t.Fatal("no client cached after a session call")
 	}
 	if _, err := e.svc.Logout(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	e.clk.advance(time.Hour)
+	if e.svc.HasCachedClient() {
+		t.Error("the client survived a logout")
+	}
+}
+
+func TestCloseDropsClient(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
-	c2, err := e.svc.SessionClient(t.Context())
-	if err != nil {
+	if _, err := e.svc.SessionClient(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if c1 == c2 {
-		t.Error("the client survived a logout")
+	if err := e.svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if e.svc.HasCachedClient() {
+		t.Error("the client survived Close")
 	}
 }

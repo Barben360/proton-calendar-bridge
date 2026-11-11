@@ -76,9 +76,11 @@ func (l *Local) session(ctx context.Context) (*api.Client, store.Account, store.
 
 // storedClient returns the one client of acc's session. A client built for
 // another account or UID is replaced. A reused client adopts the sealed
-// tokens when they differ (another process rotated them); the sealed tokens
-// are never older than the client's, since a refresh seals before it
-// returns. The lock is held for memory work only.
+// tokens when they differ (another process rotated them). acc was read
+// before the lock, so a refresh sealed in between can make the adopted tokens
+// older than the client's: that costs at most one 401, healed by
+// refreshStored's adoption of the sealed tokens, and never spends a refresh
+// token. The lock is held for memory work only.
 func (l *Local) storedClient(acc store.Account) *api.Client {
 	sealed := tokensOf(acc)
 	l.cmu.Lock()

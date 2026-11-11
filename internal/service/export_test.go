@@ -12,3 +12,10 @@ func (l *Local) SessionClient(ctx context.Context) (*api.Client, error) {
 	c, _, _, err := l.session(ctx)
 	return c, err
 }
+
+// HasCachedClient reports whether a session client is cached.
+func (l *Local) HasCachedClient() bool {
+	l.cmu.Lock()
+	defer l.cmu.Unlock()
+	return l.cached != nil
+}
