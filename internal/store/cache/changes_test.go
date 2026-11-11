@@ -17,7 +17,7 @@ func urow(id, uid string, rec int64, v int) Row {
 	return r
 }
 
-func groupIDs(gs []Group) map[string][]string {
+func groupIDs(gs []Listed) map[string][]string {
 	m := map[string][]string{}
 	for _, g := range gs {
 		for _, r := range g.Rows {
@@ -43,7 +43,7 @@ func TestSnapshotIsConsistent(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap(t, c, "cal", func(v View) {
-		before, err := v.Groups()
+		before, err := v.Listing()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func TestSnapshotIsConsistent(t *testing.T) {
 		if _, err := c.ApplyDelta(bg, "cal", "c2", []Row{urow("n", "u2", 0, 1), urow("m", "u1", 0, 2)}, []string{"x"}, time.Unix(2, 0)); err != nil {
 			t.Fatalf("writer commit during a snapshot: %v", err)
 		}
-		after, err := v.Groups()
+		after, err := v.Listing()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,13 +97,46 @@ func TestSnapshotNotBlockedByAWriteTransaction(t *testing.T) {
 	})
 }
 
-func mustGroups(t *testing.T, v View) []Group {
+func mustGroups(t *testing.T, v View) []Listed {
 	t.Helper()
-	g, err := v.Groups()
+	g, err := v.Listing()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return g
+}
+
+// Final review, minor 1: a listing carries each UID's rows (master, then by
+// recurrence ID, then by ID) with their IDs and ETags, as Group has them,
+// and no payload (Listed has no Raw: a listing of 10k events does not load
+// their ciphertext).
+func TestListingIsGroupsWithoutPayload(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{
+		urow("x2", "u1", 200, 1), urow("m", "u1", 0, 1), urow("x1", "u1", 100, 3), urow("o", "u2", 0, 2),
+	}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	snap(t, c, "cal", func(v View) {
+		list := mustGroups(t, v)
+		if len(list) != 2 || list[0].UID != "u1" || list[1].UID != "u2" {
+			t.Fatalf("listing = %+v, want u1 then u2", list)
+		}
+		for _, l := range list {
+			g, ok, err := v.Group(l.UID)
+			if err != nil || !ok {
+				t.Fatalf("Group(%s): %v %v", l.UID, ok, err)
+			}
+			if want := g.Listed(); !reflect.DeepEqual(l, want) {
+				t.Errorf("listing of %s = %+v, want %+v (Group's IDs and ETags, in its order)", l.UID, l, want)
+			}
+			for _, r := range l.Rows {
+				if r.ID == "" || r.ETag == "" || r.ID == r.ETag {
+					t.Errorf("%s: row %+v", l.UID, r)
+				}
+			}
+		}
+	})
 }
 
 func TestChangedSinceGroupsByUID(t *testing.T) {
@@ -289,7 +322,7 @@ func TestViewAfterSnapshotEnds(t *testing.T) {
 	c, _ := openNew(t)
 	var kept View
 	snap(t, c, "cal", func(v View) { kept = v })
-	if _, err := kept.Groups(); !errors.Is(err, errEnded) {
+	if _, err := kept.Listing(); !errors.Is(err, errEnded) {
 		t.Errorf("Groups after the snapshot = %v, want errEnded", err)
 	}
 	if _, _, err := kept.ChangedSince(0); !errors.Is(err, errEnded) {

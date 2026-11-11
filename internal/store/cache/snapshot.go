@@ -26,6 +26,26 @@ type Group struct {
 	Rows []StoredRow
 }
 
+// ListedRow is a row as a listing needs it: its ID and ETag, no payload.
+type ListedRow struct {
+	ID, ETag string
+}
+
+// Listed is one UID's rows as a listing needs them, in Group's order.
+type Listed struct {
+	UID  string
+	Rows []ListedRow
+}
+
+// Listed is g without the rows' payloads and plaintext columns.
+func (g Group) Listed() Listed {
+	out := Listed{UID: g.UID, Rows: make([]ListedRow, len(g.Rows))}
+	for i, r := range g.Rows {
+		out.Rows[i] = ListedRow{ID: r.ID, ETag: r.ETag}
+	}
+	return out
+}
+
 // View is a calendar as one read transaction sees it. It is valid only inside
 // the Snapshot callback.
 type View interface {
@@ -48,8 +68,9 @@ type View interface {
 	// created (0 for a calendar older than floors): no position below it
 	// belongs to this calendar's life (ruling M3-R12).
 	Floor() int64
-	// Groups returns every UID of the calendar with its rows, ordered by UID.
-	Groups() ([]Group, error)
+	// Listing returns every UID of the calendar with its rows' IDs and ETags,
+	// ordered by UID; it reads no payload (final review, minor 1).
+	Listing() ([]Listed, error)
 	// Group returns one UID's rows; false when it has no live row.
 	Group(uid string) (Group, bool, error)
 	// ChangedSince returns the UIDs having a live row with seq > since, or
@@ -59,7 +80,8 @@ type View interface {
 	// whose master lives is therefore a changed UID, not a deleted one.
 	// Tombstones recorded without a UID (files from early M2 builds) cannot
 	// be named and are skipped.
-	ChangedSince(since int64) (changed []Group, deletedUIDs []string, err error)
+	// Like Listing, it reads no payload.
+	ChangedSince(since int64) (changed []Listed, deletedUIDs []string, err error)
 }
 
 // Snapshot runs fn inside one read transaction on calID: everything fn reads
@@ -159,8 +181,37 @@ func (v *view) groups(query string, args ...any) ([]Group, error) {
 	return out, v.c.classify(rows.Err())
 }
 
-func (v *view) Groups() ([]Group, error) {
-	return v.groups(`SELECT `+rowColumns+` FROM events WHERE calendar_id = ?`+rowOrder, v.cal)
+const listedColumns = `uid, id, etag`
+
+// listing runs a query selecting listedColumns in rowOrder and groups it by
+// UID.
+func (v *view) listing(query string, args ...any) ([]Listed, error) {
+	if v.ended {
+		return nil, errEnded
+	}
+	rows, err := v.tx.QueryContext(v.ctx, query, args...)
+	if err != nil {
+		return nil, v.c.classify(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Listed
+	for rows.Next() {
+		var uid string
+		var r ListedRow
+		if err := rows.Scan(&uid, &r.ID, &r.ETag); err != nil {
+			return nil, v.c.classify(err)
+		}
+		if n := len(out); n == 0 || out[n-1].UID != uid {
+			out = append(out, Listed{UID: uid})
+		}
+		g := &out[len(out)-1]
+		g.Rows = append(g.Rows, r)
+	}
+	return out, v.c.classify(rows.Err())
+}
+
+func (v *view) Listing() ([]Listed, error) {
+	return v.listing(`SELECT `+listedColumns+` FROM events WHERE calendar_id = ?`+rowOrder, v.cal)
 }
 
 func (v *view) Group(uid string) (Group, bool, error) {
@@ -171,11 +222,11 @@ func (v *view) Group(uid string) (Group, bool, error) {
 	return gs[0], true, nil
 }
 
-func (v *view) ChangedSince(since int64) ([]Group, []string, error) {
+func (v *view) ChangedSince(since int64) ([]Listed, []string, error) {
 	if v.ended {
 		return nil, nil, errEnded
 	}
-	changed, err := v.groups(`SELECT `+rowColumns+` FROM events WHERE calendar_id = ?1
+	changed, err := v.listing(`SELECT `+listedColumns+` FROM events WHERE calendar_id = ?1
 		AND (uid IN (SELECT uid FROM events WHERE calendar_id = ?1 AND seq > ?2)
 		OR uid IN (SELECT uid FROM tombstones WHERE calendar_id = ?1 AND seq > ?2 AND uid <> ''))`+rowOrder, v.cal, since)
 	if err != nil {

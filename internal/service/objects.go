@@ -328,7 +328,7 @@ func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.C
 
 // infos lists the groups' objects, skipping a group without UID (it cannot
 // be named).
-func infos(groups []cache.Group, ck *calKeys) []ObjectInfo {
+func infos(groups []cache.Listed, ck *calKeys) []ObjectInfo {
 	out := make([]ObjectInfo, 0, len(groups))
 	for _, g := range groups {
 		if g.UID != "" {
@@ -339,7 +339,7 @@ func infos(groups []cache.Group, ck *calKeys) []ObjectInfo {
 }
 
 // liveIn reports whether a UID is one of groups'.
-func liveIn(groups []cache.Group) func(string) bool {
+func liveIn(groups []cache.Listed) func(string) bool {
 	live := make(map[string]bool, len(groups))
 	for _, g := range groups {
 		live[g.UID] = true
@@ -356,7 +356,7 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 	var token string
 	err := l.calendarRead(ctx, calID, func(db *cache.Cache, ck *calKeys) error {
 		err := db.Snapshot(ctx, calID, func(v cache.View) error {
-			groups, err := v.Groups()
+			groups, err := v.Listing()
 			if err != nil {
 				return err
 			}
@@ -415,7 +415,7 @@ func (l *Local) ObjectsByUID(ctx context.Context, calID string, uids []string) (
 			out[i] = Object{UID: uid, Missing: true}
 			continue
 		}
-		etag := objectETag(*g, ck)
+		etag := objectETag(g.Listed(), ck)
 		data, ok := l.r.lru.get(etag)
 		if !ok {
 			data = l.render(calID, *g, ks, ck)
@@ -454,15 +454,15 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 			if !full && (epoch != v.Epoch() || since < v.Floor() || since < v.UnnamedTombstoneSeq() || since > pos) {
 				return invalidSyncToken()
 			}
-			var changed []cache.Group
+			var changed []cache.Listed
 			var deleted []string
 			var err error
 			switch {
 			case full:
-				changed, err = v.Groups()
+				changed, err = v.Listing()
 			case gen != ck.gen:
 				if _, deleted, err = v.ChangedSince(since); err == nil {
-					changed, err = v.Groups()
+					changed, err = v.Listing()
 				}
 			default:
 				changed, deleted, err = v.ChangedSince(since)

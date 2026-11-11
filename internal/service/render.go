@@ -334,9 +334,9 @@ func (l *Local) RenderCounts() RenderCounts {
 // the render version, every row's (ID, ETag) sorted by ID, and the calendar
 // settings the render uses. Any row change, a settings change or a new
 // render version changes it.
-func objectETag(g cache.Group, ck *calKeys) string {
+func objectETag(g cache.Listed, ck *calKeys) string {
 	rows := slices.Clone(g.Rows)
-	slices.SortFunc(rows, func(a, b cache.StoredRow) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(rows, func(a, b cache.ListedRow) int { return strings.Compare(a.ID, b.ID) })
 	h := sha256.New()
 	field(h, []byte("pcb-object "+strconv.Itoa(renderVersion)))
 	for _, r := range rows {
