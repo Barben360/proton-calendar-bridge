@@ -6,7 +6,9 @@ package protontest
 // bridge must not send: it holds the calendar key, so it opens and checks
 // the encrypted parts too, which Proton cannot. Where the research marks a
 // behaviour [conflict] or [unknown], the fake takes the strict reading and
-// a WriteOptions switch selects the other one.
+// a WriteOptions switch selects the other one. Every code or rule the
+// research does not name is marked "assumption" where it is made (ruling
+// M4-R3).
 
 import (
 	"bytes"
@@ -21,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 )
 
@@ -56,16 +59,26 @@ const (
 	codeOK         = 1000
 	codeBatch      = 1001 // the envelope of per-entry answers
 	codeBadValue   = 2000 // STATUS:TENTATIVE
-	codeInvalid    = 2001 // signature, key packet, SEQUENCE, a malformed part
 	codeNotAllowed = 2011 // RRULE with RECURRENCE-ID, a colour off the palette
-	codeBadID      = 2061 // an ID never issued, another member's ID
-	codeExists     = 2500 // RejectDuplicateUID [inferred]
 	codeGone       = 2501 // a deleted row
+	// codeInvalid is research's code for a bad signature and a low exception
+	// SEQUENCE. Assumption: the fake answers it too for every other refusal
+	// the research gives no code for (key packets, fragment form, routing,
+	// null lists, attendees without ORGANIZER, a missing Permissions,
+	// SEQUENCE with parameters: Proton answers HTTP 500 there).
+	codeInvalid = 2001
+	// codeBadID is research's "not a valid ID" (a GET with an unknown ID).
+	// Assumption: the fake answers it for an ID never issued and for another
+	// member's MemberID.
+	codeBadID = 2061
+	// codeExists: assumption, for RejectDuplicateUID (no source saw one).
+	codeExists = 2500
 )
 
 // palette is Proton's colour palette, the only Color the endpoint takes
 // (research A.2: 2011 otherwise), as proton-cal (pkg/calcolor) and carbonate
-// (internal/calendar/create.go) list it.
+// (internal/calendar/create.go) list it. Assumption: the match is exact,
+// upper case as listed.
 var palette = []string{
 	"#8080FF", "#DB60D6", "#EC3E7C", "#F78400", "#936D58",
 	"#5252CC", "#A839A4", "#BA1E55", "#C44800", "#54473F",
@@ -154,23 +167,32 @@ func (f *Fake) serveSync(w http.ResponseWriter, r *http.Request, cal *calendarRe
 	f.cal.syncs = append(f.cal.syncs, syncRecord{cal.id, body})
 	var req SyncRequest
 	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields() // a misspelt field would otherwise vanish
+	// Assumption (HTTP 400/2001): a field Proton does not define is
+	// refused, so a misspelt one cannot vanish.
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		reply(w, http.StatusBadRequest, codeInvalid, "fake: the sync body does not decode: "+err.Error())
 		return
 	}
-	if req.MemberID != cal.memberID {
+	// A call of deletes may leave MemberID out (research A.1, caloxide live).
+	deletesWithoutMember := req.MemberID == "" && onlyDeletes(req.Events)
+	if req.MemberID != cal.memberID && !deletesWithoutMember {
 		reply(w, http.StatusUnprocessableEntity, codeBadID, "Invalid member ID")
 		return
 	}
 	if !cal.writable() {
-		// [unknown] Proton's answer; the fake's own.
+		// Assumption: Proton's answer is unknown; HTTP and code 403 are the fake's.
 		reply(w, http.StatusForbidden, http.StatusForbidden, "fake: our member cannot write to this calendar")
 		return
 	}
 	tx := f.begin(cal)
+	nulls := nullLists(body)
 	results := make([]entryResult, len(req.Events))
 	for i, e := range req.Events {
+		if e.Event != nil && nulls[i] != "" {
+			results[i] = failed(codeInvalid, "fake: %s must be a list, [] when empty", nulls[i])
+			continue
+		}
 		results[i] = tx.apply(e)
 	}
 	if f.o.Write.AllOrNothing {
@@ -202,6 +224,35 @@ func (f *Fake) serveSync(w http.ResponseWriter, r *http.Request, cal *calendarRe
 		responses = append(responses, map[string]any{"Index": i, "Response": answer})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"Code": codeBatch, "Responses": responses})
+}
+
+func onlyDeletes(entries []SyncEntry) bool {
+	return !slices.ContainsFunc(entries, func(e SyncEntry) bool { return e.Event != nil })
+}
+
+// lists are the Event fields that must be lists, [] when empty, never null
+// (research A.2, proton-cal live). Assumption, stricter than Proton: absent
+// is refused too (an omitted Attendees wipes the RSVPs, research A.2).
+var lists = []string{"SharedEventContent", "CalendarEventContent", "AttendeesEventContent", "Attendees"}
+
+// nullLists returns, for each entry of a sync body, the first of lists its
+// Event has null or absent, "" when none: the typed decoding cannot tell a
+// null list from an empty one.
+func nullLists(body []byte) []string {
+	var raw struct {
+		Events []struct{ Event map[string]json.RawMessage }
+	}
+	_ = json.Unmarshal(body, &raw) // the typed decoding already succeeded
+	out := make([]string, len(raw.Events))
+	for i, e := range raw.Events {
+		for _, name := range lists {
+			if v, ok := e.Event[name]; !ok || string(bytes.TrimSpace(v)) == "null" {
+				out[i] = name
+				break
+			}
+		}
+	}
+	return out
 }
 
 // entryResult is one entry's outcome: its code, the row to echo (none for a
@@ -310,6 +361,7 @@ func (tx *syncTx) create(ev SyncEvent) entryResult {
 	}
 	row.parts["SharedKeyPacket"] = *ev.SharedKeyPacket
 	row.parts["CalendarKeyPacket"] = nullable(ev.CalendarKeyPacket)
+	row.parts["Attendees"] = servedAttendees(ev.Attendees, row.id)
 	tx.rows = append(tx.rows, row)
 	tx.changes = append(tx.changes, feedEntry{id: row.id, action: actionCreate})
 	return entryResult{code: codeOK, row: row}
@@ -358,6 +410,7 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 		row.parts[k] = old.parts[k] // kept; for personal parts, research L.4.10 [unknown]
 	}
 	row.parts["SharedKeyPacket"], row.parts["CalendarKeyPacket"] = sharedPacket, calPacket
+	row.parts["Attendees"] = servedAttendees(ev.Attendees, row.id) // replaced, IDs kept per token
 	tx.rows[i] = row
 	tx.changes = append(tx.changes, feedEntry{id: id, action: actionUpdate})
 	return entryResult{code: codeOK, row: row}
@@ -366,7 +419,7 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 // build checks ev (old: the row it updates, nil on a create) and returns
 // the row it makes, with new IDs, or nil and the failure.
 func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRec, entryResult) {
-	if ev.Permissions == nil {
+	if ev.Permissions == nil { // assumption: every bridge sends it (research A.2)
 		return nil, failed(codeInvalid, "fake: Permissions is missing")
 	}
 	for _, raw := range []json.RawMessage{ev.AddedProtonAttendees, ev.RemovedAttendeeAddresses} {
@@ -381,6 +434,10 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRe
 	cols, err := parseColumns(card[slotSharedSigned])
 	if err != nil {
 		return nil, failed(codeInvalid, "fake: shared signed part: %v", err)
+	}
+	if card[slotAttendees] != nil && propValues(card[slotSharedSigned], "ORGANIZER") == nil {
+		// Research A.4 (carbonate live); the code is an assumption.
+		return nil, failed(codeInvalid, "Shared event has attendees but does not have an organizer")
 	}
 	if cols.RRule != "" && cols.RecurrenceID != nil {
 		return nil, failed(codeNotAllowed, "These properties are not supported: RECURRENCE-ID with RRULE")
@@ -410,12 +467,11 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRe
 	}
 	row := tx.f.newRow(cols)
 	author := tx.f.author(tx.cal)
-	row.parts = map[string]any{
+	row.parts = map[string]any{ // Attendees: by the caller, once the row ID is final
 		"Author": author, "AddressKeyPacket": nil, "AddressID": nil, "PersonalEvents": []any{},
 		"SharedEvents":    servedParts(ev.SharedEventContent, author),
 		"CalendarEvents":  servedParts(ev.CalendarEventContent, author),
 		"AttendeesEvents": servedParts(ev.AttendeesEventContent, author),
-		"Attendees":       servedAttendees(ev.Attendees, row.id),
 	}
 	return row, entryResult{}
 }
@@ -477,7 +533,7 @@ func (tx *syncTx) rowKeys(r *eventRec) (sessionKeys, error) {
 			return sessionKeys{}, err
 		}
 	}
-	addrKR, err := signer()
+	addrKR, err := memberKey(tx.cal)
 	if err != nil {
 		return sessionKeys{}, err
 	}
@@ -524,7 +580,9 @@ func (s slot) String() string {
 
 // routing is the constraints' routing table: what each part holds besides
 // UID and DTSTAMP. The shared encrypted part holds every property no other
-// part owns, except the ones never routed.
+// part owns, except the ones never routed. Assumption: Proton reads its
+// signed parts only; the fake checks the encrypted ones too, as the web
+// app would misread a misrouted property.
 var routing = map[slot][]string{
 	slotSharedSigned:      {"DTSTART", "DTEND", "RECURRENCE-ID", "RRULE", "EXDATE", "SEQUENCE", "ORGANIZER", "X-PM-CONFERENCE-ID"},
 	slotCalendarSigned:    {"EXDATE", "STATUS", "TRANSP"},
@@ -566,12 +624,13 @@ type partGroup struct {
 }
 
 // openCard checks every part of ev and returns their properties by slot: the
-// part lists' shape, each signature (the address key, over the exact bytes
-// of a signed part and over the plaintext of an encrypted one), each
+// part lists' shape, each signature (binary mode, by the key of the
+// calendar's address, over the exact bytes of a signed part and over the
+// plaintext of an encrypted one), each
 // decryption under its session key, the fragment form, the routing, one UID
 // across parts and the same EXDATEs in both signed parts.
 func (tx *syncTx) openCard(ev SyncEvent, keys sessionKeys) (map[slot][]property, error) {
-	addrKR, err := signer() // the member address's key: every address has it
+	addrKR, err := memberKey(tx.cal)
 	if err != nil {
 		return nil, err
 	}
@@ -616,6 +675,8 @@ func (tx *syncTx) openCard(ev SyncEvent, keys sessionKeys) (map[slot][]property,
 			return nil, fmt.Errorf("%s: another UID than the shared signed part's", s)
 		}
 	}
+	// Assumption: the same EXDATE lines in the same order (every writer
+	// copies them, research B.1).
 	if !slices.Equal(propValues(card[slotSharedSigned], "EXDATE"), propValues(card[slotCalendarSigned], "EXDATE")) {
 		return nil, errors.New("EXDATE must be the same in both signed parts")
 	}
@@ -636,11 +697,21 @@ func decryptPart(data string, sk *crypto.SessionKey) ([]byte, error) {
 	return plain.GetBinary(), nil
 }
 
-// verifies reports whether armoredSig is a detached signature of text by kr,
-// over the exact bytes, as internal/proton/cards checks it.
+// verifies reports whether armoredSig is a binary-mode detached signature
+// of text by kr, over the exact bytes, as internal/proton/cards checks it.
+// Binary mode only is stricter than Proton: carbonate's text-mode
+// signatures (type 0x01) work live (research B.2), but the constraints
+// require binary, which covers the bytes sent.
 func verifies(text []byte, armoredSig string, kr *crypto.KeyRing) bool {
 	sig, err := crypto.NewPGPSignatureFromArmored(armoredSig)
-	return err == nil && kr.VerifyDetached(crypto.NewPlainMessage(text), sig, 0) == nil
+	if err != nil {
+		return false
+	}
+	p, err := packet.Read(bytes.NewReader(sig.GetBinary()))
+	if s, ok := p.(*packet.Signature); err != nil || !ok || s.SigType != packet.SigTypeBinary {
+		return false
+	}
+	return kr.VerifyDetached(crypto.NewPlainMessage(text), sig, 0) == nil
 }
 
 // partProperties checks a part's text is a fragment in Proton's form
@@ -809,8 +880,8 @@ func servedParts(parts []SyncPart, author string) []any {
 // servedAttendees is the row's Attendees column from the statuses sent.
 func servedAttendees(list []SyncAttendee, rowID string) []any {
 	out := make([]any, 0, len(list))
-	for i, a := range list {
-		out = append(out, map[string]any{"ID": fmt.Sprintf("att%d-%s", i, rowID), "Token": a.Token, "Status": a.Status, "Permissions": 3})
+	for _, a := range list {
+		out = append(out, map[string]any{"ID": attendeeID(rowID, a.Token), "Token": a.Token, "Status": a.Status, "Permissions": 3})
 	}
 	return out
 }

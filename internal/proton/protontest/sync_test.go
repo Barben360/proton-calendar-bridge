@@ -77,6 +77,20 @@ func sign(t *testing.T, kr *crypto.KeyRing, text []byte) string {
 	return armored
 }
 
+// signText is a text-mode (type 0x01) detached signature of text.
+func signText(t *testing.T, kr *crypto.KeyRing, text string) string {
+	t.Helper()
+	sig, err := kr.SignDetached(crypto.NewPlainMessageFromString(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	armored, err := sig.GetArmored()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return armored
+}
+
 func signedPart(t *testing.T, kr *crypto.KeyRing, text string) map[string]any {
 	t.Helper()
 	return map[string]any{"Type": 2, "Data": text, "Signature": sign(t, kr, []byte(text))}
@@ -365,7 +379,7 @@ func TestSyncRefusesABadSignature(t *testing.T) {
 	other := stranger(t)
 	c := card{
 		uid:          "sig@pcb.test",
-		sharedSigned: []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "SEQUENCE:0"},
+		sharedSigned: []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "SEQUENCE:0", "ORGANIZER:mailto:me@pcb.test"},
 		sharedEnc:    []string{"SUMMARY:Signed"},
 		calSigned:    []string{"STATUS:CONFIRMED"},
 		calEnc:       []string{"COMMENT:note"},
@@ -388,6 +402,18 @@ func TestSyncRefusesABadSignature(t *testing.T) {
 		"calendar signed part by another key":    resign("CalendarEventContent", 0, other, nil),
 		"calendar encrypted part by another key": resign("CalendarEventContent", 1, other, k.cal),
 		"attendees part by another key":          resign("AttendeesEventContent", 0, other, k.shared),
+		// Research A.4: another address's key is 2001 (carbonate, caloxide live).
+		"shared signed part by our other address":    resign("SharedEventContent", 0, w.f.OtherAddressKeyRing(), nil),
+		"shared encrypted part by our other address": resign("SharedEventContent", 1, w.f.OtherAddressKeyRing(), k.shared),
+		// Stricter than Proton (carbonate's text mode works live): binary only.
+		"shared signed part in text mode": func(ev map[string]any) {
+			p := ev["SharedEventContent"].([]any)[0].(map[string]any)
+			p["Signature"] = signText(t, w.signer, p["Data"].(string))
+		},
+		"shared encrypted part in text mode": func(ev map[string]any) {
+			p := ev["SharedEventContent"].([]any)[1].(map[string]any)
+			p["Signature"] = signText(t, w.signer, open(t, k.shared, p["Data"].(string)))
+		},
 		"shared signed part changed after signing": func(ev map[string]any) {
 			p := ev["SharedEventContent"].([]any)[0].(map[string]any)
 			p["Data"] = strings.Replace(p["Data"].(string), "SEQUENCE:0", "SEQUENCE:1", 1)
@@ -452,6 +478,7 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 	ev := w.create(t, c, k)
 	ev["Notifications"] = []map[string]any{{"Type": 1, "Trigger": "-PT15M"}}
 	ev["Color"] = "#3CBB3A"
+	ev["IsOrganizer"] = 0
 	id := w.mustCreate(t, ev)
 	before := w.row(t, id)
 
@@ -469,6 +496,9 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 	}
 	if after["Color"] != "#3CBB3A" {
 		t.Errorf("null Color on update: %v, want the row's #3CBB3A", after["Color"])
+	}
+	if after["IsOrganizer"] != 0.0 {
+		t.Errorf("absent IsOrganizer on update: %v, want the row's 0", after["IsOrganizer"])
 	}
 	if got := open(t, k.shared, partData(after, "SharedEvents", 1)); !strings.Contains(got, "SUMMARY:After") || strings.Contains(got, "Before") {
 		t.Errorf("shared encrypted part not replaced: %q", got)
@@ -616,6 +646,20 @@ func TestSyncRefusesWhatProtonRefuses(t *testing.T) {
 			cal[0] = signedPart(t, w.signer, fragment("other@pcb.test", "STATUS:CONFIRMED"))
 		}, 2001},
 		{"no Permissions", with(func(*card) {}), func(ev map[string]any) { delete(ev, "Permissions") }, 2001},
+		// Research A.4 (carbonate live): "Shared event has attendees but does not have an organizer".
+		{"attendees without ORGANIZER", with(func(c *card) {
+			c.attendees = []string{"ATTENDEE;X-PM-TOKEN=t1:mailto:ann@pcb.test"}
+		}), nil, 2001},
+		// Research A.4: SEQUENCE;VALUE=TEXT:0 (Proton answers HTTP 500; the fake 2001).
+		{"SEQUENCE with a parameter", with(func(c *card) {
+			c.sharedSigned = []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "SEQUENCE;VALUE=TEXT:0"}
+		}), nil, 2001},
+		{"invitations (AddedProtonAttendees)", with(func(*card) {}), func(ev map[string]any) {
+			ev["AddedProtonAttendees"] = []any{map[string]any{"Email": "ann@pcb.test"}}
+		}, 2001},
+		{"invitations (RemovedAttendeeAddresses)", with(func(*card) {}), func(ev map[string]any) {
+			ev["RemovedAttendeeAddresses"] = []any{"ann@pcb.test"}
+		}, 2001},
 	}
 	// Fragment form: each spoils the shared signed part's text, then re-signs it.
 	for name, spoil := range map[string]func(string) string{
@@ -664,6 +708,135 @@ func TestSyncRefusesWhatProtonRefuses(t *testing.T) {
 	}
 }
 
+// TestSyncRefusesMalformedEntries covers the entry-level rules: Overwrite 1
+// (no known meaning), a field Proton does not define, a UID change on update.
+func TestSyncRefusesMalformedEntries(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	k := newKeys(t)
+	if code := w.entryCode(t, map[string]any{"Overwrite": 1, "Event": w.create(t, simple("ow@pcb.test", "0", "x"), k)}); code != 2001 {
+		t.Errorf("Overwrite 1: code %d, want 2001", code)
+	}
+	misspelt := w.create(t, simple("ms@pcb.test", "0", "x"), k)
+	misspelt["SharedEventsContent"] = misspelt["SharedEventContent"]
+	if st, ans := w.sync(t, map[string]any{"Event": misspelt}); st != 400 || ans.Code != 2001 {
+		t.Errorf("an unknown Event field: HTTP %d code %d, want 400/2001", st, ans.Code)
+	}
+	if rows := len(w.byUID(t, "ow@pcb.test")) + len(w.byUID(t, "ms@pcb.test")); rows != 0 {
+		t.Errorf("%d rows stored from refused writes", rows)
+	}
+	id := w.mustCreate(t, w.create(t, simple("uid@pcb.test", "0", "x"), k))
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": w.update(t, simple("other@pcb.test", "1", "x"), k)}); code != 2001 {
+		t.Errorf("update changing the UID: code %d, want 2001", code)
+	}
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": w.update(t, simple("uid@pcb.test", "1", "x"), k)}); code != 1000 {
+		t.Errorf("the same update keeping the UID: code %d, want 1000", code)
+	}
+}
+
+// TestSyncRefusesNullArrays: research A.2 (proton-cal live), the part lists
+// and Attendees are [] when empty, never null; the fake refuses them absent
+// too (stricter than Proton: an omitted Attendees wipes the RSVPs).
+func TestSyncRefusesNullArrays(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	k := newKeys(t)
+	for _, field := range []string{"SharedEventContent", "CalendarEventContent", "AttendeesEventContent", "Attendees"} {
+		for name, spoil := range map[string]func(ev map[string]any){
+			"null":   func(ev map[string]any) { ev[field] = nil },
+			"absent": func(ev map[string]any) { delete(ev, field) },
+		} {
+			ev := w.create(t, simple("null@pcb.test", "0", "x"), k)
+			spoil(ev)
+			if code := w.entryCode(t, map[string]any{"Event": ev}); code != 2001 {
+				t.Errorf("%s %s: code %d, want 2001", field, name, code)
+			}
+		}
+	}
+	if rows := w.byUID(t, "null@pcb.test"); len(rows) != 0 {
+		t.Fatalf("%d rows stored from refused writes", len(rows))
+	}
+	w.mustCreate(t, w.create(t, simple("null@pcb.test", "0", "x"), k)) // every list []
+}
+
+// TestSyncSignerIsTheMemberAddressKey (research B.3): a calendar of the
+// account's second address takes parts signed by that address's key only,
+// and its seeded rows are signed by it.
+func TestSyncSignerIsTheMemberAddressKey(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	w.cal = w.f.AddCalendar(w.f.Username, protontest.Calendar{ToSecondAddress: true})
+	w.calKey = w.f.CalendarKeyRing(w.cal)
+	k := newKeys(t)
+	if code := w.entryCode(t, map[string]any{"Event": w.create(t, simple("2nd@pcb.test", "0", "x"), k)}); code != 2001 {
+		t.Errorf("signed by the first address's key: code %d, want 2001", code)
+	}
+	w.signer = w.f.OtherAddressKeyRing()
+	w.mustCreate(t, w.create(t, simple("2nd@pcb.test", "0", "x"), k))
+
+	seeded := w.row(t, w.f.AddEvent(w.cal, protontest.Event{UID: "s@pcb.test", Start: 1, End: 2}))
+	part := seeded["SharedEvents"].([]any)[0].(map[string]any)
+	sig, err := crypto.NewPGPSignatureFromArmored(part["Signature"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.signer.VerifyDetached(crypto.NewPlainMessage([]byte(part["Data"].(string))), sig, 0); err != nil {
+		t.Errorf("a seeded row of the second address's calendar is not signed by its key: %v", err)
+	}
+}
+
+// TestSyncUpdateReplacesAttendees: research A.2 (proton-cal live), an update
+// replaces the Attendees statuses; an attendee keeps its ID across updates.
+func TestSyncUpdateReplacesAttendees(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	k := newKeys(t)
+	c := simple("att@pcb.test", "0", "Meeting")
+	c.sharedSigned = append(c.sharedSigned, "ORGANIZER:mailto:me@pcb.test")
+	c.attendees = []string{"ATTENDEE;X-PM-TOKEN=tokA:mailto:ann@pcb.test", "ATTENDEE;X-PM-TOKEN=tokB:mailto:bob@pcb.test"}
+	withStatuses := func(ev map[string]any, statuses ...any) map[string]any {
+		ev["Attendees"] = statuses
+		return ev
+	}
+	status := func(token string, s int) map[string]any { return map[string]any{"Token": token, "Status": s} }
+	type att struct {
+		ID, Token string
+		Status    int
+	}
+	attendees := func(id string) map[string]att {
+		var out struct{ Event struct{ Attendees []att } }
+		rawGet(t, w.f, w.tk, "/calendar/v1/"+url.PathEscape(w.cal)+"/events/"+url.PathEscape(id), &out)
+		m := map[string]att{}
+		for _, a := range out.Event.Attendees {
+			m[a.Token] = a
+		}
+		return m
+	}
+	id := w.mustCreate(t, withStatuses(w.create(t, c, k), status("tokA", 0), status("tokB", 0)))
+	first := attendees(id)
+	if len(first) != 2 || first["tokA"].ID == "" || first["tokA"].ID == first["tokB"].ID {
+		t.Fatalf("after create: %+v, want two attendees with distinct IDs", first)
+	}
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": withStatuses(w.update(t, c, k), status("tokA", 3), status("tokB", 0))}); code != 1000 {
+		t.Fatalf("update: code %d", code)
+	}
+	if got := attendees(id); got["tokA"] != (att{first["tokA"].ID, "tokA", 3}) || got["tokB"] != first["tokB"] {
+		t.Errorf("after re-sending both: %+v, want the same IDs and tokA accepted", got)
+	}
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": withStatuses(w.update(t, c, k), status("tokB", 2))}); code != 1000 {
+		t.Fatalf("update: code %d", code)
+	}
+	if got := attendees(id); len(got) != 1 || got["tokB"] != (att{first["tokB"].ID, "tokB", 2}) {
+		t.Errorf("after re-sending tokB only: %+v, want tokB alone, same ID, declined", got)
+	}
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": w.update(t, c, k)}); code != 1000 {
+		t.Fatalf("update: code %d", code)
+	}
+	if got := attendees(id); len(got) != 0 {
+		t.Errorf("after an update with Attendees []: %+v, want none", got)
+	}
+}
+
 func TestSyncRefusesAMemberWithoutWrite(t *testing.T) {
 	t.Parallel()
 	w := newWriter(t, protontest.Options{})
@@ -701,6 +874,16 @@ func TestSyncDeleteAnswersNoResponses(t *testing.T) {
 	}
 	if code := w.entryCode(t, map[string]any{"ID": a}); code != 2501 {
 		t.Errorf("delete of a deleted row: code %d, want 2501", code)
+	}
+	// Research A.1 (caloxide live): a delete may leave MemberID out; a write
+	// may not.
+	c := w.mustCreate(t, w.create(t, simple("del3@pcb.test", "0", "C"), k))
+	if st, raw := do(t, w.f, w.tk, http.MethodPut, "/calendar/v1/"+url.PathEscape(w.cal)+"/events/sync",
+		map[string]any{"Events": []any{map[string]any{"ID": c}}}); st != 200 || string(raw) != `{"Code":1001,"Responses":[]}` {
+		t.Errorf("delete without MemberID: HTTP %d %s, want 200 and no response", st, raw)
+	}
+	if st, ans := w.syncAs(t, "", map[string]any{"Event": w.create(t, simple("del4@pcb.test", "0", "D"), k)}); st != 422 || ans.Code != 2061 {
+		t.Errorf("create without MemberID: HTTP %d code %d, want 422/2061", st, ans.Code)
 	}
 	if code := w.entryCode(t, map[string]any{"ID": a, "Event": w.update(t, simple("del@pcb.test", "1", "B"), k)}); code != 2501 {
 		t.Errorf("update of a deleted row: code %d, want 2501", code)
@@ -866,6 +1049,30 @@ func TestBootstrapServesFlagsAndASignedPassphrase(t *testing.T) {
 			if st, _ := rawGet(t, f, tk, "/calendar/v2/"+url.PathEscape(readOnly)+"/bootstrap", &b); st != 200 || b.Members[0].Permissions != 2 {
 				t.Errorf("Calendar.Permissions 2: HTTP %d, members %+v; want Permissions 2", st, b.Members)
 			}
+
+			// The account's two addresses hold different keys: the first
+			// AddressKeyRing's, the second OtherAddressKeyRing's.
+			var addrs struct {
+				Addresses []struct {
+					Order int
+					Keys  []struct{ PrivateKey string }
+				}
+			}
+			if st, _ := rawGet(t, f, tk, "/core/v4/addresses", &addrs); st != 200 {
+				t.Fatalf("addresses: HTTP %d", st)
+			}
+			byOrder := map[int]string{}
+			for _, a := range addrs.Addresses {
+				key, err := crypto.NewKeyFromArmored(a.Keys[0].PrivateKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				byOrder[a.Order] = key.GetFingerprint()
+			}
+			first, second := f.AddressKeyRing().GetKeys()[0].GetFingerprint(), f.OtherAddressKeyRing().GetKeys()[0].GetFingerprint()
+			if len(byOrder) != 2 || byOrder[1] != first || byOrder[2] != second || first == second {
+				t.Errorf("address keys by Order = %v, want 1: %s and 2: %s", byOrder, first, second)
+			}
 		})
 	}
 }
@@ -935,6 +1142,17 @@ func TestSyncNewKeyPacketsOnUpdate(t *testing.T) {
 			}
 			if got := open(t, k.cal, partData(w.row(t, id), "CalendarEvents", 1)); !strings.Contains(got, "COMMENT:now private") {
 				t.Errorf("calendar encrypted part = %q", got)
+			}
+			// Now the row has a calendar session key: a new packet for it is
+			// like the shared one.
+			calPacket := w.row(t, id)["CalendarKeyPacket"]
+			upd = w.update(t, c, k)
+			upd["CalendarKeyPacket"] = wrap(t, w.calKey, k.cal)
+			if code, want := w.entryCode(t, map[string]any{"ID": id, "Event": upd}), map[bool]int{false: 1000, true: 2001}[refuse]; code != want {
+				t.Errorf("update with a second calendar key packet: code %d, want %d", code, want)
+			}
+			if w.row(t, id)["CalendarKeyPacket"] != calPacket {
+				t.Error("the row's calendar key packet must stay either way")
 			}
 		})
 	}

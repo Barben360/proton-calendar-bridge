@@ -1,7 +1,9 @@
 package protontest
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // TZIDs resolve on any host, as in the bridge's embedded database
 
 	"github.com/ProtonMail/go-proton-api/server/backend"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -20,7 +23,8 @@ import (
 // CRLF-separated with no CRLF after the last one [inferred]; cleartext parts
 // carry a detached signature, encrypted parts a SEIPD packet under a session
 // key whose PKESK is the row's key packet, and a detached signature over the
-// plaintext. Every signature is made by the address key (AddressKeyRing), or
+// plaintext. Every signature is made by the key of the calendar's address
+// (AddressKeyRing, or OtherAddressKeyRing for a ToSecondAddress calendar), or
 // by an unrelated key with Event.ForeignKey.
 
 // Part names a part that Event.BrokenPart makes undecryptable, or that
@@ -45,9 +49,9 @@ type Notification struct {
 	Trigger string
 }
 
-// signer is the unlocked key of every address of every account: with
-// fastKeys (see borrow) the backend locks one precomputed key for each user
-// and address key, and FastGenerateKey hands that same key out locked with a
+// signer is the unlocked key of every account's first address (and of every
+// user key): with fastKeys (see borrow) the backend locks one precomputed key
+// for each, and FastGenerateKey hands that same key out locked with a
 // passphrase of ours.
 var signer = sync.OnceValues(func() (*crypto.KeyRing, error) {
 	pass := []byte("protontest-signer")
@@ -63,8 +67,36 @@ var signer = sync.OnceValues(func() (*crypto.KeyRing, error) {
 	if err != nil {
 		return nil, err
 	}
-	return crypto.NewKeyRing(key)
+	return crypto.NewKeyRing(warm(key))
 })
+
+// warm serializes a key shared across goroutines once, before it is shared:
+// go-crypto caches a signature's subpackets on its first serialization (a
+// write), so concurrent first copies of a shared key race.
+func warm(key *crypto.Key) *crypto.Key {
+	_, _ = key.Serialize()
+	return key
+}
+
+// otherAddressKey is the key of every address but an account's first one
+// (see generateKey), unlocked: a part it signs is signed by the wrong
+// address when the calendar belongs to the first address.
+var otherAddressKey = sync.OnceValues(func() (*crypto.Key, error) {
+	key, err := crypto.GenerateKey("Other address", "other@protontest.invalid", "x25519", 0)
+	if err != nil {
+		return nil, err
+	}
+	return warm(key), nil
+})
+
+// otherSigner is otherAddressKey in a keyring.
+func otherSigner() (*crypto.KeyRing, error) {
+	k, err := otherAddressKey()
+	if err != nil {
+		return nil, err
+	}
+	return crypto.NewKeyRing(k)
+}
 
 // stranger is an unrelated key, for Event.ForeignKey.
 var stranger = sync.OnceValues(func() (*crypto.KeyRing, error) {
@@ -75,12 +107,25 @@ var stranger = sync.OnceValues(func() (*crypto.KeyRing, error) {
 	return crypto.NewKeyRing(key)
 })
 
-// AddressKeyRing returns a copy of the unlocked key every address of the
-// fake's accounts has: the key that signs the parts and that an address key
-// packet is encrypted to.
+// AddressKeyRing returns a copy of the unlocked key of every account's first
+// address: the key that signs the parts of its calendars and that an address
+// key packet is encrypted to.
 func (f *Fake) AddressKeyRing() *crypto.KeyRing {
 	f.t.Helper()
-	kr, err := signer()
+	return f.keyCopy(signer)
+}
+
+// OtherAddressKeyRing returns a copy of the unlocked key of every other
+// address (each account's second one, and AddAddress's): the key of a
+// ToSecondAddress calendar.
+func (f *Fake) OtherAddressKeyRing() *crypto.KeyRing {
+	f.t.Helper()
+	return f.keyCopy(otherSigner)
+}
+
+func (f *Fake) keyCopy(ring func() (*crypto.KeyRing, error)) *crypto.KeyRing {
+	f.t.Helper()
+	kr, err := ring()
 	if err != nil {
 		f.t.Fatalf("protontest: address key: %v", err)
 	}
@@ -89,6 +134,15 @@ func (f *Fake) AddressKeyRing() *crypto.KeyRing {
 		f.t.Fatal(err)
 	}
 	return c
+}
+
+// memberKey is the key of the calendar's address: the account's second
+// address with ToSecondAddress, else its first.
+func memberKey(cal *calendarRec) (*crypto.KeyRing, error) {
+	if cal.def.ToSecondAddress {
+		return otherSigner()
+	}
+	return signer()
 }
 
 // CalendarKeyRing returns a copy of the calendar's primary key, unlocked:
@@ -391,12 +445,19 @@ func vcalendar(common, lines []string) string {
 	return strings.Join(all, "\r\n")
 }
 
+// attendeeID is the ID of the row's attendee with token: stable across the
+// row's edits.
+func attendeeID(rowID, token string) string {
+	h := sha256.Sum256([]byte(rowID + "\x00" + token))
+	return "att" + hex.EncodeToString(h[:8])
+}
+
 // attendeeRows derives the row's Attendees column from the attendee lines:
 // X-PM-TOKEN joins them, PARTSTAT gives the status.
 func attendeeRows(rowID string, lines []string) []any {
 	statuses := map[string]int{"NEEDS-ACTION": 0, "TENTATIVE": 1, "DECLINED": 2, "ACCEPTED": 3}
 	out := []any{}
-	for i, l := range lines {
+	for _, l := range lines {
 		head := strings.NewReplacer("\r\n ", "", "\r\n\t", "").Replace(l)
 		if j := strings.IndexByte(head, ':'); j >= 0 {
 			head = head[:j]
@@ -412,7 +473,7 @@ func attendeeRows(rowID string, lines []string) []any {
 			}
 		}
 		if token != "" {
-			out = append(out, map[string]any{"ID": fmt.Sprintf("att%d-%s", i, rowID), "Token": token, "Status": status, "Permissions": 3})
+			out = append(out, map[string]any{"ID": attendeeID(rowID, token), "Token": token, "Status": status, "Permissions": 3})
 		}
 	}
 	return out
@@ -422,8 +483,11 @@ func attendeeRows(rowID string, lines []string) []any {
 // address's, the owner's first address until the calendar is materialized.
 // Caller holds f.cal.mu.
 func (f *Fake) author(cal *calendarRec) string {
-	if cal.ready {
+	switch {
+	case cal.ready:
 		return cal.address.Email
+	case cal.def.ToSecondAddress:
+		return secondAddress(cal.owner, f.backend.GetDomain())
 	}
 	return cal.owner + "@" + f.backend.GetDomain()
 }
@@ -432,7 +496,7 @@ func (f *Fake) author(cal *calendarRec) string {
 // card. Author defaults to the calendar's (see author). Caller holds
 // f.cal.mu.
 func (f *Fake) buildParts(cal *calendarRec, r *eventRec) (map[string]any, error) {
-	addrKR, err := signer()
+	addrKR, err := memberKey(cal)
 	if err != nil {
 		return nil, err
 	}

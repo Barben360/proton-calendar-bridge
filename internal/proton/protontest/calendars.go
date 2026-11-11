@@ -21,7 +21,7 @@ type Calendar struct {
 	Name, Description, Color string
 	Type                     int  // 0 normal, 1 subscribed, 2 holidays, anything else is served as is
 	LegacyTopLevel           bool // name, description and colour at the top level, not on the member
-	ToSecondAddress          bool // the member passphrase is encrypted to the user's second address key only
+	ToSecondAddress          bool // our member is the user's second address: the passphrase is encrypted to its key, its key signs
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
 	ExtraLockedKey           bool // another calendar key, no passphrase opens it, listed first
 	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
@@ -401,7 +401,7 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 		if rec.encPass, err = msg.GetArmored(); err != nil {
 			return false
 		}
-		if rec.passSig, err = signPassphrase([]byte(rec.passphrase), f.o.BadPassphraseSignature); err != nil {
+		if rec.passSig, err = signPassphrase(rec, []byte(rec.passphrase), f.o.BadPassphraseSignature); err != nil {
 			f.t.Errorf("protontest: sign passphrase: %v", err)
 			return false
 		}
@@ -419,7 +419,7 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 				return false
 			}
 			// The inviter's key signed it: not one of ours.
-			if rec.foreign.passSig, err = signPassphrase([]byte("not-the-passphrase"), true); err != nil {
+			if rec.foreign.passSig, err = signPassphrase(rec, []byte("not-the-passphrase"), true); err != nil {
 				return false
 			}
 		}
@@ -429,10 +429,10 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 }
 
 // signPassphrase is the detached signature of a member passphrase (its
-// plaintext, binary mode) by the address key (research G), or by an
-// unrelated key when foreign.
-func signPassphrase(pass []byte, foreign bool) (string, error) {
-	kr, err := signer()
+// plaintext, binary mode) by the key of the calendar's address (research G),
+// or by an unrelated key when foreign.
+func signPassphrase(rec *calendarRec, pass []byte, foreign bool) (string, error) {
+	kr, err := memberKey(rec)
 	if foreign {
 		kr, err = stranger()
 	}
