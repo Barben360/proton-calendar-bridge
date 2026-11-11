@@ -143,8 +143,12 @@ func (f *Fake) EncryptToCalendar(id string, plaintext []byte) string {
 }
 
 // AddAddress gives username another address (with a key) and returns its ID.
+// It changes the account, so the fake must have Options.Private.
 func (f *Fake) AddAddress(username, email string) (addrID string) {
 	f.t.Helper()
+	if f.shard != nil {
+		f.t.Fatalf("protontest: AddAddress changes the account; create the fake with Options.Private")
+	}
 	f.mu.Lock()
 	id, pw := f.users[username], f.passwords[username]
 	f.mu.Unlock()

@@ -85,7 +85,7 @@ func TestUnlockNoMemberOfOurs(t *testing.T) {
 
 func TestUnlockPassphraseToSecondAddress(t *testing.T) {
 	t.Parallel()
-	f, c, _ := session(t)
+	f, c, _ := sessionOn(t, protontest.Options{Private: true}) // AddAddress changes the account
 	f.AddAddress(f.Username, "second@proton.local")
 	u := unlockKeys(t, c, f.Password) // again, now that the user has two addresses
 	id := f.AddCalendar(f.Username, protontest.Calendar{ToSecondAddress: true})
@@ -207,7 +207,7 @@ func TestUnlockUnknownMemberNeverFallsBack(t *testing.T) {
 
 func TestUnlockResolvesSecondAddressMember(t *testing.T) {
 	t.Parallel()
-	f, c, _ := session(t)
+	f, c, _ := sessionOn(t, protontest.Options{Private: true}) // AddAddress changes the account
 	f.AddAddress(f.Username, "second@proton.local")
 	u := unlockKeys(t, c, f.Password)
 	id := f.AddCalendar(f.Username, protontest.Calendar{ToSecondAddress: true, ForeignMemberFirst: true})
