@@ -13,6 +13,10 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
+// localZone is the zone of date-only bounds and of the printed times; a
+// variable so tests can use another without touching the process-wide time.Local.
+var localZone = time.Local
+
 type eventData struct {
 	Events []service.Event `json:"events"`
 }
@@ -70,7 +74,7 @@ func parseWhen(flag, v string) (t *time.Time, date string, err error) {
 	}
 	parsed, err := time.Parse(time.RFC3339, v)
 	if err != nil {
-		if parsed, err = time.ParseInLocation(time.DateOnly, v, time.Local); err == nil {
+		if parsed, err = time.ParseInLocation(time.DateOnly, v, localZone); err == nil {
 			date = v
 		}
 	}
@@ -94,7 +98,7 @@ func eventTable(evs []service.Event) string {
 		return "no"
 	}
 	for _, e := range evs {
-		start, end := e.Start.Local().Format(time.RFC3339), e.End.Local().Format(time.RFC3339)
+		start, end := e.Start.In(localZone).Format(time.RFC3339), e.End.In(localZone).Format(time.RFC3339)
 		if e.AllDay {
 			start, end = e.StartDate, e.EndDate
 		}

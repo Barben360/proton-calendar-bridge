@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -88,11 +89,9 @@ func (s *eventsStub) Events(_ context.Context, req service.EventsRequest) ([]ser
 
 // All-day events are stored as UTC midnights: a date bound must compare
 // dates, not shift the event by a day in a zone west of UTC. Not parallel:
-// it sets the process's local zone.
+// it sets the CLI's local zone.
 func TestEventListAllDayWestOfUTC(t *testing.T) {
-	old := time.Local
-	time.Local = time.FixedZone("PST", -8*3600)
-	defer func() { time.Local = old }()
+	defer cli.SetLocalZone(time.FixedZone("PST", -8*3600))()
 	r, cal := syncRig(t)
 	utc := func(d int) int64 { return time.Date(2027, 1, d, 0, 0, 0, 0, time.UTC).Unix() }
 	r.f.AddEvent(cal, protontest.Event{UID: "d15", Start: utc(15), End: utc(16), FullDay: true})
