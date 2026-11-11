@@ -273,7 +273,8 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		}
 		return LoginResult{}, storeError(err, l.keyFile())
 	}
-	if replaced && old.UID != acc.UID {
+	// A relogin replaces a session Proton already ended: nothing to revoke.
+	if replaced && old.UID != acc.UID && !pl.relogin {
 		l.revoke(ctx, old)
 	}
 	return LoginResult{State: StateReady, Username: acc.Username, AccountID: acc.ID}, nil

@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/url"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -40,11 +43,7 @@ func (l *Local) calendars(ctx context.Context, c *api.Client, acc store.Account)
 	}
 	u, err := keys.Unlock(user, addrs, acc.KeyPass)
 	if errors.Is(err, keys.ErrKeysLocked) {
-		st, serr := store.LoadState(l.o.Dirs.State)
-		if serr != nil {
-			return nil, stateError(serr)
-		}
-		return nil, l.humanNeeded(st, mustAct(keysChanged, "run pcb login"))
+		return nil, errKeysChanged
 	}
 	if err != nil {
 		return nil, err
@@ -81,9 +80,22 @@ func (l *Local) calendars(ctx context.Context, c *api.Client, acc store.Account)
 }
 
 // sessionWide reports whether err stops the whole listing rather than one
-// calendar: the session ended, the caller gave up, or the service already
-// decided (a store failure during a refresh).
+// calendar (ruling R9m): the session ended, the caller gave up, the service
+// already decided (a store failure during a refresh), or Proton is
+// unreachable, unavailable or rate limiting. Only a deterministic failure of
+// this calendar (another 4xx, keys that do not unlock) is reported on it.
 func sessionWide(ctx context.Context, err error) bool {
-	var ee *exitcode.Error
-	return ctx.Err() != nil || errors.Is(err, api.ErrSessionEnded) || errors.As(err, &ee)
+	var (
+		ee *exitcode.Error
+		ae *api.Error
+		ne net.Error
+		ue *url.Error
+	)
+	switch {
+	case ctx.Err() != nil, errors.Is(err, api.ErrSessionEnded), errors.As(err, &ee):
+		return true
+	case errors.As(err, &ae):
+		return ae.Status == http.StatusTooManyRequests || ae.Status >= 500
+	}
+	return errors.As(err, &ne) || errors.As(err, &ue)
 }

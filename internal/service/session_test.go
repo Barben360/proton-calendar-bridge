@@ -3,6 +3,7 @@ package service_test
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,10 @@ func TestUnattendedReloginRepairsSession(t *testing.T) {
 	if n := e.f.Calls("POST", "/auth/v4") - srp; n != 1 {
 		t.Errorf("%d new POST /auth/v4, want 1", n)
 	}
+	// The ended session is not revoked: one refresh (the refused one), no logout.
+	if r, d := e.f.Calls("POST", "/auth/v4/refresh"), e.f.Calls("DELETE", "/auth/v4"); r != 1 || d != 0 {
+		t.Errorf("%d refreshes and %d logouts, want 1 and 0", r, d)
+	}
 	codes := e.f.TOTPCodes()
 	if want := code(t, e.f.TOTPURI, at); len(codes) == 0 || codes[len(codes)-1] != want {
 		t.Errorf("relogin 2FA code = %q, want the seed's code at Now", codes)
@@ -284,5 +289,126 @@ func TestChangedPasswordNeedsLogin(t *testing.T) {
 	s, serr := e.svc.Status(t.Context())
 	if serr != nil || s.Phase != "needs-login" || s.Reason != reason {
 		t.Errorf("status = %+v, %v", s, serr)
+	}
+}
+
+// hook runs before every request of a service's API client.
+type hook func(r *http.Request)
+
+func (h hook) RoundTrip(r *http.Request) (*http.Response, error) {
+	h(r)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// openHooked starts a service on the env's dirs whose API requests run before
+// first.
+func (e *env) openHooked(t *testing.T, before func(r *http.Request)) *service.Local {
+	t.Helper()
+	s, err := service.NewLocal(service.Options{
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: hook(before)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// A relogged session that ends again during the single retry marks the login
+// needs-login: no further automatic relogin.
+func TestReloggedSessionEndingAgainNeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.loginUnattended(t, false)
+	e.f.RevokeSessions()
+	e.clk.advance(61 * time.Second)
+	var once sync.Once
+	s := e.openHooked(t, func(r *http.Request) {
+		if r.URL.Path == "/calendar/v1" && e.f.Calls("POST", "/auth/v4") >= 2 { // after the relogin
+			once.Do(e.f.RevokeSessions)
+		}
+	})
+	srp := e.f.Calls("POST", "/auth/v4")
+	_, err := s.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "run pcb login" {
+		t.Errorf("hint = %q", ee.Hint)
+	}
+	if p := e.phase(t); p != "needs-login" {
+		t.Errorf("phase = %q, want needs-login", p)
+	}
+	e.clk.advance(2 * time.Minute)
+	_, err = s.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.MustAct)
+	if n := e.f.Calls("POST", "/auth/v4") - srp; n != 1 {
+		t.Errorf("%d relogins, want exactly 1", n)
+	}
+}
+
+// A needs-login decision never overwrites a login that finished meanwhile.
+func TestNeedsLoginKeepsNewerLogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.editAccount(t, func(a *store.Account) { a.KeyPass = []byte("not-the-key-passphrase") })
+	var newer []byte
+	var once sync.Once
+	s := e.openHooked(t, func(r *http.Request) {
+		if r.URL.Path != "/core/v4/addresses" {
+			return
+		}
+		once.Do(func() { // a person's login finishes in another process
+			st := e.loadState(t)
+			st.LastLogin = t0.Add(time.Hour)
+			if err := store.SaveState(e.dirs.State, st); err != nil {
+				t.Error(err)
+			}
+			newer, _ = e.files(t)
+		})
+	})
+	_, err := s.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.MustAct)
+	if st, _ := e.files(t); !bytes.Equal(st, newer) {
+		t.Errorf("state.json was overwritten:\n%s\nwant\n%s", st, newer)
+	}
+}
+
+// Another process relogs in while this one's request fails with the session
+// ended: this one adopts the new session instead of logging in again.
+func TestReloginAdoptsSessionOfAnotherProcess(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.loginUnattended(t, false)
+	e.clk.advance(61 * time.Second)
+	e.f.ExpireAccessTokens()
+	other := e.open(t)
+	srp := e.f.Calls("POST", "/auth/v4")
+	users := 0
+	var once sync.Once
+	b := e.openHooked(t, func(r *http.Request) {
+		if r.URL.Path != "/core/v4/users" {
+			return
+		}
+		// The first request is refused (expired) and refreshed; before the
+		// retry, the session ends and the other process relogs in.
+		if users++; users == 2 {
+			once.Do(func() {
+				e.f.RevokeSessions()
+				if _, err := other.Calendars(t.Context()); err != nil {
+					t.Errorf("the other process: %v", err)
+				}
+			})
+		}
+	})
+	got, err := b.Calendars(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Calendars = %+v, %v", got, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4") - srp; n != 1 {
+		t.Errorf("%d logins, want 1 (the other process's relogin only)", n)
+	}
+	if !sessionAlive(t, e, tokensOf(e.account(t))) {
+		t.Error("the sealed session is not alive")
 	}
 }

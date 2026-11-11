@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -103,5 +104,42 @@ func TestCalendarsWhenLoggedOut(t *testing.T) {
 	}
 	if n := e.f.Calls("", "/"); n != 0 {
 		t.Errorf("%d requests while logged out", n)
+	}
+}
+
+// Ruling R9m: Proton unavailable or rate limiting on a calendar's bootstrap
+// fails the whole listing (exit 20); only a deterministic refusal is reported
+// on the calendar.
+func TestCalendarsTransientBootstrapFailureIsBlocked(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{503, 429} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, protontest.Options{})
+			e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+			b := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
+			e.login(t, e.req())
+			for range 3 { // every attempt the client makes
+				e.f.FailNext("GET", "/calendar/v2/"+b+"/bootstrap", status, 0, 0)
+			}
+			cals, err := e.svc.Calendars(t.Context())
+			_ = wantExit(t, err, exitcode.Blocked)
+			if cals != nil {
+				t.Errorf("a partial list was returned: %+v", cals)
+			}
+		})
+	}
+}
+
+func TestCalendarsRefusedBootstrapIsPerCalendar(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	a := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
+	e.login(t, e.req())
+	e.f.FailNext("GET", "/calendar/v2/"+a+"/bootstrap", 422, 2501, 0)
+	got := e.calendars(t)
+	if len(got) != 2 || got[0].Keys != "error" || got[0].KeysError == "" || got[1].Keys != "ok" {
+		t.Fatalf("calendars = %+v, want A with a keys error and B ok", got)
 	}
 }

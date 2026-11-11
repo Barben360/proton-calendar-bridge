@@ -139,16 +139,13 @@ func acquireError(err error, stateDir string) error {
 	return blocked("cannot take the login lock", "make sure "+stateDir+" is writable by this user")
 }
 
-// keysError is the secret-free reason a calendar's keys did not unlock: a
-// Proton or network failure says so; anything else is the keys themselves.
+// keysError is the secret-free reason a calendar's keys did not unlock:
+// Proton refusing the calendar (a 4xx; transient failures stop the whole
+// listing, see sessionWide) says so; anything else is the keys themselves.
 func keysError(err error) string {
-	var (
-		ae *api.Error
-		ne net.Error
-		ue *url.Error
-	)
-	if errors.As(err, &ae) || errors.As(err, &ne) || errors.As(err, &ue) {
-		return mapError(err, "").Error()
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		return protonDown(ae).Error()
 	}
 	return "the calendar keys do not unlock with the account keys"
 }
