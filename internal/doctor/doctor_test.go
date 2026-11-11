@@ -11,6 +11,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 )
 
 func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
@@ -192,5 +193,78 @@ func TestDoctorConfigCheckOK(t *testing.T) {
 	got = doctor.ConfigCheck{Path: p, Dirs: dirs}.Run(context.Background())
 	if got.Status != doctor.StatusOK || got.Message != p {
 		t.Fatalf("present file: %+v", got)
+	}
+}
+
+func TestFileModeCheckFlagsGroupReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.key")
+	if err := os.WriteFile(path, []byte("k"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil { // defeat the umask
+		t.Fatal(err)
+	}
+	got := doctor.FileModeCheck{Label: "key file", Path: path, Want: 0o600}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Fix != "chmod 600 "+path {
+		t.Fatalf("got %+v", got)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := (doctor.FileModeCheck{Label: "key file", Path: path, Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusOK {
+		t.Fatalf("0600: %+v", got)
+	}
+}
+
+func TestFileModeCheckSkipsMissingAndRejectsDirs(t *testing.T) {
+	dir := t.TempDir()
+	if got := (doctor.FileModeCheck{Label: "f", Path: filepath.Join(dir, "nope"), Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusSkip {
+		t.Fatalf("missing: %+v", got)
+	}
+	if got := (doctor.FileModeCheck{Label: "f", Path: dir, Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusError {
+		t.Fatalf("dir: %+v", got)
+	}
+}
+
+func TestSecretsCheckWarnsKeyFile(t *testing.T) {
+	root := t.TempDir()
+	got := doctor.SecretsCheck{StateDir: filepath.Join(root, "state"), KeyFile: filepath.Join(root, "cfg", "secrets.key")}.Run(context.Background())
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "secrets sealed with a key file (headless fallback)") {
+		t.Fatalf("got %+v", got)
+	}
+	if strings.Contains(got.Message, "unattended") {
+		t.Fatalf("unattended warning without unattended state: %+v", got)
+	}
+}
+
+func TestSecretsCheckWarnsUnattended(t *testing.T) {
+	root := t.TempDir()
+	state, key := filepath.Join(root, "state"), filepath.Join(root, "cfg", "secrets.key")
+	if err := store.SaveState(state, store.State{Phase: store.PhaseReady, Unattended: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	want := "unattended relogin is on: whoever can read " + key + " and " + filepath.Join(state, "secrets.sealed") + " owns the Proton account"
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, want) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSecretsCheckWarnsKeyInsideStateDir(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(state, "secrets.key")}.Run(context.Background())
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "same directory tree") {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSecretsCheckFailsOnMalformedState(t *testing.T) {
+	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "state.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(t.TempDir(), "k")}.Run(context.Background())
+	if got.Status != doctor.StatusError {
+		t.Fatalf("got %+v", got)
 	}
 }

@@ -104,3 +104,37 @@ func (c ConfigCheck) Run(context.Context) Result {
 	}
 	return r
 }
+
+// FileModeCheck verifies that a regular file grants no more than Want.
+type FileModeCheck struct {
+	Label string
+	Path  string
+	Want  fs.FileMode
+}
+
+// Name implements Check.
+func (c FileModeCheck) Name() string { return c.Label }
+
+// Run implements Check. A missing file is skipped: it is created later with
+// the right mode.
+func (c FileModeCheck) Run(context.Context) Result {
+	r := Result{Name: c.Name()}
+	info, err := os.Stat(c.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		r.Status, r.Message = StatusSkip, c.Path+" does not exist yet"
+	case err != nil:
+		r.Status, r.Message = StatusError, err.Error()
+	case !info.Mode().IsRegular():
+		r.Status, r.Message = StatusError, c.Path+" is not a regular file"
+	default:
+		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
+			r.Status = StatusError
+			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
+			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
+		} else {
+			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
+		}
+	}
+	return r
+}
