@@ -141,7 +141,7 @@ func acquireError(err error, stateDir string) error {
 
 // keysError is the secret-free reason a calendar's keys did not unlock:
 // Proton refusing the calendar (a 4xx; transient failures stop the whole
-// listing, see sessionWide) says so; anything else is the keys themselves.
+// listing, see api.SessionWide) says so; anything else is the keys themselves.
 func keysError(err error) string {
 	var ae *api.Error
 	if errors.As(err, &ae) {
