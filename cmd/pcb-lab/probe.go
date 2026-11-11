@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/probe"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/record"
@@ -14,14 +15,9 @@ import (
 )
 
 func probeCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "probe",
-		Short: "Live measurements on the saved session (never log in again)",
-		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
-	}
+	c := cli.Group("probe", "Live measurements on the saved session (never log in again)",
+		calendarAccessCmd(), refreshCmd(), aliveCmd())
 	c.PersistentFlags().String("record-dir", "", "write redacted answers here (default: none)")
-	c.AddCommand(calendarAccessCmd(), refreshCmd(), aliveCmd())
 	return c
 }
 
@@ -37,18 +33,17 @@ func calendarAccessCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "calendar-access",
 		Short: "E03: do calendar endpoints answer with the current x-pm-appversion (PCB_LAB_APPVERSION)?",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			const name = "probe calendar-access"
 			o, err := options(cmd)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			rec := recorder(cmd)
 			o.Recorder = rec
 			s, err := session.Resume(cmd.Context(), o)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			defer s.Close()
 			app := o.AppVersion
@@ -84,7 +79,7 @@ func calendarAccessCmd() *cobra.Command {
 					}
 				}
 			}
-			return finish(cmd, name, data, b.String(), err)
+			return cli.Finish(cmd, data, b.String(), err)
 		},
 	}
 }
@@ -93,20 +88,19 @@ func refreshCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "refresh",
 		Short: "E01: refresh the saved session once, then retry once with the old refresh token",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			const name = "probe refresh"
 			o, err := options(cmd)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			o.Recorder = recorder(cmd)
 			res, err := probe.Refresh(cmd.Context(), o)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			if res.First.Status != http.StatusOK {
-				return finish(cmd, name, nil, "", &exitcode.Error{
+				return cli.Finish(cmd, nil, "", &exitcode.Error{
 					Code: exitcode.Blocked,
 					Err:  fmt.Errorf("refresh refused: HTTP %d, Proton code %d", res.First.Status, res.First.Code),
 					Hint: "stop here; the session needs pcb-lab login (guard and E02 protocol apply)",
@@ -129,7 +123,7 @@ func refreshCmd() *cobra.Command {
 			if res.Retried {
 				text += fmt.Sprintf("\nold refresh token: HTTP %d, Proton code %d, still works %v", data.OldStatus, data.OldCode, data.OldTokenWorks)
 			}
-			return finish(cmd, name, data, text, nil)
+			return cli.Finish(cmd, data, text, nil)
 		},
 	}
 }
@@ -138,22 +132,21 @@ func aliveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "alive",
 		Short: "E01: one authenticated GET with the saved access token (no refresh), appended to e01.jsonl",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			const name = "probe alive"
 			o, err := options(cmd)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			res, err := probe.Alive(cmd.Context(), o)
 			if err != nil {
-				return finish(cmd, name, nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			text := fmt.Sprintf("%s ok=%v code=%d refreshed=%v rotated=%v expires_in=%d", res.At, res.OK, res.Code, res.Refreshed, res.Rotated, res.ExpiresIn)
 			if res.Over {
 				text = "the 14-day window is over; nothing sampled. Stop it: systemctl --user disable --now pcb-lab-e01.timer"
 			}
-			return finish(cmd, name, struct {
+			return cli.Finish(cmd, struct {
 				probe.AliveResult
 				Over bool `json:"over"`
 			}{res, res.Over}, text, nil)

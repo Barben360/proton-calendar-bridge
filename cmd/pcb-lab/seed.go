@@ -5,27 +5,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/seed"
+	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
 
 const defaultDataset = "testdata/seed/dataset.yaml"
 
 func seedCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "seed",
-		Short: "Plan or apply the synthetic data set on the test account through proton-cal",
-		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
-	}
+	c := cli.Group("seed", "Plan or apply the synthetic data set on the test account through proton-cal",
+		seedPlanCmd(), seedApplyCmd())
 	c.PersistentFlags().String("dataset", defaultDataset, "data set file")
-	c.AddCommand(seedPlanCmd(), seedApplyCmd())
 	return c
 }
 
@@ -33,7 +29,7 @@ func loadDataset(cmd *cobra.Command) (seed.Dataset, error) {
 	path, _ := cmd.Flags().GetString("dataset")
 	ds, err := seed.Load(path)
 	if err != nil {
-		return ds, &exitcode.Error{Code: exitcode.Usage, Err: err}
+		return ds, cli.UsageError(err)
 	}
 	return ds, nil
 }
@@ -51,15 +47,6 @@ type planData struct {
 	Total    int           `json:"total"`
 }
 
-var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./{}-]+$`)
-
-func shellQuote(s string) string {
-	if shellSafe.MatchString(s) {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
 // seedPlanCmd works fully offline: "existing" events come from a JSON file
 // (`proton-cal events --all-calendars -o json`), never from the network.
 func seedPlanCmd() *cobra.Command {
@@ -67,21 +54,21 @@ func seedPlanCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "plan",
 		Short: "Print the proton-cal commands still needed (offline)",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ds, err := loadDataset(cmd)
 			if err != nil {
-				return finish(cmd, "seed plan", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			var existing []seed.Existing
 			if existingFile != "" {
 				f, err := os.Open(existingFile)
 				if err != nil {
-					return finish(cmd, "seed plan", nil, "", &exitcode.Error{Code: exitcode.Usage, Err: err})
+					return cli.Finish(cmd, nil, "", cli.UsageError(err))
 				}
 				defer func() { _ = f.Close() }()
 				if existing, err = seed.ParseExisting(f); err != nil {
-					return finish(cmd, "seed plan", nil, "", &exitcode.Error{Code: exitcode.Usage, Err: err})
+					return cli.Finish(cmd, nil, "", cli.UsageError(err))
 				}
 			}
 			cmds := seed.Plan(ds, existing)
@@ -91,12 +78,12 @@ func seedPlanCmd() *cobra.Command {
 				data.Commands = append(data.Commands, planCommand{p.ID, p.Op, p.Ref, p.Calendar, p.Args})
 				quoted := make([]string, len(p.Args))
 				for i, a := range p.Args {
-					quoted[i] = shellQuote(a)
+					quoted[i] = shellquote.Quote(a)
 				}
 				fmt.Fprintf(&text, "proton-cal %s\n", strings.Join(quoted, " "))
 			}
 			fmt.Fprintf(&text, "# %d commands; {cal} and {id} are filled in by `seed apply`", len(cmds))
-			return finish(cmd, "seed plan", data, text.String(), nil)
+			return cli.Finish(cmd, data, text.String(), nil)
 		},
 	}
 	c.Flags().StringVar(&existingFile, "existing", "", "JSON listing of existing events (proton-cal events --all-calendars -o json) to skip")
@@ -118,16 +105,16 @@ func seedApplyCmd() *cobra.Command {
 test account: resolves the default calendar by its default flag, creates the
 missing calendars, skips what the data set already created, then writes the rest
 in order. It never logs in itself. Rerun after a stop: it resumes.`,
-		Args: cobra.NoArgs,
+		Args: cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ds, err := loadDataset(cmd)
 			if err != nil {
-				return finish(cmd, "seed apply", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			if configDir == "" {
 				dir, err := stateDir(cmd)
 				if err != nil {
-					return finish(cmd, "seed apply", nil, "", err)
+					return cli.Finish(cmd, nil, "", err)
 				}
 				configDir = filepath.Join(filepath.Dir(dir), "pcb-lab-seed")
 			}
@@ -136,7 +123,7 @@ in order. It never logs in itself. Rerun after a stop: it resumes.`,
 			data := applyData{res.Written, res.Planned}
 			switch {
 			case err == nil:
-				return finish(cmd, "seed apply", data, fmt.Sprintf("seeded: %d writes", res.Written), nil)
+				return cli.Finish(cmd, data, fmt.Sprintf("seeded: %d writes", res.Written), nil)
 			case errors.Is(err, seed.ErrRateLimited):
 				err = &exitcode.Error{Code: exitcode.Partial, Err: err,
 					Hint: "wait a few minutes, then rerun the same `pcb-lab seed apply`: what exists is skipped and the rest resumes"}
@@ -145,7 +132,7 @@ in order. It never logs in itself. Rerun after a stop: it resumes.`,
 			default:
 				err = &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "is proton-cal logged in with this --config-dir? See spec/experiments/DATASET.md"}
 			}
-			return finish(cmd, "seed apply", data, fmt.Sprintf("%d writes done", res.Written), err)
+			return cli.Finish(cmd, data, fmt.Sprintf("%d writes done", res.Written), err)
 		},
 	}
 	c.Flags().StringVar(&bin, "bin", "proton-cal", "proton-cal binary")

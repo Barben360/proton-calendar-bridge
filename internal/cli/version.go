@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
-	"github.com/Barben360/proton-calendar-bridge/internal/output"
 )
 
 type versionData struct {
@@ -23,17 +22,12 @@ func newVersion() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the pcb version",
-		Args:  noArgs,
+		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
-				return output.Write(cmd.OutOrStdout(), "version", versionData{
-					Version: buildinfo.Version, Commit: buildinfo.Commit, Date: buildinfo.Date,
-					Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
-				}, nil)
-			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "pcb %s (commit %s, built %s)\n",
-				buildinfo.Version, buildinfo.Commit, buildinfo.Date)
-			return err
+			return Finish(cmd, versionData{
+				Version: buildinfo.Version, Commit: buildinfo.Commit, Date: buildinfo.Date,
+				Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
+			}, fmt.Sprintf("pcb %s (commit %s, built %s)", buildinfo.Version, buildinfo.Commit, buildinfo.Date), nil)
 		},
 	}
 }

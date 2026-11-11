@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli/clitest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/labtest"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
@@ -183,5 +184,22 @@ func TestRawCallsIdentifyAsPcbLab(t *testing.T) {
 	}
 	if n < 3 {
 		t.Fatalf("only %d raw calls seen", n)
+	}
+}
+
+func TestUsageContractOfEveryLabCommand(t *testing.T) {
+	clitest.CheckUsageContract(t, newRoot)
+}
+
+func TestNestedCommandNameAgreesOnSuccessAndFailure(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "external-drive-x@1.0.0")
+	_, ok := run(t, "probe", "alive", "--state-dir", dir)
+	if ok["command"] != "probe alive" {
+		t.Errorf("success command = %v, want %q", ok["command"], "probe alive")
+	}
+	code, failed := run(t, "probe", "alive", "--state-dir", t.TempDir())
+	if code == exitcode.OK || failed["command"] != "probe alive" {
+		t.Errorf("failure: code %d command %v, want a failure named %q", code, failed["command"], "probe alive")
 	}
 }

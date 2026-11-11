@@ -50,3 +50,12 @@ func From(err error) Code {
 	}
 	return Blocked
 }
+
+// HintOf returns the hint of the first *Error in err's chain, or "".
+func HintOf(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Hint
+	}
+	return ""
+}

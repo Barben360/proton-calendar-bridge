@@ -38,3 +38,16 @@ func TestErrorUnwrapsAndMessages(t *testing.T) {
 		t.Fatalf("Error() = %q, want %q", err.Error(), "inner")
 	}
 }
+
+func TestHintOf(t *testing.T) {
+	wrapped := fmt.Errorf("ctx: %w", &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("x"), Hint: "run it"})
+	if got := exitcode.HintOf(wrapped); got != "run it" {
+		t.Errorf("HintOf(wrapped) = %q", got)
+	}
+	if got := exitcode.HintOf(errors.New("plain")); got != "" {
+		t.Errorf("HintOf(plain) = %q", got)
+	}
+	if got := exitcode.HintOf(nil); got != "" {
+		t.Errorf("HintOf(nil) = %q", got)
+	}
+}

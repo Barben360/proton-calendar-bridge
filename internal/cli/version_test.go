@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
+	"github.com/Barben360/proton-calendar-bridge/internal/cli/clitest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
 
@@ -103,4 +104,74 @@ func TestBareRootShowsHelp(t *testing.T) {
 	if code != exitcode.OK || !strings.Contains(out, "version") {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
+}
+
+// decodeOne decodes the single envelope in out, failing on a second value.
+func decodeOne(t *testing.T, out string) (env struct {
+	Command string `json:"command"`
+	OK      bool   `json:"ok"`
+	Error   struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}) {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(out))
+	if err := dec.Decode(&env); err != nil {
+		t.Fatalf("stdout is not an envelope: %v\n%q", err, out)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		t.Fatalf("more than one JSON value on stdout: %q", out)
+	}
+	return env
+}
+
+func TestJSONFlagValuesAgreeOnSuccessAndFailure(t *testing.T) {
+	for _, tc := range []struct {
+		flag string
+		json bool
+	}{
+		{"--json", true}, {"--json=true", true}, {"--json=1", true}, {"--json=T", true},
+		{"--json=false", false}, {"--json=0", false},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			code, out, _ := run("version", tc.flag)
+			if code != exitcode.OK || strings.HasPrefix(out, "{") != tc.json {
+				t.Errorf("success: code=%d json=%v stdout=%q", code, tc.json, out)
+			}
+			code, out, errs := run("version", tc.flag, "extra")
+			if code != exitcode.Usage {
+				t.Fatalf("failure code = %d", code)
+			}
+			if tc.json {
+				if env := decodeOne(t, out); env.OK || env.Error.Code != 2 || errs != "" {
+					t.Errorf("envelope = %+v stderr=%q", env, errs)
+				}
+			}
+			if got := strings.HasPrefix(out, "{"); got != tc.json {
+				t.Errorf("failure printed json=%v, want %v (stdout %q, stderr %q)", got, tc.json, out, errs)
+			}
+		})
+	}
+}
+
+func TestJSONAfterDoubleDashIsNotTheFlag(t *testing.T) {
+	code, out, errs := run("version", "--", "--json")
+	if code != exitcode.Usage || out != "" || errs == "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q: --json after -- is a positional, text mode", code, out, errs)
+	}
+}
+
+func TestBareRootInJSONModeIsAUsageEnvelope(t *testing.T) {
+	code, out, errs := run("--json")
+	if code != exitcode.Usage || errs != "" {
+		t.Fatalf("code=%d stderr=%q", code, errs)
+	}
+	if env := decodeOne(t, out); env.OK || env.Error.Code != 2 {
+		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestUsageContractOfEveryPcbCommand(t *testing.T) {
+	clitest.CheckUsageContract(t, cli.NewRoot)
 }

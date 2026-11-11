@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,10 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
-	"github.com/Barben360/proton-calendar-bridge/internal/output"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
@@ -22,63 +21,15 @@ func main() {
 	os.Exit(int(execute(os.Args[1:], os.Stdout, os.Stderr)))
 }
 
-type reported struct{ error }
-
-func (e *reported) Unwrap() error { return e.error }
-
-func usage(err error) error { return &exitcode.Error{Code: exitcode.Usage, Err: err} }
-
-func execute(args []string, stdout, stderr io.Writer) exitcode.Code {
-	root := &cobra.Command{
-		Use:           "pcb-lab",
-		Short:         "Experiment harness for the Proton test account (never shipped)",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Args: func(_ *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return usage(fmt.Errorf("unknown command %q", args[0]))
-			}
-			return nil
-		},
-		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
-	}
-	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
+func newRoot() *cobra.Command {
+	root := cli.Root("pcb-lab", "Experiment harness for the Proton test account (never shipped)",
+		loginCmd(), whoamiCmd(), probeCmd(), seedCmd())
 	root.PersistentFlags().String("state-dir", "", "lab state directory (default $XDG_STATE_HOME/pcb-lab)")
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usage(err) })
-	root.AddCommand(loginCmd(), whoamiCmd(), probeCmd(), seedCmd())
-	root.SetArgs(args)
-	root.SetOut(stdout)
-	root.SetErr(stderr)
-
-	cmd, err := root.ExecuteC()
-	if err == nil {
-		return exitcode.OK
-	}
-	var r *reported
-	if !errors.As(err, &r) {
-		if jsonWanted(args) {
-			_ = output.Write(stdout, cmd.Name(), nil, err)
-		} else {
-			fmt.Fprintf(stderr, "Error: %s\n", err)
-			var e *exitcode.Error
-			if errors.As(err, &e) && e.Hint != "" {
-				fmt.Fprintf(stderr, "Hint: %s\n", e.Hint)
-			}
-		}
-	}
-	return exitcode.From(err)
+	return root
 }
 
-func jsonWanted(args []string) bool {
-	for _, a := range args {
-		if a == "--" {
-			return false
-		}
-		if a == "--json" || a == "--json=true" {
-			return true
-		}
-	}
-	return false
+func execute(args []string, stdout, stderr io.Writer) exitcode.Code {
+	return cli.Run(newRoot(), args, stdout, stderr)
 }
 
 // stateDir is --state-dir, else $XDG_STATE_HOME/pcb-lab (~/.local/state/pcb-lab).
@@ -102,23 +53,6 @@ func options(cmd *cobra.Command) (session.Options, error) {
 	return session.Options{BaseURL: os.Getenv("PCB_LAB_BASEURL"), AppVersion: os.Getenv("PCB_LAB_APPVERSION"), StateDir: dir}, nil
 }
 
-// finish prints data (or the failure) the way the command's mode wants.
-func finish(cmd *cobra.Command, name string, data any, text string, err error) error {
-	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
-		if werr := output.Write(cmd.OutOrStdout(), name, data, err); werr != nil {
-			return werr
-		}
-		if err != nil {
-			return &reported{err}
-		}
-		return nil
-	}
-	if text != "" { // a failing measurement still prints what it measured
-		fmt.Fprintln(cmd.OutOrStdout(), text)
-	}
-	return err
-}
-
 type loginData struct {
 	UID    string   `json:"uid"`
 	Scopes []string `json:"scopes"`
@@ -129,11 +63,11 @@ func loginCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "login",
 		Short: "Log into the test account (credentials from PCB_LAB_USERNAME, PCB_LAB_PASSWORD, PCB_LAB_TOTP)",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			o, err := options(cmd)
 			if err != nil {
-				return finish(cmd, "login", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			o.CaptchaToken = captcha
 			o.Creds.Username = os.Getenv("PCB_LAB_USERNAME")
@@ -141,16 +75,16 @@ func loginCmd() *cobra.Command {
 			if raw := os.Getenv("PCB_LAB_TOTP"); raw != "" {
 				t, perr := otp.Parse(raw)
 				if perr != nil {
-					return finish(cmd, "login", nil, "", &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("PCB_LAB_TOTP: %w", perr)})
+					return cli.Finish(cmd, nil, "", cli.UsageError(fmt.Errorf("PCB_LAB_TOTP: %w", perr)))
 				}
 				o.Creds.TOTP = t
 			}
 			s, err := session.Login(cmd.Context(), o)
 			if err != nil {
-				return finish(cmd, "login", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			defer s.Close()
-			return finish(cmd, "login", loginData{session.RedactID(s.UID), s.Scopes},
+			return cli.Finish(cmd, loginData{session.RedactID(s.UID), s.Scopes},
 				fmt.Sprintf("logged in; session %s; %d scopes: %v", session.RedactID(s.UID), len(s.Scopes), s.Scopes), nil)
 		},
 	}
@@ -162,18 +96,18 @@ func whoamiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the saved session's scopes and a redacted ID",
-		Args:  cobra.NoArgs,
+		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			o, err := options(cmd)
 			if err != nil {
-				return finish(cmd, "whoami", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			s, err := session.Resume(cmd.Context(), o)
 			if err != nil {
-				return finish(cmd, "whoami", nil, "", err)
+				return cli.Finish(cmd, nil, "", err)
 			}
 			defer s.Close()
-			return finish(cmd, "whoami", loginData{session.RedactID(s.UID), s.Scopes},
+			return cli.Finish(cmd, loginData{session.RedactID(s.UID), s.Scopes},
 				fmt.Sprintf("session %s; %d scopes: %v", session.RedactID(s.UID), len(s.Scopes), s.Scopes), nil)
 		},
 	}
