@@ -336,12 +336,14 @@ relogin credentials, client tokens (hashed, never stored in clear).
   again (exit 10). Session-wide failures (429, 5xx, network, session ended)
   stop the pass and, in watch, back off x2 up to 10 min with jitter; any
   other per-calendar failure is recorded on that calendar, the others
-  continue, and the pass exits 40 (partial). A calendar deferred by the
+  continue, and the pass exits 40 (partial); in watch a partial pass is
+  reported but does not back off (the other calendars keep the interval). A calendar deferred by the
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
   long) and when it retries (R11). All requests go through the one per-account client and its
   limiter. The idle slow-down (5 min) and tuning after E06 are M5 (daemon).
-  `--full` lists every calendar again; a re-read row whose ETag is unchanged
+  `--full` lists every calendar again (with `--watch`, until one pass gets
+  through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).
 - Reads are served from the cache; a read never waits for Proton unless the
   calendar was never synced.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -369,25 +370,54 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 	if len(e.clk.slept) == 0 || e.clk.slept[0] != 30*time.Second {
 		t.Errorf("slept %v, want the 30 s default interval", e.clk.slept)
 	}
+
+	// --full lists in full until one pass gets through, then reads the feed:
+	// a first pass failing session-wide (503, retried 3 times) keeps it.
+	for range 3 {
+		e.f.FailNext("GET", "/calendar/v1", 503, 0, 0)
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	var outcomes []string
+	err = e.svc.WatchSync(ctx, service.SyncRequest{Full: true}, 0, func(res service.SyncResult, err error) {
+		if err != nil {
+			outcomes = append(outcomes, "failed")
+		} else {
+			outcomes = append(outcomes, calSync(t, res, cal).Mode)
+		}
+		if len(outcomes) == 3 {
+			cancel()
+		}
+	})
+	if err != nil || !slices.Equal(outcomes, []string{"failed", "full", "incremental"}) {
+		t.Errorf("watch --full: %v, passes %v; want nil, failed then full then incremental", err, outcomes)
+	}
 }
 
+// A partial pass is reported but is no session-wide failure: the watch
+// does not back off, so the calendars that sync keep their interval.
 func TestWatchKeepsGoingAfterPartial(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	bad := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Bad"})
 	e.login(t, e.req())
-	e.f.FailNext("GET", "/calendar/v1/"+bad+"/events", 403, 2011, 0)
+	for range 2 {
+		e.f.FailNext("GET", "/calendar/v1/"+bad+"/events", 403, 2011, 0)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var codes []exitcode.Code
 	_ = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(_ service.SyncResult, err error) {
 		codes = append(codes, exitcode.From(err))
-		if len(codes) == 2 {
+		if len(codes) == 3 {
 			cancel()
 		}
 	})
-	if len(codes) != 2 || codes[0] != exitcode.Partial || codes[1] != exitcode.OK {
-		t.Errorf("pass outcomes = %v, want partial then ok", codes)
+	if len(codes) != 3 || codes[0] != exitcode.Partial || codes[1] != exitcode.Partial || codes[2] != exitcode.OK {
+		t.Errorf("pass outcomes = %v, want partial, partial, ok", codes)
+	}
+	if want := slices.Repeat([]time.Duration{30 * time.Second}, 3); !slices.Equal(e.clk.slept, want) {
+		t.Errorf("slept %v, want %v: a partial pass must not back off", e.clk.slept, want)
 	}
 }
 

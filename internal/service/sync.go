@@ -61,6 +61,8 @@ func (l *Local) Sync(ctx context.Context, req SyncRequest) (SyncResult, error) {
 
 // WatchSync implements API. The sync lock is held for the whole watch; the
 // service's own mutex is not (a login or logout may run meanwhile).
+// req.Full applies until a pass gets through (exit 0 or 40); a partial pass
+// is reported but does not make the watch back off.
 func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(SyncResult, error)) error {
 	if l.closed.Load() {
 		return errClosed()
@@ -76,17 +78,26 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 		return err
 	}
 	defer unlock()
-	var last SyncResult
+	var (
+		last    SyncResult
+		lastErr error
+		full    = req.Full
+	)
 	err = syncer.Watch(ctx, func(ctx context.Context) (syncer.Report, error) {
-		var perr error
-		last, perr = l.syncPass(ctx, req)
-		return syncer.Report{}, perr
+		last, lastErr = l.syncPass(ctx, SyncRequest{Full: full})
+		if lastErr == nil || exitcode.From(lastErr) == exitcode.Partial {
+			// The pass got through: --full is done, and a partial pass is
+			// no session-wide failure (no back-off for the other calendars).
+			full = false
+			return syncer.Report{}, nil
+		}
+		return syncer.Report{}, lastErr
 	}, syncer.WatchOptions{
 		Interval: interval,
 		Sleep:    l.o.Sleep,
-		OnPass: func(_ syncer.Report, err error) {
+		OnPass: func(syncer.Report, error) {
 			if onPass != nil {
-				onPass(last, err)
+				onPass(last, lastErr)
 			}
 		},
 		Stop: func(err error) bool {
