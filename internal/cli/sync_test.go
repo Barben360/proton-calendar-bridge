@@ -14,64 +14,113 @@ import (
 
 const baseTime = int64(1_800_000_000)
 
-// syncRig is a rig logged in on a fake with one calendar, "Work".
-func syncRig(t *testing.T) (*rig, string) {
-	t.Helper()
+// TestSyncStatusAndEventList walks first use on one logged-in rig (one SRP
+// login for the whole story, CI cost): status and event list before any
+// sync, the first sync, its text, event list, status after, --full and a
+// partial pass. The steps run in order and share the rig: each builds on
+// the one before.
+func TestSyncStatusAndEventList(t *testing.T) {
+	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	cal := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	work := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	empty := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Empty"})
+	a := r.f.AddEvent(work, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 3600})
+	r.f.AddEvent(work, protontest.Event{UID: "far@x", Start: baseTime + 400*24*3600, End: baseTime + 400*24*3600 + 60})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
-	return r, cal
-}
+	step := func(name string, fn func(t *testing.T)) {
+		if !t.Run(name, func(t *testing.T) { r.t = t; fn(t) }) {
+			t.FailNow() // the later steps build on this one
+		}
+		r.t = t
+	}
 
-func TestSyncJSONEnvelope(t *testing.T) {
-	t.Parallel()
-	r, cal := syncRig(t)
-	r.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 60})
-	r.f.AddEvent(cal, protontest.Event{UID: "b@x", Start: baseTime + 100, End: baseTime + 160})
-	r.want(exitcode.OK, "sync", "--json")
-	e := r.envelope()
-	var res service.SyncResult
-	mustUnmarshal(t, e.Data, &res)
-	if e.Command != "sync" || !e.OK || len(res.Calendars) != 1 {
-		t.Fatalf("envelope = %+v", e)
-	}
-	if c := res.Calendars[0]; c.ID != cal || c.Name != "Work" || c.Mode != "initial" || c.Added != 2 || c.Events != 2 {
-		t.Errorf("calendar = %+v", c)
-	}
-	r.want(exitcode.OK, "sync", "--json", "--full")
-	mustUnmarshal(t, r.envelope().Data, &res)
-	if res.Calendars[0].Mode != "full" {
-		t.Errorf("--full mode = %q, want full", res.Calendars[0].Mode)
-	}
-}
-
-func TestSyncText(t *testing.T) {
-	t.Parallel()
-	r, cal := syncRig(t)
-	r.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 60})
-	r.want(exitcode.OK, "sync")
-	if got, want := r.out.String(), "Work: initial sync, +1 ~0 -0, 1 events\n"; got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
-	}
-}
-
-// A partial pass prints what it did and exits 40, in both modes.
-func TestSyncPartialPrintsDataAndExits40(t *testing.T) {
-	t.Parallel()
-	r, cal := syncRig(t)
-	r.f.FailNext("GET", "/calendar/v1/"+cal+"/events", 403, 2011, 0)
-	r.want(exitcode.Partial, "sync", "--json")
-	e := r.envelope()
-	var res service.SyncResult
-	mustUnmarshal(t, e.Data, &res)
-	if e.OK || e.Error == nil || e.Error.Code != 40 || e.Error.Hint == "" || len(res.Calendars) != 1 || res.Calendars[0].Error == "" {
-		t.Fatalf("envelope = %+v, data %+v", e, res)
-	}
-	r.f.FailNext("GET", "/calendar/v1/"+cal+"/events", 403, 2011, 0)
-	r.want(exitcode.Partial, "sync", "--full")
-	if !strings.Contains(r.out.String(), "Work: ") || !strings.Contains(r.out.String(), "failed") || !strings.Contains(r.errb.String(), "Hint:") {
-		t.Errorf("stdout %q, stderr %q", r.out.String(), r.errb.String())
-	}
+	step("status before any sync", func(t *testing.T) {
+		r.want(exitcode.OK, "status")
+		if strings.Count(r.out.String(), "sync:") != 1 || !strings.Contains(r.out.String(), "sync: never (run pcb sync)") {
+			t.Errorf("status = %q, want only the never-synced line", r.out.String())
+		}
+	})
+	step("event list before any sync", func(t *testing.T) {
+		r.want(exitcode.MustAct, "event", "list", "--calendar", "Work", "--json")
+		if e := r.envelope(); e.Error == nil || !strings.Contains(e.Error.Hint, "pcb sync") {
+			t.Errorf("error = %+v", e.Error)
+		}
+	})
+	step("first sync, JSON", func(t *testing.T) {
+		r.want(exitcode.OK, "sync", "--json")
+		e := r.envelope()
+		var res service.SyncResult
+		mustUnmarshal(t, e.Data, &res)
+		if e.Command != "sync" || !e.OK || len(res.Calendars) != 2 {
+			t.Fatalf("envelope = %+v", e)
+		}
+		if c := res.Calendars[0]; c.ID != work || c.Name != "Work" || c.Mode != "initial" || c.Added != 2 || c.Events != 2 {
+			t.Errorf("calendar = %+v", c)
+		}
+	})
+	step("second sync, text", func(t *testing.T) {
+		r.f.AddEvent(work, protontest.Event{UID: "b@x", Start: baseTime + 7200, End: baseTime + 7260})
+		r.want(exitcode.OK, "sync")
+		if got, want := r.out.String(), "Work: incremental sync, +1 ~0 -0, 3 events\nEmpty: incremental sync, +0 ~0 -0, 0 events\n"; got != want {
+			t.Errorf("stdout = %q, want %q", got, want)
+		}
+	})
+	step("event list by name", func(t *testing.T) {
+		r.want(exitcode.OK, "event", "list", "--calendar", "Work", "--json")
+		var data struct {
+			Events []service.Event `json:"events"`
+		}
+		mustUnmarshal(t, r.envelope().Data, &data)
+		if len(data.Events) != 3 || data.Events[0].ID != a || data.Events[0].UID != "a@x" {
+			t.Fatalf("events = %+v", data.Events)
+		}
+		// Text table by ID, with a window that keeps only a.
+		to := time.Unix(baseTime, 0).Add(time.Hour).Format(time.RFC3339)
+		r.want(exitcode.OK, "event", "list", "--calendar", work, "--to", to)
+		lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
+		if len(lines) != 2 || strings.Join(strings.Fields(lines[0]), " ") != "START END ALL-DAY RECURRING ID" || !strings.HasSuffix(lines[1], " "+a) {
+			t.Fatalf("output = %q", r.out.String())
+		}
+		if f := strings.Fields(lines[1]); f[2] != "no" || f[3] != "no" {
+			t.Errorf("row = %q", lines[1])
+		}
+	})
+	step("event list of an empty calendar", func(t *testing.T) {
+		r.want(exitcode.OK, "event", "list", "--calendar", "Empty", "--json")
+		if !strings.Contains(r.out.String(), `"events": []`) {
+			t.Errorf("stdout = %q, want an empty array", r.out.String())
+		}
+	})
+	step("status after a sync", func(t *testing.T) {
+		r.want(exitcode.OK, "status")
+		if !strings.Contains(r.out.String(), "sync: Work ("+work+"): 3 events, synced ") || strings.Contains(r.out.String(), "never (run") {
+			t.Errorf("status = %q", r.out.String())
+		}
+	})
+	step("sync --full", func(t *testing.T) {
+		r.want(exitcode.OK, "sync", "--json", "--full")
+		var res service.SyncResult
+		mustUnmarshal(t, r.envelope().Data, &res)
+		if len(res.Calendars) != 2 || res.Calendars[0].Mode != "full" {
+			t.Errorf("--full = %+v, want full", res.Calendars)
+		}
+	})
+	// A partial pass prints what it did and exits 40, in both modes.
+	step("partial pass", func(t *testing.T) {
+		r.f.FailNext("GET", "/calendar/v1/"+empty+"/events", 403, 2011, 0)
+		r.want(exitcode.Partial, "sync", "--json", "--full")
+		e := r.envelope()
+		var res service.SyncResult
+		mustUnmarshal(t, e.Data, &res)
+		if e.OK || e.Error == nil || e.Error.Code != 40 || e.Error.Hint == "" || len(res.Calendars) != 2 || res.Calendars[1].Error == "" {
+			t.Fatalf("envelope = %+v, data %+v", e, res)
+		}
+		r.f.FailNext("GET", "/calendar/v1/"+empty+"/events", 403, 2011, 0)
+		r.want(exitcode.Partial, "sync", "--full")
+		if !strings.Contains(r.out.String(), "Empty: full sync failed") || !strings.Contains(r.errb.String(), "Hint:") {
+			t.Errorf("stdout %q, stderr %q", r.out.String(), r.errb.String())
+		}
+	})
 }
 
 func TestSyncWatchJSONRefused(t *testing.T) {

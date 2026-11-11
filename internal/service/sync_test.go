@@ -180,107 +180,181 @@ func TestSyncDeferredResyncIsPartial(t *testing.T) {
 	}
 }
 
-func TestEventsWithoutCacheMustAct(t *testing.T) {
+// TestReadPaths runs the read-only checks of the cache (Status, Events) on
+// one logged-in env, one SRP login for all (CI cost): before any sync, in
+// order; after it, in parallel subtests that only read the shared cache.
+// Each case adds its own calendars before the login.
+func TestReadPaths(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
-	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
-	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, "pcb sync") {
-		t.Errorf("hint = %q, want pcb sync", ee.Hint)
+	if st, _ := e.svc.Status(t.Context()); st.Sync != nil {
+		t.Fatalf("sync section without a cache: %+v", st.Sync)
 	}
-	if _, err := os.Stat(cache.Path(e.dirs.State)); !os.IsNotExist(err) {
-		t.Errorf("Events created the cache file: %v", err)
-	}
-}
-
-func TestEventsCalendarSelection(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
+	// Calendar selection: two calendars share a name.
 	w1 := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Twin"})
 	w2 := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Twin"})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Solo"})
-	e.login(t, e.req())
-	e.sync(t, false)
-
-	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Twin"})
-	ee := wantExit(t, err, exitcode.Usage)
-	if !strings.Contains(ee.Error(), w1) || !strings.Contains(ee.Error(), w2) {
-		t.Errorf("ambiguous error %q does not list both IDs", ee.Error())
-	}
-	_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Nope"})
-	ee = wantExit(t, err, exitcode.Usage)
-	if !strings.Contains(ee.Error(), `no calendar named "Nope"`) || !strings.Contains(ee.Hint, "pcb calendar list") {
-		t.Errorf("error = %q, hint = %q", ee.Error(), ee.Hint)
-	}
-	// A calendar Proton has but the cache does not (added since the last
-	// sync) asks for pcb sync, not for a check of its name.
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Later"})
-	_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Later"})
-	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "not synced yet") || ee.Hint != "run pcb sync" {
-		t.Errorf("not yet synced: error %q, hint %q", ee.Error(), ee.Hint)
-	}
-	_, err = e.svc.Events(t.Context(), service.EventsRequest{})
-	_ = wantExit(t, err, exitcode.Usage)
-	if evs := e.events(t, service.EventsRequest{Calendar: w2}); evs == nil {
-		t.Error("an empty calendar returned nil, want an empty list")
-	}
-	e.events(t, service.EventsRequest{Calendar: "Solo"})
-}
-
-func TestEventsWindow(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	// Windows: instants ("Work") and dates ("AllDay").
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	rec := base + 2*day
 	ids := map[string]string{
-		"early":   e.f.AddEvent(cal, protontest.Event{UID: "early", Start: base - 5*day, End: base - 5*day + 3600}),
-		"master":  e.f.AddEvent(cal, protontest.Event{UID: "master", Start: base - 10*day, End: base - 10*day + 3600, RRule: "FREQ=DAILY"}),
-		"future":  e.f.AddEvent(cal, protontest.Event{UID: "future", Start: base + 10*day, End: base + 10*day + 3600, RRule: "FREQ=DAILY"}),
-		"span":    e.f.AddEvent(cal, protontest.Event{UID: "span", Start: base - day, End: base + day}),
-		"inside":  e.f.AddEvent(cal, protontest.Event{UID: "inside", Start: base + day, End: base + day + 3600}),
-		"except":  e.f.AddEvent(cal, protontest.Event{UID: "master", Start: base + 2*day, End: base + 2*day + 3600, RecurrenceID: &rec}),
-		"late":    e.f.AddEvent(cal, protontest.Event{UID: "late", Start: base + 7*day, End: base + 7*day + 3600}),
-		"touches": e.f.AddEvent(cal, protontest.Event{UID: "touches", Start: base + 3*day, End: base + 3*day + 3600}),
+		"early":   e.f.AddEvent(work, protontest.Event{UID: "early", Start: base - 5*day, End: base - 5*day + 3600}),
+		"master":  e.f.AddEvent(work, protontest.Event{UID: "master", Start: base - 10*day, End: base - 10*day + 3600, RRule: "FREQ=DAILY"}),
+		"future":  e.f.AddEvent(work, protontest.Event{UID: "future", Start: base + 10*day, End: base + 10*day + 3600, RRule: "FREQ=DAILY"}),
+		"span":    e.f.AddEvent(work, protontest.Event{UID: "span", Start: base - day, End: base + day}),
+		"inside":  e.f.AddEvent(work, protontest.Event{UID: "inside", Start: base + day, End: base + day + 3600}),
+		"except":  e.f.AddEvent(work, protontest.Event{UID: "master", Start: base + 2*day, End: base + 2*day + 3600, RecurrenceID: &rec}),
+		"late":    e.f.AddEvent(work, protontest.Event{UID: "late", Start: base + 7*day, End: base + 7*day + 3600}),
+		"touches": e.f.AddEvent(work, protontest.Event{UID: "touches", Start: base + 3*day, End: base + 3*day + 3600}),
 	}
+	allDay := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "AllDay"})
+	d := func(day int) int64 { return time.Date(2027, 1, day, 0, 0, 0, 0, time.UTC).Unix() }
+	dayIDs := map[string]string{
+		"jan15":  e.f.AddEvent(allDay, protontest.Event{UID: "15", Start: d(15), End: d(16), FullDay: true}),
+		"jan16":  e.f.AddEvent(allDay, protontest.Event{UID: "16", Start: d(16), End: d(17), FullDay: true}),
+		"jan17":  e.f.AddEvent(allDay, protontest.Event{UID: "17", Start: d(17), End: d(19), FullDay: true}),
+		"master": e.f.AddEvent(allDay, protontest.Event{UID: "m", Start: d(1), End: d(2), FullDay: true, RRule: "FREQ=WEEKLY"}),
+	}
+	// Status: one calendar with one event.
+	status := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Status"})
+	e.f.AddEvent(status, protontest.Event{UID: "a@x", Start: base, End: base + 60})
 	e.login(t, e.req())
+
+	t.Run("events without a cache", func(t *testing.T) {
+		before := dirNames(t, e.dirs.State)
+		_, _ = e.svc.Status(t.Context())
+		_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+		if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, "pcb sync") {
+			t.Errorf("hint = %q, want pcb sync", ee.Hint)
+		}
+		if _, err := os.Stat(cache.Path(e.dirs.State)); !os.IsNotExist(err) {
+			t.Errorf("Events created the cache file: %v", err)
+		}
+		// The read paths never create, migrate or empty the cache.
+		if after := dirNames(t, e.dirs.State); after != before {
+			t.Errorf("state directory changed: %q -> %q", before, after)
+		}
+	})
 	e.sync(t, false)
-	from, to := time.Unix(base, 0), time.Unix(base+3*day, 0)
-	got := map[string]bool{}
-	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", From: &from, To: &to}) {
-		got[ev.ID] = true
-	}
-	want := map[string]bool{ids["master"]: true, ids["span"]: true, ids["inside"]: true, ids["except"]: true}
-	for name, id := range ids {
-		if got[id] != want[id] {
-			t.Errorf("event %s in window = %v, want %v", name, got[id], want[id])
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Later"}) // on Proton, not in the cache
+
+	t.Run("calendar selection", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Twin"})
+		ee := wantExit(t, err, exitcode.Usage)
+		if !strings.Contains(ee.Error(), w1) || !strings.Contains(ee.Error(), w2) {
+			t.Errorf("ambiguous error %q does not list both IDs", ee.Error())
 		}
-	}
-	// Only From: everything ending after it, masters included.
-	got = map[string]bool{}
-	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", From: &from}) {
-		got[ev.ID] = true
-	}
-	if got[ids["early"]] || !got[ids["late"]] || !got[ids["future"]] || !got[ids["master"]] {
-		t.Errorf("From-only window = %v", got)
-	}
-	// Only To: a master starting at or after To is out.
-	got = map[string]bool{}
-	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", To: &to}) {
-		got[ev.ID] = true
-	}
-	if !got[ids["early"]] || !got[ids["master"]] || got[ids["future"]] || got[ids["late"]] {
-		t.Errorf("To-only window = %v", got)
-	}
-	// Recurring is reported.
-	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work"}) {
-		if ev.ID == ids["master"] && !ev.Recurring {
-			t.Error("the master is not marked recurring")
+		_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Nope"})
+		ee = wantExit(t, err, exitcode.Usage)
+		if !strings.Contains(ee.Error(), `no calendar named "Nope"`) || !strings.Contains(ee.Hint, "pcb calendar list") {
+			t.Errorf("error = %q, hint = %q", ee.Error(), ee.Hint)
 		}
-		if ev.ID == ids["except"] && (ev.Recurring || ev.RecurrenceID == nil || !ev.RecurrenceID.Equal(time.Unix(rec, 0))) {
-			t.Errorf("exception = %+v", ev)
+		// A calendar Proton has but the cache does not (added since the last
+		// sync) asks for pcb sync, not for a check of its name.
+		_, err = e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Later"})
+		if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "not synced yet") || ee.Hint != "run pcb sync" {
+			t.Errorf("not yet synced: error %q, hint %q", ee.Error(), ee.Hint)
 		}
-	}
+		_, err = e.svc.Events(t.Context(), service.EventsRequest{})
+		_ = wantExit(t, err, exitcode.Usage)
+		if evs := e.events(t, service.EventsRequest{Calendar: w2}); evs == nil {
+			t.Error("an empty calendar returned nil, want an empty list")
+		}
+		e.events(t, service.EventsRequest{Calendar: "Solo"})
+	})
+	t.Run("window", func(t *testing.T) {
+		t.Parallel()
+		from, to := time.Unix(base, 0), time.Unix(base+3*day, 0)
+		got := map[string]bool{}
+		for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", From: &from, To: &to}) {
+			got[ev.ID] = true
+		}
+		want := map[string]bool{ids["master"]: true, ids["span"]: true, ids["inside"]: true, ids["except"]: true}
+		for name, id := range ids {
+			if got[id] != want[id] {
+				t.Errorf("event %s in window = %v, want %v", name, got[id], want[id])
+			}
+		}
+		// Only From: everything ending after it, masters included.
+		got = map[string]bool{}
+		for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", From: &from}) {
+			got[ev.ID] = true
+		}
+		if got[ids["early"]] || !got[ids["late"]] || !got[ids["future"]] || !got[ids["master"]] {
+			t.Errorf("From-only window = %v", got)
+		}
+		// Only To: a master starting at or after To is out.
+		got = map[string]bool{}
+		for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work", To: &to}) {
+			got[ev.ID] = true
+		}
+		if !got[ids["early"]] || !got[ids["master"]] || got[ids["future"]] || got[ids["late"]] {
+			t.Errorf("To-only window = %v", got)
+		}
+		// Recurring is reported.
+		for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work"}) {
+			if ev.ID == ids["master"] && !ev.Recurring {
+				t.Error("the master is not marked recurring")
+			}
+			if ev.ID == ids["except"] && (ev.Recurring || ev.RecurrenceID == nil || !ev.RecurrenceID.Equal(time.Unix(rec, 0))) {
+				t.Errorf("exception = %+v", ev)
+			}
+		}
+	})
+	t.Run("all-day window by date", func(t *testing.T) {
+		t.Parallel()
+		keep := func(req service.EventsRequest) map[string]bool {
+			req.Calendar = "AllDay"
+			got := map[string]bool{}
+			for _, ev := range e.events(t, req) {
+				got[ev.ID] = true
+			}
+			return got
+		}
+		// Window [Jan 16, Jan 17): only the 16th, and the master.
+		got := keep(service.EventsRequest{FromDate: "2027-01-16", ToDate: "2027-01-17"})
+		for name, want := range map[string]bool{"jan15": false, "jan16": true, "jan17": false, "master": true} {
+			if got[dayIDs[name]] != want {
+				t.Errorf("date window: %s kept = %v, want %v", name, got[dayIDs[name]], want)
+			}
+		}
+		// A multi-day event overlapping from the 18th.
+		got = keep(service.EventsRequest{FromDate: "2027-01-18"})
+		if got[dayIDs["jan16"]] || !got[dayIDs["jan17"]] {
+			t.Errorf("From 2027-01-18: %v", got)
+		}
+		// An RFC 3339 bound compares instants, even for all-day events.
+		to := time.Date(2027, 1, 16, 12, 0, 0, 0, time.UTC)
+		got = keep(service.EventsRequest{To: &to})
+		if !got[dayIDs["jan16"]] || got[dayIDs["jan17"]] {
+			t.Errorf("To noon Jan 16: %v", got)
+		}
+		// Dates are reported for all-day rows, the end being exclusive.
+		for _, ev := range e.events(t, service.EventsRequest{Calendar: "AllDay"}) {
+			if ev.ID == dayIDs["jan17"] && (!ev.AllDay || ev.StartDate != "2027-01-17" || ev.EndDate != "2027-01-19") {
+				t.Errorf("jan17 = %+v", ev)
+			}
+		}
+		_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "AllDay", FromDate: "01/16/2027"})
+		_ = wantExit(t, err, exitcode.Usage)
+	})
+	t.Run("status section", func(t *testing.T) {
+		t.Parallel()
+		st, err := e.svc.Status(t.Context())
+		if err != nil || st.Sync == nil {
+			t.Fatalf("status = %+v, %v", st.Sync, err)
+		}
+		i := slices.IndexFunc(st.Sync.Calendars, func(c service.CalendarStatus) bool { return c.ID == status })
+		if i < 0 || len(st.Sync.Calendars) != 6 {
+			t.Fatalf("status calendars = %+v, want the 6 synced ones", st.Sync.Calendars)
+		}
+		c := st.Sync.Calendars[i]
+		if c.Name != "Status" || c.Events != 1 || c.SyncedAt == nil || !c.SyncedAt.Equal(t0) || c.FullAt == nil || c.Error != "" {
+			t.Errorf("calendar status = %+v", c)
+		}
+	})
 }
 
 func TestLogoutDeletesCache(t *testing.T) {
@@ -304,26 +378,6 @@ func TestLogoutDeletesCache(t *testing.T) {
 	}
 	if st, err := e.svc.Status(t.Context()); err != nil || st.Sync != nil {
 		t.Errorf("status after logout = %+v, %v; want no sync section", st.Sync, err)
-	}
-}
-
-func TestStatusSyncSection(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	if st, _ := e.svc.Status(t.Context()); st.Sync != nil {
-		t.Fatalf("sync section without a cache: %+v", st.Sync)
-	}
-	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
-	e.sync(t, false)
-	st, err := e.svc.Status(t.Context())
-	if err != nil || st.Sync == nil || len(st.Sync.Calendars) != 1 {
-		t.Fatalf("status = %+v, %v", st.Sync, err)
-	}
-	c := st.Sync.Calendars[0]
-	if c.ID != cal || c.Name != "Work" || c.Events != 1 || c.SyncedAt == nil || !c.SyncedAt.Equal(t0) || c.FullAt == nil || c.Error != "" {
-		t.Errorf("calendar status = %+v", c)
 	}
 }
 
@@ -469,21 +523,6 @@ func TestLogoutDeletesCacheEvenWhenCancelled(t *testing.T) {
 	}
 }
 
-// The read paths never create, migrate or empty the cache.
-func TestReadPathsLeaveTheStateDirectoryAlone(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
-	before := dirNames(t, e.dirs.State)
-	_, _ = e.svc.Status(t.Context())
-	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
-	_ = wantExit(t, err, exitcode.MustAct)
-	if after := dirNames(t, e.dirs.State); after != before {
-		t.Errorf("state directory changed: %q -> %q", before, after)
-	}
-}
-
 func dirNames(t *testing.T, dir string) string {
 	t.Helper()
 	ents, err := os.ReadDir(dir)
@@ -517,84 +556,6 @@ func TestStatusReportsAnUnreadableCache(t *testing.T) {
 	// A watch stops on it: a person must remove the file.
 	err = e.svc.WatchSync(t.Context(), service.SyncRequest{}, 0, nil)
 	_ = wantExit(t, err, exitcode.MustAct)
-}
-
-func TestEventsWindowAllDayByDate(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	d := func(day int) int64 { return time.Date(2027, 1, day, 0, 0, 0, 0, time.UTC).Unix() }
-	ids := map[string]string{
-		"jan15":  e.f.AddEvent(cal, protontest.Event{UID: "15", Start: d(15), End: d(16), FullDay: true}),
-		"jan16":  e.f.AddEvent(cal, protontest.Event{UID: "16", Start: d(16), End: d(17), FullDay: true}),
-		"jan17":  e.f.AddEvent(cal, protontest.Event{UID: "17", Start: d(17), End: d(19), FullDay: true}),
-		"master": e.f.AddEvent(cal, protontest.Event{UID: "m", Start: d(1), End: d(2), FullDay: true, RRule: "FREQ=WEEKLY"}),
-	}
-	e.login(t, e.req())
-	e.sync(t, false)
-	keep := func(req service.EventsRequest) map[string]bool {
-		req.Calendar = "Work"
-		got := map[string]bool{}
-		for _, ev := range e.events(t, req) {
-			got[ev.ID] = true
-		}
-		return got
-	}
-	// Window [Jan 16, Jan 17): only the 16th, and the master.
-	got := keep(service.EventsRequest{FromDate: "2027-01-16", ToDate: "2027-01-17"})
-	for name, want := range map[string]bool{"jan15": false, "jan16": true, "jan17": false, "master": true} {
-		if got[ids[name]] != want {
-			t.Errorf("date window: %s kept = %v, want %v", name, got[ids[name]], want)
-		}
-	}
-	// A multi-day event overlapping from the 18th.
-	got = keep(service.EventsRequest{FromDate: "2027-01-18"})
-	if got[ids["jan16"]] || !got[ids["jan17"]] {
-		t.Errorf("From 2027-01-18: %v", got)
-	}
-	// An RFC 3339 bound compares instants, even for all-day events.
-	to := time.Date(2027, 1, 16, 12, 0, 0, 0, time.UTC)
-	got = keep(service.EventsRequest{To: &to})
-	if !got[ids["jan16"]] || got[ids["jan17"]] {
-		t.Errorf("To noon Jan 16: %v", got)
-	}
-	// Dates are reported for all-day rows, the end being exclusive.
-	for _, ev := range e.events(t, service.EventsRequest{Calendar: "Work"}) {
-		if ev.ID == ids["jan17"] && (!ev.AllDay || ev.StartDate != "2027-01-17" || ev.EndDate != "2027-01-19") {
-			t.Errorf("jan17 = %+v", ev)
-		}
-	}
-	_, err := e.svc.Events(t.Context(), service.EventsRequest{Calendar: "Work", FromDate: "01/16/2027"})
-	_ = wantExit(t, err, exitcode.Usage)
-}
-
-// Ruling R13 during a pass, not only at Open: a cache whose tables are
-// damaged is MustAct with the way out, and a watch stops on it.
-func TestSyncOnDamagedTablesMustAct(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
-	e.sync(t, false)
-	damageTables(t, cache.Path(e.dirs.State), "calendars", "events")
-
-	_, err := e.svc.Sync(t.Context(), service.SyncRequest{})
-	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "damaged") || !strings.Contains(ee.Hint, "pcb sync --full") {
-		t.Errorf("error %q, hint %q; want the damaged cache and its way out", ee.Error(), ee.Hint)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	passes := 0
-	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.WatchPass) {
-		if passes++; passes == 3 {
-			cancel() // the watch did not stop by itself: end the test
-		}
-	})
-	_ = wantExit(t, err, exitcode.MustAct)
-	if passes != 1 {
-		t.Errorf("the watch ran %d passes on a damaged cache, want it to stop after 1", passes)
-	}
 }
 
 // damageTables overwrites the root pages of the named tables (and their
@@ -641,11 +602,14 @@ func damageTables(t *testing.T, path string, tables ...string) {
 
 // In a watch, a 429 whose Retry-After is past the client's own 60 s is
 // waited out (up to 1 h) instead of retried after the back-off; a cache
-// written by a newer pcb stops the watch (no retry can help).
-func TestWatchWaitsRetryAfterAndStopsOnANewerCache(t *testing.T) {
+// written by a newer pcb stops the watch (no retry can help); so does a
+// cache whose tables are damaged (ruling R13 during a pass, not only at
+// Open: MustAct with the way out). One env for the three (CI cost).
+func TestWatchRetryAfterAndCachesNoRetryFixes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
 	e.login(t, e.req())
 	e.f.FailNext("GET", "/calendar/v1", 429, 0, 20*60)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -691,5 +655,33 @@ func TestWatchWaitsRetryAfterAndStopsOnANewerCache(t *testing.T) {
 	}
 	if len(passes) > 0 && passes[0].Next != 0 {
 		t.Errorf("the pass the watch stops on: next %v, want 0", passes[0].Next)
+	}
+
+	// Back to this pcb's schema, then damage the tables.
+	db, err = sql.Open("sqlite", cache.Path(e.dirs.State))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), `PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	e.sync(t, false)
+	damageTables(t, cache.Path(e.dirs.State), "calendars", "events")
+	_, err = e.svc.Sync(t.Context(), service.SyncRequest{})
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "damaged") || !strings.Contains(ee.Hint, "pcb sync --full") {
+		t.Errorf("error %q, hint %q; want the damaged cache and its way out", ee.Error(), ee.Hint)
+	}
+	passes = nil
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) {
+		if passes = append(passes, p); len(passes) == 3 {
+			cancel() // the watch did not stop by itself: end the test
+		}
+	})
+	_ = wantExit(t, err, exitcode.MustAct)
+	if len(passes) != 1 {
+		t.Errorf("the watch ran %d passes on a damaged cache, want it to stop after 1", len(passes))
 	}
 }

@@ -12,42 +12,6 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
-func TestEventListByName(t *testing.T) {
-	t.Parallel()
-	r, cal := syncRig(t)
-	a := r.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 3600})
-	r.f.AddEvent(cal, protontest.Event{UID: "far@x", Start: baseTime + 400*24*3600, End: baseTime + 400*24*3600 + 60})
-	r.want(exitcode.OK, "sync")
-	r.want(exitcode.OK, "event", "list", "--calendar", "Work", "--json")
-	var data struct {
-		Events []service.Event `json:"events"`
-	}
-	mustUnmarshal(t, r.envelope().Data, &data)
-	if len(data.Events) != 2 || data.Events[0].ID != a || data.Events[0].UID != "a@x" {
-		t.Fatalf("events = %+v", data.Events)
-	}
-	// Text table, with a window that drops the far event.
-	to := time.Unix(baseTime, 0).Add(48 * time.Hour).Format(time.RFC3339)
-	r.want(exitcode.OK, "event", "list", "--calendar", cal, "--to", to)
-	lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
-	if len(lines) != 2 || strings.Join(strings.Fields(lines[0]), " ") != "START END ALL-DAY RECURRING ID" || !strings.HasSuffix(lines[1], " "+a) {
-		t.Fatalf("output = %q", r.out.String())
-	}
-	if f := strings.Fields(lines[1]); f[2] != "no" || f[3] != "no" {
-		t.Errorf("row = %q", lines[1])
-	}
-}
-
-func TestEventListEmptyIsAnArray(t *testing.T) {
-	t.Parallel()
-	r, _ := syncRig(t)
-	r.want(exitcode.OK, "sync")
-	r.want(exitcode.OK, "event", "list", "--calendar", "Work", "--json")
-	if !strings.Contains(r.out.String(), `"events": []`) {
-		t.Errorf("stdout = %q, want an empty array", r.out.String())
-	}
-}
-
 func TestEventListBadDate(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{})
@@ -87,6 +51,15 @@ func (s *eventsStub) Events(_ context.Context, req service.EventsRequest) ([]ser
 	return nil, nil
 }
 
+// syncRig is a rig logged in on a fake with one calendar, "Work".
+func syncRig(t *testing.T) (*rig, string) {
+	t.Helper()
+	r := newRig(t, &protontest.Options{})
+	cal := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	return r, cal
+}
+
 // All-day events are stored as UTC midnights: a date bound must compare
 // dates, not shift the event by a day in a zone west of UTC. Not parallel:
 // it sets the CLI's local zone.
@@ -110,29 +83,5 @@ func TestEventListAllDayWestOfUTC(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
 	if len(lines) != 2 || strings.Join(strings.Fields(lines[1]), " ") != "2027-01-16 2027-01-17 yes no "+d16 {
 		t.Errorf("text = %q, want dates for the all-day row", r.out.String())
-	}
-}
-
-func TestEventListNeverSyncedMustAct(t *testing.T) {
-	t.Parallel()
-	r, _ := syncRig(t)
-	r.want(exitcode.MustAct, "event", "list", "--calendar", "Work", "--json")
-	if e := r.envelope(); e.Error == nil || !strings.Contains(e.Error.Hint, "pcb sync") {
-		t.Errorf("error = %+v", e.Error)
-	}
-}
-
-func TestStatusShowsSyncSection(t *testing.T) {
-	t.Parallel()
-	r, cal := syncRig(t)
-	r.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 60})
-	r.want(exitcode.OK, "status")
-	if strings.Count(r.out.String(), "sync:") != 1 || !strings.Contains(r.out.String(), "sync: never (run pcb sync)") {
-		t.Errorf("status before any sync = %q, want only the never-synced line", r.out.String())
-	}
-	r.want(exitcode.OK, "sync")
-	r.want(exitcode.OK, "status")
-	if !strings.Contains(r.out.String(), "sync: Work ("+cal+"): 1 events, synced ") {
-		t.Errorf("status = %q", r.out.String())
 	}
 }
