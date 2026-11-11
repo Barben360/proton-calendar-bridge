@@ -65,7 +65,8 @@ In Thunderbird: New Calendar > On the Network, format CalDAV, the printed URL as
 app password (the live session against the bridge runs after M4: `spec/HUMAN-CHECKS.md`, step 6). `pcb serve` keeps the cache in sync (a pass every 30 s) and serves it read-only until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0); it refuses to start logged out (exit 10, `pcb login`) or
 while `pcb sync` runs (exit 20), and stops when Proton needs you again (exit 10). Logs go to stderr, IDs only.
-After each sync pass, while an event is served as a placeholder (it could not be decrypted), a duplicate
+After each sync pass, while an event is served as a placeholder (it could not be decrypted) or marked
+`X-PCB-INTEGRITY:unverified` (a signature did not verify), a duplicate
 master is left out or a calendar's keys fail, it logs a `render counters` line (counts and calendar IDs), and once
 more when they change; `pcb status` does not show these counts, since only the serving process has them.
 

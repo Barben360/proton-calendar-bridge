@@ -321,3 +321,22 @@ func TestApplyRowDedupsAttendees(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// Ruling M3-R33: the integrity marker is pcb's alone. A part's own
+// X-PCB-INTEGRITY (any case, any value) never reaches the client; an
+// unverified event gets exactly one, as a property before the alarms.
+func TestMarkIntegrity(t *testing.T) {
+	ev := mustMerge(t, part("UID:u", "x-pcb-integrity:verified", "BEGIN:VALARM", "ACTION:DISPLAY", "END:VALARM"))
+	MarkIntegrity(&ev, false)
+	if got := values(ev, "X-PCB-INTEGRITY"); len(got) != 0 {
+		t.Fatalf("a verified event keeps a part's marker: %v", got)
+	}
+	ev = mustMerge(t, part("UID:u", "X-PCB-INTEGRITY:verified", "BEGIN:VALARM", "ACTION:DISPLAY", "END:VALARM"))
+	MarkIntegrity(&ev, true)
+	if got := values(ev, "X-PCB-INTEGRITY"); len(got) != 1 || got[0] != ":unverified" {
+		t.Fatalf("an unverified event's markers = %v, want [:unverified]", got)
+	}
+	if b := string(ev.Bytes()); !strings.Contains(b, "X-PCB-INTEGRITY:unverified\r\nBEGIN:VALARM") {
+		t.Fatalf("the marker is not the last property before the alarm:\n%s", b)
+	}
+}

@@ -271,3 +271,19 @@ func joinStatus(params string, statuses map[string]int) string {
 	}
 	return ";" + strings.Join(kept, ";")
 }
+
+// integrityProp marks an event a signed part of which did not verify (SPEC
+// §5.3, ruling M3-R33).
+const integrityProp = "X-PCB-INTEGRITY"
+
+// MarkIntegrity sets ev's integrity marker, which is pcb's alone: every
+// X-PCB-INTEGRITY the parts carry is dropped (a part cannot vouch for
+// itself, and one written back by a client says nothing of now), then
+// X-PCB-INTEGRITY:unverified is added after the last property when
+// unverified.
+func MarkIntegrity(ev *Component, unverified bool) {
+	ev.removeProps(func(p Property) bool { return strings.EqualFold(p.Name, integrityProp) })
+	if unverified {
+		ev.addProp(Property{Name: integrityProp, Value: "unverified"})
+	}
+}

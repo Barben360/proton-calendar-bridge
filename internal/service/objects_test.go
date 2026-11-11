@@ -126,6 +126,13 @@ func TestObjectReads(t *testing.T) {
 	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60, Card: card("dup@x", "Mid", base)})
 	e.f.UpdateEvent(work, old, protontest.Event{UID: "dup@x", Start: base, End: base + 60, Card: card("dup@x", "Newest", base)})
 	e.f.AddEvent(locked, protontest.Event{UID: "locked@x", Start: base - 8*3600, End: base - 8*3600 + 2*day, FullDay: true})
+	// Signatures that do not verify (ruling M3-R33): a whole event, and one
+	// exception of a series whose master verifies.
+	e.f.AddEvent(hol, protontest.Event{UID: "forged@x", Start: base, End: base + 3600, ForeignKey: true, Card: card("forged@x", "Forged", base)})
+	e.f.AddEvent(hol, protontest.Event{UID: "mixed@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY",
+		Card: card("mixed@x", "Mixed", base, "RRULE:FREQ=DAILY")})
+	e.f.AddEvent(hol, protontest.Event{UID: "mixed@x", Start: rid, End: rid + 3600, RecurrenceID: &rid, ForeignKey: true,
+		Card: card("mixed@x", "Mixed moved", rid, "RECURRENCE-ID:"+stamp(rid))})
 	e.login(t, e.req())
 
 	t.Run("NeverSyncedIsMustAct", func(t *testing.T) {
@@ -256,6 +263,22 @@ func TestObjectReads(t *testing.T) {
 		}
 		if !slices.Equal(rc.KeysErrors, []string{locked}) {
 			t.Errorf("KeysErrors = %v, want the Locked calendar's ID only", rc.KeysErrors)
+		}
+	})
+
+	t.Run("TestUnverifiedSignatureIsMarked", func(t *testing.T) {
+		got := e.objects(t, hol, "forged@x", "mixed@x")
+		forged := got["forged@x"].Data
+		// Marked, never dropped: the event is still served in full.
+		contains(t, "forged@x", forged, "SUMMARY:Forged\r\n", "X-PCB-INTEGRITY:unverified\r\n")
+		mixed := string(got["mixed@x"].Data)
+		vevents := strings.Split(mixed, "BEGIN:VEVENT")
+		if len(vevents) != 3 || strings.Contains(vevents[1], "X-PCB-INTEGRITY") || !strings.Contains(vevents[2], "X-PCB-INTEGRITY:unverified\r\n") {
+			t.Errorf("mixed@x: want the marker on the exception's VEVENT only:\n%s", mixed)
+		}
+		lacks(t, "rich@x (verified)", e.objects(t, work, "rich@x")["rich@x"].Data, "X-PCB-INTEGRITY")
+		if n := e.svc.RenderCounts().Unverified; n != 2 {
+			t.Errorf("Unverified = %d, want 2 (forged@x and mixed@x's exception)", n)
 		}
 	})
 

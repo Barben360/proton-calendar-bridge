@@ -191,19 +191,21 @@ type WatchPass struct {
 // of now (ruling M3-R34): only the process that serves can see it, so
 // pcb serve logs it and pcb status does not show it (M5's local socket
 // will). Since the keys were last loaded: Undecryptable counts the rows
-// served as placeholders (ruling M3-R4), DuplicateMasters the masters left
-// out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
+// served as placeholders (ruling M3-R4), Unverified the rows rendered with
+// X-PCB-INTEGRITY:unverified (ruling M3-R33), DuplicateMasters the masters
+// left out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
 // did not unlock (every event of them is a placeholder), sorted, nil if
 // none.
 type RenderCounts struct {
 	Undecryptable    int
+	Unverified       int
 	DuplicateMasters int
 	KeysErrors       []string
 }
 
 // Zero reports whether every counter is zero.
 func (c RenderCounts) Zero() bool {
-	return c.Undecryptable == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
+	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or

@@ -93,7 +93,7 @@ Then repeat the Thunderbird dialog once with the bare URL and once with `http://
 3. Multiget with a UID containing `@`, space or non-ASCII.
 4. `readOnly`: with M4 enabled, whether Thunderbird writes after M3-era subscriptions (E08 §5).
 5. The self-signed exception flow and the certificate validity (825 days) accepted.
-6. Real data: non-IANA TZIDs, orphan exceptions, duplicate masters, placeholder events (`pcb serve` logs their counts in a `render counters` line after each pass; `pcb status` does not show them).
+6. Real data: non-IANA TZIDs, orphan exceptions, duplicate masters, placeholder events (`pcb serve` logs their counts in a `render counters` line after each pass; `pcb status` does not show them); whether any of the test account's own events carries `X-PCB-INTEGRITY:unverified` (`unverified` above 0 in that line): it should not, else E10's signing-key assumption is wrong.
 7. Alarms from `Notifications`: shown once, no re-fire after a refresh.
 8. First-sync time and memory with the test data set (E09 live half), Thunderbird's startup refresh.
 9. `getcontenttype` with `;component=vevent`, and a calendar rename or recolour not reaching an existing subscription (E08 §1.3).

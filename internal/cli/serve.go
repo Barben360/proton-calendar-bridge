@@ -308,7 +308,7 @@ func (rl *renderLog) log(log *slog.Logger, c *service.RenderCounts) {
 		return
 	}
 	rl.last = *c
-	attrs := []any{"undecryptable", c.Undecryptable, "duplicate_masters", c.DuplicateMasters}
+	attrs := []any{"undecryptable", c.Undecryptable, "unverified", c.Unverified, "duplicate_masters", c.DuplicateMasters}
 	if len(c.KeysErrors) > 0 {
 		attrs = append(attrs, "keys_error_ids", c.KeysErrors)
 	}

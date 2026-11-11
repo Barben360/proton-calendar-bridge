@@ -24,7 +24,8 @@ import (
 
 // renderVersion is folded into every object ETag: bump it whenever the
 // same rows render differently, so that clients fetch every object again.
-const renderVersion = 1
+// Version 2: X-PCB-INTEGRITY (ruling M3-R33).
+const renderVersion = 2
 
 // placeholderSummary is the SUMMARY of an event pcb cannot decrypt (ruling
 // M3-R4).
@@ -54,6 +55,7 @@ type renderer struct {
 
 	smu           sync.Mutex
 	undecryptable map[string]bool // row IDs served as placeholders
+	unverified    map[string]bool // row IDs rendered with X-PCB-INTEGRITY:unverified (M3-R33)
 	duplicates    map[string]int  // masters left out (M3-R3) by calendar ID and UID, as last rendered
 }
 
@@ -249,22 +251,29 @@ func (r *renderer) drop() {
 	r.kmu.Unlock()
 	r.lru.clear()
 	r.smu.Lock()
-	r.undecryptable, r.duplicates = nil, nil
+	r.undecryptable, r.unverified, r.duplicates = nil, nil, nil
 	r.smu.Unlock()
 }
 
-// noteRow records whether row id rendered as a placeholder.
-func (r *renderer) noteRow(id string, placeholder bool) {
+// noteRow records whether row id rendered as a placeholder, and whether it
+// rendered as unverified.
+func (r *renderer) noteRow(id string, placeholder, unverified bool) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	if placeholder {
-		if r.undecryptable == nil {
-			r.undecryptable = map[string]bool{}
-		}
-		r.undecryptable[id] = true
-	} else {
-		delete(r.undecryptable, id)
+	mark(&r.undecryptable, id, placeholder)
+	mark(&r.unverified, id, unverified)
+}
+
+// mark adds id to the set *m when on, else removes it.
+func mark(m *map[string]bool, id string, on bool) {
+	if !on {
+		delete(*m, id)
+		return
 	}
+	if *m == nil {
+		*m = map[string]bool{}
+	}
+	(*m)[id] = true
 }
 
 // noteDuplicates records how many masters the last render of a UID left
@@ -317,7 +326,7 @@ func (l *Local) RenderCounts() RenderCounts {
 	for _, n := range l.r.duplicates {
 		out.DuplicateMasters += n
 	}
-	out.Undecryptable = len(l.r.undecryptable)
+	out.Undecryptable, out.Unverified = len(l.r.undecryptable), len(l.r.unverified)
 	return out
 }
 
@@ -377,46 +386,64 @@ func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) [
 // renderRow decrypts and merges one row into its VEVENT, or returns its
 // placeholder.
 func (l *Local) renderRow(row *cache.StoredRow, ks *keyState, ck *calKeys) ical.Component {
-	ev, ok := l.decryptRow(row, ks, ck)
-	l.r.noteRow(row.ID, !ok)
+	ev, unverified, ok := l.decryptRow(row, ks, ck)
+	l.r.noteRow(row.ID, !ok, ok && unverified)
 	if !ok {
 		return placeholder(row)
 	}
 	return ev
 }
 
-func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ical.Component, bool) {
+// decryptRow renders row's VEVENT; unverified when a part of it has a bad or
+// missing signature (unverifiedParts). Such an event is served marked
+// X-PCB-INTEGRITY:unverified, never dropped (ruling M3-R33).
+func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev ical.Component, unverified, ok bool) {
 	if ck.access == nil {
-		return ical.Component{}, false
+		return ical.Component{}, false, false
 	}
 	l.r.decrypts.Add(1)
 	opened, err := cards.Open(row.Raw, ck.access.KR, ks.u.AddrKRs, func(email string) *crypto.KeyRing {
 		return ks.own[strings.ToLower(email)]
 	})
 	if err != nil {
-		return ical.Component{}, false
+		return ical.Component{}, false, false
 	}
 	parts := make([][]byte, len(opened.Parts))
 	for i, p := range opened.Parts {
 		parts[i] = p.Text
 	}
-	ev, err := ical.MergeEvent(parts)
+	unverified = unverifiedParts(opened.Parts)
+	ev, err = ical.MergeEvent(parts)
 	if err != nil {
-		return ical.Component{}, false
+		return ical.Component{}, false, false
 	}
 	defaults := ck.partDay
 	if row.FullDay {
 		defaults = ck.fullDay
 	}
 	if err := ical.ApplyNotifications(&ev, opened.Notifications, defaults, row.FullDay); err != nil {
-		return ical.Component{}, false
+		return ical.Component{}, false, false
 	}
 	statuses := make(map[string]int, len(opened.Attendees))
 	for _, a := range opened.Attendees {
 		statuses[a.Token] = a.Status
 	}
 	ical.ApplyRow(&ev, opened.Color, statuses)
-	return ev, true
+	ical.MarkIntegrity(&ev, unverified)
+	return ev, unverified, true
+}
+
+// unverifiedParts reports whether a part of an event has a bad or missing
+// signature (SPEC §5.3): one that does not verify with the key of its
+// author, one of our addresses, including a part sent unsigned (a server
+// could otherwise drop a signature to pass an edit).
+func unverifiedParts(parts []cards.Part) bool {
+	for _, p := range parts {
+		if !p.Verified {
+			return true
+		}
+	}
+	return false
 }
 
 // placeholder is the minimal VEVENT of a row pcb cannot render (ruling

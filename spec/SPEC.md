@@ -174,9 +174,15 @@ docs/crypto.md, Proton security-model blog]. Unlocked keys live in memory
 only; the salted key passphrase is sealed in C2.
 
 Signature policy [call]: verify every signed part; a bad or missing
-signature marks the event `integrity: unverified` (in CalDAV as
-`X-PCB-INTEGRITY: unverified`, and in `pcb status`), never silently
-accepted or dropped. Which parts are signed by which key [assumed → E10].
+signature (another key, an author not one of our addresses, a part sent
+unsigned) marks the event unverified: in CalDAV each affected VEVENT (the
+master or an exception) carries `X-PCB-INTEGRITY:unverified`, and
+`pcb serve` logs the count (`unverified`, §15); never silently accepted or
+dropped (M3-R33). An `X-PCB-INTEGRITY` a part carries itself is dropped
+[verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
+`TestUnverifiedWhenAnyPartIsNotVerified`, `TestMarkIntegrity`]. Which parts
+are signed by which key [assumed → E10]: if Proton signs a part with another
+key than its author address's, the event shows as unverified.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
@@ -551,7 +557,8 @@ neither; when set, TLS on any bind).
 Structured text logs on stderr (`log/slog` key=value lines, M3 `pcb serve`;
 no event content, no secrets; IDs only). `pcb serve` logs one `render counters`
 line per sync pass while a counter is non-zero, and once more when they change:
-`undecryptable` (placeholders served), `duplicate_masters` (left out) and
+`undecryptable` (placeholders served), `unverified` (rows marked
+`X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out) and
 `keys_error_ids` (calendars whose keys failed). Only the serving process holds
 them, so `pcb status` and `pcb doctor` do not show them until M5's local API
 socket (M3-R34) [verified: `TestServeLogsTheRenderCounters`,
@@ -649,7 +656,8 @@ events (privacy), the ability to write (integrity). Adversaries: other local
 users, network peers, malicious calendar content, a leaked CalDAV app
 password. Controls: sealed secrets (§7.3), no plaintext cache (§7.2),
 loopback by default, TLS and authentication on any other bind (§9), per-
-client app passwords stored hashed, signature verification (§5.3), no
+client app passwords stored hashed, signature verification (§5.3: an
+event that fails it is served marked, not dropped), no
 secrets in argv or logs, state directory 0700. On a server, the daemon runs
 as a dedicated `pcb` user (system service) or in its container [call].
 Residual risk, stated in the docs: the bridge holds the decrypted calendar
