@@ -252,7 +252,7 @@ Sealed with a data key held by, in order of preference [call]:
 1. systemd credentials (`systemd-creds`, TPM2 when present) for services;
 2. the Secret Service (desktop keyring) when a session bus has one;
 3. a key file 0600 on a separate path (headless fallback, `doctor` warns).
-Availability on a headless Debian/morpheus-like host [assumed → E15].
+Availability [verified: E15]: systemd-creds (user scope, systemd >= 256) works on both machines, TPM2 only on the desktop, no Secret Service on headless morpheus, and none of them inside the container, which uses a key file 0600 plus an optional compose `secrets:` file mount.
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 
