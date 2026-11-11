@@ -64,6 +64,7 @@ func (l *Local) calendars(ctx context.Context, c *api.Client, acc store.Account)
 		a, err := calendar.Unlock(ctx, c, u, cal)
 		switch {
 		case err == nil:
+			sc.ReadOnly = !a.Writable() // the gate (ruling M4-R1)
 			a.Close()
 		case api.SessionWide(ctx, err): // ruling R9m
 			return nil, err

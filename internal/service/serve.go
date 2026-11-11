@@ -83,9 +83,9 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
 			if cals, cerr := db.Calendars(ctx); cerr == nil {
-				live := make(map[string]bool, len(cals))
+				live := make(map[string]calendar.Type, len(cals))
 				for _, c := range cals {
-					live[c.ID] = true
+					live[c.ID] = calendar.ParseType(c.Type)
 				}
 				l.refreshSettings(ctx, live)
 			}
@@ -101,7 +101,7 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 // or whose keys failed and now unlock, gets its new keys: its ETags, CTag
 // and token generation change, so clients fetch its objects again. A
 // failure keeps what is held (a transient one is tried at the next pass).
-func (l *Local) refreshSettings(ctx context.Context, live map[string]bool) {
+func (l *Local) refreshSettings(ctx context.Context, live map[string]calendar.Type) {
 	l.r.kmu.RLock()
 	due := l.r.ks != nil && !l.o.Now().Before(l.r.refreshedAt.Add(settingsRefresh))
 	l.r.kmu.RUnlock()
@@ -125,11 +125,12 @@ func (l *Local) refreshSettings(ctx context.Context, live map[string]bool) {
 			}
 		}
 		for _, id := range slices.Sorted(maps.Keys(ks.cals)) {
-			if !live[id] {
+			typ, ok := live[id]
+			if !ok {
 				gone = append(gone, id)
 				continue
 			}
-			a, err := calendar.Unlock(ctx, c, ks.u, calendar.Calendar{ID: id})
+			a, err := calendar.Unlock(ctx, c, ks.u, calendar.Calendar{ID: id, Type: typ})
 			switch {
 			case err == nil:
 				ck := newCalKeys(id, a, ks.addrTags)

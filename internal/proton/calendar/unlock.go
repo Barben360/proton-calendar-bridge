@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -28,11 +29,43 @@ type Settings struct {
 	DefaultFullDayNotifications []Notification
 }
 
+// PermissionWrite is the bit of a member's Permissions that allows writing.
+// The value comes from caloxide's constants and is not confirmed by Proton's
+// own sources [claim: caloxide] (research H); E14 settles it on the live
+// account (owner, edit and view shares).
+const PermissionWrite = 8
+
+// keyFlagPrimary is the bit of a bootstrap calendar key's Flags that marks the
+// key new data is encrypted to (1 active, 2 primary; research B.3).
+const keyFlagPrimary = 2
+
+// copyMu serialises the copy of address keys: go-proton-api's and
+// go-crypto's key copy writes a serialisation cache on the first Serialize of
+// a shared key, so two concurrent copies of one key race (M4 ledger).
+var copyMu sync.Mutex
+
 // Access is an unlocked calendar: its keyring (in memory only) and our member.
 type Access struct {
 	CalendarID, MemberID, AddressID string
 	KR                              *crypto.KeyRing
-	Settings                        Settings
+	// Primary is the calendar key whose Flags include 2, alone in its ring
+	// (nil when it did not unlock): the only recipient of new key packets.
+	Primary *crypto.KeyRing
+	// Signer is the primary key of our member's address, alone in its ring
+	// (nil when the address has no unlocked primary key): it signs every part.
+	// It is a copy: Close clears it without touching the account's keys.
+	Signer *crypto.KeyRing
+	// Type is the calendar's type, from the caller (the bootstrap has none).
+	Type Type
+	// Permissions is our member's bitmask in the bootstrap.
+	Permissions int
+	// PassphraseVerified reports that the member passphrase's signature
+	// verifies, over the decrypted passphrase, with our member's address
+	// keyring (research G, ruling R17): the calendar key is ours, not one the
+	// server substituted. False is not an unlock error: the calendar stays
+	// readable.
+	PassphraseVerified bool
+	Settings           Settings
 	// Keys are the calendar keys the bootstrap lists, in its order, and
 	// whether each unlocked: they change when the calendar key rotates or a
 	// key opens again (reactivation).
@@ -45,23 +78,43 @@ type KeyState struct {
 	Unlocked bool
 }
 
-// Close clears the keyring's private parameters. It is idempotent and
+// Writable reports whether the calendar may be written (ruling M4-R1): a
+// normal calendar, our member has the Write bit, the member passphrase is
+// verified, and both write keys exist.
+func (a *Access) Writable() bool {
+	return a != nil && a.Type == Normal && a.Permissions&PermissionWrite != 0 && a.PassphraseVerified &&
+		a.Primary != nil && a.Signer != nil
+}
+
+// Close clears the keyrings' private parameters. It is idempotent and
 // nil-safe.
 func (a *Access) Close() {
-	if a == nil || a.KR == nil {
+	if a == nil {
 		return
 	}
-	a.KR.ClearPrivateParams()
-	a.KR = nil
+	if a.KR != nil {
+		a.KR.ClearPrivateParams()
+		a.KR = nil
+	}
+	if a.Primary != nil {
+		a.Primary.ClearPrivateParams()
+		a.Primary = nil
+	}
+	if a.Signer != nil {
+		a.Signer.ClearPrivateParams()
+		a.Signer = nil
+	}
 }
 
 type bootstrap struct {
-	Keys []struct{ ID, PrivateKey string }
-	// Passphrase.MemberPassphrases[].Signature is deliberately not decoded.
+	Keys []struct {
+		ID, PrivateKey string
+		Flags          int
+	}
 	Passphrase struct {
 		MemberPassphrases []struct {
-			MemberID   string
-			Passphrase string
+			MemberID              string
+			Passphrase, Signature string
 		}
 	}
 	Members          []member
@@ -70,11 +123,10 @@ type bootstrap struct {
 
 // Unlock fetches the calendar's bootstrap and unlocks its keys: our member's
 // passphrase is decrypted with the address keyrings, in address order, and
-// opens every calendar key it can (at least one must).
-//
-// TODO(E10, M4): the member passphrase signature is NOT verified here; this
-// is read-only use. It must be settled before anything is encrypted to a
-// calendar key (M4).
+// opens every calendar key it can (at least one must). The signature of that
+// passphrase is verified with the keys of our member's address (research G,
+// ruling R17): a failure leaves PassphraseVerified false, never an error.
+// cal.Type is kept in Access.Type for the write gate.
 func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) (*Access, error) {
 	var b bootstrap
 	if err := c.Get(ctx, "/calendar/v2/"+url.PathEscape(cal.ID)+"/bootstrap", nil, &b); err != nil {
@@ -92,12 +144,12 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 	if memberID == "" {
 		return nil, fmt.Errorf("calendar %s: none of our addresses is a member", cal.ID)
 	}
-	passphrase, err := decryptPassphrase(u, memberID, addressID, b)
+	passphrase, sig, err := decryptPassphrase(u, memberID, addressID, b)
 	if err != nil {
 		return nil, fmt.Errorf("calendar %s: %w", cal.ID, err)
 	}
 	defer clear(passphrase)
-	var kr *crypto.KeyRing
+	var kr, primary *crypto.KeyRing
 	states := make([]KeyState, 0, len(b.Keys))
 	for _, k := range b.Keys {
 		states = append(states, KeyState{ID: k.ID})
@@ -121,11 +173,86 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 			return nil, fmt.Errorf("calendar %s: building the keyring failed", cal.ID)
 		}
 		states[len(states)-1].Unlocked = true
+		if k.Flags&keyFlagPrimary != 0 && primary == nil {
+			primary, err = crypto.NewKeyRing(unlocked)
+			if err != nil {
+				kr.ClearPrivateParams()
+				return nil, fmt.Errorf("calendar %s: building the keyring failed", cal.ID)
+			}
+		}
 	}
 	if kr == nil {
 		return nil, fmt.Errorf("calendar %s: the passphrase unlocks no calendar key", cal.ID)
 	}
-	return &Access{CalendarID: cal.ID, MemberID: memberID, AddressID: addressID, KR: kr, Settings: b.CalendarSettings, Keys: states}, nil
+	a := &Access{CalendarID: cal.ID, MemberID: memberID, AddressID: addressID, KR: kr, Primary: primary,
+		Type: cal.Type, Settings: b.CalendarSettings, Keys: states}
+	for _, m := range b.Members {
+		if m.ID == memberID {
+			a.Permissions = m.Permissions
+		}
+	}
+	a.PassphraseVerified = verifyPassphrase(u.AddrKRs[addressID], passphrase, sig)
+	a.Signer = primarySigner(u, addressID)
+	return a, nil
+}
+
+// verifyPassphrase checks the detached armored signature sig over the
+// decrypted passphrase with addrKR; any failure, a missing signature
+// included, is false.
+func verifyPassphrase(addrKR *crypto.KeyRing, passphrase []byte, sig string) bool {
+	if addrKR == nil || sig == "" {
+		return false
+	}
+	s, err := crypto.NewPGPSignatureFromArmored(sig)
+	if err != nil {
+		return false
+	}
+	return addrKR.VerifyDetached(crypto.NewPlainMessage(passphrase), s, crypto.GetUnixTime()) == nil
+}
+
+// primarySigner returns a ring holding a copy of the primary key of address
+// addressID, matched by fingerprint among the unlocked keys of its keyring;
+// nil when there is none. The copy is made under copyMu.
+func primarySigner(u *keys.Unlocked, addressID string) *crypto.KeyRing {
+	kr := u.AddrKRs[addressID]
+	if kr == nil {
+		return nil
+	}
+	var primaryFP string
+	for _, a := range u.Addresses {
+		if a.ID != addressID {
+			continue
+		}
+		for _, k := range a.Keys {
+			if !k.Primary {
+				continue
+			}
+			// go-proton-api decodes the armor: PrivateKey is the binary key.
+			if key, err := crypto.NewKey(k.PrivateKey); err == nil {
+				primaryFP = key.GetFingerprint()
+			}
+		}
+	}
+	if primaryFP == "" {
+		return nil
+	}
+	copyMu.Lock()
+	defer copyMu.Unlock()
+	for _, k := range kr.GetKeys() {
+		if k.GetFingerprint() != primaryFP {
+			continue
+		}
+		c, err := k.Copy()
+		if err != nil {
+			return nil
+		}
+		ring, err := crypto.NewKeyRing(c)
+		if err != nil {
+			return nil
+		}
+		return ring
+	}
+	return nil
 }
 
 func ownsEmail(u *keys.Unlocked, email string) bool {
@@ -141,14 +268,14 @@ func ownsEmail(u *keys.Unlocked, email string) bool {
 // with the member's address keyring first, then every other address keyring in
 // address order, since the passphrase may be encrypted to any of them. Library errors are dropped so
 // no armor or key detail reaches the message.
-func decryptPassphrase(u *keys.Unlocked, memberID, addressID string, b bootstrap) ([]byte, error) {
+func decryptPassphrase(u *keys.Unlocked, memberID, addressID string, b bootstrap) (plain []byte, sig string, err error) {
 	for _, e := range b.Passphrase.MemberPassphrases {
 		if e.MemberID != memberID {
 			continue
 		}
 		msg, err := crypto.NewPGPMessageFromArmored(e.Passphrase)
 		if err != nil {
-			return nil, errors.New("the member passphrase is not valid PGP")
+			return nil, "", errors.New("the member passphrase is not valid PGP")
 		}
 		for _, a := range addressOrder(u.Addresses, addressID) {
 			kr, ok := u.AddrKRs[a.ID]
@@ -159,11 +286,11 @@ func decryptPassphrase(u *keys.Unlocked, memberID, addressID string, b bootstrap
 			if err != nil {
 				continue
 			}
-			return plain.GetBinary(), nil
+			return plain.GetBinary(), e.Signature, nil
 		}
-		return nil, errors.New("no address key decrypts the member passphrase")
+		return nil, "", errors.New("no address key decrypts the member passphrase")
 	}
-	return nil, errors.New("no passphrase for our member")
+	return nil, "", errors.New("no passphrase for our member")
 }
 
 // addressOrder returns addrs with the address first listed first, the rest in

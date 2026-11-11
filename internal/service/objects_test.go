@@ -651,3 +651,81 @@ func TestServeStopsWhileAReadUnlocksKeys(t *testing.T) {
 		t.Errorf("the read = %v, want it served (from the file once Serve ended)", err)
 	}
 }
+
+// Would fail if ReadOnly were still "type is normal" (M3-R15), ignored the
+// Write bit, the passphrase verification or a calendar whose keys do not
+// unlock.
+func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
+	t.Parallel()
+	t.Run("permissions and types", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		owner := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Owner"})
+		editor := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Editor", Permissions: 8})
+		viewer := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Viewer", Permissions: 2 | 4})
+		busy := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Busy", Permissions: 1})
+		hol := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		odd := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Odd", Type: 7})
+		locked := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Locked", BrokenPassphrase: true})
+		e.login(t, e.req())
+		e.sync(t, false)
+		for id, want := range map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true} {
+			if got := e.collection(t, id).ReadOnly; got != want {
+				t.Errorf("calendar %s: ReadOnly = %v, want %v", id, got, want)
+			}
+		}
+		// The CLI listing follows the same gate.
+		byID := map[string]bool{}
+		for _, c := range e.calendars(t) {
+			byID[c.ID] = c.ReadOnly
+		}
+		if byID[editor] || !byID[viewer] || byID[owner] {
+			t.Errorf("calendar list read-only flags = %v", byID)
+		}
+	})
+	t.Run("bad passphrase signature", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{BadPassphraseSignature: true})
+		id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+		e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		e.sync(t, false)
+		if !e.collection(t, id).ReadOnly {
+			t.Error("a calendar whose passphrase signature fails is writable")
+		}
+		// Still readable: the objects decrypt.
+		lacks(t, "a@x", e.objects(t, id, "a@x")["a@x"].Data, "X-PCB-PLACEHOLDER")
+	})
+}
+
+// Would fail if the write gate were not among the render inputs: a permission
+// change would leave ETags, CTag and token alone and clients would keep a
+// stale privilege set.
+func TestWritabilityChangeIsSeenByClients(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	before := e.collection(t, id)
+	etags, tok := e.listing(t, id)
+	if before.ReadOnly {
+		t.Fatal("precondition: the calendar starts writable")
+	}
+	e.f.SetPermissions(id, 2) // the owner downgrades us to a viewer
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	after := e.collection(t, id)
+	etags2, tok2 := e.listing(t, id)
+	if !after.ReadOnly {
+		t.Error("the downgrade did not make the collection read only")
+	}
+	if after.CTag == before.CTag || after.SyncToken == before.SyncToken || tok2 == tok || etags2["a@x"] == etags["a@x"] {
+		t.Errorf("a writability change left CTag %q->%q, token %q->%q, ETag %q->%q",
+			before.CTag, after.CTag, tok, tok2, etags["a@x"], etags2["a@x"])
+	}
+	s.stop(t)
+}

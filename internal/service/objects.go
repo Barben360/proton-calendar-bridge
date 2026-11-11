@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -139,7 +140,11 @@ func errKeysDropped() error { return blocked("the login changed during the read"
 // reason. A failure that is not the calendar's own (network, Proton
 // unavailable, the session) is returned and nothing is kept, so the next
 // read tries again.
-func (l *Local) ensureKeys(ctx context.Context, ids []string) error {
+//
+// cals gives each calendar's type, from the cache (the bootstrap has none): it
+// feeds the write gate.
+func (l *Local) ensureKeys(ctx context.Context, cals map[string]calendar.Type) error {
+	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.has(ids) {
 		return nil
 	}
@@ -149,11 +154,12 @@ func (l *Local) ensureKeys(ctx context.Context, ids []string) error {
 		return nil
 	}
 	return l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
-		return l.loadKeys(ctx, c, acc, ids)
+		return l.loadKeys(ctx, c, acc, cals)
 	})
 }
 
-func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, ids []string) error {
+func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, cals map[string]calendar.Type) error {
+	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.beforeLoad != nil {
 		l.r.beforeLoad()
 	}
@@ -198,7 +204,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		if fresh[id] != nil || (cur != nil && cur.cals[id] != nil) {
 			continue
 		}
-		a, err := calendar.Unlock(ctx, c, u, calendar.Calendar{ID: id})
+		a, err := calendar.Unlock(ctx, c, u, calendar.Calendar{ID: id, Type: cals[id]})
 		switch {
 		case err == nil:
 			fresh[id] = newCalKeys(id, a, addrTags)
@@ -242,7 +248,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		return nil, errClosed()
 	}
 	var known []cache.Calendar
-	var ids []string
+	ids := map[string]calendar.Type{}
 	err := l.withCache(func(db *cache.Cache) error {
 		cals, err := db.Calendars(ctx)
 		if err != nil {
@@ -251,7 +257,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		known = cals
 		for _, c := range cals {
 			if !c.SyncedAt.IsZero() {
-				ids = append(ids, c.ID)
+				ids[c.ID] = calendar.ParseType(c.Type)
 			}
 		}
 		return nil
@@ -270,8 +276,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	out := make([]Collection, 0, len(known))
 	err = l.withCache(func(db *cache.Cache) error {
 		for _, c := range known {
-			coll := Collection{ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description,
-				ReadOnly: c.Type != calendar.Normal.String(), Pending: c.SyncedAt.IsZero()}
+			// A calendar not synced yet has no keys: read only until it is.
+			coll := Collection{ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description, ReadOnly: true,
+				Pending: c.SyncedAt.IsZero()}
 			if coll.Pending {
 				out = append(out, coll)
 				continue
@@ -280,6 +287,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 			if ck == nil {
 				return errKeysDropped()
 			}
+			// The write gate (ruling M4-R1, replacing M3-R1): calendars whose
+			// keys did not unlock are read only too.
+			coll.ReadOnly = !ck.access.Writable()
 			var epoch string
 			var seq int64
 			if err := db.Snapshot(ctx, c.ID, func(v cache.View) error {
@@ -307,14 +317,16 @@ func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.C
 	if l.closed.Load() {
 		return errClosed()
 	}
+	var typ calendar.Type
 	err := l.withCache(func(db *cache.Cache) error {
-		_, err := syncedCalendar(ctx, db, calID)
+		c, err := syncedCalendar(ctx, db, calID)
+		typ = calendar.ParseType(c.Type)
 		return l.fail(err)
 	})
 	if err != nil {
 		return err
 	}
-	if err := l.ensureKeys(ctx, []string{calID}); err != nil {
+	if err := l.ensureKeys(ctx, map[string]calendar.Type{calID: typ}); err != nil {
 		return err
 	}
 	return l.withCache(func(db *cache.Cache) error {

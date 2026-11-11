@@ -253,6 +253,19 @@ func (f *Fake) SetDefaultNotifications(id string, partDay, fullDay []Notificatio
 	rec.def.PartDayNotifications, rec.def.FullDayNotifications = partDay, fullDay
 }
 
+// SetPermissions changes our member's bitmask in the calendar, as when its
+// owner changes the share (research H); 0 serves 127 again.
+func (f *Fake) SetPermissions(id string, perms int) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil {
+		f.t.Fatalf("protontest: unknown calendar %q", id)
+	}
+	rec.def.Permissions = perms
+}
+
 // EncryptToCalendar encrypts plaintext to the calendar's primary key and
 // returns the armored message.
 func (f *Fake) EncryptToCalendar(id string, plaintext []byte) string {

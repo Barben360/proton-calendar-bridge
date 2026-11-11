@@ -100,10 +100,15 @@ func newCalKeys(calID string, a *calendar.Access, addrTags []string) *calKeys {
 		calTags = append(calTags, keyTag(k.ID, k.Unlocked))
 	}
 	slices.Sort(calTags)
+	// Writable is an input too (ruling M4-R1): a change of the member's
+	// permissions, of the type or of the passphrase verification must change
+	// the ETags and the token generation, so clients re-read the calendar's
+	// privileges.
 	settings, _ := json.Marshal(struct {
 		PartDay, FullDay          json.RawMessage
 		CalendarKeys, AddressKeys []string
-	}{partDay, fullDay, calTags, addrTags})
+		Writable                  bool
+	}{partDay, fullDay, calTags, addrTags, a.Writable()})
 	return &calKeys{access: a, settings: settings, hash: settingsHash(settings), gen: tokenGen(calID, settings),
 		partDay: partDay, fullDay: fullDay}
 }

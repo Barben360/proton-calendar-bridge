@@ -18,7 +18,13 @@ import (
 // unlocked keys.
 func session(t *testing.T) (*protontest.Fake, *api.Client, *keys.Unlocked) {
 	t.Helper()
-	f := protontest.New(t, protontest.Options{})
+	return sessionWith(t, protontest.Options{})
+}
+
+// sessionWith is session on a fake with options.
+func sessionWith(t *testing.T, o protontest.Options) (*protontest.Fake, *api.Client, *keys.Unlocked) {
+	t.Helper()
+	f := protontest.New(t, o)
 	m := auth.NewManager(f.URL, "Other")
 	t.Cleanup(m.Close)
 	p, err := auth.Begin(t.Context(), m, f.Username, []byte(f.Password), "")
@@ -155,5 +161,20 @@ func TestListIsNotCached(t *testing.T) {
 	cals, err := calendar.List(t.Context(), c)
 	if err != nil || len(cals) != 2 {
 		t.Fatalf("got %d calendars, %v; want the fresh list of 2", len(cals), err)
+	}
+}
+
+// Would fail if an unknown type name parsed as Normal (writable).
+func TestParseTypeRoundTripsAndFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []calendar.Type{calendar.Normal, calendar.Subscribed, calendar.Holidays, 7} {
+		if got := calendar.ParseType(typ.String()); got != typ {
+			t.Errorf("ParseType(%q) = %d, want %d", typ.String(), got, typ)
+		}
+	}
+	for _, s := range []string{"", "bogus", "type 0", "type x"} {
+		if got := calendar.ParseType(s); got == calendar.Normal || !got.ReadOnly() {
+			t.Errorf("ParseType(%q) = %d: must not be a writable type", s, got)
+		}
 	}
 }
