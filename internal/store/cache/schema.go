@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS events_seq ON events (calendar_id, seq);
 CREATE TABLE IF NOT EXISTS tombstones (
 	calendar_id TEXT NOT NULL,
 	id          TEXT NOT NULL,
+	uid         TEXT NOT NULL DEFAULT '',
 	seq         INTEGER NOT NULL,
 	PRIMARY KEY (calendar_id, id)
 ) WITHOUT ROWID;

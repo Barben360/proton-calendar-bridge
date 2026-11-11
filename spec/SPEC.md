@@ -275,8 +275,11 @@ cache records its account in `meta` and is emptied when opened for another):
 - `events`: per row, calendar ID, event ID, UID, start, end, full-day flag,
   recurrence ID, RRULE, `LastEditTime`, ETag, a change sequence number and
   `raw`, the row exactly as Proton returned it (ciphertext parts and
-  plaintext fields). Plus `tombstones` (deleted IDs with their sequence) so a
-  later sync-token read can report deletions.
+  plaintext fields). Plus `tombstones` (deleted IDs with the row's UID and their
+  sequence, indexed by calendar and sequence) so a later sync-token read can
+  report deletions; M3's CalDAV resources are per UID, so a deletion is
+  reported as a 404 for the UID's href (R16). `Changes(calendar, since)`
+  reads the writes and tombstones after a sequence number, in order.
 - Not stored in M2: members, settings, key material (the key chain stays in
   M1's sealed store and is re-derived per session).
 - **Nothing decrypted is ever written.** Event decryption, the JSCalendar model

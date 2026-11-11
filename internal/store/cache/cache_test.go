@@ -849,14 +849,17 @@ func TestDeferResyncLastsUntilAFullListing(t *testing.T) {
 	}
 }
 
-// A version 1 file from before calendars.resync existed gains it on Open.
-func TestOpenAddsTheResyncColumn(t *testing.T) {
+// A version 1 file from before calendars.resync and tombstones.uid existed
+// gains them on Open.
+func TestOpenAddsTheLateColumns(t *testing.T) {
 	c, path := openNew(t)
 	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.db.ExecContext(bg, `ALTER TABLE calendars DROP COLUMN resync`); err != nil {
-		t.Fatal(err)
+	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN resync`, `ALTER TABLE tombstones DROP COLUMN uid`} {
+		if _, err := c.db.ExecContext(bg, q); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_ = c.Close()
 	c = openAt(t, path, "acct-1")
@@ -866,5 +869,61 @@ func TestOpenAddsTheResyncColumn(t *testing.T) {
 	}
 	if err := c.DeferResync(bg, "cal", "row"); err != nil {
 		t.Errorf("DeferResync after the upgrade: %v", err)
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal", "c2", nil, time.Unix(101, 0)); err != nil {
+		t.Errorf("tombstoning after the upgrade: %v", err)
+	}
+	if ch, err := c.Changes(bg, "cal", 0); err != nil || len(ch) != 1 || ch[0].UID != "e1@proton" {
+		t.Errorf("Changes after the upgrade = %+v, %v", ch, err)
+	}
+}
+
+// Ruling R16: a tombstone carries the deleted row's UID (M3's CalDAV
+// resources are per UID), and Changes reads a calendar's writes and
+// tombstones after a counter value, in counter order.
+func TestTombstonesCarryTheUIDAndChangesReadsThem(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1), row("e2", 1), row("e3", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReplaceCalendar(bg, "other", "c1", []Row{row("x1", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	since := seq(t, c)
+	if _, err := c.ApplyDelta(bg, "cal", "c2", []Row{row("e2", 2)}, []string{"e1"}, time.Unix(101, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal", "c3", []Row{row("e2", 2)}, time.Unix(102, 0)); err != nil { // tombstones e3
+		t.Fatal(err)
+	}
+	var uid string
+	if err := c.db.QueryRowContext(bg, `SELECT uid FROM tombstones WHERE calendar_id = 'cal' AND id = 'e1'`).Scan(&uid); err != nil || uid != "e1@proton" {
+		t.Errorf("tombstone uid = %q, %v; want e1@proton", uid, err)
+	}
+	got, err := c.Changes(bg, "cal", since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Change{
+		{ID: "e2", UID: "e2@proton", Seq: since + 1},
+		{ID: "e1", UID: "e1@proton", Seq: since + 2, Deleted: true},
+		{ID: "e3", UID: "e3@proton", Seq: since + 3, Deleted: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Changes = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Changes[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if all, err := c.Changes(bg, "cal", 0); err != nil || len(all) != 3 { // e2 rewritten, e1 and e3 gone
+		t.Errorf("Changes since 0 = %+v, %v; want the 3 current entries", all, err)
+	}
+	if none, err := c.Changes(bg, "cal", seq(t, c)); err != nil || len(none) != 0 {
+		t.Errorf("Changes since the head = %+v, %v; want none", none, err)
 	}
 }

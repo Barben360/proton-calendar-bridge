@@ -187,7 +187,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`: %w", path, version, schemaVersion, ErrNewerSchema)
 	}
 	if version == schemaVersion {
-		if err := c.addResyncColumn(ctx); err != nil {
+		if err := c.addLateColumns(ctx); err != nil {
 			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 		}
 	}
@@ -265,17 +265,32 @@ func (c *Cache) Epoch(ctx context.Context) (string, error) {
 	return e, nil
 }
 
-// addResyncColumn adds calendars.resync to a version 1 file written before
-// it existed (M2 development builds, before the schema was released).
-func (c *Cache) addResyncColumn(ctx context.Context) error {
-	var n int
-	if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name = 'resync'`).Scan(&n); err != nil || n == 1 {
-		return err
+// lateColumns were added to schema version 1 before it was released (M2
+// development builds wrote files without them).
+var lateColumns = []struct{ table, column, def string }{
+	{"calendars", "resync", "TEXT NOT NULL DEFAULT ''"},
+	{"tombstones", "uid", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// addLateColumns adds the lateColumns a version 1 file lacks.
+func (c *Cache) addLateColumns(ctx context.Context) error {
+	has := func(table, column string) (bool, error) {
+		var n int
+		err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n)
+		return n == 1, err
 	}
-	if _, err := c.db.ExecContext(ctx, `ALTER TABLE calendars ADD COLUMN resync TEXT NOT NULL DEFAULT ''`); err != nil {
-		// Another process may have added it first.
-		if qerr := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name = 'resync'`).Scan(&n); qerr != nil || n != 1 {
-			return err
+	for _, lc := range lateColumns {
+		if ok, err := has(lc.table, lc.column); err != nil || ok {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := c.db.ExecContext(ctx, `ALTER TABLE `+lc.table+` ADD COLUMN `+lc.column+` `+lc.def); err != nil {
+			// Another process may have added it first.
+			if ok, qerr := has(lc.table, lc.column); qerr != nil || !ok {
+				return err
+			}
 		}
 	}
 	return nil
@@ -532,11 +547,13 @@ func (w *writer) tombstone(id string, known map[string]string) error {
 	if _, ok := known[id]; !ok {
 		return nil
 	}
-	if _, err := w.tx.ExecContext(w.ctx, `DELETE FROM events WHERE calendar_id = ? AND id = ?`, w.cal, id); err != nil {
+	var uid string
+	if err := w.tx.QueryRowContext(w.ctx, `DELETE FROM events WHERE calendar_id = ? AND id = ? RETURNING uid`, w.cal, id).Scan(&uid); err != nil {
 		return err
 	}
-	if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO tombstones (calendar_id, id, seq) VALUES (?, ?, ?)
-		ON CONFLICT(calendar_id, id) DO UPDATE SET seq = excluded.seq`, w.cal, id, w.next()); err != nil {
+	// The UID names the deleted CalDAV resource (ruling R16).
+	if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO tombstones (calendar_id, id, uid, seq) VALUES (?, ?, ?, ?)
+		ON CONFLICT(calendar_id, id) DO UPDATE SET uid = excluded.uid, seq = excluded.seq`, w.cal, id, uid, w.next()); err != nil {
 		return err
 	}
 	delete(known, id)
@@ -725,6 +742,36 @@ func (c *Cache) Events(ctx context.Context, calID string) ([]Event, error) {
 			e.RecurrenceID = &rec.Int64
 		}
 		out = append(out, e)
+	}
+	return out, c.classify(rows.Err())
+}
+
+// Change is one entry of Changes: a row written (Deleted false) or
+// tombstoned at counter value Seq.
+type Change struct {
+	ID, UID string
+	Seq     int64
+	Deleted bool
+}
+
+// Changes lists the calendar's rows written and tombstones recorded after
+// counter value since, in counter order (what a sync token "epoch:since"
+// asks for). A row written several times appears once, at its last write.
+func (c *Cache) Changes(ctx context.Context, calID string, since int64) ([]Change, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT id, uid, seq, 0 FROM events WHERE calendar_id = ? AND seq > ?
+		UNION ALL SELECT id, uid, seq, 1 FROM tombstones WHERE calendar_id = ? AND seq > ?
+		ORDER BY 3`, calID, since, calID, since)
+	if err != nil {
+		return nil, c.classify(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Change
+	for rows.Next() {
+		var ch Change
+		if err := rows.Scan(&ch.ID, &ch.UID, &ch.Seq, &ch.Deleted); err != nil {
+			return nil, c.classify(err)
+		}
+		out = append(out, ch)
 	}
 	return out, c.classify(rows.Err())
 }
