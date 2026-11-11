@@ -261,6 +261,7 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
+Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5).
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).
 

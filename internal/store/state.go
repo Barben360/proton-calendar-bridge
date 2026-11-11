@@ -61,6 +61,9 @@ func LoadState(stateDir string) (State, error) {
 	if err := dec.Decode(&s); err != nil {
 		return State{}, fmt.Errorf("%s is malformed: %w", statePath(stateDir), err)
 	}
+	if dec.More() {
+		return State{}, fmt.Errorf("%s is malformed: data after the JSON value", statePath(stateDir))
+	}
 	switch s.Phase {
 	case PhaseLoggedOut, PhaseReady, PhaseNeedsCaptcha, PhaseNeedsLogin:
 		return s, nil

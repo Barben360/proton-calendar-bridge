@@ -50,6 +50,7 @@ func TestStateMalformedFailsClosed(t *testing.T) {
 		"garbage":       "{not json",
 		"unknown phase": `{"phase":"banana"}`,
 		"empty phase":   `{}`,
+		"trailing data": `{"phase":"ready"} {"phase":"ready"}`,
 		"unknown field": `{"phase":"ready","password":"x"}`,
 	} {
 		dir := t.TempDir()

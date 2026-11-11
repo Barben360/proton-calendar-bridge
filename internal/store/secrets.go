@@ -17,7 +17,9 @@ import (
 const secretsVersion = 1
 
 // Secrets is the sealed store of accounts (SPEC C2). The file only holds an
-// envelope and one sealed blob; the key stays with the Sealer.
+// envelope and one sealed blob; the key stays with the Sealer. Restoring an
+// older secrets.sealed is not detected (no rollback protection yet; a
+// generation counter is planned for M5).
 type Secrets struct {
 	Path     string // secrets.sealed
 	LockPath string // secrets.lock
@@ -94,7 +96,7 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 		return err
 	}
 	if len(accounts) == 0 {
-		return s.Wipe()
+		return s.wipe()
 	}
 	plain, err := json.Marshal(accounts)
 	if err != nil {
@@ -112,9 +114,21 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 	return atomicfile.Write(s.Path, out)
 }
 
-// Wipe removes the sealed file, for a store that can no longer be opened.
-// A missing file is not an error.
-func (s *Secrets) Wipe() error {
+// Wipe removes the sealed file under the store lock, for a store that can no
+// longer be opened. A missing file is not an error.
+func (s *Secrets) Wipe(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := filelock.Lock(ctx, s.LockPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.wipe()
+}
+
+func (s *Secrets) wipe() error {
 	if err := os.Remove(s.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

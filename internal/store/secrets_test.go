@@ -129,13 +129,13 @@ func TestWipeRemovesUnreadableStore(t *testing.T) {
 	if err := os.Remove(f.key); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.secrets.Wipe(); err != nil {
+	if err := f.secrets.Wipe(ctx(t)); err != nil {
 		t.Fatal(err)
 	}
 	if m, err := f.secrets.Load(); err != nil || len(m) != 0 {
 		t.Fatalf("after wipe: %v, %v", m, err)
 	}
-	if err := f.secrets.Wipe(); err != nil { // nothing left: not an error
+	if err := f.secrets.Wipe(ctx(t)); err != nil { // nothing left: not an error
 		t.Fatal(err)
 	}
 }
@@ -262,5 +262,26 @@ func TestAccountNeverPrintsSecrets(t *testing.T) {
 	}
 	if got := fmt.Sprintf("%v", a); got != "store.Account(id=user…, redacted)" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestWipeWaitsForTheStoreLock(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.secrets, fullAccount("userA"))
+	unlock := lockFor(t, f)
+	c, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := f.secrets.Wipe(c); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(f.secrets.Path); err != nil {
+		t.Fatalf("store removed while locked: %v", err)
+	}
+	unlock()
+	if err := f.secrets.Wipe(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.secrets.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("store still there: %v", err)
 	}
 }

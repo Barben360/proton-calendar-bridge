@@ -47,6 +47,8 @@ Y = protects, N = does not. Statements marked (man) come from systemd-creds(1) a
 
 Plain reading: host-key credentials are no stronger than a 0600 key file against root or a same-user process. They help against casual disclosure and data-only backups, which a key file on a separate path also does. Only TPM2 binding, or a keyring encrypted under a strong login password (both untested here), helps against offline theft without FDE.
 
+Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5).
+
 ### Container (reasoned, no container run)
 
 - A container has its own PID/mount namespaces and, by default, no `/run/systemd`, no host `/run/user/<uid>/bus`, no `/dev/tpmrm0`; a slim image has no systemd-creds and no PID 1 systemd. Reaching host systemd-creds or the session bus needs socket/device mounts that defeat isolation: not supported.

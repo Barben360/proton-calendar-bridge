@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 )
 
 const keySize = 32
@@ -139,8 +140,66 @@ func (k *KeyFile) create() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Link(tmp.Name(), k.Path); err != nil && !errors.Is(err, fs.ErrExist) {
-		return err
+	err = link(tmp.Name(), k.Path)
+	switch {
+	case err == nil:
+		syncDir(dir)
+	case errors.Is(err, fs.ErrExist):
+		err = nil // another writer won: its key stands
+	case noHardLinks(err):
+		err = k.createExclusive(dir, key)
+	default:
+		return fmt.Errorf("creating key file %s: %w", k.Path, err)
+	}
+	if err != nil {
+		return fmt.Errorf("creating key file %s: %w", k.Path, err)
 	}
 	return nil
+}
+
+// createExclusive is the fallback for filesystems without hard links: the
+// final path is created exclusively, then written. A reader that wins the
+// race sees a short file, which read refuses by its exact size.
+func (k *KeyFile) createExclusive(dir string, key []byte) error {
+	f, err := os.OpenFile(k.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(key); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
+// link is os.Link; tests replace it.
+var link = os.Link
+
+// noHardLinks reports whether err says the filesystem cannot hard link.
+func noHardLinks(err error) bool {
+	for _, e := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV, syscall.EMLINK} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// syncDir fsyncs a directory, best effort.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }

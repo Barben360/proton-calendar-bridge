@@ -1,5 +1,7 @@
 // Package seal encrypts small secrets at rest. A Sealer holds the key
 // outside the sealed data; the aad binds a blob to the record it belongs to.
+// Protection is at rest only: keys and plaintext are not zeroed in memory
+// (Go copies them).
 package seal
 
 import "errors"
