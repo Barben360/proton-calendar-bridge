@@ -133,8 +133,8 @@ type Changes struct{ Added, Updated, Deleted int }
 type Cache struct {
 	db       *sql.DB
 	readOnly bool
-	// noMeta: the file lacks the calendars' color and description columns
-	// (a read-only handle on a file no writer upgraded yet).
+	// noMeta: the file lacks the calendars' color, description and floor
+	// columns (a read-only handle on a file no writer upgraded yet).
 	noMeta bool
 }
 
@@ -283,6 +283,9 @@ var lateColumns = []struct{ table, column, def string }{
 	// Added in M3 (released M2 files lack them): CalDAV collections show them.
 	{"calendars", "color", "TEXT NOT NULL DEFAULT ''"},
 	{"calendars", "description", "TEXT NOT NULL DEFAULT ''"},
+	// Added in M3 (ruling M3-R12): see createCalendar. Existing calendars get
+	// 0: every position they ever had stays valid.
+	{"calendars", "floor", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // addLateColumns adds the lateColumns a version 1 file lacks.
@@ -436,10 +439,10 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 		return ErrNoCache
 	}
 	var n int
-	if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name IN ('color', 'description')`).Scan(&n); err != nil {
+	if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('calendars') WHERE name IN ('color', 'description', 'floor')`).Scan(&n); err != nil {
 		return fmt.Errorf("cache: %w", c.classify(err))
 	}
-	c.noMeta = n != 2
+	c.noMeta = n != 3
 	return nil
 }
 
@@ -487,11 +490,12 @@ func readSeq(ctx context.Context, q querier) (int64, error) {
 
 // writer is a transaction's view of one calendar's writes.
 type writer struct {
-	ctx context.Context
-	tx  *sql.Tx
-	cal string
-	seq int64
-	ch  Changes
+	ctx   context.Context
+	tx    *sql.Tx
+	cal   string
+	start int64 // the counter before this write
+	seq   int64
+	ch    Changes
 }
 
 func (c *Cache) begin(ctx context.Context, tx *sql.Tx, cal string) (*writer, error) {
@@ -502,7 +506,7 @@ func (c *Cache) begin(ctx context.Context, tx *sql.Tx, cal string) (*writer, err
 	if err != nil {
 		return nil, err
 	}
-	return &writer{ctx: ctx, tx: tx, cal: cal, seq: seq}, nil
+	return &writer{ctx: ctx, tx: tx, cal: cal, start: seq, seq: seq}, nil
 }
 
 func (w *writer) next() int64 { w.seq++; return w.seq }
@@ -580,15 +584,21 @@ func (w *writer) tombstone(id string, known map[string]string) error {
 }
 
 func (w *writer) finish(cursor string, at time.Time, full bool) error {
-	if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO meta (key, value) VALUES ('seq', ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.FormatInt(w.seq, 10)); err != nil {
+	created, floor, err := createCalendar(w.ctx, w.tx, w.cal, w.start)
+	if err != nil {
+		return err
+	}
+	if created && w.seq == w.start {
+		w.seq = floor // no row took the floor's value: the creation does
+	}
+	if err := writeSeq(w.ctx, w.tx, w.seq); err != nil {
 		return err
 	}
 	fullAt := int64(0)
 	if full {
 		fullAt = at.Unix()
 	}
-	_, err := w.tx.ExecContext(w.ctx, `INSERT INTO calendars (id, cursor, full_at, synced_at) VALUES (?, ?, ?, ?)
+	_, err = w.tx.ExecContext(w.ctx, `INSERT INTO calendars (id, cursor, full_at, synced_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, synced_at = excluded.synced_at,
 		full_at = CASE WHEN ? THEN excluded.full_at ELSE calendars.full_at END,
 		resync = CASE WHEN ? THEN '' ELSE calendars.resync END`,
@@ -706,12 +716,45 @@ func (c *Cache) PutCalendar(ctx context.Context, cal Calendar) error {
 	if cal.ID == "" {
 		return errors.New("cache: empty calendar ID")
 	}
-	_, err := c.db.ExecContext(ctx, `INSERT INTO calendars (id, name, type, color, description, error)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, color = excluded.color,
-			description = excluded.description, error = excluded.error`,
-		cal.ID, cal.Name, cal.Type, cal.Color, cal.Description, cal.Error)
-	return c.classify(err)
+	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
+		seq, err := readSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		created, floor, err := createCalendar(ctx, tx, cal.ID, seq)
+		if err != nil {
+			return err
+		}
+		if created {
+			if err := writeSeq(ctx, tx, floor); err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE calendars SET name = ?, type = ?, color = ?, description = ?, error = ? WHERE id = ?`,
+			cal.Name, cal.Type, cal.Color, cal.Description, cal.Error, cal.ID)
+		return err
+	}))
+}
+
+// createCalendar inserts calendar id's row when it has none, with a floor
+// one past seq, the counter's value: the creation takes that value (the
+// caller stores it as the counter), so every position of a former calendar
+// of the same ID is below the floor and no token of that life is answered
+// (ruling M3-R12). created is false when the row exists.
+func createCalendar(ctx context.Context, tx *sql.Tx, id string, seq int64) (created bool, floor int64, err error) {
+	floor = seq + 1
+	res, err := tx.ExecContext(ctx, `INSERT INTO calendars (id, floor) VALUES (?, ?) ON CONFLICT(id) DO NOTHING`, id, floor)
+	if err != nil {
+		return false, 0, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, floor, err
+}
+
+func writeSeq(ctx context.Context, tx *sql.Tx, seq int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('seq', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.FormatInt(seq, 10))
+	return err
 }
 
 // DeferResync records that the calendar needs a full listing it could not

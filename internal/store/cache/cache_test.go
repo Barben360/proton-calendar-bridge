@@ -858,7 +858,7 @@ func TestOpenAddsTheLateColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN resync`, `ALTER TABLE tombstones DROP COLUMN uid`,
-		`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`} {
+		`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`, `ALTER TABLE calendars DROP COLUMN floor`} {
 		if _, err := c.db.ExecContext(bg, q); err != nil {
 			t.Fatal(err)
 		}
@@ -886,14 +886,17 @@ func TestOpenAddsTheLateColumns(t *testing.T) {
 	}
 }
 
-// A read-only handle never upgrades a file: on an M2 file (no colour or
-// description yet) it reads the calendars without them.
+// A read-only handle never upgrades a file: on an M2 file (no colour,
+// description or floor yet) it reads the calendars and snapshots without them.
 func TestReadOnlyReadsCalendarsOfAnM2File(t *testing.T) {
 	c, path := openNew(t)
 	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "kept", Color: "#abcdef"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`} {
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`ALTER TABLE calendars DROP COLUMN color`, `ALTER TABLE calendars DROP COLUMN description`, `ALTER TABLE calendars DROP COLUMN floor`} {
 		if _, err := c.db.ExecContext(bg, q); err != nil {
 			t.Fatal(err)
 		}
@@ -906,6 +909,14 @@ func TestReadOnlyReadsCalendarsOfAnM2File(t *testing.T) {
 	defer func() { _ = ro.Close() }()
 	if cals, err := ro.Calendars(bg); err != nil || len(cals) != 1 || cals[0].Name != "kept" || cals[0].Color != "" {
 		t.Errorf("read-only Calendars of an M2 file = %+v, %v", cals, err)
+	}
+	if err := ro.Snapshot(bg, "cal", func(v View) error {
+		if v.Floor() != 0 || v.MaxSeq() == 0 {
+			t.Errorf("snapshot of an M2 file: floor %d, max seq %d; want 0 and the row's", v.Floor(), v.MaxSeq())
+		}
+		return nil
+	}); err != nil {
+		t.Errorf("read-only Snapshot of an M2 file: %v", err)
 	}
 }
 

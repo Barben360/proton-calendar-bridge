@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS calendars (
 	error     TEXT NOT NULL DEFAULT '',
 	resync    TEXT NOT NULL DEFAULT '',
 	color       TEXT NOT NULL DEFAULT '',
-	description TEXT NOT NULL DEFAULT ''
+	description TEXT NOT NULL DEFAULT '',
+	floor       INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS events (
 	calendar_id   TEXT NOT NULL CHECK (calendar_id <> ''),

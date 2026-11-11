@@ -44,6 +44,10 @@ type View interface {
 	// ChangedSince cannot name those deletions, so a sync token whose seq is
 	// below this value is invalid (403 valid-sync-token, full resync).
 	UnnamedTombstoneSeq() int64
+	// Floor is the counter value the calendar's row took when it was
+	// created (0 for a calendar older than floors): no position below it
+	// belongs to this calendar's life (ruling M3-R12).
+	Floor() int64
 	// Groups returns every UID of the calendar with its rows, ordered by UID.
 	Groups() ([]Group, error)
 	// Group returns one UID's rows; false when it has no live row.
@@ -71,6 +75,10 @@ func (c *Cache) Snapshot(ctx context.Context, calID string, fn func(View) error)
 	}
 	defer func() { _ = tx.Rollback() }()
 	v := &view{c: c, ctx: ctx, tx: tx, cal: calID}
+	floor := `COALESCE((SELECT floor FROM calendars WHERE id = ?1), 0)`
+	if c.noMeta {
+		floor = `0`
+	}
 	// modernc honours TxOptions.ReadOnly with a deferred BEGIN, whatever the
 	// DSN's _txlock says (tx.go), so no second handle is needed.
 	// The first read fixes the snapshot, so the fixed values are read first.
@@ -83,7 +91,8 @@ func (c *Cache) Snapshot(ctx context.Context, calID string, fn func(View) error)
 	if err := tx.QueryRowContext(ctx, `SELECT
 		MAX(COALESCE((SELECT MAX(seq) FROM events WHERE calendar_id = ?1), 0), COALESCE((SELECT MAX(seq) FROM tombstones WHERE calendar_id = ?1), 0)),
 		COALESCE((SELECT MIN(seq) FROM tombstones WHERE calendar_id = ?1), 0),
-		COALESCE((SELECT MAX(seq) FROM tombstones WHERE calendar_id = ?1 AND uid = ''), 0)`, calID).Scan(&v.maxSeq, &v.minTomb, &v.unnamed); err != nil {
+		COALESCE((SELECT MAX(seq) FROM tombstones WHERE calendar_id = ?1 AND uid = ''), 0),
+		`+floor, calID).Scan(&v.maxSeq, &v.minTomb, &v.unnamed, &v.floor); err != nil {
 		return c.classify(err)
 	}
 	err = fn(v)
@@ -103,6 +112,7 @@ type view struct {
 	maxSeq  int64
 	minTomb int64
 	unnamed int64
+	floor   int64
 	ended   bool
 }
 
@@ -110,6 +120,7 @@ func (v *view) Epoch() string              { return v.epoch }
 func (v *view) MaxSeq() int64              { return v.maxSeq }
 func (v *view) MinTombstoneSeq() int64     { return v.minTomb }
 func (v *view) UnnamedTombstoneSeq() int64 { return v.unnamed }
+func (v *view) Floor() int64               { return v.floor }
 
 // errEnded is returned by a View used after its Snapshot callback returned.
 var errEnded = errors.New("cache: snapshot used after it ended")

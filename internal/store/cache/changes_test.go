@@ -342,3 +342,46 @@ func TestEventsUIDIndexExistsAlsoOnOldFiles(t *testing.T) {
 		t.Error("opening an existing file did not add events_uid")
 	}
 }
+
+// Ruling M3-R12: a calendar row records, when it is created, a floor past
+// every counter value already used, so a calendar dropped and created again
+// under the same ID never answers a position of its former life.
+func TestFloorIsSetWhenTheCalendarIsCreated(t *testing.T) {
+	c, _ := openNew(t)
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work"}); err != nil {
+		t.Fatal(err)
+	}
+	var floor0 int64
+	snap(t, c, "cal", func(v View) { floor0 = v.Floor() })
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{urow("e1", "u1", 0, 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	var before, floor1 int64
+	snap(t, c, "cal", func(v View) { before, floor1 = v.MaxSeq(), v.Floor() })
+	if floor1 != floor0 || floor0 >= before {
+		t.Errorf("floor %d then %d (max seq %d): an update must keep the floor set at creation, below the rows", floor0, floor1, before)
+	}
+	if err := c.DropCalendar(bg, "cal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work"}); err != nil {
+		t.Fatal(err)
+	}
+	var again int64
+	snap(t, c, "cal", func(v View) { again = v.Floor() })
+	if again <= before {
+		t.Errorf("floor after re-creation = %d, want above %d (every value of the former life)", again, before)
+	}
+	// A calendar first created by a write (no PutCalendar) gets one too.
+	if _, err := c.ReplaceCalendar(bg, "new", "c1", []Row{urow("n1", "u1", 0, 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	var nf, nmax int64
+	snap(t, c, "new", func(v View) { nf, nmax = v.Floor(), v.MaxSeq() })
+	if nf <= again || nf > nmax {
+		t.Errorf("floor of a calendar created by its first write = %d, want above %d and at most its row's %d", nf, again, nmax)
+	}
+}
