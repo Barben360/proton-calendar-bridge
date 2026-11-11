@@ -73,7 +73,7 @@ func TestProbeFeedRecordsRedacted(t *testing.T) {
 	if !strings.Contains(string(row), "<redacted:len=") || !strings.Contains(string(row), `"Type": 3`) {
 		t.Errorf("part kept as shape only (type kept, Data/Signature redacted): %s", row)
 	}
-	// Every request carried the saved access token, none ever left argv/URL.
+	// No secret leaked into a request path.
 	for _, line := range paths(f, 0) {
 		if strings.Contains(line, "s3cr3t") {
 			t.Errorf("secret in a request path: %s", line)

@@ -241,3 +241,13 @@ func TestRedactTwentyCharThreshold(t *testing.T) {
 		t.Errorf("got %v", m)
 	}
 }
+
+func TestRedactHidesAuthorEmail(t *testing.T) {
+	out, err := JSON([]byte(`{"Code":1000,"CalendarEvents":[{"Type":2,"Author":"jane@example.test"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "jane@example.test") || !strings.Contains(string(out), "<redacted:len=17>") {
+		t.Errorf("Author must be redacted whole: %s", out)
+	}
+}

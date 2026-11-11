@@ -1,6 +1,6 @@
 # E04 — Calendar change feed (`modelevents`)
 
-Source-based, **pending live run**. Feeds C4 sync (`internal/syncer`), SPEC §5.5 and §8.1. Evidence: `raw/m2-feed-research.md` (third-party clients, none Proton-documented; citations are file:line in each project). Confidence marks: `[verified]` = read in source, `[claim]` = the author's own statement, not reproduced by us, `[inferred]` = ours, `[unknown]`.
+Source-based, **pending live run**. Feeds C4 sync (`internal/syncer`), SPEC §5.5 and §8.1. Evidence: `raw/m2-feed-research.md` (third-party clients, none Proton-documented; citations are file:line in each project). Confidence marks: `[source]` = read in a third-party project's source (never `[verified: live]`, which only a run on the test account earns), `[claim]` = the author's own statement, not reproduced by us, `[inferred]` = ours, `[unknown]`.
 
 ## Question
 
@@ -10,21 +10,21 @@ How does `GET /calendar/v1/{cal}/modelevents/{cursor}` behave: payload, cursor s
 
 | Point | Evidence | Mark |
 |---|---|---|
-| Endpoints: `modelevents/latest` gives `{CalendarModelEventID}`; `modelevents/{cursor}` gives `{CalendarModelEventID, More, Refresh, CalendarEvents:[{ID, Action, Event?}]}` | caloxide `protonmail/calendar.go:363-405`; jmdlab `internal/proton/delta.go:50-87`; carbonate `internal/caldav/store.go:130-205` | verified (3 clients agree) |
-| One feed per calendar (ID in path); no account-wide calendar feed | jmdlab `store.go:70-80`; caloxide `poller.go:41` | verified |
-| `Action`: 0 delete, 1 create, 2 update | caloxide `events.go:39-46`; jmdlab `delta.go:28-30` | verified |
-| `Event` payload of create/update is metadata only, no encrypted cards; delete has none | jmdlab `delta.go:21-26`, caloxide `calendar.go:351-361`, secondhand from WebClients; no captured response in any repo | claim; shape unknown |
-| Every client re-reads the full row by ID before use | jmdlab `delta.go:147`, caloxide `poller.go:157` | verified |
-| carbonate ignores `Action`, looks every ID up; jmdlab treats a row GET 404 after Action 1/2 as delete | carbonate `store.go:171-180`; jmdlab `delta.go:147-153` | verified |
-| `latest` is a head, not a consumed position; polling from `latest` with no change returns nothing and the same cursor | carbonate `store.go:150-168` ("measured against a live account"); jmdlab `delta.go:131-134` | claim |
-| Pitfall: the cursor returned when reading at `latest` sat past changes not yet issued; adopting it lost events. Persist `latest` itself as baseline | carbonate `docs/ARCHITECTURE.md:176-190` ("measured") | claim, one source |
-| Baseline `latest` taken before the full listing; replays are harmless if upserts are idempotent | jmdlab `poller.go:206-224` | verified; rule inferred |
-| Lag of "a second or two" between a write and the feed | carbonate `docs/ARCHITECTURE.md:196-205` | claim |
-| Paging: loop while `More != 0`; caps seen: jmdlab 1000 pages, carbonate 20 pages then full re-read | caloxide `poller.go:72-111`; jmdlab `delta.go:108-139`; carbonate `store.go:171-205` | verified |
-| `Refresh != 0` means discard and full resync | caloxide `poller.go:94-100`, jmdlab `delta.go:119-122`, carbonate `store.go:195-199` | verified; bit values unknown |
+| Endpoints: `modelevents/latest` gives `{CalendarModelEventID}`; `modelevents/{cursor}` gives `{CalendarModelEventID, More, Refresh, CalendarEvents:[{ID, Action, Event?}]}` | caloxide `protonmail/calendar.go:363-405`; jmdlab `internal/proton/delta.go:50-87`; carbonate `internal/caldav/store.go:130-205` | [source] (3 clients agree) |
+| One feed per calendar (ID in path); no account-wide calendar feed | jmdlab `store.go:70-80`; caloxide `poller.go:41` | [source] |
+| `Action`: 0 delete, 1 create, 2 update | caloxide `events.go:39-46`; jmdlab `delta.go:28-30` | [source] |
+| `Event` payload of create/update is metadata only, no encrypted cards; delete has none | jmdlab `delta.go:21-26`, caloxide `calendar.go:351-361`, secondhand from WebClients; no captured response in any repo | [claim]; shape unknown |
+| Every client re-reads the full row by ID before use | jmdlab `delta.go:147`, caloxide `poller.go:157` | [source] |
+| carbonate ignores `Action`, looks every ID up; jmdlab treats a row GET 404 after Action 1/2 as delete | carbonate `store.go:171-180`; jmdlab `delta.go:147-153` | [source] |
+| `latest` is a head, not a consumed position; polling from `latest` with no change returns nothing and the same cursor | carbonate `store.go:150-168` ("measured against a live account"); jmdlab `delta.go:131-134` | [claim] |
+| Pitfall: the cursor returned when reading at `latest` sat past changes not yet issued; adopting it lost events. Persist `latest` itself as baseline | carbonate `docs/ARCHITECTURE.md:176-190` ("measured") | [claim], one source |
+| Baseline `latest` taken before the full listing; replays are harmless if upserts are idempotent | jmdlab `poller.go:206-224` | [source]; rule inferred |
+| Lag of "a second or two" between a write and the feed | carbonate `docs/ARCHITECTURE.md:196-205` | [claim] |
+| Paging: loop while `More != 0`; caps seen: jmdlab 1000 pages, carbonate 20 pages then full re-read | caloxide `poller.go:72-111`; jmdlab `delta.go:108-139`; carbonate `store.go:171-205` | [source] |
+| `Refresh != 0` means discard and full resync | caloxide `poller.go:94-100`, jmdlab `delta.go:119-122`, carbonate `store.go:195-199` | [source]; bit values unknown |
 | Cursor too old: no source documents the answer; carbonate treats any error on the cursor GET as "read everything"; jmdlab and caloxide retry forever | carbonate `store.go:195-200`; caloxide `calendar.go:365`, jmdlab `delta.go:21-23` | server behaviour unknown |
-| Cadence: caloxide 30 s per calendar (backoff to 10 min); jmdlab 60 s for all calendars, full resync every 6 h | caloxide `poller.go:13-27`; jmdlab `poller.go:28,67-70` | verified |
-| Push (`GET /event-notifier/v1/events`, SSE): caloxide's author saw 404 on 2026-10-29 and no `PingOMatic` flag; mail only | caloxide `FORK.md:112-135`, `notifier.go:19-64` | claim; dormant |
+| Cadence: caloxide 30 s per calendar (backoff to 10 min); jmdlab 60 s for all calendars, full resync every 6 h | caloxide `poller.go:13-27`; jmdlab `poller.go:28,67-70` | [source] |
+| Push (`GET /event-notifier/v1/events`, SSE): caloxide's author saw 404 on 2026-10-29 and no `PingOMatic` flag; mail only | caloxide `FORK.md:112-135`, `notifier.go:19-64` | [claim]; dormant |
 
 ## What the engine assumes (M2, all `[assumed → E04]`)
 

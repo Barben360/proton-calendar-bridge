@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -188,20 +189,8 @@ func feedCmd() *cobra.Command {
 				return cli.Finish(cmd, nil, "", err)
 			}
 			defer s.Close()
-			enter := make(chan struct{}, 1)
-			go func() {
-				_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
-				enter <- struct{}{}
-			}()
 			res, err := probe.Feed(cmd.Context(), s, rec, calendar, func(ctx context.Context) error {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Feed head recorded. Edit the calendar in the web app now; press Enter when done (or wait %s).\n", wait)
-				select {
-				case <-time.After(wait):
-				case <-enter:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-				return nil
+				return waitForEdits(ctx, cmd.InOrStdin(), wait, cmd.ErrOrStderr())
 			})
 			if err != nil {
 				return cli.Finish(cmd, nil, "", err)
@@ -220,4 +209,40 @@ func feedCmd() *cobra.Command {
 	c.Flags().StringVar(&calendar, "calendar", "", "calendar ID to record (required)")
 	c.Flags().DurationVar(&wait, "wait", 2*time.Minute, "how long to wait for your edits before reading the feed")
 	return c
+}
+
+// waitForEdits waits for wait to elapse, or for a line on in when in is a
+// terminal. A stdin that is not a terminal (an agent run, </dev/null) never
+// ends the wait early: its EOF must not look like "edits done".
+func waitForEdits(ctx context.Context, in io.Reader, wait time.Duration, msg io.Writer) error {
+	enter := make(chan struct{}, 1)
+	if listensForEnter(in) {
+		fmt.Fprintf(msg, "Feed head recorded. Edit the calendar in the web app now; press Enter to stop early (or wait %s).\n", wait)
+		go func() {
+			if _, err := bufio.NewReader(in).ReadString('\n'); err == nil {
+				enter <- struct{}{}
+			}
+		}()
+	} else {
+		fmt.Fprintf(msg, "Feed head recorded. Edit the calendar in the web app now; waiting %s (stdin is not a terminal).\n", wait)
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-enter:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// listensForEnter: in is a terminal, or not a file at all (a test pipe).
+func listensForEnter(in io.Reader) bool {
+	f, ok := in.(*os.File)
+	if !ok {
+		return true
+	}
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }

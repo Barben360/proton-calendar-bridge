@@ -203,3 +203,21 @@ func TestNestedCommandNameAgreesOnSuccessAndFailure(t *testing.T) {
 		t.Errorf("failure: code %d command %v, want a failure named %q", code, failed["command"], "probe alive")
 	}
 }
+
+func TestWaitForEditsIgnoresEOFAndEndsOnALine(t *testing.T) {
+	const wait = 150 * time.Millisecond
+	start := time.Now()
+	if err := waitForEdits(t.Context(), strings.NewReader(""), wait, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < wait {
+		t.Errorf("empty stdin cut the wait short after %s, want the full %s", d, wait)
+	}
+	start = time.Now()
+	if err := waitForEdits(t.Context(), strings.NewReader("\n"), time.Minute, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("a line on stdin did not end the wait (%s)", d)
+	}
+}

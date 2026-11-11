@@ -10,11 +10,11 @@ Does `/core/v4/events/{id}` carry calendar-level changes (calendar created or de
 
 | Point | Evidence | Mark |
 |---|---|---|
-| go-proton-api models core events with only `EventID, Refresh, User, UserSettings, MailSettings, Messages, Labels, Addresses, Notifications, UsedSpace`; no calendar field; its fake server is mail only | go-proton-api `event_types.go:10-30`, `server/events.go` | verified |
-| caloxide models `Calendars` and `CalendarMembers` (`{ID, Action}`) and re-lists calendars on any entry; "a deleted member carries no calendar ID" | caloxide `protonmail/events.go:15-56`, `caldav/caldav.go:66-80` | verified code; its only test is a synthetic fixture the author wrote (`notifier_test.go:234-242`); its own comment says it was logging to "confirm whether Proton signals calendar deltas here" |
+| go-proton-api models core events with only `EventID, Refresh, User, UserSettings, MailSettings, Messages, Labels, Addresses, Notifications, UsedSpace`; no calendar field; its fake server is mail only | go-proton-api `event_types.go:10-30`, `server/events.go` | [source] |
+| caloxide models `Calendars` and `CalendarMembers` (`{ID, Action}`) and re-lists calendars on any entry; "a deleted member carries no calendar ID" | caloxide `protonmail/events.go:15-56`, `caldav/caldav.go:66-80` | [source] code; its only test is a synthetic fixture the author wrote (`notifier_test.go:234-242`); its own comment says it was logging to "confirm whether Proton signals calendar deltas here" |
 | `CalendarUserSettings` in the core event: nobody models it | grep in all repos | unknown |
-| core `latest` moves on any mail arrival: unsuitable as a calendar change token | carbonate `docs/ARCHITECTURE.md:108-112` | claim |
-| Core cadence 30 s | caloxide `caldav/standby.go:326-327` | verified |
+| core `latest` moves on any mail arrival: unsuitable as a calendar change token | carbonate `docs/ARCHITECTURE.md:108-112` | [claim] |
+| Core cadence 30 s | caloxide `caldav/standby.go:326-327` | [source] |
 
 No source captured a real core event carrying calendar data.
 
