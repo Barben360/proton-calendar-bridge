@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
 
@@ -78,4 +80,27 @@ func (c FailedCheck) Name() string { return c.Label }
 // Run implements Check.
 func (c FailedCheck) Run(context.Context) Result {
 	return Result{Name: c.Label, Status: StatusError, Message: c.Message, Fix: c.Fix}
+}
+
+// ConfigCheck verifies that config.toml, if present, loads.
+type ConfigCheck struct {
+	Path string
+	Dirs paths.Dirs
+}
+
+// Name implements Check.
+func (ConfigCheck) Name() string { return "config file" }
+
+// Run implements Check.
+func (c ConfigCheck) Run(context.Context) Result {
+	r := Result{Name: c.Name()}
+	if _, err := config.Load(c.Path, c.Dirs); err != nil {
+		r.Status, r.Message, r.Fix = StatusError, err.Error(), "edit "+shellquote.Quote(c.Path)
+		return r
+	}
+	r.Status, r.Message = StatusOK, c.Path
+	if _, err := os.Stat(c.Path); errors.Is(err, fs.ErrNotExist) {
+		r.Message = "defaults, no file"
+	}
+	return r
 }

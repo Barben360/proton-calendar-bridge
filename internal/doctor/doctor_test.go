@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
 func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
@@ -162,5 +164,33 @@ func TestFailedCheck(t *testing.T) {
 	got := doctor.FailedCheck{Label: "config dir", Message: "boom", Fix: "set HOME"}.Run(context.Background())
 	if got.Status != doctor.StatusError || got.Name != "config dir" || got.Fix != "set HOME" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDoctorConfigCheckReportsBadFile(t *testing.T) {
+	dirs := paths.Dirs{Config: t.TempDir(), State: t.TempDir()}
+	p := config.Path(dirs)
+	if err := os.WriteFile(p, []byte("[proton]\nappversion = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.ConfigCheck{Path: p, Dirs: dirs}.Run(context.Background())
+	if got.Status != doctor.StatusError || !strings.Contains(got.Message, "appversion") || got.Fix != "edit "+p {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestDoctorConfigCheckOK(t *testing.T) {
+	dirs := paths.Dirs{Config: t.TempDir(), State: t.TempDir()}
+	p := config.Path(dirs)
+	got := doctor.ConfigCheck{Path: p, Dirs: dirs}.Run(context.Background())
+	if got.Status != doctor.StatusOK || got.Message != "defaults, no file" || got.Fix != "" {
+		t.Fatalf("missing file: %+v", got)
+	}
+	if err := os.WriteFile(p, []byte("[proton]\napp_version = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.ConfigCheck{Path: p, Dirs: dirs}.Run(context.Background())
+	if got.Status != doctor.StatusOK || got.Message != p {
+		t.Fatalf("present file: %+v", got)
 	}
 }

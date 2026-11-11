@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -51,7 +52,8 @@ func doctorChecks() []doctor.Check {
 	}
 	return append(checks,
 		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
-		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700})
+		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700},
+		doctor.ConfigCheck{Path: config.Path(dirs), Dirs: dirs})
 }
 
 var marks = map[doctor.Status]string{
