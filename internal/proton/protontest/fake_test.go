@@ -2,6 +2,7 @@ package protontest_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -118,5 +119,36 @@ func TestSuccessesCarryCode1000(t *testing.T) {
 	a := login(t, f, f.Username, f.Password)
 	if status, code, _ := getUser(t, f, a); status != 200 || code != 1000 {
 		t.Fatalf("answer = %d/%d, want 200/1000", status, code)
+	}
+}
+
+func TestSetCaptchaChallengesLaterLogins(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	_ = login(t, f, f.Username, f.Password) // no challenge yet
+	f.SetCaptcha("T9")
+	m := gpa.New(gpa.WithHostURL(f.URL), gpa.WithAppVersion("Other"), gpa.WithRetryCount(0))
+	t.Cleanup(m.Close)
+	_, _, err := m.NewClientWithLogin(t.Context(), f.Username, []byte(f.Password))
+	var ae *gpa.APIError
+	if !errors.As(err, &ae) || ae.Code != 9001 {
+		t.Fatalf("login after SetCaptcha: %v, want a 9001 challenge", err)
+	}
+}
+
+func TestTOTPCodesRecordsSubmittedCodes(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{TwoFA: true})
+	m := gpa.New(gpa.WithHostURL(f.URL), gpa.WithAppVersion("Other"), gpa.WithRetryCount(0))
+	t.Cleanup(m.Close)
+	c, _, err := m.NewClientWithLogin(t.Context(), f.Username, []byte(f.Password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.Auth2FA(t.Context(), gpa.Auth2FAReq{TwoFactorCode: "123456"})
+	_ = c.Auth2FA(t.Context(), gpa.Auth2FAReq{TwoFactorCode: "654321"})
+	if got := f.TOTPCodes(); len(got) != 2 || got[0] != "123456" || got[1] != "654321" {
+		t.Fatalf("TOTPCodes = %q", got)
 	}
 }

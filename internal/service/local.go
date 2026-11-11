@@ -38,14 +38,15 @@ type Options struct {
 	Sleep  func(ctx context.Context, d time.Duration) error
 }
 
-// Local is the in-process API. Operations that change the login run one at a
-// time; Status reads the files without waiting for them.
+// Local is the in-process API. Operations that change the login (an
+// unattended relogin included) run one at a time; Status reads the files
+// without waiting for them.
 type Local struct {
 	o       Options
 	secrets *store.Secrets
 	mgr     *gpa.Manager
 
-	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout and Close
+	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
 	waiting atomic.Bool // pending != nil, readable without mu
 	closed  atomic.Bool
@@ -90,16 +91,22 @@ func (l *Local) keyFile() string { return l.o.Config.Secrets.KeyFile }
 
 func (l *Local) fail(err error) error { return mapError(err, l.keyFile()) }
 
-// client returns an API client on tokens that refreshes them like the manager.
+// client returns an API client on tokens that refreshes them in memory only:
+// for a session not (or no longer) sealed, such as a login in progress or a
+// session being revoked. The stored session uses session (refreshStored).
 func (l *Local) client(tokens api.Tokens) *api.Client {
+	return l.newClient(tokens, func(ctx context.Context, stale api.Tokens) (api.Tokens, error) {
+		return auth.Refresh(ctx, l.mgr, stale)
+	})
+}
+
+func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.Tokens) (api.Tokens, error)) *api.Client {
 	return api.New(tokens, api.Options{
 		BaseURL:    l.o.Config.Proton.BaseURL,
 		AppVersion: l.o.Config.Proton.AppVersion,
 		HTTP:       l.o.HTTP,
 		Sleep:      l.o.Sleep,
-		Refresh: func(ctx context.Context, stale api.Tokens) (api.Tokens, error) {
-			return auth.Refresh(ctx, l.mgr, stale)
-		},
+		Refresh:    refresh,
 	})
 }
 
@@ -200,14 +207,6 @@ func (l *Local) Status(context.Context) (Status, error) {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
 	}
 	return s, nil
-}
-
-// Calendars implements API. Task 9 fills it in.
-func (l *Local) Calendars(context.Context) ([]Calendar, error) {
-	if l.closed.Load() {
-		return nil, errClosed()
-	}
-	return nil, blocked("listing calendars is not available yet", "wait for the next release")
 }
 
 // Close implements API: it aborts a login waiting for its code and releases

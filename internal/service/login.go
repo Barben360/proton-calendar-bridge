@@ -23,6 +23,7 @@ type pendingLogin struct {
 	username   string
 	password   []byte
 	unattended bool
+	relogin    bool        // an unattended relogin, not a person's login
 	totpURI    string      // the otpauth:// URI, when one was given
 	tries      int         // 2FA codes Proton rejected so far
 	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
@@ -247,9 +248,14 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		return LoginResult{}, storeError(err, l.keyFile())
 	}
 	pl.sealed = true
+	// LastLogin is a person's last login; an unattended relogin only moves
+	// LastRelogin.
 	st := store.State{
 		AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 		LastLogin: now, LastRelogin: pl.last.LastRelogin,
+	}
+	if pl.relogin {
+		st.LastLogin, st.LastRelogin = pl.last.LastLogin, now
 	}
 	if err := store.SaveState(l.o.Dirs.State, st); err != nil {
 		// Put the secrets back as they were, so the stored session stays the

@@ -50,7 +50,7 @@ type Options struct {
 	BadLoginProof    bool // POST /auth/v4 returns a wrong ServerProof
 	// Captcha, when set, makes POST /auth/v4 answer 422/9001 with this token
 	// unless the request carries it (x-pm-human-verification-token, type
-	// captcha).
+	// captcha). SetCaptcha changes it later.
 	Captcha        string
 	CaptchaMethods []string         // offered with Captcha; default ["captcha"]
 	Now            func() time.Time // clock for TOTP; default time.Now
@@ -79,6 +79,8 @@ type Fake struct {
 	unlocked  map[string]bool      // UIDs holding the locked scope
 	users     map[string]string    // username → user ID
 	passwords map[string]string    // username → password
+	captcha   string               // Options.Captcha, changed by SetCaptcha
+	codes     []string             // 2FA codes received, in order
 
 	cal calendars
 }
@@ -134,6 +136,7 @@ func New(t testing.TB, o Options) *Fake {
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)
 	}
+	f.captcha = o.Captcha
 	f.proxy.ModifyResponse = f.fixResponse
 	f.AddUser(f.Username, f.Password)
 	ts := httptest.NewServer(http.HandlerFunc(f.serve))
@@ -199,6 +202,21 @@ func (f *Fake) FailNext(method, path string, status, code, retryAfter int) {
 	f.failures[key] = append(f.failures[key], failure{status, code, retryAfter})
 }
 
+// SetCaptcha makes later logins answer the CAPTCHA challenge token, like
+// Options.Captcha; "" stops challenging.
+func (f *Fake) SetCaptcha(token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.captcha = token
+}
+
+// TOTPCodes returns the 2FA codes received so far, in order.
+func (f *Fake) TOTPCodes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.codes...)
+}
+
 // AccessTokens returns every access token the fake has handed out, expired or
 // not, so a test can check that none leaks into a message.
 func (f *Fake) AccessTokens() []string {
@@ -247,7 +265,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case expired:
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
 	case route == "POST /auth/v4" && f.challenged(r):
-		WriteChallenge(w, f.o.Captcha, f.o.CaptchaMethods)
+		WriteChallenge(w, f.captchaToken(), f.o.CaptchaMethods)
 	case strings.HasPrefix(r.URL.Path, "/calendar/") || route == "GET /settings/calendar":
 		f.serveCalendar(w, r)
 	case route == "POST /auth/v4/2fa":
@@ -276,9 +294,16 @@ func (f *Fake) popFailure(route string) (failure, bool) {
 	return q[0], true
 }
 
+func (f *Fake) captchaToken() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.captcha
+}
+
 func (f *Fake) challenged(r *http.Request) bool {
-	return f.o.Captcha != "" &&
-		(r.Header.Get("x-pm-human-verification-token") != f.o.Captcha ||
+	token := f.captchaToken()
+	return token != "" &&
+		(r.Header.Get("x-pm-human-verification-token") != token ||
 			r.Header.Get("x-pm-human-verification-token-type") != "captcha")
 }
 
@@ -296,6 +321,9 @@ func (f *Fake) twoFA(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct{ TwoFactorCode string }
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	f.mu.Lock()
+	f.codes = append(f.codes, req.TwoFactorCode)
+	f.mu.Unlock()
 	now := f.o.Now()
 	if !f.o.TwoFA || (req.TwoFactorCode != f.totp.Code(now) && req.TwoFactorCode != f.totp.Code(now.Add(-30*time.Second))) {
 		reply(w, http.StatusUnprocessableEntity, CodeTOTPWrong, "Incorrect code")

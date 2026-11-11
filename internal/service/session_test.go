@@ -1,0 +1,288 @@
+package service_test
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
+)
+
+// loginUnattended logs in with unattended relogin (and the TOTP URI when the
+// fake has 2FA).
+func (e *env) loginUnattended(t *testing.T, twoFA bool) {
+	t.Helper()
+	r := e.req()
+	r.UnattendedRelogin = true
+	if twoFA {
+		r.TOTP = e.f.TOTPURI
+	}
+	e.login(t, r)
+}
+
+// editAccount changes the sealed account in place.
+func (e *env) editAccount(t *testing.T, fn func(a *store.Account)) {
+	t.Helper()
+	id := e.f.UserID(e.f.Username)
+	err := e.secrets().Update(t.Context(), func(m map[string]store.Account) error {
+		a := m[id]
+		fn(&a)
+		m[id] = a
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *env) files(t *testing.T) (state, sealed []byte) {
+	t.Helper()
+	state, err := os.ReadFile(filepath.Join(e.dirs.State, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err = os.ReadFile(e.secrets().Path); err != nil {
+		t.Fatal(err)
+	}
+	return state, sealed
+}
+
+func (e *env) phase(t *testing.T) string {
+	t.Helper()
+	s, err := e.svc.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Phase
+}
+
+// logins counts the SRP attempts (POST /auth/v4/info and POST /auth/v4).
+func (e *env) logins() int {
+	return e.f.Calls("POST", "/auth/v4/info") + e.f.Calls("POST", "/auth/v4")
+}
+
+func TestExpiredAccessTokenRefreshesAndPersists(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.login(t, e.req())
+	before := e.account(t)
+	e.f.ExpireAccessTokens()
+	if got := e.calendars(t); len(got) != 1 {
+		t.Fatalf("calendars = %+v", got)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Fatalf("%d refreshes, want 1", n)
+	}
+	after := e.account(t)
+	if after.UID != before.UID || after.AccessToken == before.AccessToken || after.RefreshToken == before.RefreshToken {
+		t.Fatal("the rotated tokens were not sealed")
+	}
+	// Another process starts from the sealed tokens: no refresh needed.
+	other := e.open(t)
+	if _, err := other.Calendars(t.Context()); err != nil {
+		t.Fatalf("Calendars from a new service: %v", err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Errorf("%d refreshes after the restart, want still 1", n)
+	}
+}
+
+// Two processes share the state directory and the expired token: the refresh
+// runs once, under the secrets lock, and the second adopts its tokens.
+func TestConcurrentRefreshAcrossProcessesRefreshesOnce(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.login(t, e.req())
+	e.f.ExpireAccessTokens()
+	a, b := e.open(t), e.open(t) // separate fds, so separate flocks
+	// Hold the secrets lock until both have been refused with the old token,
+	// so both reach the refresh with the same stale tokens.
+	unlock, err := filelock.Lock(t.Context(), e.secrets().LockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := e.f.Calls("GET", "/core/v4/users")
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, s := range []*service.Local{a, b} {
+		wg.Go(func() { _, errs[i] = s.Calendars(ctx) })
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for e.f.Calls("GET", "/core/v4/users") < users+2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // let both answers (401) arrive
+	unlock()
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("process %d: %v", i, err)
+		}
+	}
+	if n := e.f.Calls("POST", "/auth/v4/refresh"); n != 1 {
+		t.Errorf("%d refreshes, want 1", n)
+	}
+	minted := e.f.AccessTokens()
+	acc := e.account(t)
+	if acc.AccessToken != minted[len(minted)-1] || !sessionAlive(t, e, tokensOf(acc)) {
+		t.Error("the store does not hold the newest tokens")
+	}
+}
+
+func TestTransientRefreshFailureKeepsSession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.loginUnattended(t, false)
+	e.clk.advance(2 * time.Minute) // a relogin would be allowed
+	e.f.ExpireAccessTokens()
+	e.f.FailNext("POST", "/auth/v4/refresh", 503, 0, 0)
+	state, sealed := e.files(t)
+	logins := e.logins()
+	_, err := e.svc.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.Blocked)
+	if s, x := e.files(t); !bytes.Equal(s, state) || !bytes.Equal(x, sealed) {
+		t.Error("state.json or secrets.sealed changed after a transient failure")
+	}
+	if n := e.logins() - logins; n != 0 {
+		t.Errorf("%d login requests, want 0 (no relogin)", n)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d logouts, want 0", n)
+	}
+}
+
+func TestSessionEndedWithoutReloginNeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	logins := e.logins()
+	_, err := e.svc.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "run pcb login" {
+		t.Errorf("hint = %q, want run pcb login", ee.Hint)
+	}
+	if p := e.phase(t); p != "needs-login" {
+		t.Errorf("phase = %q, want needs-login", p)
+	}
+	if n := e.logins() - logins; n != 0 {
+		t.Errorf("%d login requests without unattended relogin", n)
+	}
+}
+
+func TestUnattendedReloginRepairsSession(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+	e.loginUnattended(t, true)
+	old := e.account(t)
+	e.f.RevokeSessions()
+	e.clk.advance(61 * time.Second)
+	at := e.clk.Now()
+	srp := e.f.Calls("POST", "/auth/v4")
+	if got := e.calendars(t); len(got) != 1 || got[0].Keys != "ok" {
+		t.Fatalf("calendars = %+v", got)
+	}
+	if n := e.f.Calls("POST", "/auth/v4") - srp; n != 1 {
+		t.Errorf("%d new POST /auth/v4, want 1", n)
+	}
+	codes := e.f.TOTPCodes()
+	if want := code(t, e.f.TOTPURI, at); len(codes) == 0 || codes[len(codes)-1] != want {
+		t.Errorf("relogin 2FA code = %q, want the seed's code at Now", codes)
+	}
+	st := e.loadState(t)
+	if st.Phase != store.PhaseReady || !st.LastRelogin.Equal(at) || !st.LastLogin.Equal(t0) || !st.Unattended {
+		t.Errorf("state = %+v, want ready, relogin at %v, login at %v", st, at, t0)
+	}
+	acc := e.account(t)
+	if acc.UID == old.UID || !sessionAlive(t, e, tokensOf(acc)) || acc.Relogin == nil {
+		t.Error("the new session is not what is sealed, or the relogin credentials were dropped")
+	}
+}
+
+func TestReloginStopsAfterHumanNeeded(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, phase, hint string
+		human             func(e *env, t *testing.T)
+	}{
+		{"captcha", "needs-captcha", "pcb login resume --captcha-token T9", func(e *env, _ *testing.T) { e.f.SetCaptcha("T9") }},
+		{"changed password", "needs-login", "pcb login", func(e *env, t *testing.T) {
+			e.editAccount(t, func(a *store.Account) { a.Relogin.Password = "wrong-" + a.Relogin.Password })
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, protontest.Options{})
+			e.loginUnattended(t, false)
+			e.f.RevokeSessions()
+			c.human(e, t)
+			e.clk.advance(61 * time.Second)
+			srp := e.f.Calls("POST", "/auth/v4")
+			_, err := e.svc.Calendars(t.Context())
+			if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, c.hint) {
+				t.Errorf("hint = %q, want %q", ee.Hint, c.hint)
+			}
+			if p := e.phase(t); p != c.phase {
+				t.Errorf("phase = %q, want %q", p, c.phase)
+			}
+			e.clk.advance(2 * time.Minute)
+			_, err = e.svc.Calendars(t.Context())
+			if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, c.hint) {
+				t.Errorf("second call: hint = %q, want %q", ee.Hint, c.hint)
+			}
+			if n := e.f.Calls("POST", "/auth/v4") - srp; n != 1 {
+				t.Errorf("%d login attempts, want exactly 1", n)
+			}
+		})
+	}
+}
+
+func TestReloginThrottled(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.loginUnattended(t, false)
+	e.clk.advance(30 * time.Second)
+	e.f.RevokeSessions()
+	state, _ := e.files(t)
+	logins := e.logins()
+	_, err := e.svc.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.Blocked)
+	if n := e.logins() - logins; n != 0 {
+		t.Errorf("%d login requests within the guard window", n)
+	}
+	if s, _ := e.files(t); !bytes.Equal(s, state) {
+		t.Error("state.json changed after a throttled relogin")
+	}
+}
+
+func TestChangedPasswordNeedsLogin(t *testing.T) {
+	t.Parallel()
+	const reason = "account keys no longer unlock (password changed?)"
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.editAccount(t, func(a *store.Account) { a.KeyPass = []byte("not-the-key-passphrase") })
+	_, err := e.svc.Calendars(t.Context())
+	ee := wantExit(t, err, exitcode.MustAct)
+	if !strings.Contains(ee.Error(), reason) || !strings.Contains(ee.Hint, "pcb login") {
+		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
+	}
+	s, serr := e.svc.Status(t.Context())
+	if serr != nil || s.Phase != "needs-login" || s.Reason != reason {
+		t.Errorf("status = %+v, %v", s, serr)
+	}
+}

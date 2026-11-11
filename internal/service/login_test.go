@@ -667,14 +667,6 @@ func TestStatusUnreadableSecretsNeedsLogin(t *testing.T) {
 	}
 }
 
-// Task 9 replaces this stub's expectation with the real listing.
-func TestCalendarsNotYetAvailableIsAnExitError(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t, protontest.Options{})
-	_, err := e.svc.Calendars(t.Context())
-	_ = wantExit(t, err, exitcode.Blocked)
-}
-
 // TestEveryErrorIsAnExitError walks the failure paths of the API: each error
 // is an *exitcode.Error with the mapped code and a hint, and none carries a
 // password, a TOTP seed or a token.
@@ -693,6 +685,16 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 				mod(&r)
 			}
 			_, err := e.svc.Login(t.Context(), r)
+			return err
+		}
+	}
+	// calendars runs setup (which logs in), then lists the calendars.
+	calendars := func(setup func(*testing.T, *env)) func(*testing.T, *env) error {
+		return func(t *testing.T, e *env) error {
+			if setup != nil {
+				setup(t, e)
+			}
+			_, err := e.svc.Calendars(t.Context())
 			return err
 		}
 	}
@@ -776,10 +778,43 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			_, err := e.svc.SubmitTOTP(t.Context(), "otpauth://totp/x?secret=!!!")
 			return err
 		}},
-		{"calendars", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
-			_, err := e.svc.Calendars(t.Context())
-			return err
-		}},
+		{"calendars logged out", protontest.Options{}, exitcode.MustAct, calendars(nil)},
+		{"refresh transient", protontest.Options{}, exitcode.Blocked, calendars(func(t *testing.T, e *env) {
+			e.login(t, e.req())
+			e.f.ExpireAccessTokens()
+			e.f.FailNext("POST", "/auth/v4/refresh", 503, 0, 0)
+		})},
+		{"calendars session ended", protontest.Options{}, exitcode.MustAct, calendars(func(t *testing.T, e *env) {
+			e.login(t, e.req())
+			e.f.RevokeSessions()
+		})},
+		{"relogin captcha", protontest.Options{}, exitcode.MustAct, calendars(func(t *testing.T, e *env) {
+			e.loginUnattended(t, false)
+			e.f.RevokeSessions()
+			e.f.SetCaptcha("T9")
+			e.clk.advance(61 * time.Second)
+		})},
+		{"relogin wrong password", protontest.Options{}, exitcode.MustAct, calendars(func(t *testing.T, e *env) {
+			e.loginUnattended(t, false)
+			e.editAccount(t, func(a *store.Account) { a.Relogin.Password = "wrong-" + a.Relogin.Password })
+			e.f.RevokeSessions()
+			e.clk.advance(61 * time.Second)
+		})},
+		{"relogin totp rejected", protontest.Options{TwoFA: true}, exitcode.MustAct, calendars(func(t *testing.T, e *env) {
+			e.loginUnattended(t, true)
+			e.editAccount(t, func(a *store.Account) { a.Relogin.TOTPURI = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP" })
+			e.f.RevokeSessions()
+			e.clk.advance(61 * time.Second)
+		})},
+		{"relogin too soon", protontest.Options{}, exitcode.Blocked, calendars(func(t *testing.T, e *env) {
+			e.loginUnattended(t, false)
+			e.f.RevokeSessions()
+			e.clk.advance(30 * time.Second)
+		})},
+		{"keys no longer unlock", protontest.Options{}, exitcode.MustAct, calendars(func(t *testing.T, e *env) {
+			e.login(t, e.req())
+			e.editAccount(t, func(a *store.Account) { a.KeyPass = []byte("not-the-key-passphrase") })
+		})},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -803,6 +838,9 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			if accs, lerr := e.secrets().Load(); lerr == nil {
 				for _, a := range accs {
 					secrets = append(secrets, a.AccessToken, a.RefreshToken, string(a.KeyPass))
+					if a.Relogin != nil {
+						secrets = append(secrets, a.Relogin.Password, a.Relogin.TOTPURI, "JBSWY3DPEHPK3PXP")
+					}
 				}
 			}
 			for _, s := range secrets {
