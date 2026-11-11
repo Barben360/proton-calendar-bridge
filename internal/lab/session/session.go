@@ -29,6 +29,7 @@ const DefaultAppVersion = "Other"
 const (
 	sessionFile = "session.json"
 	hvFile      = "hv.json"
+	hvLogFile   = "hv-log.jsonl"
 )
 
 // Creds are the test account's credentials. They come from the environment.
@@ -233,6 +234,31 @@ func sendTOTP(ctx context.Context, o Options, c *proton.Client) error {
 	return nil
 }
 
+// logHV appends one line per human-verification event to hv-log.jsonl (E02's
+// data): when it happened, the challenge token's length and whether the login
+// had sent a solved token. Never the token itself. The log outlives hv.json.
+func (o Options) logHV(tokenLen int) {
+	line, _ := json.Marshal(struct {
+		At       string `json:"at"`
+		TokenLen int    `json:"token_len"`
+		Sent     bool   `json:"sent_captcha_token"`
+	}{o.now().UTC().Format(time.RFC3339), tokenLen, o.CaptchaToken != ""})
+	f, err := os.OpenFile(filepath.Join(o.StateDir, hvLogFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, err = f.Write(append(line, '\n'))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		w := o.Stderr
+		if w == nil {
+			w = os.Stderr
+		}
+		fmt.Fprintf(w, "pcb-lab: cannot append to %s: %v\n", hvLogFile, err)
+	}
+}
+
 // loginError turns a failed login into a stop the caller can act on. A
 // human-verification challenge is saved to hv.json and never retried.
 func loginError(o Options, err error) error {
@@ -242,6 +268,7 @@ func loginError(o Options, err error) error {
 		if derr != nil || d == nil || d.Token == "" {
 			return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("human verification requested without a usable token")}
 		}
+		o.logHV(len(d.Token))
 		verifyURL := "https://verify.proton.me/?methods=captcha&token=" + url.QueryEscape(d.Token)
 		info := hvInfo{Token: d.Token, URL: verifyURL, At: o.now().UTC().Format(time.RFC3339)}
 		if b, merr := json.MarshalIndent(info, "", "  "); merr == nil {

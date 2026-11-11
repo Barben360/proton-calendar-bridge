@@ -514,3 +514,78 @@ func TestTOTPWaitsForTheNextPeriod(t *testing.T) {
 		t.Fatal("vacuous: both periods give the same code")
 	}
 }
+
+func TestHVEventsAreLogged(t *testing.T) {
+	const second = "SECOND-CHALLENGE-TOKEN"
+	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
+	o := opts(t, f)
+	if _, err := session.Login(t.Context(), o); err == nil {
+		t.Fatal("expected the first HV stop")
+	}
+	// 61 s later a retry with the (stale) solved token is answered by another challenge.
+	f.Mu.Lock()
+	f.Challenge = second
+	f.Mu.Unlock()
+	o.Now = func() time.Time { return t0.Add(61 * time.Second) }
+	o.CaptchaToken = "T1"
+	if _, err := session.Login(t.Context(), o); err == nil {
+		t.Fatal("expected the second HV stop")
+	}
+
+	path := filepath.Join(o.StateDir, "hv-log.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("hv-log.jsonl: %v", err)
+	}
+	for _, secret := range []string{"T1\"", second} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("hv-log.jsonl contains the token %q: %s", secret, raw)
+		}
+	}
+	type hvLine struct {
+		At          string `json:"at"`
+		TokenLen    int    `json:"token_len"`
+		SentCaptcha bool   `json:"sent_captcha_token"`
+	}
+	var lines []hvLine
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var e hvLine
+		if err := json.Unmarshal([]byte(l), &e); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		lines = append(lines, e)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("hv-log.jsonl has %d lines, want 2: %s", len(lines), raw)
+	}
+	if lines[0].At != "2026-11-11T10:00:00Z" || lines[0].TokenLen != 2 || lines[0].SentCaptcha {
+		t.Errorf("first line = %+v", lines[0])
+	}
+	if lines[1].At != "2026-11-11T10:01:01Z" || lines[1].TokenLen != len(second) || !lines[1].SentCaptcha {
+		t.Errorf("second line = %+v", lines[1])
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("hv-log.jsonl mode = %v (%v), want 0600", fi.Mode().Perm(), err)
+	}
+}
+
+func TestSuccessfulLoginLeavesTheHVLog(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{Challenge: "T1"})
+	o := opts(t, f)
+	if _, err := session.Login(t.Context(), o); err == nil {
+		t.Fatal("expected the HV stop")
+	}
+	f.Mu.Lock()
+	f.Challenge = ""
+	f.Mu.Unlock()
+	o.Now = func() time.Time { return t0.Add(61 * time.Second) }
+	o.CaptchaToken = "T1"
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if b, err := os.ReadFile(filepath.Join(o.StateDir, "hv-log.jsonl")); err != nil || strings.Count(string(b), "\n") != 1 {
+		t.Fatalf("hv-log.jsonl = %q, %v; the event history must survive a solved challenge", b, err)
+	}
+}
