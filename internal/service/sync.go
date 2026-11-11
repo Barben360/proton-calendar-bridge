@@ -37,7 +37,7 @@ func (l *Local) lockSync() (func(), error) {
 	unlock, ok, err := filelock.TryLock(filepath.Join(l.o.Dirs.State, syncLockName))
 	switch {
 	case errors.Is(err, filelock.ErrUnsupported):
-		return nil, blocked("sync locking needs a Unix system", "run pcb on Linux or macOS")
+		return nil, final("sync locking needs a Unix system", "run pcb on Linux or macOS")
 	case err != nil:
 		return nil, blocked("cannot take the sync lock", "make sure "+l.o.Dirs.State+" is writable by this user")
 	case !ok:
@@ -100,10 +100,8 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 				onPass(last, lastErr)
 			}
 		},
-		Stop: func(err error) bool {
-			var ee *exitcode.Error
-			return errors.As(err, &ee) && ee.Code == exitcode.MustAct
-		},
+		Stop:       stopsWatch,
+		RetryAfter: retryAfter,
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil // the caller stopped the watch: a normal end

@@ -28,6 +28,41 @@ func fail(code exitcode.Code, msg, hint string) *exitcode.Error {
 	return &exitcode.Error{Code: code, Err: errors.New(msg), Hint: hint}
 }
 
+// detail is the cause of an *exitcode.Error built here when a watch needs
+// more than its code: how long Proton asked to wait, or that no retry can
+// help. Its text is the message.
+type detail struct {
+	msg        string
+	retryAfter time.Duration // Proton's Retry-After (a 429), 0 if none
+	final      bool          // a retry cannot help: a person must change something
+}
+
+func (d *detail) Error() string { return d.msg }
+
+// final is a Blocked error that no retry can fix.
+func final(msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: msg, final: true}, Hint: hint}
+}
+
+// stopsWatch reports whether a watch must stop on err: a person must act
+// (MustAct), or the failure is final (a newer cache, an unsupported system).
+func stopsWatch(err error) bool {
+	var (
+		ee *exitcode.Error
+		d  *detail
+	)
+	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && d.final)
+}
+
+// retryAfter is how long err asks a watch to wait before the next pass.
+func retryAfter(err error) time.Duration {
+	var d *detail
+	if errors.As(err, &d) {
+		return d.retryAfter
+	}
+	return 0
+}
+
 func usage(msg, hint string) *exitcode.Error   { return fail(exitcode.Usage, msg, hint) }
 func mustAct(msg, hint string) *exitcode.Error { return fail(exitcode.MustAct, msg, hint) }
 func blocked(msg, hint string) *exitcode.Error { return fail(exitcode.Blocked, msg, hint) }
@@ -102,7 +137,8 @@ func protonDown(e *api.Error) error {
 		if e.RetryAfter > 0 {
 			wait = e.RetryAfter.Round(time.Second).String()
 		}
-		return blocked("Proton is rate limiting requests", "retry in "+wait)
+		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", retryAfter: e.RetryAfter},
+			Hint: "retry in " + wait}
 	case e.Status >= 500:
 		return blocked("Proton is unavailable", "try again later")
 	}
@@ -139,7 +175,7 @@ func acquireError(err error, stateDir string) error {
 	case errors.As(err, &ee):
 		return err
 	case errors.Is(err, filelock.ErrUnsupported):
-		return blocked("login locking needs a Unix system", "run pcb on Linux or macOS")
+		return final("login locking needs a Unix system", "run pcb on Linux or macOS")
 	}
 	return blocked("cannot take the login lock", "make sure "+stateDir+" is writable by this user")
 }
@@ -171,7 +207,7 @@ func cacheFailure(err error) *exitcode.Error {
 	case errors.Is(err, cache.ErrChanged):
 		return fail(exitcode.Blocked, "the event cache changed while reading", "run the command again")
 	case errors.Is(err, cache.ErrNewerSchema):
-		return fail(exitcode.Blocked, "the event cache was written by a newer pcb", "upgrade pcb (or remove pcb.db from the state directory and run pcb sync --full)")
+		return final("the event cache was written by a newer pcb", "upgrade pcb (or remove pcb.db from the state directory and run pcb sync --full)")
 	case errors.Is(err, cache.ErrCorrupt):
 		return fail(exitcode.MustAct, "the event cache is damaged", "remove pcb.db (and its -wal and -shm files) from the state directory, then run pcb sync --full")
 	case errors.As(err, &ioe):

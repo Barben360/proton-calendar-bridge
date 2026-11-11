@@ -102,3 +102,37 @@ func TestAcquireErrorIsBlocked(t *testing.T) {
 		t.Errorf("a guard refusal was rewrapped: %v", got)
 	}
 }
+
+// What a watch reads from a mapped error: how long Proton asked to wait,
+// and whether retrying can help at all.
+func TestWatchReadsTheMappedError(t *testing.T) {
+	t.Parallel()
+	limited := mapError(&api.Error{Status: 429, RetryAfter: 20 * time.Minute}, "")
+	if got := retryAfter(limited); got != 20*time.Minute {
+		t.Errorf("retryAfter(429 with Retry-After 20m) = %v", got)
+	}
+	if h := exitcode.HintOf(limited); h != "retry in 20m0s" {
+		t.Errorf("one-shot hint = %q, want the retry-in hint kept", h)
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+		stop bool
+	}{
+		{"must act", mapError(api.ErrSessionEnded, ""), true},
+		{"newer schema", mapError(fmt.Errorf("x: %w", cache.ErrNewerSchema), ""), true},
+		{"no login locks", acquireError(filelock.ErrUnsupported, "/s"), true},
+		{"rate limited", limited, false},
+		{"Proton down", mapError(&api.Error{Status: 503}, ""), false},
+		{"network", mapError(&net.OpError{Op: "dial", Err: errors.New("refused")}, ""), false},
+		{"cache permission", mapError(&cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}, ""), false},
+		{"partial", partial("1 of 2 calendars failed to sync", "run pcb sync again"), false},
+	} {
+		if got := stopsWatch(c.err); got != c.stop {
+			t.Errorf("%s: stopsWatch = %v, want %v", c.name, got, c.stop)
+		}
+		if c.name != "rate limited" && retryAfter(c.err) != 0 {
+			t.Errorf("%s: retryAfter = %v, want 0", c.name, retryAfter(c.err))
+		}
+	}
+}

@@ -171,3 +171,38 @@ func TestWatchHonoursContext(t *testing.T) {
 		t.Errorf("cancelled before: Watch = %v after %d passes, want context.Canceled, none", err, *runs)
 	}
 }
+
+// errWait asks for a wait of its own, like a 429 with Retry-After.
+type errWait time.Duration
+
+func (e errWait) Error() string { return "rate limited" }
+
+// A failure that says how long to wait is not retried sooner, even past the
+// back-off; the wait is capped at MaxRetryAfter.
+func TestWatchHonoursRetryAfter(t *testing.T) {
+	t.Parallel()
+	m := time.Minute
+	p, _ := script(t, errWait(20*m), errWait(5*time.Hour), errWait(10*time.Second), nil, errStop)
+	var waits []time.Duration
+	err := syncer.Watch(t.Context(), p, syncer.WatchOptions{
+		Sleep: func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil },
+		Stop:  func(err error) bool { return errors.Is(err, errStop) },
+		Rand:  func() float64 { return 0.5 },
+		RetryAfter: func(err error) time.Duration {
+			var w errWait
+			if errors.As(err, &w) {
+				return time.Duration(w)
+			}
+			return 0
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("Watch = %v", err)
+	}
+	// 20 min as asked; 5 h capped at 1 h; 10 s below the 120 s back-off of a
+	// third failure; then the interval after a success.
+	want := []time.Duration{20 * m, time.Hour, 120 * time.Second, 30 * time.Second}
+	if !slices.Equal(waits, want) {
+		t.Errorf("waits %v, want %v", waits, want)
+	}
+}

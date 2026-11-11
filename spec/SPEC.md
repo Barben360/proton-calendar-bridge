@@ -332,9 +332,12 @@ relogin credentials, client tokens (hashed, never stored in clear).
   reading `latest`, then follow the feed (rules in §5.5).
 - Incremental (delivered in M2): `pcb sync` is one pass; `pcb sync --watch`
   repeats every `--interval` (default 30 s, at least 10 s, a smaller value is
-  refused with exit 2) until Ctrl-C (exit 0, R12) or until you must log in
-  again (exit 10). Session-wide failures (429, 5xx, network, session ended)
-  stop the pass and, in watch, back off x2 up to 10 min with jitter; any
+  refused with exit 2) until Ctrl-C (exit 0, R12) or until only a person can
+  fix what failed: log in again or a damaged cache (exit 10), a cache written
+  by a newer pcb or a system without file locks (exit 20). Session-wide
+  failures (429, 5xx, network, session ended) stop the pass and, in watch,
+  back off x2 up to 10 min with jitter, or wait the 429's `Retry-After` when
+  longer (up to 1 h; the one-shot `pcb sync` exits 20 with "retry in X"); any
   other per-calendar failure is recorded on that calendar, the others
   continue, and the pass exits 40 (partial); in watch a partial pass is
   reported but does not back off (the other calendars keep the interval). A calendar deferred by the

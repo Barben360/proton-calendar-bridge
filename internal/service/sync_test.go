@@ -627,3 +627,50 @@ func damageTables(t *testing.T, path string, tables ...string) {
 		}
 	}
 }
+
+// In a watch, a 429 whose Retry-After is past the client's own 60 s is
+// waited out (up to 1 h) instead of retried after the back-off; a cache
+// written by a newer pcb stops the watch (no retry can help).
+func TestWatchWaitsRetryAfterAndStopsOnANewerCache(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	e.f.FailNext("GET", "/calendar/v1", 429, 0, 20*60)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var codes []exitcode.Code
+	err := e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(_ service.SyncResult, err error) {
+		if codes = append(codes, exitcode.From(err)); len(codes) == 2 {
+			cancel()
+		}
+	})
+	if err != nil || len(codes) != 2 || codes[0] != exitcode.Blocked || codes[1] != exitcode.OK {
+		t.Fatalf("WatchSync = %v, passes %v; want a blocked pass then a good one", err, codes)
+	}
+	if len(e.clk.slept) == 0 || e.clk.slept[0] != 20*time.Minute {
+		t.Errorf("slept %v, want the 20 min Proton asked for first", e.clk.slept)
+	}
+
+	db, err := sql.Open("sqlite", cache.Path(e.dirs.State))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), `PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	slept := len(e.clk.slept)
+	passes := 0
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	err = e.svc.WatchSync(ctx, service.SyncRequest{}, 0, func(service.SyncResult, error) {
+		if passes++; passes == 3 {
+			cancel() // the watch did not stop by itself: end the test
+		}
+	})
+	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "upgrade pcb") || passes != 1 || len(e.clk.slept) != slept {
+		t.Errorf("newer cache: %v (hint %q) after %d passes, %d sleeps; want it to stop after 1 pass, no sleep",
+			ee, ee.Hint, passes, len(e.clk.slept)-slept)
+	}
+}
