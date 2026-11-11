@@ -11,10 +11,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,14 +110,17 @@ func newUnsyncedRig(t *testing.T, setup func(f *protontest.Fake)) *rig {
 
 // processTB is a testing.TB that lives as long as the test binary, for the
 // shared rig: its cleanups run in TestMain after every test. It implements
-// what protontest calls (Helper, Cleanup, Fatal, Fatalf, Errorf); any other
-// method panics on the nil embedded TB.
+// what protontest calls (Helper, Cleanup, Fatal, Fatalf, Errorf); every
+// other method panics, naming itself. The embedded TB stays nil: it only
+// supplies testing.TB's unexported method.
 type processTB struct {
 	testing.TB
 	mu       sync.Mutex
 	cleanups []func()
 	failed   bool
 }
+
+const sharedRigName = "shared caldav test rig"
 
 func (*processTB) Helper() {}
 
@@ -125,17 +130,76 @@ func (p *processTB) Cleanup(f func()) {
 	p.cleanups = append(p.cleanups, f)
 }
 
-func (*processTB) Fatal(args ...any) { panic("shared rig: " + fmt.Sprint(args...)) }
+func (*processTB) Fatal(args ...any) { panic(sharedRigName + ": Fatal: " + fmt.Sprint(args...)) }
 
 func (*processTB) Fatalf(format string, args ...any) {
-	panic("shared rig: " + fmt.Sprintf(format, args...))
+	panic(sharedRigName + ": Fatalf: " + fmt.Sprintf(format, args...))
 }
 
 func (p *processTB) Errorf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "shared rig: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, sharedRigName+": "+format+"\n", args...)
 	p.mu.Lock()
 	p.failed = true
 	p.mu.Unlock()
+}
+
+// unsupported panics for a testing.TB method processTB does not implement.
+func unsupported(method string) {
+	panic(sharedRigName + ": testing.TB." + method + " is not implemented by processTB (report_test.go); implement it there")
+}
+
+func (*processTB) ArtifactDir() string      { unsupported("ArtifactDir"); return "" }
+func (*processTB) Attr(string, string)      { unsupported("Attr") }
+func (*processTB) Error(...any)             { unsupported("Error") }
+func (*processTB) Fail()                    { unsupported("Fail") }
+func (*processTB) FailNow()                 { unsupported("FailNow") }
+func (*processTB) Failed() bool             { unsupported("Failed"); return false }
+func (*processTB) Log(...any)               { unsupported("Log") }
+func (*processTB) Logf(string, ...any)      { unsupported("Logf") }
+func (*processTB) Name() string             { unsupported("Name"); return "" }
+func (*processTB) Setenv(string, string)    { unsupported("Setenv") }
+func (*processTB) Chdir(string)             { unsupported("Chdir") }
+func (*processTB) Skip(...any)              { unsupported("Skip") }
+func (*processTB) SkipNow()                 { unsupported("SkipNow") }
+func (*processTB) Skipf(string, ...any)     { unsupported("Skipf") }
+func (*processTB) Skipped() bool            { unsupported("Skipped"); return false }
+func (*processTB) TempDir() string          { unsupported("TempDir"); return "" }
+func (*processTB) Context() context.Context { unsupported("Context"); return nil }
+func (*processTB) Output() io.Writer        { unsupported("Output"); return nil }
+
+// The shared rig's TB implements every testing.TB method itself, so none
+// reaches the nil embedded TB (a bare nil-pointer panic): each names itself.
+func TestSharedRigTBNamesUnimplementedMethods(t *testing.T) {
+	t.Parallel()
+	var tb processTB
+	calls := map[string]func(){
+		"ArtifactDir": func() { tb.ArtifactDir() }, "Attr": func() { tb.Attr("k", "v") }, "Error": func() { tb.Error("x") },
+		"Fail": tb.Fail, "FailNow": tb.FailNow, "Failed": func() { tb.Failed() }, "Log": func() { tb.Log("x") },
+		"Logf": func() { tb.Logf("x") }, "Name": func() { tb.Name() }, "Setenv": func() { tb.Setenv("K", "v") },
+		"Chdir": func() { tb.Chdir(".") }, "Skip": func() { tb.Skip() }, "SkipNow": tb.SkipNow, "Skipf": func() { tb.Skipf("x") },
+		"Skipped": func() { tb.Skipped() }, "TempDir": func() { tb.TempDir() }, "Context": func() { tb.Context() },
+		"Output": func() { tb.Output() }, "Fatal": func() { tb.Fatal("boom") }, "Fatalf": func() { tb.Fatalf("boom %d", 1) },
+	}
+	tbType, want := reflect.TypeFor[testing.TB](), 0
+	for i := range tbType.NumMethod() {
+		if tbType.Method(i).IsExported() {
+			want++
+		}
+	}
+	if len(calls)+3 != want { // + Helper, Cleanup, Errorf
+		t.Fatalf("testing.TB has %d exported methods, the test covers %d: add the new ones to processTB", want, len(calls)+3)
+	}
+	for method, call := range calls {
+		func() {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, sharedRigName) || !strings.Contains(msg, method) {
+					t.Errorf("%s panics with %q, want a message naming the method and the %s", method, msg, sharedRigName)
+				}
+			}()
+			call()
+		}()
+	}
 }
 
 // teardown runs the cleanups, last first, and reports whether all went well.

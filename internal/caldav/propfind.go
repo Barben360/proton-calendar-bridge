@@ -253,17 +253,24 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 	case kindPrincipal:
 		principalResource().write(ms, q)
 	case kindHome:
+		// Even at Depth 0 the home set asks the service: while it has synced
+		// no calendar yet, the answer is 503, so Thunderbird's detection
+		// reports a temporary failure rather than no calendars (ruling
+		// M3-R30); a pending calendar is listed once synced (M3-R25).
+		colls, err := s.api.Collections(r.Context())
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		synced := slices.DeleteFunc(colls, func(c service.Collection) bool { return c.Pending })
+		if len(synced) == 0 {
+			unavailable(w)
+			return
+		}
 		homeResource().write(ms, q)
 		if depth == "1" {
-			colls, err := s.api.Collections(r.Context())
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			for _, c := range colls {
-				if !c.Pending { // listed once synced (ruling M3-R25)
-					calendarResource(c).write(ms, q)
-				}
+			for _, c := range synced {
+				calendarResource(c).write(ms, q)
 			}
 		}
 	case kindCalendar:

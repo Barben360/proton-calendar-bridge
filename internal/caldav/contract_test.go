@@ -1654,3 +1654,42 @@ func TestPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T) {
 		t.Errorf("a pending calendar logged:\n%s", logs.String())
 	}
 }
+
+// --- Fix round 2 ----------------------------------------------------------
+
+// While the cache knows calendars but has synced none (a first pass under
+// way), the home set answers 503 + Retry-After: 30 at Depth 0 and 1, so
+// Thunderbird's detection reports a temporary failure, not "no calendars"
+// (ruling M3-R30). One synced calendar is enough to list it.
+func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	s := newStub()
+	for i := range s.colls {
+		s.colls[i].Pending, s.colls[i].CTag, s.colls[i].SyncToken = true, "", ""
+	}
+	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	for _, depth := range []string{"0", "1"} {
+		for _, p := range []string{home, strings.TrimSuffix(home, "/")} {
+			rec := do(h, "PROPFIND", p, tbHomeSet, "Depth", depth)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
+				t.Errorf("PROPFIND %s Depth %s, all pending: %d, Retry-After %q, body %q; want 503, 30, none",
+					p, depth, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+			}
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("all-pending logged:\n%s", logs.String())
+	}
+	// Discovery above the home set still answers.
+	parseMS(t, do(h, "PROPFIND", principal, tbDetect, "Depth", "0"))
+
+	s.colls[0].Pending = false
+	for _, depth := range []string{"0", "1"} {
+		ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", depth))
+		want := map[string]int{"0": 1, "1": 2}[depth]
+		if len(ms.responses) != want {
+			t.Errorf("one synced, Depth %s: %d responses, want %d", depth, len(ms.responses), want)
+		}
+	}
+}
