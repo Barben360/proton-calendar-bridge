@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -28,15 +30,18 @@ func (c CacheCheck) Run(context.Context) Result {
 		r.Status, r.Message, r.Fix = StatusError, err.Error(), rebuild
 	case !info.Exists:
 		r.Status, r.Message = StatusOK, "no cache yet"
-	case info.Mode.Perm() != 0o600:
+	case runtime.GOOS != "windows" && info.Mode.Perm()&^0o600 != 0:
 		r.Status = StatusError
 		r.Message = path + " has mode " + modeString(info.Mode.Perm()) + ", want 600"
 		r.Fix = "chmod 600 " + shellquote.Quote(path)
 	case info.QuickCheck != "ok":
 		r.Status, r.Message, r.Fix = StatusError, "cache is damaged: "+info.QuickCheck, rebuild
+	case info.Schema > 1:
+		r.Status, r.Fix = StatusError, "upgrade pcb (or remove the cache and run `pcb sync --full` to rebuild it with this version)"
+		r.Message = fmt.Sprintf("cache has schema version %d, newer than this pcb supports (1)", info.Schema)
 	case info.Schema != 1:
 		r.Status, r.Fix = StatusError, rebuild
-		r.Message = "cache has an unknown schema version"
+		r.Message = fmt.Sprintf("cache has an unknown schema version %d", info.Schema)
 	default:
 		r.Status, r.Message = StatusOK, path+" 600, schema 1, integrity ok"
 	}

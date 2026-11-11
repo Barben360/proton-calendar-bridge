@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,18 +109,9 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 	}
 	_ = c.Close()
 	_, err := Open(path, "acct-1")
-	if err == nil || !contains(err.Error(), "99") {
+	if err == nil || !strings.Contains(err.Error(), "99") {
 		t.Errorf("err = %v, want one naming version 99", err)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func TestOpenForAnotherAccountEmpties(t *testing.T) {
@@ -180,7 +172,7 @@ func TestReplaceTombstonesMissingRows(t *testing.T) {
 	if len(got) != 2 || got["e2"].ID != "" {
 		t.Errorf("events = %v", got)
 	}
-	if got["e3"].Seq != 4 && got["e3"].Seq != 5 {
+	if got["e3"].Seq != 4 {
 		t.Errorf("e3 seq = %d", got["e3"].Seq)
 	}
 	var tseq int64
@@ -220,7 +212,10 @@ func TestApplyDeltaUnchangedETagNoBump(t *testing.T) {
 	if got := seq(t, c); got != before {
 		t.Errorf("seq %d -> %d for an unchanged row", before, got)
 	}
-	cals, _ := c.Calendars(bg)
+	cals, err := c.Calendars(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cals[0].Cursor != "c2" || !cals[0].SyncedAt.Equal(time.Unix(20, 0)) {
 		t.Errorf("cursor/synced not advanced: %+v", cals[0])
 	}
@@ -255,7 +250,10 @@ func TestApplyDeltaIsAtomic(t *testing.T) {
 	if string(mustRaw(t, c, "cal", "e1")) != string(row("e1", 1).Raw) {
 		t.Error("e1 was updated despite the failure")
 	}
-	cals, _ := c.Calendars(bg)
+	cals, err := c.Calendars(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cals[0].Cursor != "c1" || !cals[0].SyncedAt.Equal(time.Unix(10, 0)) {
 		t.Errorf("cursor moved: %+v", cals[0])
 	}
@@ -279,7 +277,9 @@ func TestRecreatedIDDropsTombstone(t *testing.T) {
 		}
 		return n
 	}
-	_, _ = c.ApplyDelta(bg, "cal", "c1", []Row{row("e1", 1)}, nil, time.Unix(1, 0))
+	if _, err := c.ApplyDelta(bg, "cal", "c1", []Row{row("e1", 1)}, nil, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
 	ch, err := c.ApplyDelta(bg, "cal", "c2", nil, []string{"e1"}, time.Unix(2, 0))
 	if err != nil || ch != (Changes{Deleted: 1}) || count() != 1 {
 		t.Fatalf("delete: %+v %v tombstones %d", ch, err, count())
@@ -309,7 +309,10 @@ func TestEventFieldsRoundTrip(t *testing.T) {
 	}
 	got := ids(t, c, "cal")
 	e := got["e1"]
-	wantTag, _ := ETag(r.Raw)
+	wantTag, err := ETag(r.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if e.UID != "u1" || e.Start != 5 || e.End != 9 || !e.FullDay || e.RecurrenceID == nil || *e.RecurrenceID != rid ||
 		e.RRule != "FREQ=DAILY" || e.LastEditTime != 77 || e.ETag != wantTag || e.Seq == 0 {
 		t.Errorf("event = %+v", e)
@@ -327,12 +330,18 @@ func TestPutAndDropCalendar(t *testing.T) {
 	if _, err := c.ReplaceCalendar(bg, "cal", "cur", []Row{row("e1", 1), row("e2", 1)}, time.Unix(5, 0)); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = c.ApplyDelta(bg, "cal", "cur", nil, []string{"e2"}, time.Unix(5, 0))
-	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work", Type: "personal", Cursor: "IGNORED", Error: "boom", SyncedAt: time.Unix(9, 0)}); err != nil {
+	if _, err := c.ApplyDelta(bg, "cal", "cur", nil, []string{"e2"}, time.Unix(6, 0)); err != nil {
 		t.Fatal(err)
 	}
-	cals, _ := c.Calendars(bg)
-	if cals[0].Name != "Work" || cals[0].Type != "personal" || cals[0].Error != "boom" || cals[0].Cursor != "cur" || cals[0].Events != 1 {
+	if err := c.PutCalendar(bg, Calendar{ID: "cal", Name: "Work", Type: "personal", Cursor: "IGNORED", Error: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	cals, err := c.Calendars(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cals[0].Name != "Work" || cals[0].Type != "personal" || cals[0].Error != "boom" || cals[0].Cursor != "cur" || cals[0].Events != 1 ||
+		!cals[0].FullAt.Equal(time.Unix(5, 0)) || !cals[0].SyncedAt.Equal(time.Unix(6, 0)) {
 		t.Errorf("calendar = %+v", cals[0])
 	}
 	if err := c.PutCalendar(bg, Calendar{ID: "new", Name: "N"}); err != nil {
@@ -345,7 +354,9 @@ func TestPutAndDropCalendar(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	_ = c.db.QueryRowContext(bg, `SELECT (SELECT count(*) FROM events)+(SELECT count(*) FROM tombstones)`).Scan(&n)
+	if err := c.db.QueryRowContext(bg, `SELECT (SELECT count(*) FROM events)+(SELECT count(*) FROM tombstones)`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if cals, _ = c.Calendars(bg); len(cals) != 1 || cals[0].ID != "new" || n != 0 {
 		t.Errorf("after drop: %+v, %d rows left", cals, n)
 	}
@@ -433,7 +444,23 @@ func TestInspect(t *testing.T) {
 	if runtime.GOOS != "windows" && info.Mode.Perm() != 0o600 {
 		t.Errorf("mode = %o", info.Mode.Perm())
 	}
-	_ = c.Close()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Inspect(path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names(before) != names(after) {
+		t.Errorf("Inspect changed the directory: %s -> %s", names(before), names(after))
+	}
 
 	junk := filepath.Join(t.TempDir(), "pcb.db")
 	if err := os.WriteFile(junk, []byte("this is not a sqlite database at all, just text padding padding padding"), 0o600); err != nil {
@@ -442,5 +469,31 @@ func TestInspect(t *testing.T) {
 	info, err = Inspect(junk)
 	if err != nil || !info.Exists || info.QuickCheck == "ok" || info.QuickCheck == "" {
 		t.Errorf("junk: %+v, %v", info, err)
+	}
+}
+
+func names(es []os.DirEntry) string {
+	var n []string
+	for _, e := range es {
+		n = append(n, e.Name())
+	}
+	return strings.Join(n, ",")
+}
+
+func TestOpenNotADatabase(t *testing.T) {
+	path := Path(t.TempDir())
+	if err := os.WriteFile(path, []byte(strings.Repeat("definitely not sqlite ", 40)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(path, "a")
+	if err == nil || !strings.Contains(err.Error(), "pcb sync --full") || !strings.Contains(err.Error(), "remove") {
+		t.Errorf("err = %v, want one saying to remove the file and run pcb sync --full", err)
+	}
+}
+
+func TestOpenMissingDirectory(t *testing.T) {
+	_, err := Open(filepath.Join(t.TempDir(), "absent", "pcb.db"), "a")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("err = %v", err)
 	}
 }

@@ -44,7 +44,15 @@ func TestCacheCheck(t *testing.T) {
 		if r := runCache(dir); r.Status != doctor.StatusError || !strings.Contains(r.Message, "644") || !strings.Contains(r.Fix, "chmod 600") {
 			t.Errorf("mode: %+v", r)
 		}
-		_ = os.Chmod(path, 0o600)
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if r := runCache(dir); r.Status != doctor.StatusOK {
+			t.Errorf("0400 is no wider than 0600: %+v", r)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := os.WriteFile(path, []byte(strings.Repeat("not a sqlite database ", 20)), 0o600); err != nil {
@@ -73,7 +81,7 @@ func TestCacheCheckUnknownSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = raw.Close()
-	if r := runCache(dir); r.Status != doctor.StatusError || !strings.Contains(r.Fix, "pcb sync --full") {
+	if r := runCache(dir); r.Status != doctor.StatusError || !strings.Contains(r.Message, "42") || !strings.Contains(r.Fix, "upgrade pcb") {
 		t.Errorf("schema: %+v", r)
 	}
 }

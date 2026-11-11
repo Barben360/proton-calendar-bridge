@@ -16,7 +16,8 @@ import (
 	"strconv"
 	"time"
 
-	_ "modernc.org/sqlite" // the "sqlite" driver
+	"modernc.org/sqlite" // the "sqlite" driver
+	sqlitelib "modernc.org/sqlite/lib"
 )
 
 // ErrNotFound is returned by Raw for an unknown event.
@@ -68,7 +69,9 @@ func Path(stateDir string) string { return filepath.Join(stateDir, "pcb.db") }
 
 // Open opens (creating it, mode 0600) the cache at path for accountID. A
 // cache recorded for another account is emptied first; a schema newer than
-// this build knows is refused.
+// this build knows is refused. The parent directory must exist (the callers
+// create the state directory); a file that is not a SQLite database is
+// refused with the way out.
 func Open(path, accountID string) (*Cache, error) {
 	if accountID == "" {
 		return nil, errors.New("cache: empty account ID")
@@ -80,6 +83,9 @@ func Open(path, accountID string) (*Cache, error) {
 	// Create the file ourselves so its mode never depends on the umask;
 	// SQLite gives -wal and -shm the mode of the main file.
 	f, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE, 0o600)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("cache: directory %s does not exist: create the state directory first: %w", filepath.Dir(abs), err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cache: %w", err)
 	}
@@ -103,6 +109,10 @@ func Open(path, accountID string) (*Cache, error) {
 func (c *Cache) init(ctx context.Context, path, account string) error {
 	var version int
 	if err := c.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		var se *sqlite.Error
+		if errors.As(err, &se) && (se.Code()&0xff == sqlitelib.SQLITE_NOTADB || se.Code()&0xff == sqlitelib.SQLITE_CORRUPT) {
+			return fmt.Errorf("cache: %s is not a usable SQLite database: remove it (and its -wal and -shm files), then run `pcb sync --full`: %w", path, err)
+		}
 		return fmt.Errorf("cache: read %s: %w", path, err)
 	}
 	if version > schemaVersion {
@@ -411,24 +421,17 @@ func fromUnix(s int64) time.Time {
 	return time.Unix(s, 0)
 }
 
-func toUnix(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.Unix()
-}
-
-// PutCalendar records a calendar's name, type, error and sync times; the
-// cursor is only ever set by ReplaceCalendar and ApplyDelta.
+// PutCalendar records a calendar's name, type and error. The cursor, FullAt
+// and SyncedAt are only ever set by ReplaceCalendar and ApplyDelta, so a
+// caller cannot erase them (cal's own values for them are ignored).
 func (c *Cache) PutCalendar(ctx context.Context, cal Calendar) error {
 	if cal.ID == "" {
 		return errors.New("cache: empty calendar ID")
 	}
-	_, err := c.db.ExecContext(ctx, `INSERT INTO calendars (id, name, type, full_at, synced_at, error)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type,
-		full_at = excluded.full_at, synced_at = excluded.synced_at, error = excluded.error`,
-		cal.ID, cal.Name, cal.Type, toUnix(cal.FullAt), toUnix(cal.SyncedAt), cal.Error)
+	_, err := c.db.ExecContext(ctx, `INSERT INTO calendars (id, name, type, error)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type, error = excluded.error`,
+		cal.ID, cal.Name, cal.Type, cal.Error)
 	return err
 }
 

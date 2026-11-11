@@ -34,7 +34,14 @@ func Inspect(path string) (Info, error) {
 	if err != nil {
 		return info, err
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	// A read-only open of a WAL database creates -wal and -shm. With no
+	// -wal there is no writer and nothing pending, so read the file as
+	// immutable; with one, those files exist and are not created.
+	query := "mode=ro&_pragma=busy_timeout(5000)"
+	if _, err := os.Stat(abs + "-wal"); errors.Is(err, fs.ErrNotExist) {
+		query = "immutable=1"
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: query}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return info, err

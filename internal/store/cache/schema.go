@@ -3,7 +3,8 @@ package cache
 // schemaVersion is the only schema so far, stored in PRAGMA user_version.
 const schemaVersion = 1
 
-// Timestamps are Unix seconds. Nothing decrypted is stored: raw is the row
+// events is a rowid table: raw blobs are large, which SQLite advises
+// against in WITHOUT ROWID tables. Timestamps are Unix seconds. Nothing decrypted is stored: raw is the row
 // as Proton returned it.
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -32,12 +33,14 @@ CREATE TABLE IF NOT EXISTS events (
 	etag          TEXT NOT NULL,
 	seq           INTEGER NOT NULL,
 	raw           BLOB NOT NULL,
-	PRIMARY KEY (calendar_id, id)
-) WITHOUT ROWID;
+	UNIQUE (calendar_id, id)
+);
+CREATE INDEX IF NOT EXISTS events_seq ON events (calendar_id, seq);
 CREATE TABLE IF NOT EXISTS tombstones (
 	calendar_id TEXT NOT NULL,
 	id          TEXT NOT NULL,
 	seq         INTEGER NOT NULL,
 	PRIMARY KEY (calendar_id, id)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS tombstones_seq ON tombstones (calendar_id, seq);
 `
