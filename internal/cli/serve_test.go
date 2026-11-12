@@ -298,6 +298,28 @@ func TestServeRefusesWhenLoggedOut(t *testing.T) {
 	s.neverListened()
 }
 
+// Logged in with no client (all removed): a login would not run again, so
+// the hint is client add (final review I2).
+func TestServeIntroHintsClientAddWhenLoggedIn(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.statusPhase = "ready"
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	s.listening()
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d, want 0\nstderr: %s", code, s.errb.String())
+	}
+	if want := "No CalDAV client: run pcb client add NAME, then use its password in Thunderbird."; !strings.Contains(s.out.String(), want) {
+		t.Errorf("stdout lacks %q: %q", want, s.out.String())
+	}
+	if strings.Contains(s.out.String(), "pcb login") {
+		t.Errorf("a logged-in daemon tells to log in: %q", s.out.String())
+	}
+}
+
 func TestServeRefusesJSONAndABadListen(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{{"--json"}, {"--listen", "1080"}, {"--listen", ":1080"}, {"--listen", "127.0.0.1:99999"}} {
@@ -348,8 +370,9 @@ func TestServeStopsOnSignal(t *testing.T) {
 	if want := "Thunderbird URL: http://localhost:" + port + "/"; lines[0] != want {
 		t.Errorf("first line %q, want %q", lines[0], want)
 	}
-	if !strings.Contains(s.out.String(), "pcb client add NAME") {
-		t.Errorf("stdout lacks the client hint with no client: %q", s.out.String())
+	// Not logged in (decision 0013): the login creates the client default.
+	if want := "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password."; !strings.Contains(s.out.String(), want) {
+		t.Errorf("stdout lacks %q with no client and no login: %q", want, s.out.String())
 	}
 	if strings.Contains(s.out.String(), "fingerprint") {
 		t.Errorf("plain HTTP printed a fingerprint: %q", s.out.String())

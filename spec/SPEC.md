@@ -846,9 +846,9 @@ writes (PUT, DELETE) since M4.
   app password (24 random bytes, base64url) from `pcb client add NAME`. It is kept in
   `<state>/clients.json` (0600, format version 2) twice: as a salted SHA-256, compared in
   constant time, and sealed with the key that seals the session (§7.3), so it can be shown
-  again. This amends M3-R17 ("printed once, salted hash only"). The first successful `pcb login`
-  (not an unattended relogin) creates a client named `default` when none exists, so a fresh
-  install has credentials; `pcb client show [NAME] [--reveal]` prints them (§13); `pcb client rotate NAME`
+  again. This amends M3-R17 ("printed once, salted hash only"). Every `pcb login` that
+  completes (not an unattended relogin) creates a client named `default` when none exists, so a fresh
+  install has credentials (also after all clients were removed: a new random password, decision 0013's rule); `pcb client show [NAME] [--reveal]` prints them (§13); `pcb client rotate NAME`
   replaces one and the old stops working at once; clients made before M5 keep only their hash and
   `show` names `rotate`. The file is reloaded when it changes, so `remove` and `rotate` bite at once.
   A pcb from before M5 refuses a version 2 `clients.json` (no downgrade; M5-R14 (1)). Passwords never
@@ -951,8 +951,8 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   `pcb client show`. `--plan` changes nothing and needs no root. No systemd: `--plan` says so, applying exits 20.
 - `--system` needs root: it creates the `pcb` user and group (`useradd`), uses `/etc/pcb` and `/var/lib/pcb`, copies
   the running binary to `/usr/local/bin/pcb` (root, 0755) instead of running a user-writable one as `pcb`, and prints the
-  login line to run as that user: `sudo -u pcb env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb /usr/local/bin/pcb login`
-  (the control socket accepts only the daemon's own UID, §15). `--system --plan` as non-root prints the plan and
+  login and client show lines to run as that user: `sudo -u pcb env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb /usr/local/bin/pcb login`,
+  then the same with `client show` (the control socket accepts only the daemon's own UID, §15). `--system --plan` as non-root prints the plan and
   a note that applying needs root, exit 0 (M5-R4).
 - The user unit carries only hardening that needs no user namespace, so it starts under any user manager (M5-P17);
   the system unit carries the full set (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, an empty capability set
@@ -969,12 +969,15 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
   and `logs` do not (M5-R7).
-- First login: the first successful `pcb login` creates the `default` CalDAV client; `pcb client show` prints the URL,
+- First login: a `pcb login` that completes while no client exists creates the `default` CalDAV client; `pcb client show` prints the URL,
   the username (the client's name), the password and, over TLS, the fingerprint. With a daemon, the URL and fingerprint
   are its listener's; offline, `show` builds the URL from `config.toml`, so it ignores a `--listen` override and a
   port 0 (M5-R14 (4)), and the fingerprint reads "not known yet" until `pcb serve` created the certificate. No CTL
   endpoint serves `show` or `rotate` in M5: they work on `clients.json`, which the daemon reloads (M5-R13); a CLI under
   another UID than the daemon needs `sudo -u`.
+- No client yet: `pcb serve`'s intro and `pcb doctor`'s `caldav clients` fix say `pcb login` (it creates the client
+  default), then `pcb client show`, while not logged in; once logged in with no client (all removed), `pcb client add NAME`
+  (final review I2) [verified: `TestClientsCheck`, `TestDoctorTextOK`, `TestServeIntroHintsClientAddWhenLoggedIn`, `TestServeStopsOnSignal`, `TestInstallUserCreatesThenKeeps`, `TestInstallSystemCreatesTheUserOnce`].
 [verified: `TestUserUnitGolden`, `TestSystemUnitGolden`, `TestDefaultConfigGolden`, `TestInstallUserPlanChangesNothing`,
 `TestInstallUserCreatesThenKeeps`, `TestInstallKeepsAnEditedConfig`, `TestInstallUpdatesAChangedUnitAndRestarts`,
 `TestInstallSystemNeedsRoot`, `TestInstallSystemCreatesTheUserOnce`, `TestInstallSystemCopiesTheBinary`,

@@ -525,7 +525,13 @@ func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, 
 	case err != nil:
 		log.Warn("cannot list the CalDAV clients", "error", err.Error())
 	case len(clients) == 0:
-		fmt.Fprintln(w, "No CalDAV client yet: run pcb client add NAME, then use its password in Thunderbird.")
+		// Decision 0013: a login creates the client default; once logged
+		// in, only client add makes one.
+		if st, err := svc.Status(cmd.Context()); err == nil && st.Phase == string(service.StateReady) {
+			fmt.Fprintln(w, "No CalDAV client: run pcb client add NAME, then use its password in Thunderbird.")
+		} else {
+			fmt.Fprintln(w, "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password.")
+		}
 	}
 }
 

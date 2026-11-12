@@ -115,7 +115,7 @@ func TestDoctorTextOK(t *testing.T) {
 	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[9] != want {
 		t.Errorf("line 9 = %q, want %q", lines[9], want)
 	}
-	if want := "!  caldav clients: no CalDAV client: nothing can sign in to pcb serve"; lines[10] != want || lines[11] != "   fix: pcb client add NAME" {
+	if want := "!  caldav clients: no CalDAV client: nothing can sign in to pcb serve"; lines[10] != want || lines[11] != "   fix: pcb login (it creates the client default), then pcb client show" {
 		t.Errorf("lines 10-11 = %q, want %q and its fix", lines[10:], want)
 	}
 }

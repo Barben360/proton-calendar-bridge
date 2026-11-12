@@ -381,7 +381,7 @@ func TestInstallUserCreatesThenKeeps(t *testing.T) {
 	}; !slices.Equal(got, want) {
 		t.Errorf("commands = %q, want %q", got, want)
 	}
-	for _, want := range []string{"\nNext:\n", "  loginctl enable-linger alice\n", "  pcb login\n", "  pcb client add NAME\n"} {
+	for _, want := range []string{"\nNext:\n", "  loginctl enable-linger alice\n", "  pcb login\n", "  pcb client show\n"} {
 		if !strings.Contains(s.stdout.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, s.stdout.String())
 		}
@@ -399,7 +399,8 @@ func TestInstallUserCreatesThenKeeps(t *testing.T) {
 	if got, want := s.takeEvents(), []string{"systemctl --user enable --now pcb.service", showState, "loginctl show-user alice -p Linger"}; !slices.Equal(got, want) {
 		t.Errorf("second run commands = %q, want %q", got, want)
 	}
-	if want := []string{"pcb login", "pcb client add NAME"}; !slices.Equal(d.Next, want) {
+	// Decision 0013: the login creates the client default; client show prints it.
+	if want := []string{"pcb login", "pcb client show"}; !slices.Equal(d.Next, want) {
 		t.Errorf("with linger on, next = %q, want %q", d.Next, want)
 	}
 }
@@ -493,8 +494,9 @@ func TestInstallSystemCreatesTheUserOnce(t *testing.T) {
 			t.Errorf("mode of %s = %o", p, got)
 		}
 	}
-	if !strings.Contains(s.stdout.String(), "  sudo -u pcb env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb /usr/local/bin/pcb login\n") {
-		t.Errorf("output lacks the login line:\n%s", s.stdout.String())
+	run := "  sudo -u pcb env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb /usr/local/bin/pcb "
+	if !strings.Contains(s.stdout.String(), run+"login\n"+run+"client show\n") {
+		t.Errorf("output lacks the login and client show lines:\n%s", s.stdout.String())
 	}
 	s.want(exitcode.OK, "install", "--system", "--json")
 	if got, want := s.takeEvents(), []string{"systemctl enable --now pcb.service"}; !slices.Equal(got, want) {

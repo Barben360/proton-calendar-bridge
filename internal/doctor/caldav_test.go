@@ -13,6 +13,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -140,9 +141,18 @@ func TestCertificateCheckUserCertificate(t *testing.T) {
 func TestClientsCheck(t *testing.T) {
 	ctx := context.Background()
 	state := t.TempDir()
+	// Not logged in: the login creates the client default (decision 0013).
 	got := doctor.ClientsCheck{StateDir: state}.Run(ctx)
+	if got.Status != doctor.StatusWarn || got.Fix != "pcb login (it creates the client default), then pcb client show" {
+		t.Errorf("no client, logged out: %+v", got)
+	}
+	// Logged in with no client (all removed): only client add makes one.
+	if err := store.SaveState(state, store.State{Phase: store.PhaseReady}); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.ClientsCheck{StateDir: state}.Run(ctx)
 	if got.Status != doctor.StatusWarn || got.Fix != "pcb client add NAME" {
-		t.Errorf("no client: %+v", got)
+		t.Errorf("no client, logged in: %+v", got)
 	}
 	if _, _, err := access.NewStore(state, nil).Add(ctx, "Thunderbird"); err != nil {
 		t.Fatal(err)

@@ -466,13 +466,14 @@ func RemovedDirs(steps []Step) []string {
 const restartHint = "pcb service restart   (only if you rebuilt pcb: the running service keeps the binary it started with)"
 
 // Next lists what to run after an install: enabling linger (when loginctl
-// does not say it is on), then login and the first CalDAV client; for a
+// does not say it is on), then login, which creates the CalDAV client
+// default (decision 0013), and client show, which prints it; for a
 // user install whose unit was kept while the service runs, the restart
 // hint first.
 func Next(ctx context.Context, h Host, s Scope, steps []Step) []string {
 	if s == ScopeSystem {
 		run := "sudo -u " + SystemUser + " env PCB_CONFIG_DIR=" + SystemConfigDir + " PCB_STATE_DIR=" + SystemStateDir + " " + SystemBinary
-		return []string{run + " login", run + " client add NAME"}
+		return []string{run + " login", run + " client show"}
 	}
 	var next []string
 	if unitKept(steps) {
@@ -490,7 +491,7 @@ func Next(ctx context.Context, h Host, s Scope, steps []Step) []string {
 	if err != nil || code != 0 || strings.TrimSpace(string(out)) != "Linger=yes" {
 		next = append(next, "loginctl enable-linger "+name)
 	}
-	return append(next, "pcb login", "pcb client add NAME")
+	return append(next, "pcb login", "pcb client show")
 }
 
 // unitKept reports whether steps leave the unit as it was (no reload).

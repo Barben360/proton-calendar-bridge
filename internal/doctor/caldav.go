@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -205,7 +206,9 @@ func (c CertificateCheck) judge(r Result, leaf *x509.Certificate, t time.Time, b
 	return r
 }
 
-// ClientsCheck warns when no CalDAV client can sign in.
+// ClientsCheck warns when no CalDAV client can sign in. Its fix follows
+// decision 0013: a login creates the client default, so with no login the
+// fix is pcb login; once logged in, only pcb client add makes one.
 type ClientsCheck struct {
 	StateDir string
 }
@@ -222,11 +225,28 @@ func (c ClientsCheck) Run(context.Context) Result {
 		r.Status, r.Message = StatusError, err.Error()
 		r.Fix = "check clients.json in " + shellquote.Quote(c.StateDir) + " (valid JSON in the format pcb wrote, mode 0600), or remove it and add the clients again"
 	case len(list) == 0:
-		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", "pcb client add NAME"
+		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", noClientFix(loggedIn(c.StateDir))
 	case len(list) == 1:
 		r.Status, r.Message = StatusOK, "1 client"
 	default:
 		r.Status, r.Message = StatusOK, fmt.Sprintf("%d clients", len(list))
 	}
 	return r
+}
+
+// noClientFix is what to run when no CalDAV client exists (decision 0013):
+// logged out, pcb login creates the client default; logged in, it would
+// not run again, so pcb client add.
+func noClientFix(loggedIn bool) string {
+	if loggedIn {
+		return "pcb client add NAME"
+	}
+	return "pcb login (it creates the client default), then pcb client show"
+}
+
+// loggedIn reports whether state.json says the login is ready; an
+// unreadable state counts as not logged in (the secrets check reports it).
+func loggedIn(stateDir string) bool {
+	st, err := store.LoadState(stateDir)
+	return err == nil && st.Phase == store.PhaseReady
 }
