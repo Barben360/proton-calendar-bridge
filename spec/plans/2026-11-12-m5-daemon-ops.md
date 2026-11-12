@@ -665,6 +665,40 @@ Made in this plan (record them in the SDD ledger as such):
 - [ ] **Step 2–4:** FAIL → implement → PASS (`GOOS=windows go vet ./...` clean).
 - [ ] **Step 5: Commit** `✨ Install pcb as a systemd service`.
 
+### Task 7b: Viewable client credentials (decision 0013)
+
+**Files:**
+- Modify: `internal/access/clients.go` (format v2), `internal/service/{api.go,clients.go,login.go}`, `internal/cli/client.go`
+- Test: `internal/access/clients_test.go`, `internal/service/clients_test.go`, `internal/cli/client_test.go`
+
+**Interfaces:**
+- Consumes: the sealer `internal/store` already uses for `secrets.sealed` (same key, its own AAD); Task 3's listener and TLS facts for the URL and fingerprint (offline: computed from config as `pcb serve`'s intro does).
+- Produces:
+  - `clients.json` version 2: each record keeps `salt` + `hash` (the check is unchanged, constant time) and gains `sealed` (base64 of the password sealed with AAD `pcb-clients/v2/<sealer>/<client id>`). A v1 file still loads; its clients have no `sealed` and stay valid. The file is rewritten as v2 at its next change.
+  - `access.Store.Reveal(id string, open func(sealed, aad []byte) ([]byte, error)) (password string, err error)`; `ErrNotRecoverable` for a record with no `sealed`, or one the key cannot open.
+  - `access.Store.Rotate(ctx, idOrName string) (Client, password string, error)`: a new salt, hash and sealed copy in one write; the old password fails the next check (the store already reloads on change, M3-R18).
+  - `service.API`:
+    - `ShowClient(ctx, idOrName string) (ClientCredentials, error)`, with `ClientCredentials{Client; Username, Password, URL, Fingerprint string; Recoverable bool}`;
+    - `RotateClient(ctx, idOrName string) (ClientSecret, error)`.
+    - An empty name means `default`, else the only client; several clients and no name → MustAct `name a client: pcb client show NAME (pcb client list)`.
+  - Default client: after a login completes (any path: in process, through CTL, resume), if `clients.json` holds no client, the service adds `default` and logs `created the CalDAV client "default": see pcb client show` (no secret). It is never re-created once any client exists, and removing it is allowed.
+  - CLI:
+    - `pcb client show [NAME] [--reveal]`: the text prints `URL`, `Username`, `Password`, and `TLS certificate SHA-256 fingerprint` when TLS. `--json` omits `password` unless `--reveal` is given. An unrecoverable password prints `Password: not recoverable (made before pcb could show passwords): run pcb client rotate NAME` and exits 0.
+    - `pcb client rotate NAME`: prints the new password and the hint `update the password in your CalDAV client`.
+    - `pcb login` (text) ends with `CalDAV credentials: pcb client show` when it just created `default`.
+- [ ] **Step 1: failing tests:**
+  - `TestRevealReturnsTheAddedPassword`
+  - `TestRevealRefusesAnotherClientsAAD` (a sealed blob moved to another record does not open)
+  - `TestV1ClientsStillCheckAndAreNotRecoverable`
+  - `TestRotateInvalidatesTheOldPassword`
+  - `TestFirstLoginCreatesTheDefaultClient`
+  - `TestDefaultIsNotRecreatedOnceAnyClientExists`
+  - `TestClientShowPrintsWhatThunderbirdNeeds`
+  - `TestClientShowJSONHidesThePasswordWithoutReveal`
+  - `TestNoPasswordInLogs` (login, add, rotate and show, with the log buffer scanned for every password)
+- [ ] **Step 2–4:** FAIL → implement → PASS.
+- [ ] **Step 5: Commit** `✨ Show CalDAV credentials again and create a default client`.
+
 ### Task 8: Container image, smoke tests, workflows
 
 **Files:**
