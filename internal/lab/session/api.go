@@ -16,10 +16,11 @@ import (
 
 // API returns pcb's own transport (internal/proton/api) on the saved
 // session's tokens, identified as pcb-lab. A rejected access token is
-// refreshed once with the saved refresh token and the rotated pair saved, as
-// Resume does; a refused refresh ends the session (api.ErrSessionEnded). It
-// never logs in. hc is the HTTP client and lim the request pacing (nil: the
-// transport's defaults, one request per 250 ms after a burst of 8).
+// refreshed once with the saved pair (its access token in the body) and the
+// rotated pair saved, as Resume's client does; a refused refresh ends the
+// session (api.ErrSessionEnded). It never logs in. hc is the HTTP client and
+// lim the request pacing (nil: the transport's defaults, one request per
+// 250 ms after a burst of 8).
 func (s *Session) API(hc *http.Client, lim *rate.Limiter) (*api.Client, error) {
 	st, err := load(s.opts.StateDir)
 	if err != nil {
@@ -37,7 +38,7 @@ func (s *Session) API(hc *http.Client, lim *rate.Limiter) (*api.Client, error) {
 	return api.New(api.Tokens{UID: st.UID, AccessToken: st.AccessToken, RefreshToken: st.RefreshToken}, api.Options{
 		BaseURL: base, AppVersion: app, UserAgent: "pcb-lab/" + buildinfo.Version, HTTP: hc, Limiter: lim,
 		Refresh: func(ctx context.Context, stale api.Tokens) (api.Tokens, error) {
-			r, nb, err := refreshOnce(ctx, o, stale.UID, stale.RefreshToken)
+			r, nb, err := refreshOnce(ctx, o, stale.UID, stale.RefreshToken, stale.AccessToken)
 			if err != nil {
 				return api.Tokens{}, err
 			}

@@ -127,7 +127,7 @@ func RefreshSaved(ctx context.Context, o Options) (RefreshResult, error) {
 		o.Recorder.Forbid(st.AccessToken)
 		o.Recorder.Forbid(st.RefreshToken)
 	}
-	first, nb, err := refreshOnce(ctx, o, st.UID, st.RefreshToken)
+	first, nb, err := refreshOnce(ctx, o, st.UID, st.RefreshToken, st.AccessToken)
 	if err != nil {
 		return res, err
 	}
@@ -146,19 +146,21 @@ func RefreshSaved(ctx context.Context, o Options) (RefreshResult, error) {
 }
 
 // Refresh is RefreshSaved followed by one retry with the previous refresh
-// token, to learn whether Proton still honours it. A retry that succeeds is
-// saved too, so the file always holds the newest pair. It never logs in.
+// token, to learn whether Proton still honours it. The retry carries the
+// previous pair's access token, as the first refresh does. A retry that
+// succeeds is saved too, so the file always holds the newest pair. It never
+// logs in.
 func Refresh(ctx context.Context, o Options) (RefreshResult, error) {
 	st, err := load(o.StateDir)
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	oldRefresh := st.RefreshToken
+	oldRefresh, oldAccess := st.RefreshToken, st.AccessToken
 	res, err := RefreshSaved(ctx, o)
 	if err != nil || res.First.Status != http.StatusOK {
 		return res, err
 	}
-	retry, rb, err := refreshOnce(ctx, o, st.UID, oldRefresh)
+	retry, rb, err := refreshOnce(ctx, o, st.UID, oldRefresh, oldAccess)
 	if err != nil {
 		return res, err
 	}
@@ -180,9 +182,12 @@ func forbid(o Options, b refreshBody) {
 	}
 }
 
-func refreshOnce(ctx context.Context, o Options, uid, refresh string) (Response, refreshBody, error) {
+// refreshOnce sends one refresh of the pair (refresh, access). Proton refuses
+// a refresh token issued by a refresh unless the body carries that pair's
+// access token (400, code 10013; live finding 2026-11-12, E01).
+func refreshOnce(ctx context.Context, o Options, uid, refresh, access string) (Response, refreshBody, error) {
 	body, _ := json.Marshal(map[string]string{
-		"UID": uid, "RefreshToken": refresh,
+		"UID": uid, "RefreshToken": refresh, "AccessToken": access,
 		"ResponseType": "token", "GrantType": "refresh_token", "RedirectURI": "https://protonmail.ch",
 	})
 	r, err := call(ctx, o, http.MethodPost, "/auth/v4/refresh", uid, "", body)

@@ -202,11 +202,7 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 		s.Close()
 		return nil, fmt.Errorf("saving the session: %w", err)
 	}
-	c.AddAuthHandler(func(a proton.Auth) {
-		if err := saveRotation(o.StateDir, &st, a); err != nil {
-			o.warn(err)
-		}
-	})
+	c.AddAuthHandler(o.saveRotations(&st))
 	// The challenge is solved: its file is stale.
 	if err := os.Remove(filepath.Join(o.StateDir, hvFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		o.warn(err)
@@ -292,8 +288,13 @@ func apiMessage(err error) error {
 	return err
 }
 
-// Resume rebuilds a client from session.json by refreshing its tokens, and
-// persists the rotated tokens.
+// Resume rebuilds a client from session.json on the saved tokens and checks
+// them with one GET /core/v4/users, without refreshing: the saved scopes stay
+// as saved. On a rejected access token the client refreshes itself
+// (go-proton-api's refresh, which sends the access token Proton requires;
+// live finding 2026-11-12, E01) and the rotated tokens are saved. A refresh
+// per command would rotate the session for nothing. A session that cannot be
+// used is MustAct.
 func Resume(ctx context.Context, o Options) (*Session, error) {
 	st, err := load(o.StateDir)
 	if err != nil {
@@ -304,33 +305,32 @@ func Resume(ctx context.Context, o Options) (*Session, error) {
 		o.Recorder.Forbid(st.RefreshToken)
 	}
 	m := newManager(o)
-	c, auth, err := m.NewClientWithRefresh(ctx, st.UID, st.RefreshToken)
-	if err != nil {
+	c := m.NewClient(st.UID, st.AccessToken, st.RefreshToken)
+	c.AddAuthHandler(o.saveRotations(&st))
+	if _, err := c.GetUser(ctx); err != nil {
+		c.Close()
 		m.Close()
 		return nil, &exitcode.Error{
 			Code: exitcode.MustAct,
-			Err:  fmt.Errorf("the saved session cannot be refreshed: %w", apiMessage(err)),
+			Err:  fmt.Errorf("the saved session cannot be resumed: %w", apiMessage(err)),
 			Hint: "pcb-lab login",
 		}
 	}
-	if o.Recorder != nil {
-		o.Recorder.Forbid(auth.AccessToken)
-		o.Recorder.Forbid(auth.RefreshToken)
-	}
-	if sc := scopes(auth.Scope); len(sc) > 0 {
-		st.Scopes = sc
-	}
-	if err := saveRotation(o.StateDir, &st, auth); err != nil {
-		c.Close()
-		m.Close()
-		return nil, fmt.Errorf("saving the rotated session tokens (the previous refresh token may no longer work): %w", err)
-	}
-	c.AddAuthHandler(func(a proton.Auth) {
-		if err := saveRotation(o.StateDir, &st, a); err != nil {
+	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
+}
+
+// saveRotations is a client's auth handler: it redacts the rotated tokens
+// from the recording and saves them, warning when the write fails.
+func (o Options) saveRotations(st *stored) proton.AuthHandler {
+	return func(a proton.Auth) {
+		if o.Recorder != nil {
+			o.Recorder.Forbid(a.AccessToken)
+			o.Recorder.Forbid(a.RefreshToken)
+		}
+		if err := saveRotation(o.StateDir, st, a); err != nil {
 			o.warn(err)
 		}
-	})
-	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
+	}
 }
 
 var saveMu sync.Mutex

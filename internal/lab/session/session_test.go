@@ -16,6 +16,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/labtest"
+	"github.com/Barben360/proton-calendar-bridge/internal/lab/record"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 )
@@ -276,7 +277,24 @@ func TestSessionFileHoldsNoPassword(t *testing.T) {
 	}
 }
 
-func TestResumeRebuildsClientAndPersistsRotation(t *testing.T) {
+// refreshes counts the POST /auth/v4/refresh that reached f.
+func refreshes(f *labtest.Front) int {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	n := 0
+	for _, s := range f.Log {
+		if s.Method == "POST" && s.Path == "/auth/v4/refresh" {
+			n++
+		}
+	}
+	return n
+}
+
+// Resume rebuilds the client on the saved tokens without refreshing: every
+// refresh Proton accepts needs the access token, and a refresh per command
+// would rotate the session for nothing (live finding 2026-11-12, E01). The
+// saved scopes stay as saved.
+func TestResumeUsesTheSavedTokensWithoutRefreshing(t *testing.T) {
 	t.Parallel()
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
@@ -286,38 +304,203 @@ func TestResumeRebuildsClientAndPersistsRotation(t *testing.T) {
 	}
 	uid := s.UID
 	s.Close()
-	before, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+	path := filepath.Join(o.StateDir, "session.json")
+	var saved map[string]any
+	raw, _ := os.ReadFile(path)
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved["scopes"] = []string{"full", "self", "saved-marker"}
+	raw, _ = json.Marshal(saved)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	authBefore := f.AuthCalls
-	r, err := session.Resume(t.Context(), o)
-	if err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	defer r.Close()
-	if r.UID != uid {
-		t.Errorf("resumed UID = %q, want %q", r.UID, uid)
+	for i := 1; i <= 2; i++ {
+		r, err := session.Resume(t.Context(), o)
+		if err != nil {
+			t.Fatalf("resume %d: %v", i, err)
+		}
+		if r.UID != uid || strings.Join(r.Scopes, " ") != "full self saved-marker" {
+			t.Errorf("resume %d: UID %q scopes %q, want %q and the saved scopes", i, r.UID, r.Scopes, uid)
+		}
+		u, err := r.Client.GetUser(t.Context())
+		if err != nil || u.ID == "" {
+			t.Fatalf("resume %d: GetUser with the resumed client: %v", i, err)
+		}
+		r.Close()
 	}
 	if f.AuthCalls != authBefore {
-		t.Error("Resume logged in again instead of refreshing")
+		t.Error("Resume logged in again")
 	}
-	// The client must work: it can fetch the user.
-	u, err := r.Client.GetUser(t.Context())
+	if n := refreshes(f); n != 0 {
+		t.Errorf("Resume sent %d refreshes, want none", n)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(raw, after) {
+		t.Error("Resume rewrote session.json without a refresh")
+	}
+}
+
+// The resumed client refreshes on a rejected access token, with that token
+// (go-proton-api's own refresh), saves each rotation, and a later Resume and
+// probe still work: the second refresh is the one Proton refused without the
+// access token.
+func TestResumedClientRefreshesTwiceAndSavesEachRotation(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
 	if err != nil {
-		t.Fatalf("GetUser with the resumed client: %v", err)
+		t.Fatal(err)
 	}
-	if u.ID == "" {
-		t.Error("empty user")
-	}
-	after, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
-	if bytes.Equal(before, after) {
-		t.Error("session.json not updated with the rotated tokens")
-	}
-	// And the rotated file resumes again.
-	r2, err := session.Resume(t.Context(), o)
+	s.Close()
+	path := filepath.Join(o.StateDir, "session.json")
+	r, err := session.Resume(t.Context(), o)
 	if err != nil {
-		t.Fatalf("second resume: %v", err)
+		t.Fatal(err)
 	}
-	r2.Close()
+	for i := 1; i <= 2; i++ {
+		before, _ := os.ReadFile(path)
+		f.Backend.ExpireAccessTokens()
+		if _, err := r.Client.GetUser(t.Context()); err != nil {
+			t.Fatalf("GetUser after expiry %d: %v", i, err)
+		}
+		if after, _ := os.ReadFile(path); bytes.Equal(before, after) {
+			t.Errorf("expiry %d: the rotated tokens were not saved", i)
+		}
+	}
+	r.Close()
+	if n := refreshes(f); n != 2 {
+		t.Fatalf("%d refreshes, want 2", n)
+	}
+	again, err := session.Resume(t.Context(), o)
+	if err != nil {
+		t.Fatalf("Resume after the rotations: %v", err)
+	}
+	defer again.Close()
+	if resp, err := again.Get(t.Context(), "/core/v4/users"); err != nil || !resp.OK() {
+		t.Fatalf("probe GET on the saved tokens: %v, HTTP %d code %d", err, resp.Status, resp.Code)
+	}
+}
+
+// The tokens the resumed client rotates are redacted from the recording too.
+func TestResumedClientForbidsRotatedTokens(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	o.Recorder = &record.Recorder{Dir: t.TempDir()}
+	r, err := session.Resume(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	f.Backend.ExpireAccessTokens()
+	if _, err := r.Client.GetUser(t.Context()); err != nil {
+		t.Fatalf("GetUser after expiry: %v", err)
+	}
+	var st struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	raw, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+	if err := json.Unmarshal(raw, &st); err != nil || st.AccessToken == "" {
+		t.Fatalf("session.json: %v", err)
+	}
+	for _, tok := range []string{st.AccessToken, st.RefreshToken} {
+		// The path is written as given: only the Forbid list keeps it out.
+		e := record.Exchange{Method: "GET", Path: "/echo/" + tok, Status: 200}
+		path, err := (&record.Recorder{Dir: t.TempDir()}).Save("control", e)
+		if b, _ := os.ReadFile(path); err != nil || !strings.Contains(string(b), tok) {
+			t.Fatalf("control: an unrestricted recorder did not write the token as given: %v", err)
+		}
+		if _, err := o.Recorder.Save("echo", e); err == nil {
+			t.Error("the recorder wrote a rotated token")
+		}
+	}
+}
+
+// E01's probe refresh: each refresh, and its retry with the previous refresh
+// token, carries the access token of the pair it refreshes, so a second probe
+// refresh in a row works.
+func TestRefreshSendsTheAccessTokenOfEachPair(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	type body struct{ RefreshToken, AccessToken string }
+	var mu sync.Mutex
+	var sent []body
+	f.Mu.Lock()
+	f.Intercept = func(method, path string, b []byte) (labtest.Reply, bool) {
+		if method == "POST" && path == "/auth/v4/refresh" {
+			var rb body
+			_ = json.Unmarshal(b, &rb)
+			mu.Lock()
+			sent = append(sent, rb)
+			mu.Unlock()
+		}
+		return labtest.Reply{}, false
+	}
+	f.Mu.Unlock()
+	type pair struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	read := func() pair {
+		var p pair
+		raw, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+		if err := json.Unmarshal(raw, &p); err != nil || p.AccessToken == "" {
+			t.Fatalf("session.json: %v", err)
+		}
+		return p
+	}
+	for i := 1; i <= 2; i++ {
+		old := read()
+		res, err := session.Refresh(t.Context(), o)
+		if err != nil || res.First.Status != 200 || !res.Retried {
+			t.Fatalf("refresh %d: %v, first HTTP %d code %d, retried %t", i, err, res.First.Status, res.First.Code, res.Retried)
+		}
+		mu.Lock()
+		got := sent[len(sent)-2:]
+		mu.Unlock()
+		for j, b := range got {
+			if b.RefreshToken != old.RefreshToken || b.AccessToken != old.AccessToken {
+				t.Errorf("refresh %d, request %d: the body does not carry the refreshed pair's access token", i, j+1)
+			}
+		}
+	}
+}
+
+// Resume checks the saved session: one that is gone is MustAct (exit 10,
+// HUMAN-CHECKS), not a failure of the first probe call.
+func TestResumeOfARevokedSessionIsMustAct(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	f.Backend.RevokeSessions()
+	r, err := session.Resume(t.Context(), o)
+	if err == nil {
+		r.Close()
+		t.Fatal("Resume of a revoked session succeeded")
+	}
+	if e := exitErr(t, err); e.Code != exitcode.MustAct || !strings.Contains(e.Hint, "pcb-lab login") {
+		t.Fatalf("got %v, want MustAct with a login hint", err)
+	}
 }
 
 func TestResumeWithoutSessionIsMustAct(t *testing.T) {
@@ -455,13 +638,17 @@ func TestExistingStateDirTightenedTo0700(t *testing.T) {
 	}
 }
 
-func TestResumeReportsFailedTokenWrite(t *testing.T) {
+// A rotation the resumed client cannot save is reported on Stderr, without
+// any token, old or rotated.
+func TestResumedClientReportsFailedTokenWrite(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory modes")
 	}
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
+	var stderr bytes.Buffer
+	o.Stderr = &stderr
 	s, err := session.Login(t.Context(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -478,27 +665,30 @@ func TestResumeReportsFailedTokenWrite(t *testing.T) {
 	if err := json.Unmarshal(raw, &saved); err != nil || saved.AccessToken == "" || saved.RefreshToken == "" {
 		t.Fatalf("session.json has no tokens to look for: %v", err)
 	}
+	r, err := session.Resume(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
 	if err := os.Chmod(o.StateDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(o.StateDir, 0o700) //nolint:errcheck // t.TempDir cleanup
-	r, err := session.Resume(t.Context(), o)
-	if err == nil {
-		r.Close()
-		t.Fatal("Resume succeeded although the rotated tokens could not be saved")
+	f.Backend.ExpireAccessTokens()
+	if _, err := r.Client.GetUser(t.Context()); err != nil {
+		t.Fatalf("GetUser after expiry: %v", err)
 	}
-	if !strings.Contains(err.Error(), "saving the rotated session tokens") {
-		t.Fatalf("error = %v", err)
+	msg := strings.ReplaceAll(stderr.String(), o.StateDir, "<state>")
+	if !strings.Contains(msg, "cannot save the rotated session tokens") {
+		t.Fatalf("stderr = %q, want the failed save reported", msg)
 	}
-	// The error is printed and logged: it must carry no token, old or rotated.
-	msg := strings.ReplaceAll(err.Error(), o.StateDir, "<state>")
-	for _, tok := range []string{saved.AccessToken, saved.RefreshToken} {
+	for _, tok := range append(f.Backend.AccessTokens(), saved.RefreshToken) {
 		if strings.Contains(msg, tok) {
-			t.Errorf("error contains a session token: %q", msg)
+			t.Errorf("the warning contains a session token: %q", msg)
 		}
 	}
 	if long := regexp.MustCompile(`[A-Za-z0-9_-]{24,}`).FindString(msg); long != "" {
-		t.Errorf("error contains the token-like string %q: %q", long, msg)
+		t.Errorf("the warning contains the token-like string %q: %q", long, msg)
 	}
 }
 
@@ -634,18 +824,24 @@ func TestAPIRefreshesAndSavesTheRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
-	f.Backend.ExpireAccessTokens()
-	var u struct{ User struct{ Name string } }
-	if err := c.Get(t.Context(), "/core/v4/users", nil, &u); err != nil || u.User.Name != labtest.User {
-		t.Fatalf("GET after expiry: %v, user %q", err, u.User.Name)
-	}
-	after, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
-	if bytes.Equal(before, after) {
-		t.Error("the refresh's rotated tokens were not saved")
+	f.Mu.Lock()
+	first := len(f.Log) // Resume's own check goes through go-proton-api
+	f.Mu.Unlock()
+	// Twice: a refreshed pair's refresh token needs its access token.
+	for i := 1; i <= 2; i++ {
+		before, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+		f.Backend.ExpireAccessTokens()
+		var u struct{ User struct{ Name string } }
+		if err := c.Get(t.Context(), "/core/v4/users", nil, &u); err != nil || u.User.Name != labtest.User {
+			t.Fatalf("GET after expiry %d: %v, user %q", i, err, u.User.Name)
+		}
+		after, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+		if bytes.Equal(before, after) {
+			t.Errorf("expiry %d: the refresh's rotated tokens were not saved", i)
+		}
 	}
 	f.Mu.Lock()
-	for _, seen := range f.Log {
+	for _, seen := range f.Log[first:] {
 		if seen.Path == "/core/v4/users" && !strings.HasPrefix(seen.UserAgent, "pcb-lab/") {
 			t.Errorf("API sent User-Agent %q, want pcb-lab/<version>", seen.UserAgent)
 		}
