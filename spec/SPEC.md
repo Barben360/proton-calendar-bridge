@@ -967,6 +967,8 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
   base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
+  With no unit installed and no `--user`/`--system`, applying exits 10 ("nothing to uninstall"), while `--plan`
+  exits 0 with "Nothing to remove" and no step (M5-R16) [verified: `TestUninstallPlanWithNothingInstalled`].
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
   and `logs` do not (M5-R7).
 - First login: a `pcb login` that completes while no client exists creates the `default` CalDAV client; `pcb client show` prints the URL,

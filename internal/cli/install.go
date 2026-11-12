@@ -185,6 +185,11 @@ func (a *app) newUninstall() *cobra.Command {
 		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := scope.detectScope(a.Host, "nothing to uninstall; pass --user or --system to remove what is left")
+			if plan && errors.Is(err, install.ErrNotInstalled) {
+				// A plan is not a failure: there is nothing in it (M5-R16).
+				const nothing = "Nothing to remove: pcb is not installed as a service (pass --user or --system to plan the removal of what is left)."
+				return Finish(cmd, installData{Plan: true, Steps: []install.Step{}, Next: []string{}}, nothing+"\nPlan only: nothing was changed.", nil)
+			}
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}

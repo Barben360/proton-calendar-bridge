@@ -610,6 +610,27 @@ func TestInstallFailureMidwayIsPartial(t *testing.T) {
 	}
 }
 
+// Final review M8 (ruling M5-R16): a plan with nothing installed is not a
+// failure: exit 0, nothing to remove; applying still exits 10.
+func TestUninstallPlanWithNothingInstalled(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	for _, args := range [][]string{{"uninstall", "--plan"}, {"uninstall", "--delete-data", "--plan"}} {
+		s.want(exitcode.OK, args...)
+		if want := "Nothing to remove: pcb is not installed as a service (pass --user or --system to plan the removal of what is left).\nPlan only: nothing was changed.\n"; s.stdout.String() != want {
+			t.Errorf("%v: stdout = %q, want %q", args, s.stdout.String(), want)
+		}
+	}
+	s.want(exitcode.OK, "uninstall", "--plan", "--json")
+	if d := s.data(); !d.Plan || d.Steps == nil || len(d.Steps) != 0 {
+		t.Errorf("--json: %+v, want a plan with no step", d)
+	}
+	s.want(exitcode.MustAct, "uninstall")
+	if len(s.takeEvents()) != 0 {
+		t.Error("a command ran with nothing installed")
+	}
+}
+
 func TestUninstallKeepsDataByDefault(t *testing.T) {
 	t.Parallel()
 	s := newSysRig(t)
