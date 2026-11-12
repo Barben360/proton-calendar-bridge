@@ -7,7 +7,9 @@ package caldav_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -282,16 +284,23 @@ func TestRootPointsToPrefixedPrincipal(t *testing.T) {
 	}
 }
 
+// An account with CalDAV off refuses its clients (401) on both kinds of
+// URL; the other account is unaffected.
 func TestCalDAVOffAccountIs401(t *testing.T) {
 	t.Parallel()
 	r := newHubRig(t)
 	if _, err := r.hub.SetCalDAV(t.Context(), r.a, false); err != nil {
 		t.Fatal(err)
 	}
-	want401(t, r.as(r.passA, "", "PROPFIND", space(r.a).home, tbHomeSet, "Depth", "1"), "a's password on a's URL, CalDAV off", realmOf(r.a))
-	want401(t, r.as(r.passA, "", "PROPFIND", home, tbHomeSet, "Depth", "1"), "a's password on the compatibility URL, CalDAV off", challenge)
+	// A Thunderbird still holding a's calendars polls on: eight refusals
+	// from the one IP every client shares, none charged (ruling R28), so
+	// b's password from it still passes.
+	for range 4 {
+		want401(t, r.as(r.passA, "", "PROPFIND", space(r.a).home, tbHomeSet, "Depth", "1"), "a's password on a's URL, CalDAV off", realmOf(r.a))
+		want401(t, r.as(r.passA, "", "PROPFIND", home, tbHomeSet, "Depth", "1"), "a's password on the compatibility URL, CalDAV off", challenge)
+	}
 	if hrefs, raw := r.homeSet(t, r.passB, space(r.b).home); !hrefs[space(r.b).calPath(r.calB)] {
-		t.Errorf("b's URL with a off:\n%s", raw)
+		t.Errorf("b's URL with a off, after a's eight refusals from the same IP:\n%s", raw)
 	}
 	if hrefs, raw := r.homeSet(t, r.passB, home); !hrefs[calPath(r.calB)] {
 		t.Errorf("the compatibility URL as b with a off:\n%s", raw)
@@ -545,6 +554,39 @@ func TestMultigetHrefsOfAnotherNamespaceAre404(t *testing.T) {
 		}
 		if got := ms.get(t, tc.other.objPath(workID, lastUID)); got.status != "HTTP/1.1 404 Not Found" || len(got.props) != 0 {
 			t.Errorf("%s: the %s href answered %q with %d properties, want a response-level 404", tc.req.name, tc.other.name, got.status, len(got.props))
+		}
+	}
+}
+
+// failingRouter is a Router that cannot answer.
+type failingRouter struct{}
+
+func (failingRouter) Route(context.Context, string, string, string) (service.API, string, time.Duration, error) {
+	return nil, "", 0, errors.New("the hub is closed")
+}
+
+// A Router that cannot answer is a 503 with Retry-After, never a 401 that
+// would make Thunderbird ask for the password again.
+func TestRouterErrorIs503(t *testing.T) {
+	t.Parallel()
+	h := caldav.Handler(failingRouter{}, caldav.Options{})
+	for _, p := range []string{"/", principal, account.home} {
+		want503(t, do(h, "PROPFIND", p, tbDetect, "Depth", "0"), "PROPFIND "+p+" with a failing router")
+	}
+}
+
+// The warnings of a request name the account it was routed to, by local
+// ID (ruling R30), on either kind of URL.
+func TestWarningsNameTheAccount(t *testing.T) {
+	t.Parallel()
+	for _, b := range []urlBase{compat, account} {
+		s := newStub()
+		s.readErr = errors.New("proton is down")
+		logs := &syncLog{}
+		h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(logs, nil))})
+		want503(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"), b.name+": the home set while the service fails")
+		if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "account="+stubID) {
+			t.Errorf("%s: the warning does not name the account:\n%s", b.name, logs.String())
 		}
 	}
 }

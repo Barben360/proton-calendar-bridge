@@ -147,6 +147,13 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 // and charges one failure). A match touches the client and notes activity.
 // err is set when clients.json cannot be loaded (logged once per failure).
 func (l *Local) VerifyClient(_ context.Context, password string) (found bool, err error) {
+	return l.verifyClient(password, true)
+}
+
+// verifyClient is VerifyClient; a match touches the client and notes
+// activity only when use is set (a Hub checks the clients of an account
+// with CalDAV off without using them, ruling R28).
+func (l *Local) verifyClient(password string, use bool) (found bool, err error) {
 	if l.closed.Load() {
 		return false, nil
 	}
@@ -156,7 +163,7 @@ func (l *Local) VerifyClient(_ context.Context, password string) (found bool, er
 		return false, err
 	}
 	l.noteClientsLoad(nil)
-	if found {
+	if found && use {
 		l.touch(c.ID)
 		l.noteActivity()
 	}

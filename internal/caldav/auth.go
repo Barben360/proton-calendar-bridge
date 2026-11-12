@@ -40,6 +40,9 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, id string)
 		case api != nil && (id == "" || localID == id):
 			rs := *s
 			rs.api, rs.ns, rs.own = api, accountSpace(id), accountSpace(localID)
+			if localID != "" {
+				rs.log = s.log.With("account", localID) // its warnings name it (ruling R30)
+			}
 			return &rs, true
 		case api != nil:
 			// Never another account's API on an account's URLs.

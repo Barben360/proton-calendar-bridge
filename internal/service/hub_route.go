@@ -30,11 +30,14 @@ const accountRetry = 30 * time.Second
 var _ Router = (*Hub)(nil)
 
 // Route implements Router. The shared limiter is consulted once, before any
-// password is looked at, and charged once for a request refused 401. On an
-// account's URLs the password must be one of that account's clients; an
-// unknown local ID, or an account with CalDAV off, is a 401 like a wrong
-// password. On the compatibility URLs each account with CalDAV on is
-// tried. An account whose clients.json (or state.json) cannot be read
+// password is looked at, and charged once for a request refused 401 on a
+// password no account holds. On an account's URLs the password must be
+// one of that account's clients; an unknown local ID is a 401 like a wrong
+// password. On the compatibility URLs each account is tried. A client of
+// an account with CalDAV off is a 401 without a charge, on either kind of
+// URL, and is neither touched nor counted as activity (ruling R28): every
+// Thunderbird comes from 127.0.0.1, so charging a client left configured
+// would soon block every account's. An account whose clients.json (or state.json) cannot be read
 // answers 503 with no charge on its URLs; on the compatibility URLs a
 // password no other account holds is then a 503, as it may be that
 // account's. A matched account that is parked or waiting for a login is a
@@ -55,10 +58,12 @@ func (h *Hub) Route(ctx context.Context, accountID, password, remote string) (AP
 	}
 	broken := false
 	for _, a := range candidates {
-		found, err := h.verify(ctx, a, password)
+		found, on, err := h.verify(a, password)
 		switch {
 		case err != nil:
 			broken = true
+		case found && !on:
+			return nil, "", 0, nil
 		case found:
 			if h.unavailable(a) {
 				return nil, "", accountRetry, nil
@@ -67,6 +72,10 @@ func (h *Hub) Route(ctx context.Context, accountID, password, remote string) (AP
 		}
 	}
 	if broken {
+		// Not charged, though a password no sound store holds may be a
+		// guess (ruling R29): the broken account's own Thunderbird shares
+		// the localhost IP with every other, and a charge would lock all
+		// of them out for as long as the store stays broken.
 		return nil, "", clientsRetry, nil
 	}
 	h.o.Limiter.Fail(remote)
@@ -81,22 +90,23 @@ func (h *Hub) byID(id string) *hubAccount {
 }
 
 // verify reports whether password is a CalDAV client's of a, through its
-// gate: a removed account, or one with CalDAV off, holds none. err is set
-// when a's clients.json or state.json cannot be read.
-func (h *Hub) verify(ctx context.Context, a *hubAccount, password string) (bool, error) {
+// gate (a removed account holds none), and whether a has CalDAV on; a
+// client of an account with CalDAV off is not used (no touch, no
+// activity). err is set when a's clients.json or state.json cannot be
+// read.
+func (h *Hub) verify(a *hubAccount, password string) (found, on bool, err error) {
 	leave, err := a.enter()
 	if err != nil {
-		return false, nil
+		return false, false, nil
 	}
 	defer leave()
 	st, err := store.LoadState(a.dir)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	if st.CalDAV != nil && !*st.CalDAV {
-		return false, nil
-	}
-	return a.local.VerifyClient(ctx, password)
+	on = st.CalDAV == nil || *st.CalDAV
+	found, err = a.local.verifyClient(password, on)
+	return found, on, err
 }
 
 // unavailable reports whether a cannot answer CalDAV now: its serve loop
