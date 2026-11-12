@@ -1,7 +1,11 @@
 .git
+.github
+.claude
+.superpowers
 bin
 spec
-*.md
+**/*.md
 !README.md
-# The local SDD workspace (gitignored, absent in CI).
-.superpowers
+.env*
+**/*.sealed
+**/*.key

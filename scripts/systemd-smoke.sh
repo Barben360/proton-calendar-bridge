@@ -56,14 +56,30 @@ verify() {
 	[ -z "$out" ] || fail "$* warned: $out"
 }
 
+# wait_state runs a systemctl command line until it prints the wanted state
+# (up to 15 s), so a unit still activating does not flake the test.
+wait_state() {
+	local want=$1 got deadline=$((SECONDS + 15))
+	shift
+	while :; do
+		got=$("$@" 2>/dev/null) || true
+		[ "$got" = "$want" ] && return 0
+		[ "$SECONDS" -lt "$deadline" ] || fail "$*: want '$want', got '$got' after 15 s"
+		sleep 1
+	done
+}
+
 # wait_status runs a pcb status --json --daemon command line until a daemon
 # answers (up to 30 s), then checks it needs a login.
 wait_status() {
-	local out deadline=$((SECONDS + 30))
-	until out=$("$@" 2>/dev/null); do
-		[ "$SECONDS" -lt "$deadline" ] || fail "no daemon answered within 30 s: $out"
+	local out err deadline=$((SECONDS + 30)) errfile
+	errfile=$(mktemp)
+	until out=$("$@" 2>"$errfile"); do
+		err=$(cat "$errfile")
+		[ "$SECONDS" -lt "$deadline" ] || { rm -f "$errfile"; fail "no daemon answered within 30 s: ${out:-<no stdout>} / stderr: ${err:-<none>}"; }
 		sleep 1
 	done
+	rm -f "$errfile"
 	jq -e '.ok == true and any(.data.alerts[]; .code == "needs-login")' <<<"$out" >/dev/null ||
 		fail "unexpected status: $out"
 }
@@ -111,10 +127,8 @@ step "u2. install --user"
 as_tester "$pcb" install --user
 
 step "u3. enabled and active"
-got=$(as_tester systemctl --user is-enabled pcb) || true
-[ "$got" = enabled ] || fail "systemctl --user is-enabled pcb: '$got'"
-got=$(as_tester systemctl --user is-active pcb) || true
-[ "$got" = active ] || fail "systemctl --user is-active pcb: '$got'"
+wait_state enabled as_tester systemctl --user is-enabled pcb
+wait_state active as_tester systemctl --user is-active pcb
 
 step "u4. pcb service status --json: active"
 out=$(as_tester "$pcb" service status --json)
@@ -148,15 +162,16 @@ got=$(as_tester systemctl --user is-active pcb) || true
 echo "== as root: pcb install --system"
 
 step "s1. install --system --plan leaves no unit"
-in_box "$pcb" install --system --plan >/dev/null
+plan=$(in_box "$pcb" install --system --plan --json)
+jq -e --arg unit "$system_unit" '.data.plan == true and any(.data.steps[]; .path == $unit and .action == "create")' <<<"$plan" >/dev/null ||
+	fail "the plan does not create $system_unit: $plan"
 absent "$system_unit" "after --plan"
 
 step "s2. install --system"
 in_box "$pcb" install --system
 
 step "s3. active"
-got=$(in_box systemctl is-active pcb) || true
-[ "$got" = active ] || fail "systemctl is-active pcb: '$got'"
+wait_state active in_box systemctl is-active pcb
 
 step "s4. pcb status --json --daemon as pcb: needs-login"
 wait_status in_box runuser -u pcb -- env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb "$system_pcb" status --json --daemon
