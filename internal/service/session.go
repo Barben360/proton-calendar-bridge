@@ -37,30 +37,31 @@ func (l *Local) stored() (store.State, store.Account, error) {
 	}
 	acc, ok := accounts[st.AccountID]
 	if !ok {
-		return st, store.Account{}, mustAct("no stored Proton session", "run pcb login")
+		return st, store.Account{}, loginNeeded("no stored Proton session", "run pcb login")
 	}
 	return st, acc, nil
 }
 
-// phaseError is nil for a ready login, else what the person must do.
+// phaseError is nil for a ready login, else what the person must do: a
+// MustAct a login fixes (loginFixes).
 func phaseError(st store.State) error {
 	switch st.Phase {
 	case store.PhaseReady:
 		return nil
 	case store.PhaseNeedsCaptcha:
 		if st.Captcha == nil {
-			return mustAct("Proton asks for a CAPTCHA", "run pcb login")
+			return loginNeeded("Proton asks for a CAPTCHA", "run pcb login")
 		}
-		return mustAct("Proton asks for a CAPTCHA before pcb can log in again: solve it at "+st.Captcha.URL,
+		return loginNeeded("Proton asks for a CAPTCHA before pcb can log in again: solve it at "+st.Captcha.URL,
 			"pcb login resume --captcha-token "+shellquote.Quote(st.Captcha.Token))
 	case store.PhaseNeedsLogin:
 		reason := st.Reason
 		if reason == "" {
 			reason = sessionEnded
 		}
-		return mustAct(reason, "run pcb login")
+		return loginNeeded(reason, "run pcb login")
 	}
-	return mustAct("not logged in to Proton", "run pcb login")
+	return loginNeeded("not logged in to Proton", "run pcb login")
 }
 
 // session returns a client on the stored session, its account and the state
@@ -120,7 +121,7 @@ func (l *Local) refreshStored(id string) func(context.Context, api.Tokens) (api.
 		err := l.secrets.Update(ctx, func(accounts map[string]store.Account) error {
 			acc, ok := accounts[id]
 			if !ok {
-				return mustAct("pcb was logged out meanwhile", "run pcb login")
+				return loginNeeded("pcb was logged out meanwhile", "run pcb login")
 			}
 			if acc.RefreshToken != stale.RefreshToken {
 				fresh = tokensOf(acc)
@@ -300,7 +301,8 @@ func (l *Local) humanNeeded(ctx context.Context, st store.State, err error) erro
 	})
 	switch {
 	case uerr == nil:
-		return err
+		// Marked needs-login (or a login landed meanwhile): a login fixes it.
+		return asLoginNeeded(ee)
 	case errors.Is(uerr, store.ErrStateLock):
 		return stateLockError(uerr, l.o.Dirs.State)
 	case !loaded:

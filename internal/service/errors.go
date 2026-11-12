@@ -38,6 +38,7 @@ type detail struct {
 	retryAfter time.Duration // Proton's Retry-After, 0 if none
 	final      bool          // a retry cannot help: a person must change something
 	class      string        // the error class Health reports (errorClass), "" when the code says enough
+	login      bool          // a MustAct a login fixes (loginFixes)
 }
 
 func (d *detail) Error() string { return d.msg }
@@ -57,6 +58,33 @@ func withClass(ee *exitcode.Error, class string) *exitcode.Error {
 	}
 	d.class = class
 	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
+
+// loginNeeded is a MustAct that a login fixes (ruling M5-R8): not logged
+// in, the session ended, the login marked needs-login or needs-captcha, the
+// sealed secrets rolled back.
+func loginNeeded(msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.MustAct, Err: &detail{msg: msg, login: true}, Hint: hint}
+}
+
+// asLoginNeeded is ee, a MustAct, marked as one a login fixes, its message,
+// hint and class kept.
+func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
+	d := detail{msg: ee.Err.Error()}
+	var old *detail
+	if errors.As(ee.Err, &old) {
+		d = *old
+	}
+	d.login = true
+	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
+
+// loginFixes reports whether err is a MustAct a login fixes: Serve with
+// WaitForLogin waits for one after it; any other stop ends Serve (ruling
+// M5-R8). It reads the type only, never the text.
+func loginFixes(err error) bool {
+	var d *detail
+	return exitcode.From(err) == exitcode.MustAct && errors.As(err, &d) && d.login
 }
 
 // final is a Blocked error that no retry can fix.
@@ -163,7 +191,7 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, keys.ErrKeysLocked):
 		return mustAct("the password does not unlock the account keys", "check the password; accounts in two-password mode are not supported")
 	case errors.Is(err, api.ErrSessionEnded):
-		return mustAct("the Proton session has ended", "run pcb login")
+		return loginNeeded("the Proton session has ended", "run pcb login")
 	case errors.As(err, &uve):
 		return blocked(uve.Error(), "complete the verification once in a browser on this network, then retry later")
 	case errors.Is(err, auth.ErrServerProof):
@@ -205,7 +233,7 @@ func protonDown(e *api.Error) error {
 // secrets.sealed (store.ErrRolledBack): only they know whether the restore
 // was meant, and a new login is the way out either way.
 func rolledBack(rb *store.RolledBackError) *exitcode.Error {
-	return mustAct(rb.Explain(), store.RolledBackHint)
+	return loginNeeded(rb.Explain(), store.RolledBackHint)
 }
 
 // storeError maps a failure of the sealed store: a lost or foreign key names

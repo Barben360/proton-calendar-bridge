@@ -18,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
@@ -730,4 +731,86 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 			t.Errorf("pcb.db after Logout: %v", err)
 		}
 	})
+}
+
+// Ruling M5-R8: under WaitForLogin, every stop a login fixes goes back to
+// waiting: not logged in (another process logged out), the login marked
+// needs-login or needs-captcha (by another process), the sealed secrets
+// rolled back. (A session Proton ended: TestSessionEndWaitsInsteadOfExiting;
+// a Logout in this process: TestLogoutDuringServeClosesTheCacheFirst.)
+func TestLoginFixableStopsWait(t *testing.T) {
+	t.Parallel()
+	setPhase := func(t *testing.T, r *waitRig, phase store.Phase, captcha *store.Captcha) {
+		t.Helper()
+		if err := store.UpdateState(r.dirs.State, func(st *store.State) error {
+			st.Phase, st.Reason, st.Captcha = phase, "set by another process", captcha
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		after func(t *testing.T, r *waitRig)
+	}{
+		{"not logged in", func(t *testing.T, r *waitRig) {
+			if _, err := r.open(t).Logout(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"needs login", func(t *testing.T, r *waitRig) { setPhase(t, r, store.PhaseNeedsLogin, nil) }},
+		{"needs captcha", func(t *testing.T, r *waitRig) {
+			setPhase(t, r, store.PhaseNeedsCaptcha, &store.Captcha{URL: "https://verify.example/x", Token: "tok"})
+		}},
+		{"secrets rolled back", func(t *testing.T, r *waitRig) { restoreOlderSecrets(t, r.env) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newWaitRig(t)
+			r.login(t, r.req())
+			done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+			r.wantState(t, service.ServeServing)
+			r.wantPass(t)
+			tc.after(t, r)
+			r.tick <- struct{}{}
+			if p := r.wantPass(t); exitcode.From(p.Err) != exitcode.MustAct {
+				t.Fatalf("pass after the change: %v, want a MustAct", p.Err)
+			}
+			r.wantState(t, service.ServeWaitingForLogin)
+			running(t, done)
+		})
+	}
+}
+
+// Ruling M5-R8: a MustAct a login does not fix (a damaged cache) ends Serve
+// with that error even under WaitForLogin (pcb serve exits 10): no waiting,
+// no retry loop.
+func TestDamagedCacheEndsServeUnderTheFlag(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache.Path(r.dirs.State), []byte("not a database, not at all, not even close........"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Millisecond})
+	select {
+	case err := <-done:
+		done <- err // for the cleanup's stop
+		if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "damaged") {
+			t.Errorf("Serve = %v, want the damaged cache", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("Serve with a damaged cache never returned: it waits for a login a login cannot fix")
+	}
+	if n := r.polls.Load(); n != 1 {
+		t.Errorf("%d login checks, want the first one only (no retry loop)", n)
+	}
+	for len(r.states) > 0 {
+		if s := <-r.states; s == service.ServeWaitingForLogin {
+			t.Error("Serve reported waiting for a login over a damaged cache")
+		}
+	}
 }
