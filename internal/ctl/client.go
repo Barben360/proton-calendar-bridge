@@ -233,6 +233,11 @@ func (c *Client) do(ctx context.Context, method, target string, body []byte, out
 		}
 		return nil
 	case resp.StatusCode == http.StatusUnprocessableEntity && env.Error != nil && env.Error.Code != 0:
+		var list Accounts
+		if json.Unmarshal(env.Data, &list) == nil && len(list.Accounts) > 0 {
+			// The refusal to choose among several accounts: the CLI reads them.
+			return &exitcode.Error{Code: exitcode.Code(env.Error.Code), Err: &service.SeveralAccountsError{Accounts: list.Accounts}, Hint: env.Error.Hint}
+		}
 		return &exitcode.Error{Code: exitcode.Code(env.Error.Code), Err: errors.New(env.Error.Message), Hint: env.Error.Hint}
 	}
 	msg, hint := http.StatusText(resp.StatusCode), ""

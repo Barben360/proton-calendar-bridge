@@ -14,6 +14,7 @@ import (
 const (
 	CodeNeedsLogin         = "needs-login"
 	CodeAccountStopped     = "account-stopped"
+	CodeAccountUnreadable  = "account-unreadable"
 	CodeNeedsCaptcha       = "needs-captcha"
 	CodeHumanVerification  = "human-verification"
 	CodeSyncStalled        = "sync-stalled"

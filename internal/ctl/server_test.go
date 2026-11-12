@@ -41,7 +41,12 @@ type stubHub struct {
 	status    map[string]service.Status
 	health    map[string]service.Health
 	statusErr error
-	loginFn   func(service.LoginRequest) (service.LoginResult, error)
+	// ghosts are listed by Accounts but gone by Account (removed meanwhile).
+	ghosts []service.AccountInfo
+	// statusErrFor and healthErrFor fail one account's Status or Health.
+	statusErrFor, healthErrFor map[string]error
+	signOutErr                 error
+	loginFn                    func(service.LoginRequest) (service.LoginResult, error)
 
 	entered, release chan struct{}
 
@@ -75,7 +80,7 @@ func (h *stubHub) find(selector string) (service.AccountInfo, error) {
 	return service.AccountInfo{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account " + selector), Hint: "see pcb account list"}
 }
 
-func (h *stubHub) Accounts() []service.AccountInfo { return h.infos }
+func (h *stubHub) Accounts() []service.AccountInfo { return append(slices.Clone(h.infos), h.ghosts...) }
 
 func (h *stubHub) Account(selector string) (service.API, service.AccountInfo, error) {
 	i, err := h.find(selector)
@@ -87,6 +92,9 @@ func (h *stubHub) Account(selector string) (service.API, service.AccountInfo, er
 
 func (h *stubHub) Health(_ context.Context, selector string) (service.Health, error) {
 	i, err := h.find(selector)
+	if err == nil {
+		err = h.healthErrFor[i.ID]
+	}
 	return h.health[i.ID], err
 }
 
@@ -107,6 +115,9 @@ func (h *stubHub) Login(_ context.Context, r service.LoginRequest) (service.Logi
 }
 
 func (h *stubHub) SubmitTOTP(_ context.Context, selector, code string) (service.LoginResult, error) {
+	if _, err := h.find(selector); err != nil {
+		return service.LoginResult{}, err
+	}
 	h.mu.Lock()
 	h.codes = append(h.codes, code)
 	h.codeFor = append(h.codeFor, selector)
@@ -115,6 +126,9 @@ func (h *stubHub) SubmitTOTP(_ context.Context, selector, code string) (service.
 }
 
 func (h *stubHub) SignOut(_ context.Context, selector string, r service.LogoutRequest) (service.LogoutResult, error) {
+	if h.signOutErr != nil {
+		return service.LogoutResult{}, h.signOutErr
+	}
 	if _, err := h.find(selector); err != nil {
 		return service.LogoutResult{}, err
 	}
@@ -172,6 +186,9 @@ type statusAPI struct {
 }
 
 func (a statusAPI) Status(context.Context) (service.Status, error) {
+	if err := a.h.statusErrFor[a.id]; err != nil {
+		return service.Status{}, err
+	}
 	return a.h.status[a.id], a.h.statusErr
 }
 
@@ -356,6 +373,99 @@ func TestStatusListsEveryAccount(t *testing.T) {
 	}
 	if len(b.Alerts) != 1 || b.Alerts[0].Code != "needs-login" || b.Alerts[0].Account != idB || b.Alerts[0].Message != "Proton ended the session" {
 		t.Errorf("second account's alerts = %+v; want its own needs-login", b.Alerts)
+	}
+}
+
+// One account that cannot be read does not take the others' status down: it
+// keeps its entry with an alert, and the healthy one is whole.
+func TestOneFailingAccountDoesNotFailTheStatus(t *testing.T) {
+	t.Parallel()
+	for name, mod := range map[string]func(*stubHub){
+		"status": func(h *stubHub) {
+			h.statusErrFor = map[string]error{idB: &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("state.json is unreadable"), Hint: "restore it"}}
+		},
+		"health": func(h *stubHub) {
+			h.healthErrFor = map[string]error{idB: &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("state.json is unreadable"), Hint: "restore it"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			hub := newHub(service.Status{Phase: "ready", Username: "alice"})
+			hub.health[idA] = *serving(cal(nil))
+			hub.infos = append(hub.infos, service.AccountInfo{ID: idB, Address: addrB, Phase: "needs-login"})
+			mod(hub)
+			ln := &ctl.Listener{Addr: "127.0.0.1:1080", URL: "http://localhost:1080"}
+			s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon(), Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return now }})
+			st, err := dial(t, s.path).Status(t.Context())
+			if err != nil {
+				t.Fatalf("Status = %v; want 200 with both accounts", err)
+			}
+			if len(st.Accounts) != 2 {
+				t.Fatalf("accounts = %+v", st.Accounts)
+			}
+			a, b := st.Accounts[0], st.Accounts[1]
+			if a.ID != idA || a.Login.Username != "alice" || a.Health == nil || a.Health.Serve != "serving" || a.URL == "" || len(a.Alerts) != 0 {
+				t.Errorf("the healthy account = %+v", a)
+			}
+			var got *ctl.Alert
+			for i := range b.Alerts {
+				if b.Alerts[i].Code == "account-unreadable" {
+					got = &b.Alerts[i]
+				}
+			}
+			if b.ID != idB || b.Address != addrB || got == nil || got.Severity != "error" || got.Account != idB ||
+				got.Message != "state.json is unreadable" || got.Fix != "restore it" {
+				t.Errorf("the failing account = %+v; want its entry with an account-unreadable alert", b)
+			}
+		})
+	}
+}
+
+// An account removed between the listing and the read is skipped.
+func TestVanishedAccountIsSkipped(t *testing.T) {
+	t.Parallel()
+	hub := newHub(service.Status{Phase: "ready"})
+	hub.ghosts = []service.AccountInfo{{ID: idB, Address: addrB}}
+	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
+	st, err := dial(t, s.path).Status(t.Context())
+	if err != nil || len(st.Accounts) != 1 || st.Accounts[0].ID != idA {
+		t.Errorf("Status = %+v, %v; want only the account still there", st.Accounts, err)
+	}
+}
+
+// R31: the refusal to choose among several accounts crosses the socket
+// with the list, as the same error type.
+func TestSeveralAccountsCrossTheSocket(t *testing.T) {
+	t.Parallel()
+	hub := newHub(service.Status{Phase: "ready"})
+	list := []service.AccountInfo{{ID: idA, Address: addrA, Phase: "ready", CalDAV: true}, {ID: idB, Address: addrB, Phase: "needs-login"}}
+	hub.signOutErr = &exitcode.Error{Code: exitcode.Usage, Err: &service.SeveralAccountsError{Accounts: list}, Hint: "name one with --account"}
+	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
+
+	resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/x/logout", nil)
+	data, _ := env["data"].(map[string]any)
+	if resp.StatusCode != http.StatusUnprocessableEntity || data == nil || len(data["accounts"].([]any)) != 2 {
+		t.Fatalf("HTTP %d, envelope %v; want 422 with data.accounts", resp.StatusCode, env)
+	}
+	_, err := dial(t, s.path).Logout(t.Context(), "x", service.LogoutRequest{})
+	var several *service.SeveralAccountsError
+	if !errors.As(err, &several) || !slices.Equal(several.Accounts, list) {
+		t.Fatalf("Logout error = %#v; want a *service.SeveralAccountsError listing both", err)
+	}
+	if exitcode.From(err) != exitcode.Usage || exitcode.HintOf(err) != "name one with --account" || err.Error() != "several accounts: name one with --account" {
+		t.Errorf("error = %v (exit %d, hint %q)", err, exitcode.From(err), exitcode.HintOf(err))
+	}
+}
+
+// R32: an unclean path is the JSON 404, never ServeMux's plain-text redirect.
+func TestUncleanPathsAre404(t *testing.T) {
+	t.Parallel()
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{Phase: "ready"}), Daemon: daemon()})
+	for _, target := range []string{"/v2//status", "/v2/accounts/x/../status", "/v2/./status", "/v2/status/", "//v2/status"} {
+		resp, env := raw(t, s.path, http.MethodGet, target, nil)
+		if resp.StatusCode != http.StatusNotFound || env["ok"] != false || env["error"] == nil {
+			t.Errorf("GET %s: HTTP %d, envelope %v; want the 404 envelope", target, resp.StatusCode, env)
+		}
 	}
 }
 
@@ -574,17 +684,17 @@ func TestOversizedBodyIs413(t *testing.T) {
 func TestErrorsCrossTheSocket(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{})
-	hub.statusErr = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the key file is missing"), Hint: "restore /k/secrets.key"}
+	hub.signOutErr = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the key file is missing"), Hint: "restore /k/secrets.key"}
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
-	resp, env := raw(t, s.path, http.MethodGet, "/v2/status", nil)
+	resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/"+idA+"/logout", nil)
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("HTTP %d, envelope %v; want 422", resp.StatusCode, env)
 	}
 	c := dial(t, s.path)
-	_, err := c.Status(t.Context())
+	_, err := c.Logout(t.Context(), idA, service.LogoutRequest{})
 	var ee *exitcode.Error
 	if !errors.As(err, &ee) || ee.Code != exitcode.MustAct || ee.Error() != "the key file is missing" || ee.Hint != "restore /k/secrets.key" {
-		t.Fatalf("Status error = %#v; want code 10 with the message and hint", err)
+		t.Fatalf("Logout error = %#v; want code 10 with the message and hint", err)
 	}
 
 	// A transport error is blocked (20), never mistaken for the command's.
@@ -601,7 +711,7 @@ func TestUnknownAccountRoute(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{Phase: "ready"})
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
-	for _, action := range []string{"logout", "remove", "caldav", "restart"} {
+	for _, action := range []string{"login/totp", "logout", "remove", "caldav", "restart"} {
 		target := "/v2/accounts/zzzzzzzz/" + action
 		resp, env := raw(t, s.path, http.MethodPost, target, strings.NewReader(`{"on":true}`))
 		if resp.StatusCode != http.StatusUnprocessableEntity || env["ok"] != false {
@@ -617,6 +727,9 @@ func TestUnknownAccountRoute(t *testing.T) {
 	_, err := c.Logout(t.Context(), "zzzzzzzz", service.LogoutRequest{})
 	if exitcode.From(err) != exitcode.Usage || !strings.Contains(err.Error(), "no account") {
 		t.Errorf("Logout of an unknown account = %v (exit %d); want exit 2", err, exitcode.From(err))
+	}
+	if _, err := c.SubmitTOTP(t.Context(), "zzzzzzzz", "123456"); exitcode.From(err) != exitcode.Usage {
+		t.Errorf("SubmitTOTP of an unknown account = %v; want exit 2", err)
 	}
 	if len(hub.removed)+len(hub.restarted)+len(hub.caldav)+hub.logouts != 0 {
 		t.Errorf("the hub changed something: %+v", hub)

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +150,9 @@ func (s *Server) Handler() http.Handler {
 		if uid, refused := s.refusedPeer(r); refused {
 			s.logger().Warn("control socket: refused a peer of another user", "peer_uid", uid)
 			out = transport(w, "ctl", http.StatusForbidden, "the control socket answers only its own user", "run pcb as the user that runs pcb serve")
+		} else if path.Clean(r.URL.Path) != r.URL.Path {
+			// ServeMux would redirect (301, plain text); no path is unclean here.
+			out = transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon")
 		} else {
 			s.mux.ServeHTTP(w, r)
 		}
@@ -205,7 +209,13 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request, rt route) {
 	case errors.Is(err, errBadBody):
 		record(r, transport(w, command, http.StatusBadRequest, errBadBody.Error(), "use the pcb of the same version as the daemon"))
 	case err != nil:
-		record(r, write(w, command, http.StatusUnprocessableEntity, nil, err))
+		// A refusal to choose among several accounts lists them (data.accounts).
+		var several *service.SeveralAccountsError
+		var details any
+		if errors.As(err, &several) {
+			details = Accounts{Accounts: several.Accounts}
+		}
+		record(r, write(w, command, http.StatusUnprocessableEntity, details, err))
 	default:
 		record(r, write(w, command, http.StatusOK, data, nil))
 	}
@@ -264,20 +274,10 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	infos := s.Hub.Accounts()
 	accounts := make([]AccountStatus, 0, len(infos))
 	for _, info := range infos {
-		api, _, err := s.Hub.Account(info.ID)
-		if err != nil {
-			return nil, err
+		as, err := s.accountStatus(ctx, info, now())
+		if isUsage(err) {
+			continue // removed since Accounts listed it
 		}
-		st, err := api.Status(ctx)
-		if err != nil {
-			return nil, err
-		}
-		h, err := s.Hub.Health(ctx, info.ID)
-		if err != nil {
-			return nil, err
-		}
-		as := AccountStatus{AccountInfo: info, Login: st, Health: &h,
-			Alerts: Alerts(AlertInput{Account: info.ID, Login: st, Stopped: info.Stopped, Health: &h, Now: now()})}
 		if base != "" {
 			as.URL = base + service.AccountPath(info.ID)
 		}
@@ -286,6 +286,33 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	d := s.Daemon
 	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, now())}, nil
 }
+
+// accountStatus is info's entry of Status. An account that cannot be read
+// still has its entry, with an account-unreadable alert saying why (err
+// is then set, for the caller to tell a vanished account), so one account
+// never takes the others' status down.
+func (s *Server) accountStatus(ctx context.Context, info service.AccountInfo, now time.Time) (AccountStatus, error) {
+	as := AccountStatus{AccountInfo: info}
+	api, _, err := s.Hub.Account(info.ID)
+	if err == nil {
+		as.Login, err = api.Status(ctx)
+	}
+	if err == nil {
+		var h service.Health
+		if h, err = s.Hub.Health(ctx, info.ID); err == nil {
+			as.Health = &h
+		}
+	}
+	as.Alerts = Alerts(AlertInput{Account: info.ID, Login: as.Login, Stopped: info.Stopped, Health: as.Health, Now: now})
+	if err != nil && !isUsage(err) {
+		as.Alerts = append(as.Alerts, Alert{Account: info.ID, Code: CodeAccountUnreadable, Severity: SeverityError,
+			Message: err.Error(), Fix: exitcode.HintOf(err)})
+		SortAlerts(as.Alerts)
+	}
+	return as, err
+}
+
+func isUsage(err error) bool { return err != nil && exitcode.From(err) == exitcode.Usage }
 
 // login is POST /v2/login: Hub.Login on the body, a service.LoginRequest.
 // A login that completes here wakes a Serve waiting for one, as an
