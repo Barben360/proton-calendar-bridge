@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
@@ -64,4 +65,47 @@ func TestWriteRenameFailureRemovesTemp(t *testing.T) {
 			t.Errorf("temp file %s left behind", e.Name())
 		}
 	}
+}
+
+// RemoveStale removes the temporary files a crash left (state Minor): those
+// of Write (.tmp-*) and of the key file's creation (.key-*), once older than
+// the bound; a younger one may belong to a write in progress, and nothing
+// else is touched.
+func TestRemoveStaleRemovesOnlyOldTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	old, young := now.Add(-atomicfile.StaleAfter-time.Minute), now.Add(-atomicfile.StaleAfter+time.Minute)
+	files := map[string]time.Time{
+		".tmp-123": old, ".key-456": old, // gone
+		".tmp-789": young, ".key-000": young, // a write in progress
+		"state.json": old, "tmp-1": old, ".tmpx": old, // not ours
+	}
+	for name, at := range files {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sub := filepath.Join(dir, ".tmp-dir")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sub, old, old); err != nil {
+		t.Fatal(err)
+	}
+	atomicfile.RemoveStale(dir, now)
+	for name := range files {
+		_, err := os.Stat(filepath.Join(dir, name))
+		gone := os.IsNotExist(err)
+		if want := name == ".tmp-123" || name == ".key-456"; gone != want {
+			t.Errorf("%s removed = %v, want %v", name, gone, want)
+		}
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Errorf("a directory was removed: %v", err)
+	}
+	atomicfile.RemoveStale(filepath.Join(dir, "missing"), now) // no panic, nothing to do
 }

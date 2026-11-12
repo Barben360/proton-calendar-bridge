@@ -389,3 +389,26 @@ func TestSecretsCheckReportsRollback(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A state.json or secrets.sealed a newer pcb wrote is not damaged: the
+// check says to upgrade pcb, never to remove it or to log out (state-I1, I2).
+func TestSecretsCheckSaysUpgradeForANewerState(t *testing.T) {
+	state, key := sealedSetup(t)
+	if err := os.WriteFile(filepath.Join(state, "state.json"), []byte(`{"phase":"ready","added_later":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Message != "state.json was written by a newer pcb" || got.Fix != "upgrade pcb" {
+		t.Errorf("newer state.json: got %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(state, "state.json"), []byte(`{"phase":"ready"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "secrets.sealed"), []byte(`{"version":3,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Message != "secrets.sealed was written by a newer pcb" || got.Fix != "upgrade pcb" {
+		t.Errorf("newer secrets.sealed: got %+v", got)
+	}
+}

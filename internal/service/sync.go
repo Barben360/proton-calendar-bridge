@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -44,7 +45,14 @@ func (l *Local) lockSync() (func(), error) {
 	case !ok:
 		return nil, blocked("a sync is already running", "wait for it or stop pcb sync --watch")
 	}
-	return unlock, nil
+	l.syncHeld.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.syncHeld.Add(-1)
+			unlock()
+		})
+	}, nil
 }
 
 // Sync implements API.

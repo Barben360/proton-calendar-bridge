@@ -19,7 +19,9 @@ type API interface {
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
 	// Logout revokes the session and forgets the account. During Serve it
 	// first stops the sync loop and closes its cache handle (ruling M5-P10).
-	Logout(ctx context.Context) (LogoutResult, error)
+	// A stored session this pcb cannot read (Status.Secrets "unsupported")
+	// cannot be revoked: it is forgotten only with req.Discard.
+	Logout(ctx context.Context, req LogoutRequest) (LogoutResult, error)
 	// Status describes the login without any network call.
 	Status(ctx context.Context) (Status, error)
 	// Calendars lists the account's calendars.
@@ -176,17 +178,33 @@ type LoginResult struct {
 	DefaultClientCreated bool `json:"default_client_created,omitempty"`
 }
 
+// LogoutRequest asks for a logout. Discard forgets a stored session this
+// pcb cannot read (written by a newer pcb, or sealed by another sealer)
+// although it cannot be revoked; without it such a logout is refused.
+type LogoutRequest struct {
+	Discard bool `json:"discard,omitempty"`
+}
+
+// SecretsUnsupported is Status.Secrets for a store this pcb cannot read:
+// written by a newer pcb, or sealed by another sealer.
+const SecretsUnsupported = "unsupported"
+
 // LogoutResult says what Logout did. Revoked is false when Proton could not
 // be told (the local secrets are gone anyway).
+// SyncRunning: another pcb process held the sync lock (pcb sync, its
+// watch, or pcb serve); a pass of it may write the event cache again.
 type LogoutResult struct {
 	WasLoggedIn bool `json:"was_logged_in"`
 	Revoked     bool `json:"revoked"`
+	SyncRunning bool `json:"sync_running,omitempty"`
 }
 
 // Status is the login as the files describe it. Phase is the store's phase
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none", "unreadable" or
-// "rolled-back" (secrets.sealed older than the last one pcb wrote).
+// waits for its code. Secrets is "sealed", "none", "unreadable",
+// "unsupported" (written by a newer pcb, or sealed by another sealer: Reason
+// names which) or "rolled-back" (secrets.sealed older than the last one pcb
+// wrote).
 type Status struct {
 	Phase       string     `json:"phase"`
 	Reason      string     `json:"reason,omitempty"`

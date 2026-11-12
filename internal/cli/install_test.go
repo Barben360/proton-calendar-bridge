@@ -192,7 +192,7 @@ type logoutAPI struct {
 	s *sysRig
 }
 
-func (a *logoutAPI) Logout(context.Context) (service.LogoutResult, error) {
+func (a *logoutAPI) Logout(context.Context, service.LogoutRequest) (service.LogoutResult, error) {
 	_, err := os.Stat(a.s.logoutEnv[1])
 	a.s.mu.Lock()
 	a.s.events = append(a.s.events, "logout (state present: "+map[bool]string{true: "yes", false: "no"}[err == nil]+")")

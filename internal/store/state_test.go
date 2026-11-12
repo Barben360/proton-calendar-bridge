@@ -343,3 +343,33 @@ func TestGenerationOutOfRangeFailsClosed(t *testing.T) {
 		t.Fatalf("UpdateState: err = %v, fn called = %v", err, called)
 	}
 }
+
+// A state.json with a field this build does not know was written by a newer
+// pcb (state-I2): it stays refused, as its own error, never as a malformed
+// file; the other refusals are not it.
+func TestStateWithUnknownFieldsIsNewer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		newer   bool
+	}{
+		"unknown field":         {`{"phase":"ready","added_later":1}`, true},
+		"unknown nested field":  {`{"phase":"ready","captcha":{"url":"u","token":"t","kind":"x"}}`, true},
+		"garbage":               {"{not json", false},
+		"unknown phase":         {`{"phase":"banana"}`, false},
+		"unknown field + error": {`{"phase":"ready","added_later":1,"unattended":"yes"}`, false},
+		"trailing data":         {`{"phase":"ready","x":1} {"phase":"ready"}`, false},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := store.LoadState(dir)
+		if err == nil {
+			t.Errorf("%s: no error", name)
+			continue
+		}
+		if got := errors.Is(err, store.ErrNewerState); got != tc.newer {
+			t.Errorf("%s: errors.Is(ErrNewerState) = %v, want %v (%v)", name, got, tc.newer, err)
+		}
+	}
+}

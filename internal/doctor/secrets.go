@@ -35,7 +35,11 @@ var deviceOf = device
 func (c SecretsCheck) Run(context.Context) Result {
 	r := Result{Name: c.Name(), Status: StatusSkip, Message: "no secrets stored yet"}
 	state, err := store.LoadState(c.StateDir)
-	if err != nil {
+	switch {
+	case errors.Is(err, store.ErrNewerState):
+		r.Status, r.Message, r.Fix = StatusError, store.ErrNewerState.Error(), "upgrade pcb"
+		return r
+	case err != nil:
 		r.Status, r.Message = StatusError, err.Error()
 		r.Fix = "remove the damaged state.json, then log in again"
 		return r
@@ -49,10 +53,19 @@ func (c SecretsCheck) Run(context.Context) Result {
 			r.Fix = "pcb logout"
 			return r
 		}
-		var rb *store.RolledBackError
-		if _, err := store.NewSecrets(c.StateDir, &seal.KeyFile{Path: c.KeyFile}).Load(); errors.As(err, &rb) {
+		var (
+			rb *store.RolledBackError
+			ue *store.UnsupportedError
+		)
+		_, err := store.NewSecrets(c.StateDir, &seal.KeyFile{Path: c.KeyFile}).Load()
+		switch {
+		case errors.As(err, &rb):
 			r.Status = StatusError
 			r.Message, r.Fix = rb.Explain(), store.RolledBackHint
+			return r
+		case errors.As(err, &ue):
+			r.Status = StatusError
+			r.Message, r.Fix = ue.Explain(), "upgrade pcb"
 			return r
 		}
 		msgs = append(msgs, "secrets sealed with a key file (headless fallback)")

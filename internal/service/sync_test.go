@@ -368,7 +368,7 @@ func TestLogoutDeletesCache(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("no cache after a sync: %v", err)
 	}
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
@@ -515,7 +515,7 @@ func TestLogoutDeletesCacheEvenWhenCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := e.svc.Logout(ctx); err != nil {
+	if _, err := e.svc.Logout(ctx, service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {

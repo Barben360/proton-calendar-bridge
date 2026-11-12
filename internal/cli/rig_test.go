@@ -90,7 +90,7 @@ func (s *stubAPI) SubmitTOTP(_ context.Context, c string) (service.LoginResult, 
 	return s.submit(c)
 }
 
-func (s *stubAPI) Logout(context.Context) (service.LogoutResult, error) {
+func (s *stubAPI) Logout(context.Context, service.LogoutRequest) (service.LogoutResult, error) {
 	return service.LogoutResult{}, nil
 }
 
@@ -182,6 +182,10 @@ type rig struct {
 	// hostRoot, when set, is the root of the host's files (systemd,
 	// container markers) instead of a root that does not exist.
 	hostRoot string
+	// asRoot makes the host's effective UID 0; userName, when set, names
+	// the host's users.
+	asRoot   bool
+	userName func(uid int) (string, error)
 	out      bytes.Buffer
 	errb     bytes.Buffer
 }
@@ -264,6 +268,12 @@ func (r *rig) run(args ...string) exitcode.Code {
 	if r.hostRoot != "" {
 		io.Host.Root = r.hostRoot
 		io.Host.Env = func(k string) string { return r.env[k] }
+	}
+	if r.asRoot {
+		io.Host.Euid = func() int { return 0 }
+	}
+	if r.userName != nil {
+		io.Host.UserName = r.userName
 	}
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()

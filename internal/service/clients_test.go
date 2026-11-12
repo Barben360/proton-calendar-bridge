@@ -270,7 +270,7 @@ func TestClientsSurviveLogout(t *testing.T) { // ruling M3-R17
 	t.Parallel()
 	e := newClientsEnv(t)
 	sec, _ := e.svc.AddClient(t.Context(), "Phone")
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1"); !ok {
@@ -430,7 +430,7 @@ func TestPasswordStaysRecoverableAcrossLogout(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
 	before := e.show(t, "")
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if after := e.show(t, ""); !after.Recoverable || after.Password != before.Password {

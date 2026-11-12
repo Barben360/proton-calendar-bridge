@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -664,5 +665,95 @@ func TestGenerationSaturatesAtTheBound(t *testing.T) {
 	}
 	if got, err := f.secrets.Load(); err != nil || len(got) != 1 {
 		t.Fatalf("Load = %d accounts, %v", len(got), err)
+	}
+}
+
+// writeEnvelope replaces secrets.sealed with an envelope of version and
+// sealer around data.
+func writeEnvelope(t *testing.T, f fixture, version int, sealer string, data []byte) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"version": version, "sealer": sealer, "data": data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.secrets.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A store this build cannot open names why (state-I1): a newer envelope
+// version, or another sealer, each as *UnsupportedError; Update never
+// overwrites it.
+func TestUnsupportedStoreNamesTheCause(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version int
+		sealer  string
+		open    *store.Secrets // nil: the fixture's
+		want    string
+	}{
+		{name: "newer version", version: 3, sealer: "keyfile", want: "secrets.sealed was written by a newer pcb"},
+		{name: "newer version, other sealer", version: 9, sealer: "tpm2", want: "secrets.sealed was written by a newer pcb"},
+		{name: "other sealer", version: 2, sealer: "tpm2", want: `secrets.sealed is sealed with "tpm2", which this pcb cannot use`},
+		{name: "odd sealer name", version: 2, sealer: "a\x1b[31mb" + strings.Repeat("z", 60),
+			want: `secrets.sealed is sealed with "a\x1b[31mb` + strings.Repeat("z", 25) + `…", which this pcb cannot use`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			put(t, f.secrets, fullAccount("userA"))
+			_, _, data := envelopeOf(t, f)
+			writeEnvelope(t, f, tc.version, tc.sealer, data)
+			before, _ := os.ReadFile(f.secrets.Path)
+			_, err := f.secrets.Load()
+			var ue *store.UnsupportedError
+			if !errors.As(err, &ue) || !errors.Is(err, store.ErrUnsupported) {
+				t.Fatalf("Load err = %v, want an *UnsupportedError", err)
+			}
+			if got := ue.Explain(); got != tc.want {
+				t.Errorf("Explain() = %q, want %q", got, tc.want)
+			}
+			if err := f.secrets.Update(ctx(t), func(m map[string]store.Account) error { m["userB"] = fullAccount("userB"); return nil }); !errors.Is(err, store.ErrUnsupported) {
+				t.Errorf("Update err = %v, want ErrUnsupported", err)
+			}
+			if after, _ := os.ReadFile(f.secrets.Path); !bytes.Equal(before, after) {
+				t.Error("Update overwrote a store it cannot open")
+			}
+		})
+	}
+}
+
+// An envelope version below 1 was never written by any pcb: a damaged file,
+// not a newer one.
+func TestEnvelopeVersionZeroIsCorrupt(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.secrets, fullAccount("userA"))
+	_, _, data := envelopeOf(t, f)
+	writeEnvelope(t, f, 0, "keyfile", data)
+	if _, err := f.secrets.Load(); !errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrUnsupported) {
+		t.Fatalf("Load err = %v, want ErrCorrupt", err)
+	}
+}
+
+// Removing secrets.sealed fsyncs the state directory (state Minor): a power
+// loss right after a logout must not bring the file back.
+func TestWipeSyncsTheDirectory(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.secrets, fullAccount("userA"))
+	var synced []string
+	defer store.OnSyncDir(func(dir string) { synced = append(synced, dir) })()
+	if _, err := f.secrets.Wipe(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(synced, f.state) {
+		t.Errorf("directories synced after the wipe = %q, want %s", synced, f.state)
+	}
+	synced = nil
+	put(t, f.secrets, fullAccount("userA"))
+	synced = nil
+	if err := f.secrets.Update(ctx(t), func(m map[string]store.Account) error { clear(m); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(synced, f.state) {
+		t.Errorf("directories synced after an emptying update = %q, want %s", synced, f.state)
 	}
 }

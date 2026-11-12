@@ -52,6 +52,10 @@ func TestAlerts(t *testing.T) {
 			[]ctl.Alert{{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: loginFix}}},
 		{"needs login with its reason", ctl.AlertInput{Login: service.Status{Phase: "needs-login", Reason: "Proton ended the session"}},
 			[]ctl.Alert{{Code: "needs-login", Severity: "error", Message: "Proton ended the session", Fix: loginFix}}},
+		// A login fails the same way over a store this pcb cannot read (state-I1).
+		{"store this pcb cannot read", ctl.AlertInput{Login: service.Status{Phase: "needs-login", Secrets: service.SecretsUnsupported,
+			Reason: "secrets.sealed was written by a newer pcb"}},
+			[]ctl.Alert{{Code: "needs-login", Severity: "error", Message: "secrets.sealed was written by a newer pcb", Fix: "upgrade pcb"}}},
 		{"ready", ctl.AlertInput{Login: ready}, nil},
 		{"needs totp is no alert", ctl.AlertInput{Login: service.Status{Phase: "needs-totp"}}, nil},
 		{"captcha", ctl.AlertInput{Login: service.Status{Phase: "needs-captcha", CaptchaURL: "https://verify.proton.me/?token=x"}},

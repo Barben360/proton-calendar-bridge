@@ -4,6 +4,9 @@ package atomicfile
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 )
 
 // Write replaces path with data: a temporary file in the same directory
@@ -33,9 +36,46 @@ func Write(path string, data []byte) error {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	if d, err := os.Open(filepath.Dir(path)); err == nil { // best effort
+	SyncDir(filepath.Dir(path))
+	return nil
+}
+
+// SyncDir fsyncs the directory dir, best effort: after a rename or a
+// removal in it, so the change survives a power loss.
+func SyncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-	return nil
+}
+
+// StaleAfter is the age past which RemoveStale takes a temporary file for
+// one a crash left: a write holds its file for milliseconds.
+const StaleAfter = time.Hour
+
+// stalePrefixes are the temporary files pcb creates next to the files it
+// replaces: Write's, and the key file's creation (seal.KeyFile, a raw copy
+// of the key).
+var stalePrefixes = []string{".tmp-", ".key-"}
+
+// RemoveStale removes from dir the regular files named like pcb's
+// temporary files and last modified more than StaleAfter before now: a
+// process that died between creating one and renaming or removing it left
+// them, with the contents they were to hold. Best effort: a file it cannot
+// remove stays, and a missing dir is nothing to do.
+func RemoveStale(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !slices.ContainsFunc(stalePrefixes, func(p string) bool { return strings.HasPrefix(e.Name(), p) }) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) <= StaleAfter {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
 }

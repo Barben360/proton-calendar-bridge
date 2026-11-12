@@ -17,3 +17,11 @@ func SetStateLockTimeout(d time.Duration) (restore func()) {
 	stateLockTimeout = d
 	return func() { stateLockTimeout = old }
 }
+
+// OnSyncDir makes f see every directory fsync of the store and returns a
+// restore function. Tests that use it must not run in parallel.
+func OnSyncDir(f func(dir string)) (restore func()) {
+	old := syncDir
+	syncDir = func(dir string) { f(dir); old(dir) }
+	return func() { syncDir = old }
+}

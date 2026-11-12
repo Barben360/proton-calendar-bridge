@@ -135,9 +135,28 @@ func localService(_ context.Context, env func(string) string) (service.API, erro
 // app is the state the pcb commands share.
 type app struct{ IO }
 
-// service opens the service for cmd's run.
+// service opens the service for cmd's run, refusing root on another
+// user's state (stateOwner).
 func (a *app) service(cmd *cobra.Command) (service.API, error) {
+	if err := a.stateOwner(); err != nil {
+		return nil, err
+	}
 	return a.NewService(cmd.Context(), a.Env)
+}
+
+// stateOwner refuses to open the state as root on another user's state
+// directory (service.CheckStateOwner). pcb install, uninstall and service
+// run as root but do not open the state through here (uninstall's logout
+// opens its own service).
+func (a *app) stateOwner() error {
+	if a.Host.Euid == nil {
+		return nil
+	}
+	dirs, err := resolveDirs(a.Env)
+	if err != nil {
+		return nil //nolint:nilerr // the service reports it
+	}
+	return service.CheckStateOwner(dirs.State, a.Host.Euid(), a.Host.UserName)
 }
 
 // dialDaemon connects to the daemon on socket: nil, without an error, when
