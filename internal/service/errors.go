@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -253,6 +255,30 @@ func rolledBack(rb *store.RolledBackError) *exitcode.Error {
 	return loginNeeded(rb.Explain(), store.RolledBackHint)
 }
 
+// keyCause is why the key file or the sealed store could not be used, safe
+// to show (it never holds a secret): the OS error with its operation and
+// path (permission denied, read-only file system) or the key file's mode
+// refusal; "" when there is none to give (M5-R15 C2).
+func keyCause(err error) string {
+	var (
+		me *seal.KeyModeError
+		pe *fs.PathError
+		le *os.LinkError
+	)
+	switch {
+	case errors.As(err, &me):
+		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
+	case errors.As(err, &pe):
+		return pe.Error()
+	case errors.As(err, &le):
+		return le.Error()
+	}
+	return ""
+}
+
+// keyFix is the hint for a key file that cannot be used.
+const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+
 // storeError maps a failure of the sealed store: a lost or foreign key names
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
@@ -264,6 +290,9 @@ func storeError(err error, keyFile string) error {
 	var ee *exitcode.Error
 	if errors.As(err, &ee) {
 		return mapError(err, keyFile)
+	}
+	if cause := keyCause(err); cause != "" {
+		return blocked("cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory, or run pcb logout to discard the stored session")
 }

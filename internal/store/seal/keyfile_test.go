@@ -100,8 +100,9 @@ func TestKeyFileRefusesLooseMode(t *testing.T) {
 		"seal": func() error { _, err := k.Seal([]byte("x"), nil); return err },
 	} {
 		err := run()
-		if err == nil || !strings.Contains(err.Error(), "chmod 600 "+path) {
-			t.Fatalf("%s: err = %v", name, err)
+		var me *seal.KeyModeError
+		if err == nil || !strings.Contains(err.Error(), "chmod 600 "+path) || !errors.Is(err, seal.ErrKeyMode) || !errors.As(err, &me) || me.Mode != 0o644 {
+			t.Fatalf("%s: err = %v, want a KeyModeError with mode 0644", name, err)
 		}
 	}
 }

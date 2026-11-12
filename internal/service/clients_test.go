@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -690,5 +691,38 @@ func TestShowClientWhoseSealedCopyIsNotItsPasswordSaysSo(t *testing.T) {
 	wantCode(t, err, exitcode.MustAct)
 	if !strings.Contains(err.Error(), "does not match its password") || strings.Contains(err.Error(), "does not open") {
 		t.Errorf("error = %q; want the mismatch named", err)
+	}
+}
+
+// M5-R15 C2: a key file this user cannot read (a container secret left
+// host-owned) fails with its cause, never a bare "could not be sealed";
+// a key other users can read (mode 0444, a compose default) says so too.
+func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	e := newClientsEnv(t)
+	if _, err := e.svc.AddClient(t.Context(), "Phone"); err != nil {
+		t.Fatal(err)
+	}
+	key := config.Defaults(e.dirs).Secrets.KeyFile
+	for _, c := range []struct {
+		mode fs.FileMode
+		want string
+	}{{0o000, "permission denied"}, {0o444, "mode 0444"}} {
+		if err := os.Chmod(key, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		_, err := e.svc.AddClient(t.Context(), "Laptop")
+		wantCode(t, err, exitcode.Blocked)
+		if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), key) {
+			t.Errorf("mode %04o: error %q, want the key file and %q", c.mode, err, c.want)
+		}
+		// show, too: the key is not lost, so rotate is no way out.
+		_, err = e.svc.ShowClient(t.Context(), "Phone")
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(exitcode.HintOf(err), "rotate") {
+			t.Errorf("mode %04o: show error %v, hint %q; want %q and no rotate", c.mode, err, exitcode.HintOf(err), c.want)
+		}
 	}
 }

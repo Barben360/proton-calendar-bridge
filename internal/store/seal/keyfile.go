@@ -98,7 +98,7 @@ func (k *KeyFile) read() ([]byte, error) {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("key file %s is accessible by others (mode %04o). Fix: chmod 600 %s", k.Path, info.Mode().Perm(), k.Path)
+		return nil, &KeyModeError{Path: k.Path, Mode: info.Mode().Perm()}
 	}
 	key := make([]byte, keySize+1)
 	n, err := f.Read(key)

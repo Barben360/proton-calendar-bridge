@@ -1461,3 +1461,22 @@ func TestRejectedCodeKeepsTheDeadline(t *testing.T) {
 		t.Errorf("%d DELETE /auth/v4, want 1", n)
 	}
 }
+
+// M5-R15 C2: the login's sealing names why the key file cannot be read.
+func TestLoginNamesWhyTheKeyCannotBeRead(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	e := newEnv(t, protontest.Options{})
+	if err := os.MkdirAll(filepath.Dir(e.cfg.Secrets.KeyFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.cfg.Secrets.KeyFile, make([]byte, 32), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.Login(t.Context(), e.req())
+	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) {
+		t.Fatalf("Login = %v, want the key file and permission denied", err)
+	}
+}
