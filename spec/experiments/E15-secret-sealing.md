@@ -47,7 +47,7 @@ Y = protects, N = does not. Statements marked (man) come from systemd-creds(1) a
 
 Plain reading: host-key credentials are no stronger than a 0600 key file against root or a same-user process. They help against casual disclosure and data-only backups, which a key file on a separate path also does. Only TPM2 binding, or a keyring encrypted under a strong login password (both untested here), helps against offline theft without FDE.
 
-Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5).
+Restoring an older `secrets.sealed` is detected since M5 (a sealed generation mirrored in `state.json`, SPEC §7.3); restoring the whole state directory is not.
 
 ### Container (reasoned, no container run)
 
@@ -55,9 +55,16 @@ Restoring an older `secrets.sealed` is not detected (no rollback protection yet;
 - Compose file-based `secrets:` bind-mounts a host file read-only at `/run/secrets/<name>` without Swarm. It is a delivery channel, not a sealing mechanism: strength equals the host file's permissions.
 - A key on a volume separate from the data protects against a backup or snapshot of the data volume alone. It does not protect against host root, any container that has the same mounts, or a bind mount from the same host path (the key sits next to the data on the same host disk).
 
+### What the M5 smoke tests show (2026-11-12)
+
+Run locally with Docker; neither logs in, so no sealed Proton session was written.
+- **Container** (`make container-smoke`, steps 1 to 9, PASS on commit e5faeb8): the distroless static image runs as UID 65532 with one volume `/data` (config and state directories `0700` 65532, inherited by a fresh named volume), comes up healthy with no login, answers 401 and 503 over its self-signed TLS, has no `secrets.sealed` and comes back healthy after `docker kill`. `pcb client add` works in it. With the default `key_file` (`/data/config/secrets.key`) the key sits on the data volume; the compose secret at `/run/secrets/pcb_key` of the README is the separation this file recommends, and it was **not** exercised by the smoke test [assumed → step 7.2]. A bind mount of `/data` must be writable by 65532, and the directories `0700`: with `0755` directories `pcb serve` exits 20 (sabotage S3 of Task 8).
+- **systemd** (`make systemd-smoke`, a Debian 13 container with systemd as PID 1, `--privileged --cgroupns=host`, PASS on commit e5faeb8): `pcb install --user` and `--system` start the unit, it stays active, answers 503 to an authenticated CalDAV request while logged out, `systemd-analyze verify` is silent on both units, a second install changes nothing, and `uninstall --delete-data` removes the unit, the directories and the `pcb` user. The service context did not change what the key file needs (a path and mode 0600).
+- Still untested (step 7): a sealed session written and read back inside a systemd user or system service, and inside the container with the compose secret; TPM2, desktop system scope, and Secret Service or `systemd-creds` sealing, which M5 did not build (the key file is the only sealer, SPEC §7.3).
+
 ## Conclusion
 
-Verified: user-scope systemd-creds works (systemd 262 and 257, interactive/SSH context), Secret Service is present on blackwater in an interactive session only, none on morpheus, system-scope systemd-creds works on morpheus. Untested: TPM2 sealing anywhere, desktop (blackwater) system scope, any systemd-service-context run, any container.
+Verified: user-scope systemd-creds works (systemd 262 and 257, interactive/SSH context), Secret Service is present on blackwater in an interactive session only, none on morpheus, system-scope systemd-creds works on morpheus. Untested: TPM2 sealing anywhere, desktop (blackwater) system scope, a sealed session inside any systemd service or container (M5's smoke tests run pcb in both without a login).
 
 One order per environment, justified by the table (the differences between backends are offline theft without FDE, which only TPM2 or a keyring under a strong login password could change, and backups):
 

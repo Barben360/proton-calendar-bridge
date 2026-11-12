@@ -438,10 +438,28 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
 ## 7. C2 — Store block
 
 ### 7.1 Layout
-`$XDG_STATE_HOME/pcb/` (or `/var/lib/pcb/` for a system service):
-`pcb.db` (SQLite, WAL), `secrets.sealed`, `logs/`. Config in
-`$XDG_CONFIG_HOME/pcb/config.toml` (or `/etc/pcb/`). Directories 0700,
-files 0600; `doctor` checks them.
+`$XDG_STATE_HOME/pcb/` (`/var/lib/pcb/` for a system service, `/data/state` in
+the container): `pcb.db` (SQLite, WAL), `secrets.sealed`, `state.json`,
+`state.lock`, `clients.json`, `tls/`, `pcb.sock`, `logs/`. Config in
+`$XDG_CONFIG_HOME/pcb/config.toml` (`/etc/pcb/`, `/data/config`). Directories
+0700, files 0600; `doctor` checks them.
+
+M5 additions:
+- `PCB_CONFIG_DIR` and `PCB_STATE_DIR`, when set, are used verbatim (no `/pcb`
+  suffix) and must be absolute: a relative value is refused, naming the variable
+  (M5-P1). The units and the image set them; the user unit takes the directories
+  resolved at install time, since the user manager does not see the shell's XDG
+  variables (M5-P18) [verified: `TestStateDirOverride`, `TestConfigDirOverride`,
+  `TestRelativeOverrideIsRefused`, `TestUserUnitGolden`, `TestSystemUnitGolden`].
+- `pcb.sock` is the control socket of `pcb serve` (§15), mode 0600. Its directory
+  must grant group and other nothing, else `pcb serve` exits 20. A path over 107
+  bytes (103 on macOS and the BSDs) is refused, exit 20, hint `set PCB_STATE_DIR
+  to a shorter path`. A stale socket is replaced without a probe: `pcb serve`
+  holds `sync.lock` before binding, so no other daemon owns it (M5-P2)
+  [verified: `TestSocketPath`, `TestSocketIsPrivate`, `TestLongSocketPathIsRefused`,
+  `TestServeRefusesATooLongSocketPath`, `TestServeRefusesAnOpenStateDir`,
+  `TestStaleSocketIsReplaced`, `TestNonSocketFileIsRefused`].
+- `state.lock` is the leaf lock held by every writer of `state.json` (§7.3, R10m).
 
 ### 7.2 What is cached [call]
 What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 2 in
@@ -499,14 +517,31 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
   file 0600 on a separate path, `doctor` warns.
 - Container: 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600
   on a volume separate from the data.
-`doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
+Built in M5: the key file only (`[secrets] key_file`, default `<config>/secrets.key`, exactly 32 random bytes,
+refused when group or other can read it); Secret Service and `systemd-creds` are not built, and in a container the
+compose secret is just the path `key_file` points at (README, "Run in a container"). `doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
 Restoring an older `secrets.sealed` is detected (M5, R3m): format version 2 seals a monotonic generation with the accounts under AAD `pcb-secrets/v2/<sealer>`, mirrored as `secrets_generation` in `state.json`; a sealed generation below the mirror is refused (`pcb status` shows `rolled-back`, `pcb logout` wipes it without revoking, then `pcb login`). Removing the file (logout) moves the mirror one above, so a removed file is refused if restored. A file ahead of the mirror is accepted (a crash between the two writes). Restoring the whole state directory, `state.json` included, is not detected. A v1 file reads as generation 0 and is rewritten as v2 at the next write. Every writer of `state.json` holds the leaf lock `state.lock` (R10m; an in-process mutex off Unix).
 Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
 Sealed content: session tokens, salted key passphrase, optional unattended
-relogin credentials, client tokens (hashed, never stored in clear).
+relogin credentials, and, since decision 0013, a copy of each CalDAV client password (below).
+CalDAV client passwords are kept twice in `clients.json` (format version 2): a salted SHA-256 for the check, and the
+password sealed with the same key under the AAD `pcb-clients/v2/<sealer>/<client id>` so `pcb client show` can print
+it again (decision 0013, §9). `pcb logout` and a rollback wipe `secrets.sealed` but keep the key file, so those copies
+survive them; only `pcb uninstall --delete-data` removes the key (§13) [verified:
+`TestPasswordStaysRecoverableAcrossLogout`, `TestRevealRefusesAnotherClientsAAD`]. With no key file but with
+`secrets.sealed` present, `pcb client add` and `pcb client rotate` refuse (exit 10, naming the key file; the fix is
+`pcb logout` then `pcb login`), because minting a key would turn "key missing" into "secrets corrupt" [verified:
+`TestClientsRefuseToMintAKeyWhileTheSessionsKeyIsMissing`]; the stat-then-seal window (a key deleted between the check
+and the seal) is accepted (OPEN, later).
+M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAndIsMirrored`, `TestRestoredOlderSecretsAreRefused`,
+`TestFileRemovedByLogoutIsRefusedIfRestored`, `TestV1FileIsReadAndUpgraded`, `TestSealedAheadOfMirrorIsAccepted`,
+`TestEditedVersionFieldDoesNotDowngrade`, `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`,
+`TestRolledBackSecretsNeedALogin`, `TestLogoutWipesRolledBackSecrets`]. On a rollback the session pcb holds in memory
+is revoked best effort before it is dropped (M5-R3). Inside a systemd service and a container: the smoke tests never log in,
+so no sealed session was exercised there; that is the live step 7 (`spec/experiments/E15-secret-sealing.md`) [assumed → step 7].
 
 ## 8. C3/C4 — Service and sync
 
@@ -531,10 +566,38 @@ relogin credentials, client tokens (hashed, never stored in clear).
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
   long) and when it retries (M2-R11). All requests go through the one per-account client and its
-  limiter. The idle slow-down (5 min) and tuning after E06 are M5 (daemon).
+  limiter. Tuning after E06 stays open; the daemon's idle slow-down is below.
   `--full` lists every calendar again (with `--watch`, until one pass gets
   through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).
+- Daemon cadence (M5, `pcb serve`; M5-Rpre9, P6, R1): a pass every `ActiveInterval` 30 s, every `IdleInterval` 5 min
+  once idle. Idle means no request authenticated by `CheckClient` for `IdleAfter` 35 min since Serve began serving;
+  35 min is longer than Thunderbird's default 30-minute refresh, so a running Thunderbird keeps 30 s (E08 §3.7).
+  A refused password is no activity. The first authenticated request while idle starts a pass at once; a wake never
+  shortens a back-off or a `Retry-After` wait. Back-off is unchanged (x2 up to 10 min, +-10 %). A partial pass counts
+  as a success for the cadence (M5-R1): only a pass in which no calendar synced backs off, and the failing calendars
+  show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the rule [verified:
+  `TestIdleServeSlowsToFiveMinutes`, `TestAuthenticatedRequestWakesAnIdleLoop`, `TestRefusedPasswordIsNotActivity`,
+  `TestWakeCutsOnlyASuccessSleep`, `TestWakeDuringBackOffDoesNotShortenIt`, `TestPartialPassKeepsTheCadence`,
+  `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: that Thunderbird at its
+  default settings keeps the active cadence and that reopening it brings a pass within seconds [assumed → step 7.4].
+  The standby idea is caloxide's (README, Credits).
+- Waiting for a login (M5, `pcb serve --wait-for-login`, the default of the units and the image; M5-Rpre3, R8, R9,
+  R10, P8, P9, P22): CTL and the CalDAV listener bind at once, and while there is no usable session every
+  authenticated CalDAV request that reads or writes calendars answers 503 `Retry-After: 30` with no warning line;
+  authentication still comes first (no credentials: 401). The principal, the root and `/.well-known/caldav` call no
+  service and answer 207 or 308; a GET on a collection is 405, as when serving. A login is noticed at once when it
+  completes in the daemon, and by reading `state.json` every 5 s when another process's `pcb login` wrote it. Serve
+  goes back to waiting only for a stop a login fixes (not logged in, session ended or revoked, needs login or CAPTCHA,
+  secrets rolled back); any other stop needing a person (a damaged cache, a config error) ends `pcb serve` with exit 10,
+  and the units carry `RestartPreventExitStatus=10`. Until the first successful pass after a cache opens, an unknown
+  calendar answers 503, not 404. `pcb logout` during Serve stops the sync loop and closes the cache before the wipe
+  (M5-P10). A second SIGINT or SIGTERM while stopping exits 20 at once (`a second signal cut the stop of pcb serve`)
+  and the units set `TimeoutStopSec=30s` (M5-P22). Without the flag, M3's behaviour stays (exit 10 logged out,
+  Proton's code at a session end) [verified: `TestServeWaitsForALogin`, `TestEveryReadAndWriteWaitsForTheLogin`,
+  `TestServeNoticesALoginFromAnotherProcess`, `TestSessionEndWaitsInsteadOfExiting`, `TestLoginFixableStopsWait`,
+  `TestDamagedCacheEndsServeUnderTheFlag`, `TestServeWithoutTheFlagKeepsM3`, `TestLogoutDuringServeClosesTheCacheFirst`,
+  `TestWaitingForLoginIs503WithoutAWarning`, `TestServeWaitForLoginAnswers503ThenServes`, `TestSecondSignalForcesExit`].
 - Reads are served from the cache; a read never waits for Proton unless the
   calendar was never synced (M2: `pcb event list` for a calendar the cache
   does not hold reads Proton's calendar list once, to tell "not synced yet,
@@ -779,10 +842,22 @@ writes (PUT, DELETE) since M4.
   `TestPendingCalendarsAre503AndLeftOutOfTheHomeSet`,
   `TestUnknownCalendarIs503WhileACalendarIsPending`,
   `TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter`].
-- Auth (M3-R17 to R21): HTTP Basic, any username; the password is an app password from
-  `pcb client add NAME` (24 random bytes, base64url, printed once), stored as a salted
-  SHA-256 in `<state>/clients.json` (0600), compared in constant time, reloaded when the
-  file changes so `pcb client remove` bites at once; 401 with
+- Auth (M3-R17 to R21, amended by decision 0013): HTTP Basic, any username; the password is an
+  app password (24 random bytes, base64url) from `pcb client add NAME`. It is kept in
+  `<state>/clients.json` (0600, format version 2) twice: as a salted SHA-256, compared in
+  constant time, and sealed with the key that seals the session (§7.3), so it can be shown
+  again. This amends M3-R17 ("printed once, salted hash only"). The first successful `pcb login`
+  (not an unattended relogin) creates a client named `default` when none exists, so a fresh
+  install has credentials; `pcb client show [NAME] [--reveal]` prints them (§13); `pcb client rotate NAME`
+  replaces one and the old stops working at once; clients made before M5 keep only their hash and
+  `show` names `rotate`. The file is reloaded when it changes, so `remove` and `rotate` bite at once.
+  A pcb from before M5 refuses a version 2 `clients.json` (no downgrade; M5-R14 (1)). Passwords never
+  appear in logs, argv or errors, and `--json` carries one only with `--reveal` [verified:
+  `TestRevealReturnsTheAddedPassword`, `TestRotateInvalidatesTheOldPassword`,
+  `TestV1ClientsStillCheckAndAreNotRecoverable`, `TestFirstLoginCreatesTheDefaultClient`,
+  `TestDefaultIsNotRecreatedOnceAnyClientExists`, `TestShowClientPicksDefaultElseTheOnlyClient`,
+  `TestShowClientMadeBeforeSealingIsNotRecoverable`, `TestClientCredentialsRedactThemselves`, `TestNoPasswordInLogs`,
+  `TestClientShowJSONHidesThePasswordWithoutReveal`]. 401 with
   `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"`; 5 failures per minute per IP
   (IPv4 /32, IPv6 /64) then 503. OPTIONS is answered without auth (M3-R23)
   [verified: `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`; the client
@@ -811,7 +886,8 @@ writes (PUT, DELETE) since M4.
   `pcb doctor` for the exception dialog (M3-R29, R31, R32) [claim: Thunderbird offers
   the exception over the network, E08 §2.3, live check pending; the certificate rules
   are tested in `internal/tlsutil` and `internal/cli` [claim: test names not listed here]].
-- Plain HTTP inside a container behind a reverse proxy: not built (M5, `OPEN.md`).
+- Plain HTTP inside a container behind a reverse proxy: not built (`OPEN.md`, later); the image serves the
+  self-signed TLS of any non-loopback bind on 1080.
 
 ## 10. A2 — `.ics` feeds
 
@@ -842,20 +918,22 @@ partly done and resumable. Credential and verification failures (wrong password,
 
 Command tree:
 ```
-pcb install [--system|--user] [--plan]     # unit files, dirs, config; no root needed for --user
-pcb uninstall [--delete-data] [--plan]
-pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients)
-pcb serve [--listen HOST:PORT]              # sync loop (30 s) + CalDAV listener in one process (M3 reads, M4 writes; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20); prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0; stops with Proton's error code when the session ends (M3-R28)
-pcb service start|stop|restart|status|logs
-pcb login [--username U] [--password-fd N] [--unattended-relogin]
-pcb login resume --captcha-token T          # (--totp CODE moves to M5: the daemon must hold the half-authenticated session; until then the 2FA code comes from PCB_TOTP or a prompt in the same process)
+pcb install [--system|--user] [--plan]     # M5: unit file, dirs, default config; --user (default) needs no root
+pcb uninstall [--system|--user] [--delete-data [--yes]] [--plan]   # M5
+pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients; M5: service, daemon, alerts)
+pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level L]   # sync loop (30 s, 5 min idle) + CalDAV listener + control socket in one process (M3 reads, M4 writes, M5 daemon; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Without --wait-for-login: refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20), stops with Proton's error code when the session ends (M3-R28); with it: waits for a login (§8.1). Prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0, a second one exits 20
+pcb service start|stop|restart|status|logs [-f] [--system|--user]   # M5: systemctl and journalctl, scope from what is installed
+pcb login [--username U] [--password-fd N] [--unattended-relogin]   # M5: through the running daemon when there is one
+pcb login resume (--captcha-token T | --totp)   # --totp takes no value: the 2FA code of the login the daemon holds comes from PCB_TOTP or a prompt, never argv (M5-P11)
 pcb logout
-pcb status                                  # login state, sync state, listeners, alerts
+pcb status [--daemon]                       # login state; with a daemon: its live state, listener, per-calendar sync and write gate, render counters, alerts (§15); --daemon exits 20 when none answers
 pcb calendar list                           # what Thunderbird will see; read_only is the write gate (M4-R1: false only for a normal calendar with the Write bit and a verified passphrase signature)
 pcb sync [--full] [--watch [--interval 30s]] # M2: fill/refresh the event cache (--watch not with --json)
 pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no network call
-pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords, printed once; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
-pcb config get|set|validate
+pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
+pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL, username (the client's name), password and, over TLS, the certificate fingerprint; without NAME: `default`, else the only client
+pcb client rotate NAME|ID                    # M5, decision 0013: a new password, the old one stops working at once
+pcb config get|set|validate                  # not built (M5 out of scope: edit config.toml, run pcb doctor)
 pcb version
 ```
 One account per daemon in v1 [call]; the data model keeps an account ID so a
@@ -863,11 +941,56 @@ second one is an addition, not a migration.
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
 
-While the repository is private [call]: install from source (`make
-install` in a clone, then `pcb install`), or the container image from a
-private GHCR package (`pcb serve` as entrypoint, state in one volume, the
-same model as the author's headless Proton Mail Bridge container). Updates
-and signed releases are not planned yet.
+M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 to R7, P16 to P19, P23):
+- `make install` puts `bin/pcb` at `$(PREFIX)/bin/pcb` (`PREFIX ?= $(HOME)/.local`).
+- `pcb install` is `--user` by default (the caller's systemd user manager, no root; refused as root with the hint
+  `use --system`) and idempotent: a second run keeps every file. It creates the config and state directories (0700),
+  a default `config.toml` (never replaced once it exists), the unit (`ExecStart=<this binary> serve --wait-for-login`),
+  then `daemon-reload` when the unit changed, `enable --now`, and a restart when the unit or the system binary changed.
+  It prints the steps and what to do next: `loginctl enable-linger <user>` unless lingering is already on, `pcb login`,
+  `pcb client show`. `--plan` changes nothing and needs no root. No systemd: `--plan` says so, applying exits 20.
+- `--system` needs root: it creates the `pcb` user and group (`useradd`), uses `/etc/pcb` and `/var/lib/pcb`, copies
+  the running binary to `/usr/local/bin/pcb` (root, 0755) instead of running a user-writable one as `pcb`, and prints the
+  login line to run as that user: `sudo -u pcb env PCB_CONFIG_DIR=/etc/pcb PCB_STATE_DIR=/var/lib/pcb /usr/local/bin/pcb login`
+  (the control socket accepts only the daemon's own UID, §15). `--system --plan` as non-root prints the plan and
+  a note that applying needs root, exit 0 (M5-R4).
+- The user unit carries only hardening that needs no user namespace, so it starts under any user manager (M5-P17);
+  the system unit carries the full set (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, an empty capability set
+  and more). Both set `PCB_CONFIG_DIR`/`PCB_STATE_DIR`, `Restart=on-failure`, `RestartPreventExitStatus=10`,
+  `TimeoutStopSec=30s`, `UMask=0077`.
+- `pcb uninstall` stops and disables the unit and removes it (data kept). `--delete-data` needs a confirmation or
+  `--yes`, then logs out (revoking the Proton session, best effort) and deletes the config and state directories, and
+  with `--system` the `pcb` user; it reads the installed unit's own `PCB_*_DIR` (`systemctl show`, never the
+  caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
+  base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
+  config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
+- `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
+  and `logs` do not (M5-R7).
+- First login: the first successful `pcb login` creates the `default` CalDAV client; `pcb client show` prints the URL,
+  the username (the client's name), the password and, over TLS, the fingerprint. With a daemon, the URL and fingerprint
+  are its listener's; offline, `show` builds the URL from `config.toml`, so it ignores a `--listen` override and a
+  port 0 (M5-R14 (4)), and the fingerprint reads "not known yet" until `pcb serve` created the certificate. No CTL
+  endpoint serves `show` or `rotate` in M5: they work on `clients.json`, which the daemon reloads (M5-R13); a CLI under
+  another UID than the daemon needs `sudo -u`.
+[verified: `TestUserUnitGolden`, `TestSystemUnitGolden`, `TestDefaultConfigGolden`, `TestInstallUserPlanChangesNothing`,
+`TestInstallUserCreatesThenKeeps`, `TestInstallKeepsAnEditedConfig`, `TestInstallUpdatesAChangedUnitAndRestarts`,
+`TestInstallSystemNeedsRoot`, `TestInstallSystemCreatesTheUserOnce`, `TestInstallSystemCopiesTheBinary`,
+`TestInstallUserAsRootIsRefused`, `TestInstallWithoutSystemdIsBlocked`, `TestInstallFailureMidwayIsPartial`,
+`TestUninstallKeepsDataByDefault`, `TestUninstallDeleteDataNeedsConfirmation`,
+`TestUninstallDeleteDataStopsThenLogsOutThenDeletes`, `TestUninstallKeepsAKeyFileOutsideTheConfigDir`,
+`TestUninstallSystemDeleteData`, `TestDeleteDataRemovesOnlyDirectoriesNamedPcb`,
+`TestUninstallDeleteDataNeedsTheUnitsDirectories`, `TestServiceSystemNeedsRoot`, `TestServiceSystemLogsWithoutRoot`,
+`TestServiceDetectsTheScope`, `TestServiceStatusParsesShow`, `TestServiceLogsFollow`,
+`TestClientShowPrintsWhatThunderbirdNeeds`, `TestClientRotatePrintsTheNewPasswordAndTheHint`,
+`TestClientShowNamesRotateForAnUnrecoverablePassword`; `make systemd-smoke` (a Debian container with systemd as
+PID 1, both scopes, install, active, 503 with a client, uninstall) and `make container-smoke` passed locally on
+commit e5faeb8; the CI jobs have not run until the branch is pushed. Real systemd on a real host, linger across a
+reboot and a real login are [assumed → step 7].]
+
+Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
+the container image locally (`make image`; the GHCR package `proton-calendar-bridge` is pushed by CI on main and stays
+private, so it is not pullable without credentials; the model is the author's headless Proton Mail Bridge container:
+one volume, `docker exec -it`). Updates and signed releases are not planned yet.
 
 Later, when public: `install.sh` downloads a signed release (minisign, as
 backsight [call]), verifies it, places the binary, then runs `pcb install`.
@@ -879,13 +1002,19 @@ with a dedicated user [call]; container image with the same binary and
 
 One TOML file, strict decoding (unknown keys and empty lists refused —
 lesson from the proton-cal fork audit). CalDAV client credentials live in
-`<state>/clients.json` (salted hashes, not the C2 SQLite store) and are managed by `pcb client`, not hand-edited [call].
+`<state>/clients.json` (salted hashes and sealed copies, not the C2 SQLite store) and are managed by `pcb client`, not hand-edited [call].
+`PCB_CONFIG_DIR` and `PCB_STATE_DIR` move the directories (§7.1).
 
 `[caldav]` (M3): `listen` (HOST:PORT, explicit host, default
 `127.0.0.1:1080`; `pcb serve --listen` overrides it under the same rule),
 `hostnames` (DNS names or IPs clients use: certificate SANs, the first one
 in the printed URL), `tls_cert` and `tls_key` (absolute paths, both or
 neither; when set, TLS on any bind).
+
+`[log]` (M5): `level` (`debug`, `info`, `warn` or `error`, lower case; default `info`; anything else is refused without
+echoing the value); `pcb serve --log-level` overrides it [verified: `TestLogLevelDefaultsToInfo`,
+`TestUnknownLogLevelIsRefused`, `TestServeHonoursTheLogLevel`, `TestServeRefusesABadLogLevel`].
+`[secrets] key_file` (M1) is the path the container's compose secret is mounted at (§7.3).
 
 ## 15. Observability
 
@@ -902,13 +1031,55 @@ concurrent change of its event`, `a write is not confirmed by the rows read
 back`, `a write is not confirmed: a row came back under other key packets`,
 `a write could not be read back`, and the adapter's `caldav: the service
 could not answer` for each 503. What a write normalised is logged at debug
-(`write normalised`), which `pcb serve`'s default level does not print. Only the serving process holds
-them, so `pcb status` and `pcb doctor` do not show them until M5's local API
-socket (M3-R34) [verified: `TestServeLogsTheRenderCounters`,
-`TestServePassesCarryTheRenderCounters`]. Then `pcb status`,
-`pcb doctor`, optional Prometheus endpoint (sync lag, Proton errors, rate
-limit waits, login state), and alerts as status entries (session lost,
-captcha needed, sync stalled) that `doctor` and `status` surface [call].
+(`write normalised`); `[log] level` or `pcb serve --log-level debug` (§14) prints it. Only the serving process holds
+the render counters, so since M5 `pcb status` and `pcb doctor` read them from the daemon's control socket (M3-R34, below)
+[verified: `TestServeLogsTheRenderCounters`, `TestServePassesCarryTheRenderCounters`].
+
+Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
+- `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v1/`, internal and versioned:
+  `GET /v1/status`, `POST /v1/login`, `POST /v1/login/totp`, `POST /v1/logout`. Each answer is one `output.Envelope`:
+  200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
+  are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
+  dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.
+- Peer check: on Linux the peer UID (`SO_PEERCRED`) must equal the daemon's effective UID, root included (root uses its
+  own state directory or `sudo -u`); other Unix rely on the 0600 mode and the 0700 directory; off Unix there is no CTL
+  and the CLI is always offline. Before dialling, the client checks that the socket file is a socket (not a symlink)
+  owned by the caller's UID (M5-R2); on Linux it also checks the connected server's UID before sending a login, on
+  every redial. A refusal exits 20 [verified: `TestOtherUIDIsRefused`, `TestDefaultPeerUID`,
+  `TestDialChecksTheSocketBeforeDialling`, `TestSymlinkAtTheSocketPathIsRefused`, `TestClientRefusesAServerOfAnotherUID`,
+  `TestOversizedBodyIs413`, `TestLoginBodyIsBounded`, `TestErrorsCrossTheSocket`, `TestStatusRefusesAForeignSocketPath`].
+- Login through the daemon (M5-Rpre4, R12, P11, P12): with a daemon running, `pcb login`, `pcb login resume` and `pcb logout`
+  go through it; without one the command says so on stderr (text mode only) and runs in process. A login waiting for
+  its 2FA code is held in the daemon for 5 minutes, then revoked and its password zeroed. `pcb login resume --totp` sends
+  the code (from `PCB_TOTP` or the prompt) and takes no credentials; with no daemon it exits 10 (`no pcb daemon holds a login
+  waiting for its code`); it must be the only mode (exit 2 with `--captcha-token`, `--username` and the like). A second
+  login while one runs is refused (exit 10, `a login is already in progress`); a new login replaces a held 2FA login and
+  revokes its half session. `login resume --captcha-token` gathers the credentials again; only the post-SRP 2FA login is
+  held [verified: `TestPendingLoginExpiresAfterFiveMinutes`, `TestPendingPasswordIsZeroedOnExpiry`,
+  `TestReplacedLoginsTimerNeverRevokesTheNewOne`, `TestLoginOverTheSocketNeverLogsSecrets`,
+  `TestSecondLoginWhileOneRunsIsRefused`, `TestLoginGoesThroughTheDaemon`, `TestLogoutGoesThroughTheDaemon`,
+  `TestNonInteractiveTOTPIsHeldByTheDaemon`, `TestInteractiveTOTPThroughTheDaemon`,
+  `TestResumeTOTPWithoutADaemonIsExit10`, `TestResumeNeedsExactlyOneMode`, `TestNoDaemonLoginSaysSo`].
+  Ctrl-C at the 2FA prompt leaves the held login until it expires or is replaced (at most 5 minutes) [source: ruling
+  M5-R12 (4); no test].
+- `pcb status` keeps `service.Status`'s fields flat at the top level of its JSON (M5-P4) and adds `daemon` (null
+  offline), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
+  with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
+  Text lines: `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`, `listener:`, one `calendar:` line
+  each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
+  the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5). `pcb doctor` adds a `service`
+  result (the installed unit's state) and a `daemon` result and lists the alerts when a daemon answers; offline it shows
+  none (a fresh, logged-out install must not exit 20) [verified: `TestStatusShowsTheDaemon`,
+  `TestStatusShowsADaemonWaitingForALogin`, `TestStatusFallsBackOffline`, `TestStatusDaemonFlagNeedsADaemon`,
+  `TestOnlyNoDaemonFallsBackOffline`, `TestDoctorListsAlerts`, `TestDoctorReportsTheService`,
+  `TestServeServesTheControlSocket`, `TestHealthReportsGatesWithReasons`, `TestHumanVerificationIsHeldUntilAWriteLands`].
+- Alerts: `{code, severity: error|warning, message, fix, calendar?}`, errors first, then code, then calendar ID. Codes
+  (stable): `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
+  from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
+  Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
+  and why: closes the M4-R39 note), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`].
+- Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. Testing
 
@@ -970,6 +1141,12 @@ Status at the close of M4 (2026-11-12):
 - E08: writes implemented and contract-tested (MUST 10 and 11, "What the bridge does"); live with step 6.
 - E06 (rate limits): not started; writes are never retried and a 429 is a 503 with Proton's `Retry-After`.
 
+Status at the close of M5 (2026-11-12):
+- E15: the key file is the only sealer built; the smoke tests ran pcb as a systemd user and system service and in a container (logged out: no sealed session yet), see `E15-secret-sealing.md`; the sealed session in a service and a container, TPM2 and the other backends stay untested (step 7).
+- E08 §3.7 (Thunderbird's 30-minute refresh) fixes the idle threshold at 35 min (§8.1); whether Thunderbird behaves so is step 7.4.
+- E06 (rate limits): not started; the idle cadence and the back-off are unchanged by it.
+- Live run: `spec/HUMAN-CHECKS.md` step 7.
+
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
 raw results (redacted), conclusion, and the decision it feeds.
 
@@ -982,7 +1159,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M2 Store and sync | C2 cache, C4 initial + incremental (E04, E05, E07; E09 moved to M3) | cache follows edits made in the Proton web app |
 | M3 CalDAV read (built, live session after M4) | A1 read, client credentials, TLS for non-loopback binds, E08, E11, E17 | Thunderbird (local and over the network) shows all calendars and stays in sync: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
 | M4 CalDAV writes (built, live session pending) | C1 codec write path, A1 writes, fidelity table (E12, E13), write gate (E10, E14) | Thunderbird two-way edits, incl. single occurrences: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
-| M5 Daemon and ops | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only |
+| M5 Daemon and ops (built, live session pending) | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only: smoke-tested in CI (a Debian container with systemd as PID 1, the image); the live run is `spec/HUMAN-CHECKS.md` step 7 |
 
 Nothing after M5 is planned [decided 0007].
 
@@ -992,13 +1169,32 @@ M3 delivered (2026-11-11, branch m3-caldav-read): event decryption and the iCale
 
 M4 delivered (2026-11-12, branch m4-caldav-write): the fake Proton's sync endpoint and `?UID=` listing (`internal/proton/protontest`), the write gate with the member passphrase signature (`internal/proton/calendar`), the write side of the iCalendar codec (`ical.ParseWrite`, `Route`, `Patch`, VALARM → `Notifications`), sealing (`cards.Seal`, the session-key proof), `events.ListByUID` and `events.Sync`, the cache's `aliases` and `pins` (schema 2), the planner and executor (`service.PutObject`, `DeleteObject`), CalDAV PUT and DELETE with served names, `spec/mapping.md`, E10, E12, E13, E14 write-ups. Deferred: the live session (`spec/HUMAN-CHECKS.md` step 6) and every live marker above; fresh session keys on update (after L.4 #3); the daemon behaviours (M5). Rulings recorded (`.superpowers/sdd/2026-11-11-m4-caldav-write/progress.md`): Rpre1–3 package seams; R1 the write gate; R2, R3 the fake as an oracle, stricter than Proton where marked; R4 SEQUENCE (and fail closed on two primary keys); R5 MONTHLY ordinal → BYSETPOS; R6 aliases, X-PM-CONFERENCE-ID shared signed; R7 strip pcb lines, keep stored COLOR and components; R8 DTSTAMP and DTEND defaults; R9 attendee parameter edits ignored; R10 the RRULE allow-list; R11 Thunderbird's faked master dropped; R12 DAILY BYDAY → WEEKLY; R13, R15 no new session key on update; R14, R16, R19, R20 the session-key proof; R17, R30, R35, R36, R37 key-packet pinning; R18 only our own verified parts are rewritten; R21, R22 ApplyWrite and alias lifetime; R23, R24 one resend after a 401, 2001 not split; R25 Task 7 in two; R26 controller re-review; R27 deletes skip the trust checks; R28 new exceptions take the master's attendees; R29 colours and mirrored exception rows; R31 an ambiguous call confirmed by the read-back is a success; R32 confirmation by plaintext; R33 names from the service; R34 412 for a concurrent change, 403 for a refusal; R38 alternative names; R39, R40 undecided gate is 503 with no privileges advertised; R41 displaced hrefs kept.
 
-M5 carry-overs (known gaps left by M1, to close with the daemon work):
-- R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.
-- R8m: a pending login holds the password in memory with no timeout in M1; the daemon gives it a TTL (about 5 min).
-- R10m: a leaf state-file lock (held only for load-and-write) on every writer of `state.json`, to close the rare spurious `needs-login` overwrite.
-- R17: done in M4 (the passphrase signature is verified and gates writes, §5.3); its live confirmation is E10, step 6.
-- M4 (Task 8, M4-R39): a calendar with no usable write key (two calendar keys flagged primary, no unlocked primary address key, no passphrase signature) keeps its write gate undecided, so every write is 503 and Thunderbird retries for ever: `pcb status` and `pcb doctor` must name such a calendar and why (`OPEN.md`).
-- R16: `pcb login resume --totp CODE`.
+M5 delivered (2026-11-12, branch m5-daemon-ops; the live checks of `spec/HUMAN-CHECKS.md` step 7 are pending): the paths overrides and `[log]` (`internal/paths`, `internal/config`), the idle cadence and `Health` (`internal/syncer`, `internal/service`), the control socket, alerts and live `pcb status`/`pcb doctor` (`internal/ctl`), `pcb serve --wait-for-login` and login through the daemon, the sealed-secrets generation and the `state.lock` (`internal/store`), `pcb install`, `uninstall` and `service` (`internal/install`), viewable CalDAV credentials (decision 0013: `pcb client show`, `rotate`, the `default` client), the container image, `make container-smoke` and `make systemd-smoke`, and `.github/workflows/image.yml` (build and smoke on pull requests, push to private GHCR on main). Deferred: the live session (step 7); the Prometheus endpoint (Rpre11); `pcb config`; plain HTTP behind a reverse proxy; the items under "Later" in `OPEN.md`. The two workflows have not run in GitHub Actions: they need the push over SSH. Rulings recorded (`.superpowers/sdd/2026-11-12-m5-daemon-ops/progress.md`; the plan `spec/plans/2026-11-12-m5-daemon-ops.md`):
+
+| Ruling | Decision |
+|---|---|
+| Rpre1, R2, P2, P3 | CTL: HTTP/1.1 on `<state>/pcb.sock`, 0600 in a 0700 directory, SO_PEERCRED on Linux, `/v1/`, internal; the client checks the socket's owner and type before dialling; stale sockets replaced without a probe |
+| Rpre2, P4, P5, P7 | live `pcb status` and `pcb doctor` over CTL; flat status JSON plus `daemon`, `health`, `listener`, `alerts`; `status --daemon` exits 20 without a daemon; separate `needs-captcha` and `human-verification`; `sync-stalled` per calendar |
+| Rpre3, R8 to R10, P8, P9, P10, P22 | `--wait-for-login`: wait only for a stop a login fixes; 503 for an unknown calendar until the first pass; authentication before the 503; login seen by a 5 s poll or an in-process wake; logout halts Serve first; a second signal exits 20 |
+| Rpre4, R12, P11, P12 | login through the daemon: 5 min TTL; `login resume --totp` is a boolean, the code from `PCB_TOTP` or the prompt; a new login revokes the held half session; flags that do not apply to `--totp` exit 2 |
+| Rpre5, Rpre6, R4 to R7, P16 to P19, P23 | `install`/`uninstall`/`service`: `--user` default, `--system` copies the binary to `/usr/local/bin/pcb`; `--plan` never needs root; `--delete-data` removes only directories named `pcb`, reads the unit's own environment, keeps a key file outside the config directory; start/stop/restart need root on the system scope; units set the directories explicitly; `make install` |
+| Rpre7, P20, P21 | image: distroless static nonroot (65532), `golang:1.27-trixie` builder, both pinned by digest, `CGO_ENABLED=0`, one volume `/data`, TLS on 1080, exec-form HEALTHCHECK; both smoke tests run in CI (`--privileged --cgroupns=host`) |
+| Rpre8 | `[log] level` and `--log-level` |
+| Rpre9, P6, R1 | cadence 30 s, 5 min after 35 min idle; a partial pass keeps the cadence |
+| Rpre10, P14, P15, R3 | R3m: sealed generation in v2 `secrets.sealed`, mirrored in `state.json`, a restore of the whole directory undetected; R10m: `state.lock` through `filelock`; the in-memory session is revoked on a rollback |
+| Rpre11 | Prometheus deferred |
+| Rpre12 | done when: both smoke tests in CI; the live run is step 7 on the test account only |
+| P1, P13 | `PCB_CONFIG_DIR`/`PCB_STATE_DIR` verbatim and absolute; the write gate's last decision stays per process (M4-R40 kept) |
+| 0013, R13, 7b-R1, R14 | CalDAV passwords sealed beside their hash and shown again; no CTL endpoint for `show`/`rotate`; logout keeps the key file; a pcb from before M5 refuses a v2 `clients.json` (no downgrade); `client add` and `rotate` refuse while the key is missing but `secrets.sealed` exists (`pcb logout`, then `pcb login`); offline `show` ignores a `--listen` override |
+
+M5 carry-overs from M1 to M4, as closed:
+- R3m (rollback of `secrets.sealed`): done, a monotonic generation sealed and mirrored (§7.3) [verified: `TestRestoredOlderSecretsAreRefused`].
+- R8m (a pending login with no timeout): done, 5 min TTL in the daemon [verified: `TestPendingLoginExpiresAfterFiveMinutes`].
+- R10m (a leaf lock on every `state.json` writer): done [verified: `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`].
+- R17: done in M4 (§5.3); live confirmation is E10, step 6.
+- M4-R39 (a calendar whose write gate stays undecided is named by `pcb status` and `pcb doctor`) and M4-R44 (human verification in `pcb status`): done, alerts `write-gate-undecided` and `human-verification` (§15).
+- R16 (`pcb login resume --totp`): done, as a boolean (M5-P11).
+- Open and parked, not carried: see "Later" in `OPEN.md`.
 
 ## 19. Security model (summary)
 
@@ -1007,13 +1203,27 @@ events (privacy), the ability to write (integrity). Adversaries: other local
 users, network peers, malicious calendar content, a leaked CalDAV app
 password. Controls: sealed secrets (§7.3), no plaintext cache (§7.2),
 loopback by default, TLS and authentication on any other bind (§9), per-
-client app passwords stored hashed, signature verification (§5.3: an
+client app passwords stored hashed and, since decision 0013, sealed beside the hash, signature verification (§5.3: an
 event that fails it is served marked, not dropped), writes only to calendars
 whose member passphrase signature verifies with our key, and only over
 content of ours that verifies, with pinned key packets (§5.3, its residual
 risks listed there), no
 secrets in argv or logs, state directory 0700. On a server, the daemon runs
 as a dedicated `pcb` user (system service) or in its container [call].
+M5 additions:
+- The control socket (§15) is 0600 in a 0700 directory and accepts the daemon's UID only (SO_PEERCRED, Linux; the
+  client checks the socket and the server too), because logins and the 2FA code cross it. Another local user, and root
+  under another UID, cannot use it [verified: `TestOtherUIDIsRefused`, `TestClientRefusesAServerOfAnotherUID`].
+- Units: the user unit carries the hardening that needs no user namespace, the system unit the full set (`ProtectSystem=strict`,
+  `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`, an empty capability bounding set, a system call filter) and runs as
+  `pcb` [verified: `TestUserUnitGolden`, `TestSystemUnitGolden`; `systemd-analyze verify` in `make systemd-smoke`]; the exposure
+  score printed by `systemd-analyze security` was 1.4 locally (not asserted).
+- Image: distroless static, UID 65532, no shell, one volume `/data` with 0700 directories [verified: `make container-smoke`
+  steps 7 and 8]; the key file belongs on another mount (README, "Run in a container") [call].
+- Decision 0013: whoever can read the state directory and the key file can recover the CalDAV passwords; the same
+  access already exposes the Proton session, which is more sensitive.
+- Residual (documented): restoring the whole state directory, `state.json` included, defeats the rollback check (§7.3);
+  the daemon's memory holds the decrypted calendar and, for at most 5 minutes, a pending login.
 Residual risk, stated in the docs: the bridge holds the decrypted calendar
 in memory, like Mail Bridge does for mail; whoever can unseal the store
 owns the Proton session (and the account, if unattended relogin is on).
@@ -1035,7 +1245,12 @@ piece of logic is reused:
   baseline-before-listing order and the row-404-means-delete rule.
 - WentTheFox/caloxide (from protoxide/ferroxide/hydroxide): unattended
   relogin, CAPTCHA page, shared rate limiter, encrypted cache. M2 takes from
-  it the feed's endpoint shapes and the 30 s / backoff cadence.
+  it the feed's endpoint shapes and the 30 s / backoff cadence; M5 takes its
+  standby idea (slow the poll when nobody uses the bridge), rewritten as the
+  idle cadence of §8.1 with our own definition of idle.
+- The Proton Mail Bridge container model (the author's headless Bridge
+  container): M5 takes the usage model only, one volume, login with `docker exec -it`,
+  a credential the bridge shows on request (decision 0013); no code.
 - emersion/go-webdav (MIT): audited in E17; used as a test client only (M3-R5).
 - Thunderbird's CalDAV provider (mozilla/releases-comm-central, MPL-2.0): read for
   understanding only (E08), no code copied.
