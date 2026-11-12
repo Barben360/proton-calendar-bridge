@@ -312,3 +312,301 @@ func TestErrorsCrossTheSocket(t *testing.T) {
 		t.Errorf("Status on a refusal = %v (exit %d); want blocked naming HTTP 403", err, exitcode.From(err))
 	}
 }
+
+// loginAPI records the login calls it answers. When entered is set, Login
+// closes it and waits for release.
+type loginAPI struct {
+	fakeAPI
+	mu      sync.Mutex
+	logins  []service.LoginRequest
+	codes   []string
+	logouts int
+	loginFn func(service.LoginRequest) (service.LoginResult, error)
+
+	entered, release chan struct{}
+}
+
+func (a *loginAPI) Login(_ context.Context, r service.LoginRequest) (service.LoginResult, error) {
+	a.mu.Lock()
+	a.logins = append(a.logins, r)
+	fn := a.loginFn
+	a.mu.Unlock()
+	if a.entered != nil {
+		close(a.entered)
+		<-a.release
+	}
+	if fn != nil {
+		return fn(r)
+	}
+	exp := now.Add(5 * time.Minute)
+	return service.LoginResult{State: service.StateNeedsTOTP, Username: r.Username, AccountID: "id1", LoginExpires: &exp}, nil
+}
+
+func (a *loginAPI) SubmitTOTP(_ context.Context, code string) (service.LoginResult, error) {
+	a.mu.Lock()
+	a.codes = append(a.codes, code)
+	a.mu.Unlock()
+	return service.LoginResult{State: service.StateReady, Username: "alice", AccountID: "id1"}, nil
+}
+
+func (a *loginAPI) Logout(context.Context) (service.LogoutResult, error) {
+	a.mu.Lock()
+	a.logouts++
+	a.mu.Unlock()
+	return service.LogoutResult{WasLoggedIn: true, Revoked: true}, nil
+}
+
+func (a *loginAPI) calls() (logins, codes int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.logins), len(a.codes)
+}
+
+func dial(t *testing.T, path string) *ctl.Client {
+	t.Helper()
+	c, err := ctl.Dial(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// M5-Rpre4: the secrets travel in the request bodies only; the daemon's
+// logs, at debug level, carry each request's path and exit code, never a
+// password or a code.
+func TestLoginOverTheSocketNeverLogsSecrets(t *testing.T) {
+	t.Parallel()
+	const password, totp = "pw-S3CRET-hunter2", "246810"
+	api := &loginAPI{}
+	s := serve(t, &ctl.Server{API: api, Daemon: daemon()})
+	c := dial(t, s.path)
+
+	req := service.LoginRequest{Username: "alice", Password: password, CaptchaToken: "cap-1", UnattendedRelogin: true}
+	res, err := c.Login(t.Context(), req)
+	if err != nil || res.State != service.StateNeedsTOTP || res.LoginExpires == nil || !res.LoginExpires.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("Login = %+v, %v", res, err)
+	}
+	res, err = c.SubmitTOTP(t.Context(), totp)
+	if err != nil || res.State != service.StateReady || res.AccountID != "id1" {
+		t.Fatalf("SubmitTOTP = %+v, %v", res, err)
+	}
+	out, err := c.Logout(t.Context())
+	if err != nil || !out.WasLoggedIn || !out.Revoked {
+		t.Fatalf("Logout = %+v, %v", out, err)
+	}
+	api.mu.Lock()
+	if len(api.logins) != 1 || api.logins[0] != req {
+		t.Errorf("the daemon got %d logins, want the request as sent", len(api.logins))
+	}
+	if len(api.codes) != 1 || api.codes[0] != totp || api.logouts != 1 {
+		t.Errorf("the daemon got %d codes and %d logouts, want the code as sent and 1", len(api.codes), api.logouts)
+	}
+	// A command error crosses with its code and hint, and is logged by code.
+	api.loginFn = func(service.LoginRequest) (service.LoginResult, error) {
+		return service.LoginResult{}, &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("Proton refused the password"), Hint: "check the password"}
+	}
+	api.mu.Unlock()
+	_, err = c.Login(t.Context(), req)
+	var ee *exitcode.Error
+	if !errors.As(err, &ee) || ee.Code != exitcode.MustAct || ee.Error() != "Proton refused the password" || ee.Hint != "check the password" {
+		t.Fatalf("Login error = %#v", err)
+	}
+
+	logs := s.logs.String()
+	for _, secret := range []string{password, totp, "cap-1"} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs carry a secret:\n%s", logs)
+		}
+	}
+	for _, want := range []string{"path=/v1/login ", "path=/v1/login/totp ", "path=/v1/logout ", "exit=0", "exit=10"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("the logs lack %q:\n%s", want, logs)
+		}
+	}
+}
+
+// Request bodies are at most 64 KiB on the login endpoints too, and an
+// oversized or malformed one never reaches the service.
+func TestLoginBodyIsBounded(t *testing.T) {
+	t.Parallel()
+	api := &loginAPI{}
+	s := serve(t, &ctl.Server{API: api, Daemon: daemon()})
+	big := `{"username":"alice","password":"` + strings.Repeat("x", 64<<10) + `"}`
+	for _, target := range []string{"/v1/login", "/v1/login/totp"} {
+		resp, env := raw(t, s.path, http.MethodPost, target, strings.NewReader(big))
+		if resp.StatusCode != http.StatusRequestEntityTooLarge || env["ok"] != false {
+			t.Errorf("POST %s, 64 KiB + : HTTP %d, envelope %v; want 413", target, resp.StatusCode, env)
+		}
+		resp, env = raw(t, s.path, http.MethodPost, target, strings.NewReader(`{"username":`))
+		if resp.StatusCode != http.StatusBadRequest || env["ok"] != false {
+			t.Errorf("POST %s, malformed: HTTP %d, envelope %v; want 400", target, resp.StatusCode, env)
+		}
+		if resp, env := raw(t, s.path, http.MethodGet, target, nil); resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s: HTTP %d, envelope %v; want 405", target, resp.StatusCode, env)
+		}
+	}
+	if l, c := api.calls(); l != 0 || c != 0 {
+		t.Errorf("the service got %d logins and %d codes from refused bodies", l, c)
+	}
+	if strings.Contains(s.logs.String(), "xxxx") {
+		t.Error("the logs carry the body")
+	}
+}
+
+// A second login while one runs is refused at once (exit 10), not queued.
+func TestSecondLoginWhileOneRunsIsRefused(t *testing.T) {
+	t.Parallel()
+	api := &loginAPI{entered: make(chan struct{}), release: make(chan struct{})}
+	s := serve(t, &ctl.Server{API: api, Daemon: daemon()})
+	first := make(chan error, 1)
+	go func() {
+		c, err := ctl.Dial(context.Background(), s.path)
+		if err != nil {
+			first <- err
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_, err = c.Login(context.Background(), service.LoginRequest{Username: "alice", Password: "pw"})
+		first <- err
+	}()
+	<-api.entered
+	c := dial(t, s.path)
+	// Bounded: a login queued behind the first would wait for ever.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for name, call := range map[string]func() error{
+		"Login": func() error {
+			_, err := c.Login(ctx, service.LoginRequest{Username: "bob", Password: "pw"})
+			return err
+		},
+		"SubmitTOTP": func() error { _, err := c.SubmitTOTP(ctx, "123456"); return err },
+	} {
+		err := call()
+		var ee *exitcode.Error
+		if !errors.As(err, &ee) || ee.Code != exitcode.MustAct || ee.Error() != "a login is already in progress" || ee.Hint == "" {
+			t.Errorf("%s during a login = %#v; want exit 10, a login is already in progress", name, err)
+		}
+	}
+	close(api.release)
+	if err := <-first; err != nil {
+		t.Fatalf("the first login: %v", err)
+	}
+	if l, c := api.calls(); l != 1 || c != 0 {
+		t.Errorf("the service got %d logins and %d codes, want only the first login", l, c)
+	}
+	// Once it is done, the next one goes through.
+	if _, err := c.SubmitTOTP(t.Context(), "123456"); err != nil {
+		t.Errorf("SubmitTOTP after the login: %v", err)
+	}
+}
+
+// Re-review N1: the client checks the UID of the process that accepted its
+// connection (SO_PEERCRED on Linux) before it sends anything: a socket
+// swapped between the lstat and the dial never gets a login.
+func TestClientRefusesAServerOfAnotherUID(t *testing.T) {
+	t.Parallel()
+	api := &loginAPI{}
+	s := serve(t, &ctl.Server{API: api, Daemon: daemon()})
+	other := func(net.Conn) (int, bool) { return os.Geteuid() + 1, true }
+	c, err := ctl.DialCheckingPeer(t.Context(), s.path, other)
+	if err == nil {
+		_, err = c.Login(t.Context(), service.LoginRequest{Username: "alice", Password: "pw"})
+		_ = c.Close()
+	}
+	if exitcode.From(err) != exitcode.Blocked || !strings.Contains(err.Error(), "uid "+strconv.Itoa(os.Geteuid()+1)) {
+		t.Fatalf("a server of another UID: %v (exit %d); want blocked naming its UID", err, exitcode.From(err))
+	}
+	if l, _ := api.calls(); l != 0 {
+		t.Errorf("the service got %d logins", l)
+	}
+	if logs := s.logs.String(); strings.Contains(logs, "control request") {
+		t.Errorf("a request reached the server:\n%s", logs)
+	}
+
+	// The same UID, or an unchecked peer (other Unix), is talked to.
+	for _, peer := range []func(net.Conn) (int, bool){
+		func(net.Conn) (int, bool) { return os.Geteuid(), true },
+		func(net.Conn) (int, bool) { return 0, false },
+	} {
+		c, err := ctl.DialCheckingPeer(t.Context(), s.path, peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.Login(t.Context(), service.LoginRequest{Username: "alice", Password: "pw"})
+		_ = c.Close()
+		if err != nil {
+			t.Errorf("Login: %v", err)
+		}
+	}
+	// The real check passes against this test's own server.
+	if _, err := dial(t, s.path).Logout(t.Context()); err != nil {
+		t.Errorf("Logout over the real peer check: %v", err)
+	}
+}
+
+// countingListener counts the connections it accepts.
+type countingListener struct {
+	net.Listener
+	mu sync.Mutex
+	n  int
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		l.mu.Lock()
+		l.n++
+		l.mu.Unlock()
+	}
+	return c, err
+}
+
+func (l *countingListener) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.n
+}
+
+// The connection Dial made is used only while fresh: pcb login dials, then
+// prompts, and the server drops a connection that sent no request within
+// its 5 s header timeout. A stale one is replaced, not sent on.
+func TestStaleFirstConnectionIsRedialled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	dir, err := os.MkdirTemp("", "pcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "pcb.sock")
+	ln, err := ctl.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := &countingListener{Listener: ln}
+	srv := &ctl.Server{API: &loginAPI{}, Daemon: daemon()}
+	go func() { _ = srv.Serve(cl) }()
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	for _, tc := range []struct {
+		wait time.Duration
+		want int // connections accepted in all
+	}{{time.Second, 1}, {3 * time.Second, 3}} {
+		clock := time.Now()
+		c, err := ctl.DialWithClock(t.Context(), path, func() time.Time { return clock })
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(tc.wait) // the person types the password
+		if _, err := c.Login(t.Context(), service.LoginRequest{Username: "alice", Password: "pw"}); err != nil {
+			t.Fatalf("Login after %v: %v", tc.wait, err)
+		}
+		_ = c.Close()
+		if n := cl.count(); n != tc.want {
+			t.Errorf("after a wait of %v: %d connections accepted in all, want %d", tc.wait, n, tc.want)
+		}
+	}
+}

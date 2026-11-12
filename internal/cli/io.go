@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -137,6 +138,34 @@ type app struct{ IO }
 // service opens the service for cmd's run.
 func (a *app) service(cmd *cobra.Command) (service.API, error) {
 	return a.NewService(cmd.Context(), a.Env)
+}
+
+// dialDaemon connects to the daemon on socket: nil, without an error, when
+// none answers there (ctl.ErrNoDaemon). Any other failure is the caller's.
+func (a *app) dialDaemon(ctx context.Context, socket string) (*ctl.Client, error) {
+	c, err := a.DialDaemon(ctx, socket)
+	if errors.Is(err, ctl.ErrNoDaemon) {
+		return nil, nil
+	}
+	return c, err
+}
+
+// daemon is the client of the running daemon, nil when none answers: the
+// command then runs in process (and directories that do not resolve are
+// the in-process service's to report).
+func (a *app) daemon(cmd *cobra.Command) (*ctl.Client, error) {
+	dirs, err := resolveDirs(a.Env)
+	if err != nil {
+		return nil, nil //nolint:nilerr // the in-process path reports it
+	}
+	return a.dialDaemon(cmd.Context(), dirs.Socket())
+}
+
+// noDaemonNote tells, in text mode, that the command runs without a daemon.
+func (a *app) noDaemonNote(cmd *cobra.Command) {
+	if !JSONMode(cmd) {
+		fmt.Fprintln(a.Stderr, "Note: no pcb daemon is running; this command runs on its own.")
+	}
 }
 
 // closeService releases svc. A failure is one line on stderr: it never

@@ -7,7 +7,8 @@ import (
 	"syscall"
 )
 
-// defaultPeerUID reads the peer's UID with SO_PEERCRED. A connection whose
+// defaultPeerUID reads the peer's UID with SO_PEERCRED: the server checks
+// its client with it, and the client its server. A connection whose
 // credentials cannot be read reports -1, checked: it is refused, never let
 // through unchecked.
 func defaultPeerUID(c net.Conn) (int, bool) {

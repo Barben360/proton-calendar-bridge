@@ -14,7 +14,8 @@ import (
 type API interface {
 	// Login runs the login state machine: ready, needs-totp or needs-captcha.
 	Login(ctx context.Context, req LoginRequest) (LoginResult, error)
-	// SubmitTOTP finishes a login that answered needs-totp.
+	// SubmitTOTP finishes a login that answered needs-totp, within 5
+	// minutes of it: then the login is revoked and forgotten.
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
 	// Logout revokes the session and forgets the account. During Serve it
 	// first stops the sync loop and closes its cache handle (ruling M5-P10).
@@ -149,13 +150,15 @@ const (
 )
 
 // LoginResult is the outcome of Login or SubmitTOTP. CaptchaURL and
-// CaptchaToken are set with needs-captcha.
+// CaptchaToken are set with needs-captcha; LoginExpires with needs-totp:
+// when the login waiting for its code ends (Login's time + 5 minutes).
 type LoginResult struct {
 	State        LoginState `json:"state"`
 	Username     string     `json:"username,omitempty"`
 	AccountID    string     `json:"account_id,omitempty"`
 	CaptchaURL   string     `json:"captcha_url,omitempty"`
 	CaptchaToken string     `json:"captcha_token,omitempty"`
+	LoginExpires *time.Time `json:"login_expires,omitempty"`
 }
 
 // LogoutResult says what Logout did. Revoked is false when Proton could not
@@ -180,6 +183,9 @@ type Status struct {
 	CaptchaURL  string     `json:"captcha_url,omitempty"`
 	LastLogin   *time.Time `json:"last_login,omitempty"`
 	LastRelogin *time.Time `json:"last_relogin,omitempty"`
+	// LoginExpires is set with needs-totp: when the login waiting for its
+	// code ends.
+	LoginExpires *time.Time `json:"login_expires,omitempty"`
 	// Sync is the event cache's state; nil while there is no cache.
 	Sync *SyncStatus `json:"sync,omitempty"`
 }

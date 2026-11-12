@@ -70,11 +70,8 @@ func (a *app) status(cmd *cobra.Command, daemonOnly bool) (ctl.Status, error) {
 // daemonStatus asks the daemon on socket for its status; ok is false when
 // none answers there.
 func (a *app) daemonStatus(ctx context.Context, socket string) (st ctl.Status, ok bool, err error) {
-	c, err := a.DialDaemon(ctx, socket)
-	if errors.Is(err, ctl.ErrNoDaemon) {
-		return ctl.Status{}, false, nil
-	}
-	if err != nil {
+	c, err := a.dialDaemon(ctx, socket)
+	if c == nil || err != nil {
 		return ctl.Status{}, false, err
 	}
 	defer func() { _ = c.Close() }()
@@ -183,6 +180,7 @@ func statusText(s service.Status) string {
 	line("key_file", s.KeyFile)
 	line("unattended", fmt.Sprint(s.Unattended))
 	optional("captcha_url", s.CaptchaURL)
+	optional("login_expires", at(s.LoginExpires))
 	optional("last_login", at(s.LastLogin))
 	optional("last_relogin", at(s.LastRelogin))
 	if s.Sync == nil && s.Phase == string(service.StateReady) {

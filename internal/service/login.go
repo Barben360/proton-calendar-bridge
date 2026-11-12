@@ -30,6 +30,52 @@ type pendingLogin struct {
 	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
 	last       store.State // state.json when the login began
 	live       *api.Client // the client of the key calls; its tokens outlive p.Tokens after a refresh
+	expires    time.Time   // when it stops waiting for its code (pendingTTL after Login)
+	stop       func() bool // stops its expiry timer; nil until it waits
+}
+
+// pendingTTL is how long a login waits for its 2FA code (ruling M5-Rpre4):
+// then expire revokes its session and zeroes its password.
+const pendingTTL = 5 * time.Minute
+
+// release ends pl for good: its expiry timer stopped, so a stale timer
+// never touches a newer login, and its password zeroed.
+func (pl *pendingLogin) release() {
+	if pl.stop != nil {
+		pl.stop()
+	}
+	clear(pl.password)
+}
+
+// hold makes pl the login waiting for its code. It holds mu. The first time,
+// it arms the expiry timer; a rejected code keeps the first deadline.
+func (l *Local) hold(pl *pendingLogin) {
+	l.pending = pl
+	exp := pl.expires
+	l.waiting.Store(&exp)
+	if pl.stop == nil {
+		pl.stop = l.o.AfterFunc(pendingTTL, func() { l.expire(pl) })
+	}
+}
+
+// unhold forgets the login waiting for its code. It holds mu.
+func (l *Local) unhold() {
+	l.pending = nil
+	l.waiting.Store(nil)
+}
+
+// expire ends pl once pendingTTL has passed: its half session revoked
+// (best effort, within revokeTimeout), its password zeroed, and SubmitTOTP
+// then says it expired. A timer whose login completed, failed or was
+// replaced meanwhile finds another pending login, or none, and does nothing.
+func (l *Local) expire(pl *pendingLogin) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pending != pl || l.closed.Load() {
+		return
+	}
+	l.dropPending(context.Background())
+	l.expired = true
 }
 
 // abort revokes the login's session and closes it. After a refresh during
@@ -74,6 +120,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		}
 	}
 	l.dropPending(ctx)
+	l.expired = false
 
 	accounts, err := l.secrets.Load()
 	if err != nil {
@@ -107,9 +154,10 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		pl.totpURI = strings.TrimSpace(req.TOTP)
 	}
 	if p.NeedsTOTP && totp == nil {
-		l.pending = pl
-		l.waiting.Store(true)
-		return LoginResult{State: StateNeedsTOTP, Username: req.Username, AccountID: p.UserID}, nil
+		pl.expires = l.o.Now().Add(pendingTTL)
+		l.hold(pl)
+		exp := pl.expires
+		return LoginResult{State: StateNeedsTOTP, Username: req.Username, AccountID: p.UserID, LoginExpires: &exp}, nil
 	}
 	return l.finish(ctx, pl, totp, now)
 }
@@ -121,6 +169,9 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	defer l.mu.Unlock()
 	if l.closed.Load() {
 		return LoginResult{}, errClosed()
+	}
+	if l.pending == nil && l.expired {
+		return LoginResult{}, mustAct("the login waiting for its 2FA code expired after 5 minutes", "run pcb login again")
 	}
 	if l.pending == nil {
 		return LoginResult{}, mustAct("no login is waiting for a 2FA code", "run pcb login first")
@@ -136,8 +187,7 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	if isURI(code) {
 		pl.totpURI = strings.TrimSpace(code)
 	}
-	l.pending = nil
-	l.waiting.Store(false)
+	l.unhold()
 	return l.finish(ctx, pl, totp, l.o.Now())
 }
 
@@ -147,9 +197,8 @@ func (l *Local) dropPending(ctx context.Context) {
 		return
 	}
 	l.abort(ctx, l.pending)
-	clear(l.pending.password)
-	l.pending = nil
-	l.waiting.Store(false)
+	l.pending.release()
+	l.unhold()
 }
 
 // acquire takes the login guard. With a CAPTCHA token the user already
@@ -196,26 +245,25 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 	res, err := l.complete(ctx, pl, totp, now)
 	if err == nil {
 		pl.p.Close()
-		clear(pl.password)
+		pl.release()
 		l.wakeLogin() // a Serve waiting for a login serves at once (ruling M5-P9)
 		return res, nil
 	}
 	if errors.Is(err, auth.ErrTOTPRejected) {
 		if pl.tries++; pl.tries < maxTOTPTries {
-			l.pending = pl
-			l.waiting.Store(true)
+			l.hold(pl)
 			return LoginResult{}, mustAct("the 2FA code was rejected by Proton",
 				fmt.Sprintf("enter the current code again (%d tries left)", maxTOTPTries-pl.tries))
 		}
 		l.abort(ctx, pl)
-		clear(pl.password)
+		pl.release()
 		return LoginResult{}, mustAct("the 2FA code was rejected "+strconv.Itoa(maxTOTPTries)+" times and the login was cancelled",
 			"run pcb login again")
 	}
 	if !pl.sealed {
 		l.abort(ctx, pl)
 	}
-	clear(pl.password)
+	pl.release()
 	return LoginResult{}, l.fail(err)
 }
 

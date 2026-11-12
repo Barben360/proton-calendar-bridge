@@ -1,13 +1,16 @@
 package cli_test
 
 import (
+	"context"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -476,5 +479,220 @@ func TestDefaultServiceReadsConfigToml(t *testing.T) {
 	r.want(exitcode.OK, "status", "--json")
 	if n := r.f.Calls("", "/auth/v4"); n != 0 {
 		t.Errorf("status called Proton (%d)", n)
+	}
+}
+
+// daemonService is the real service on the rig's directories, as the
+// daemon holds it, closed with the test.
+func daemonService(t *testing.T, r *rig) *service.Local {
+	t.Helper()
+	cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
+		Sleep: func(context.Context, time.Duration) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
+// noInProcess makes opening the in-process service fail the test: the
+// commands from here on must go through the daemon.
+func noInProcess(t *testing.T, r *rig) {
+	t.Helper()
+	r.svc = nil
+	r.mk = func() (service.API, error) {
+		t.Error("the command opened the in-process service")
+		return nil, errors.New("no in-process service in this test")
+	}
+}
+
+// serveWaiting starts pcb serve --wait-for-login on the real service,
+// whose login poll is an hour: only a wake moves it within the test.
+func serveWaiting(t *testing.T, r *rig) *fastPoll {
+	t.Helper()
+	fp := &fastPoll{states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16), poll: time.Hour}
+	r.mk = func() (service.API, error) {
+		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+		if err != nil {
+			return nil, err
+		}
+		l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
+			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
+		fp.Local = l
+		return fp, err
+	}
+	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+	s.listening()
+	return fp
+}
+
+const noDaemonNote = "Note: no pcb daemon is running; this command runs on its own.\n"
+
+// M5-Rpre4: with a daemon, pcb login logs in through it, and the login
+// wakes its Serve at once (the poll is an hour away).
+func TestLoginGoesThroughTheDaemon(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := newRig(t, &protontest.Options{})
+	fp := serveWaiting(t, r)
+	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+	noInProcess(t, r)
+	r.want(exitcode.OK, "login", "--non-interactive")
+	if !strings.Contains(r.out.String(), "Logged in as "+r.f.Username) || strings.Contains(r.errb.String(), "Note:") {
+		t.Errorf("stdout %q, stderr %q; want the login without the no-daemon note", r.out.String(), r.errb.String())
+	}
+	wantServeState(t, fp.states, service.ServeServing)
+	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+}
+
+// With a daemon, pcb logout goes through it, and its Serve goes back to
+// waiting for a login (ruling M5-R8).
+func TestLogoutGoesThroughTheDaemon(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive") // no daemon yet: in process
+	fp := serveWaiting(t, r)
+	wantServeState(t, fp.states, service.ServeServing)
+	noInProcess(t, r)
+	r.want(exitcode.OK, "logout")
+	if r.out.String() != "Logged out.\n" || strings.Contains(r.errb.String(), "Note:") {
+		t.Errorf("stdout %q, stderr %q; want Logged out. without the no-daemon note", r.out.String(), r.errb.String())
+	}
+	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+	if n := r.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1 (the session revoked)", n)
+	}
+	r.want(exitcode.OK, "status", "--json", "--daemon")
+	var st ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &st)
+	if st.Phase != "logged-out" || st.Health == nil || st.Health.Serve != service.ServeWaitingForLogin {
+		t.Errorf("status after the logout = %+v", st)
+	}
+}
+
+// Review Focus 3: without a terminal, the daemon holds the login waiting
+// for its code; login resume --totp finishes it with the code from
+// PCB_TOTP, without the credentials and without a second SRP.
+func TestNonInteractiveTOTPIsHeldByTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	startDaemon(t, r, daemonService(t, r), nil)
+	noInProcess(t, r)
+	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+	e := r.envelope()
+	wantHint := "PCB_TOTP=<code> pcb login resume --totp before " + t0.Add(5*time.Minute).Local().Format(time.TimeOnly) + " (the daemon holds the login)"
+	if e.Error == nil || e.Error.Message != "the account needs a 2FA code" || e.Error.Hint != wantHint {
+		t.Fatalf("error = %+v; want the 2FA code asked for with the hint %q", e.Error, wantHint)
+	}
+	var held service.LoginResult
+	mustUnmarshal(t, e.Data, &held)
+	if held.State != service.StateNeedsTOTP || held.LoginExpires == nil {
+		t.Errorf("data = %s; want needs-totp with login_expires", e.Data)
+	}
+	if n := r.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d DELETE /auth/v4: the held login was cancelled", n)
+	}
+
+	delete(r.env, "PCB_USERNAME")
+	delete(r.env, "PCB_PASSWORD")
+	code := r.totpCode()
+	r.env["PCB_TOTP"] = code
+	r.want(exitcode.OK, "login", "resume", "--totp", "--non-interactive", "--json")
+	var res service.LoginResult
+	mustUnmarshal(t, r.envelope().Data, &res)
+	if res.State != service.StateReady {
+		t.Fatalf("resume --totp = %+v, want ready", res)
+	}
+	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1 (none for the resume)", n)
+	}
+	if strings.Contains(r.out.String()+r.errb.String(), code) {
+		t.Error("the output carries the 2FA code")
+	}
+}
+
+// Interactive, with a daemon: the prompt answers the login the daemon
+// holds, again after a rejected code.
+func TestInteractiveTOTPThroughTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	startDaemon(t, r, daemonService(t, r), nil)
+	noInProcess(t, r)
+	r.term = &fakeTerm{interactive: true, secrets: []string{"000000", r.totpCode()}}
+	r.want(exitcode.OK, "login")
+	if len(r.term.secretPrompts) != 2 || !strings.Contains(r.errb.String(), "rejected") {
+		t.Errorf("%d prompts, stderr %q; want two, the first code reported rejected", len(r.term.secretPrompts), r.errb.String())
+	}
+	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+}
+
+func TestResumeTOTPWithoutADaemonIsExit10(t *testing.T) {
+	t.Parallel()
+	s := &stubAPI{}
+	r := stubRig(t, s)
+	r.env["PCB_TOTP"] = "123456"
+	r.want(exitcode.MustAct, "login", "resume", "--totp", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Message != "no pcb daemon holds a login waiting for its code" || e.Error.Hint != "run pcb login with PCB_TOTP set" {
+		t.Errorf("error = %+v", e.Error)
+	}
+	if len(s.totps)+len(s.logins) != 0 {
+		t.Errorf("the in-process service got %d codes and %d logins", len(s.totps), len(s.logins))
+	}
+}
+
+// M5-P11: resume takes exactly one of --captcha-token and --totp (a flag:
+// the code never comes from argv).
+func TestResumeNeedsExactlyOneMode(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"login", "resume"},
+		{"login", "resume", "--totp", "--captcha-token", "T1"},
+		{"login", "resume", "--totp", "123456"},
+	} {
+		s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+		r := stubRig(t, s)
+		r.env["PCB_TOTP"] = "123456"
+		r.want(exitcode.Usage, append(args, "--json")...)
+		if len(s.logins)+len(s.totps) != 0 {
+			t.Errorf("pcb %s reached the service", strings.Join(args, " "))
+		}
+	}
+}
+
+// Without a daemon, pcb login and pcb logout run in process and say so on
+// stderr, in text mode only.
+func TestNoDaemonLoginSaysSo(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive")
+	if r.errb.String() != noDaemonNote || !strings.Contains(r.out.String(), "Logged in as") {
+		t.Errorf("login: stdout %q, stderr %q; want the note on stderr", r.out.String(), r.errb.String())
+	}
+	r.want(exitcode.OK, "logout", "--json")
+	if strings.Contains(r.errb.String()+r.out.String(), "Note:") {
+		t.Errorf("logout --json: stdout %q, stderr %q; want no note", r.out.String(), r.errb.String())
+	}
+	r.want(exitcode.OK, "logout")
+	if r.errb.String() != noDaemonNote || r.out.String() != "Not logged in.\n" {
+		t.Errorf("logout: stdout %q, stderr %q; want the note on stderr", r.out.String(), r.errb.String())
+	}
+	delete(r.env, "PCB_PASSWORD") // fails before Proton: the login guard holds a second login back
+	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+	if strings.Contains(r.errb.String()+r.out.String(), "Note:") {
+		t.Errorf("login --json: stdout %q, stderr %q; want no note", r.out.String(), r.errb.String())
 	}
 }

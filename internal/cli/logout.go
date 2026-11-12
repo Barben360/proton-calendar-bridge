@@ -2,20 +2,17 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 func (a *app) newLogout() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Revoke the Proton session and forget the stored credentials",
+		Short: "Revoke the Proton session and forget the stored credentials (through pcb serve when it runs)",
 		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := a.service(cmd)
-			if err != nil {
-				return Finish(cmd, nil, "", err)
-			}
-			defer a.closeService(svc)
-			res, err := svc.Logout(cmd.Context())
+			res, err := a.logout(cmd)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
@@ -29,4 +26,24 @@ func (a *app) newLogout() *cobra.Command {
 			return Finish(cmd, res, text, nil)
 		},
 	}
+}
+
+// logout logs out through the daemon when one runs (its Serve then waits
+// for a login, or stops), else in process.
+func (a *app) logout(cmd *cobra.Command) (service.LogoutResult, error) {
+	c, err := a.daemon(cmd)
+	if err != nil {
+		return service.LogoutResult{}, err
+	}
+	if c != nil {
+		defer func() { _ = c.Close() }()
+		return c.Logout(cmd.Context())
+	}
+	a.noDaemonNote(cmd)
+	svc, err := a.service(cmd)
+	if err != nil {
+		return service.LogoutResult{}, err
+	}
+	defer a.closeService(svc)
+	return svc.Logout(cmd.Context())
 }

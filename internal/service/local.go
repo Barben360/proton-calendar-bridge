@@ -29,15 +29,19 @@ const wipeTimeout = 10 * time.Second
 
 func errClosed() error { return blocked("service closed", "start a new session") }
 
-// Options build a Local. Sealer, HTTP, Now and Sleep default to the key file
-// of Config, the API client's default, time.Now and a context-aware sleep.
+// Options build a Local. Sealer, HTTP, Now, Sleep and AfterFunc default to
+// the key file of Config, the API client's default, time.Now, a
+// context-aware sleep and time.AfterFunc. AfterFunc runs f once d has
+// passed, unless stop (true: it will not run) came first; it ends a login
+// left waiting for its 2FA code (pendingTTL).
 type Options struct {
-	Dirs   paths.Dirs
-	Config config.Config
-	Sealer seal.Sealer
-	HTTP   *http.Client
-	Now    func() time.Time
-	Sleep  func(ctx context.Context, d time.Duration) error
+	Dirs      paths.Dirs
+	Config    config.Config
+	Sealer    seal.Sealer
+	HTTP      *http.Client
+	Now       func() time.Time
+	Sleep     func(ctx context.Context, d time.Duration) error
+	AfterFunc func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Local is the in-process API. Operations that change the login (an
@@ -61,7 +65,8 @@ type Local struct {
 
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
-	waiting atomic.Bool // pending != nil, readable without mu
+	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
+	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
 	closed  atomic.Bool
 
 	cmu    sync.Mutex // guards cached; never held across a network call
@@ -134,6 +139,9 @@ func NewLocal(o Options) (*Local, error) {
 	}
 	if o.Sleep == nil {
 		o.Sleep = sleep
+	}
+	if o.AfterFunc == nil {
+		o.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 	}
 	l := &Local{
 		o:       o,
@@ -231,6 +239,7 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, errClosed()
 	}
 	l.dropPending(ctx)
+	l.expired = false
 	accounts, err := l.secrets.Load()
 	if errors.Is(err, store.ErrRolledBack) {
 		l.revokeHeld()
@@ -327,8 +336,10 @@ func (l *Local) Status(context.Context) (Status, error) {
 	} else if st.Phase == store.PhaseReady {
 		s.Phase, s.Reason = string(store.PhaseNeedsLogin), "no stored session"
 	}
-	if l.waiting.Load() {
+	if exp := l.waiting.Load(); exp != nil {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
+		t := *exp
+		s.LoginExpires = &t
 	}
 	s.Sync = l.syncStatus()
 	return s, nil

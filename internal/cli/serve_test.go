@@ -996,16 +996,21 @@ func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 	})
 }
 
-// fastPoll is the real service with a short login poll, reporting Serve's
-// states and passes to channels (the CLI's own callbacks still run).
+// fastPoll is the real service with a short login poll (poll, 0: 20 ms),
+// reporting Serve's states and passes to channels (the CLI's own callbacks
+// still run).
 type fastPoll struct {
 	*service.Local
 	states chan service.ServeState
 	passes chan service.WatchPass
+	poll   time.Duration
 }
 
 func (f *fastPoll) Serve(ctx context.Context, o service.ServeOptions) error {
 	o.LoginPoll = 20 * time.Millisecond
+	if f.poll > 0 {
+		o.LoginPoll = f.poll
+	}
 	onState, onPass := o.OnState, o.OnPass
 	o.OnState = func(s service.ServeState) {
 		if onState != nil {

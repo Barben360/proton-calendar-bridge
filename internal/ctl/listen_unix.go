@@ -59,8 +59,10 @@ func Listen(path string) (net.Listener, error) {
 // dialSocket connects to the socket at path: ErrNoDaemon when nothing can
 // listen there (too long a path) or nothing does (missing, or refused). A
 // path that is not a socket owned by this process's effective UID is
-// refused before any dial (ruling M5-R2).
-func dialSocket(ctx context.Context, path string) (net.Conn, error) {
+// refused before any dial (ruling M5-R2), and so is a connection whose
+// server peer reports another UID (re-review N1: the socket may have been
+// swapped between the lstat and the dial), before anything is sent on it.
+func dialSocket(ctx context.Context, path string, peer func(net.Conn) (int, bool)) (net.Conn, error) {
 	if len(path) > maxPath {
 		return nil, ErrNoDaemon
 	}
@@ -71,18 +73,25 @@ func dialSocket(ctx context.Context, path string) (net.Conn, error) {
 	case err != nil:
 		return nil, err
 	}
-	if err := checkSocket(path, fi, os.Geteuid()); err != nil {
+	euid := os.Geteuid()
+	if err := checkSocket(path, fi, euid); err != nil {
 		return nil, err
 	}
 	d := net.Dialer{Timeout: dialTimeout}
 	c, err := d.DialContext(ctx, "unix", path)
 	switch {
-	case err == nil:
-		return c, nil
 	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED):
 		return nil, ErrNoDaemon
+	case err != nil:
+		return nil, err
 	}
-	return nil, err
+	if uid, checked := peer(c); checked && uid != euid {
+		_ = c.Close()
+		return nil, &exitcode.Error{Code: exitcode.Blocked,
+			Err:  fmt.Errorf("the process answering on the control socket %s runs as another user (uid %d): pcb refuses to talk to it", path, uid),
+			Hint: "run pcb as the user that runs pcb serve, and check who replaced " + path}
+	}
+	return c, nil
 }
 
 // checkSocket refuses a path (lstat'ed as fi) that is not a socket owned by

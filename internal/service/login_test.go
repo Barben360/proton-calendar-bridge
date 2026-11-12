@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,11 +71,19 @@ type env struct {
 	dirs paths.Dirs
 	cfg  config.Config
 	svc  *service.Local
+	// after, when set, is the services' AfterFunc (the pending login's expiry).
+	after func(time.Duration, func()) func() bool
 }
 
 func newEnv(t *testing.T, fo protontest.Options) *env {
 	t.Helper()
-	e := &env{clk: &clock{now: t0}}
+	return newEnvWith(t, fo, nil)
+}
+
+// newEnvWith is newEnv with after as the service's AfterFunc.
+func newEnvWith(t *testing.T, fo protontest.Options, after func(time.Duration, func()) func() bool) *env {
+	t.Helper()
+	e := &env{clk: &clock{now: t0}, after: after}
 	fo.Now = e.clk.Now
 	e.f = protontest.New(t, fo)
 	root := t.TempDir()
@@ -88,7 +97,7 @@ func newEnv(t *testing.T, fo protontest.Options) *env {
 // open starts a service on the env's dirs, closed with the test.
 func (e *env) open(t *testing.T) *service.Local {
 	t.Helper()
-	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep})
+	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, AfterFunc: e.after})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1264,5 +1273,191 @@ func TestLogoutAtTheGenerationBoundRecovers(t *testing.T) {
 	}
 	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "sealed" || s.Phase != "ready" {
 		t.Errorf("Status after the login = %+v, %v", s, err)
+	}
+}
+
+// fakeTimers stands in for time.AfterFunc: each timer runs only when the
+// test fires it, and never once stopped, as a real one.
+type fakeTimers struct {
+	mu sync.Mutex
+	ts []*fakeTimer
+}
+
+type fakeTimer struct {
+	d     time.Duration
+	f     func()
+	state atomic.Int32 // 0 armed, 1 stopped, 2 fired
+}
+
+func (ft *fakeTimers) AfterFunc(d time.Duration, f func()) func() bool {
+	tm := &fakeTimer{d: d, f: f}
+	ft.mu.Lock()
+	ft.ts = append(ft.ts, tm)
+	ft.mu.Unlock()
+	return func() bool { return tm.state.CompareAndSwap(0, 1) }
+}
+
+func (ft *fakeTimers) timer(t *testing.T, i int) *fakeTimer {
+	t.Helper()
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if i >= len(ft.ts) {
+		t.Fatalf("%d timers armed, want at least %d", len(ft.ts), i+1)
+	}
+	return ft.ts[i]
+}
+
+func (ft *fakeTimers) count() int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return len(ft.ts)
+}
+
+// fire runs the timer as its duration passing would: not at all when it
+// was stopped. It reports whether it ran.
+func (tm *fakeTimer) fire() bool {
+	if !tm.state.CompareAndSwap(0, 2) {
+		return false
+	}
+	tm.f()
+	return true
+}
+
+// M5-Rpre4: the login a daemon holds for its 2FA code lives 5 minutes; then
+// its half session is revoked and SubmitTOTP says it expired.
+func TestPendingLoginExpiresAfterFiveMinutes(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	res := e.login(t, e.req())
+	want := t0.Add(5 * time.Minute)
+	if res.State != service.StateNeedsTOTP || res.LoginExpires == nil || !res.LoginExpires.Equal(want) {
+		t.Fatalf("Login = %+v; want needs-totp expiring at %v", res, want)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Phase != "needs-totp" || st.LoginExpires == nil || !st.LoginExpires.Equal(want) {
+		t.Fatalf("Status = %+v, %v; want needs-totp with login_expires %v", st, err, want)
+	}
+	if n := ft.count(); n != 1 || ft.timer(t, 0).d != 5*time.Minute {
+		t.Fatalf("%d timers (first %v), want one of 5 min", n, ft.timer(t, 0).d)
+	}
+
+	if !ft.timer(t, 0).fire() {
+		t.Fatal("the expiry timer was stopped before it fired")
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1 (the half session revoked)", n)
+	}
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the login waiting for its 2FA code expired after 5 minutes" || ee.Hint != "run pcb login again" {
+		t.Errorf("SubmitTOTP after expiry = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/2fa"); n != 0 {
+		t.Errorf("%d 2FA submissions after the expiry, want 0", n)
+	}
+	st, err = e.svc.Status(t.Context())
+	if err != nil || st.Phase == "needs-totp" || st.LoginExpires != nil {
+		t.Errorf("Status after expiry = %+v, %v; want no login waiting", st, err)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("secrets sealed by an expired login")
+	}
+	// A new login starts afresh: the expiry is not remembered for ever.
+	e.clk.advance(time.Minute) // past the login guard
+	if res := e.login(t, e.req()); res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login after expiry = %+v", res)
+	}
+	if res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP of the new login = %+v, %v", res, err)
+	}
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a 2FA code" {
+		t.Errorf("SubmitTOTP with nothing pending = %q; the old expiry still told", ee.Error())
+	}
+}
+
+func TestSubmitBeforeExpiryStillWorks(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	e.clk.advance(4*time.Minute + 59*time.Second)
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP at 4:59 = %+v, %v", res, err)
+	}
+	if ft.timer(t, 0).fire() {
+		t.Error("the expiry timer was left armed after the login completed")
+	}
+	// Even a timer that fired just before the completion stopped it finds
+	// nothing to revoke: the stored session lives on.
+	ft.timer(t, 0).f()
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d DELETE /auth/v4 after a completed login, want 0", n)
+	}
+	if !sessionAlive(t, e, tokensOf(e.account(t))) {
+		t.Error("the completed login's session was revoked")
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "ready" || st.LoginExpires != nil {
+		t.Errorf("Status = %+v; want ready without login_expires", st)
+	}
+}
+
+// A login that replaces one waiting for its code stops the old timer, and a
+// stale timer never revokes the newer login.
+func TestReplacedLoginsTimerNeverRevokesTheNewOne(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	e.clk.advance(time.Minute) // past the login guard
+	e.login(t, e.req())
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Fatalf("%d DELETE /auth/v4, want 1 (the replaced login aborted)", n)
+	}
+	if ft.timer(t, 0).fire() {
+		t.Error("the replaced login's timer was left armed")
+	}
+	ft.timer(t, 0).f() // as if it had fired just before the stop
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4 after the stale timer, want 1", n)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-totp" {
+		t.Fatalf("phase after the stale timer = %q, want needs-totp", st.Phase)
+	}
+	if res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP of the newer login = %+v, %v", res, err)
+	}
+	if ft.timer(t, 1).fire() {
+		t.Error("the completed login's timer was left armed")
+	}
+}
+
+// A rejected code keeps the login waiting under its first deadline: no
+// second timer, and expiry still ends it.
+func TestRejectedCodeKeepsTheDeadline(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	if _, err := e.svc.SubmitTOTP(t.Context(), "000000"); err == nil {
+		t.Fatal("a wrong code was accepted")
+	}
+	if n := ft.count(); n != 1 {
+		t.Errorf("%d timers after a rejected code, want 1", n)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.LoginExpires == nil || !st.LoginExpires.Equal(t0.Add(5*time.Minute)) {
+		t.Errorf("login_expires after a rejected code = %v, want the first deadline", st.LoginExpires)
+	}
+	if !ft.timer(t, 0).fire() {
+		t.Fatal("the timer was stopped by a rejected code")
+	}
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "expired") {
+		t.Errorf("SubmitTOTP after expiry = %v", ee)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1", n)
 	}
 }

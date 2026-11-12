@@ -7,6 +7,7 @@ package ctl
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -25,6 +26,23 @@ type Status struct {
 	Listener *Listener       `json:"listener,omitempty"`
 	Alerts   []Alert         `json:"alerts"`
 }
+
+// TOTPRequest is the body of POST /v1/login/totp: the 2FA code (or the
+// otpauth:// URI) of the login the daemon holds.
+type TOTPRequest struct {
+	Code string `json:"code"`
+}
+
+const redactedTOTP = "ctl.TOTPRequest(redacted)"
+
+// String hides the code from fmt.
+func (TOTPRequest) String() string { return redactedTOTP }
+
+// GoString hides the code from %#v.
+func (TOTPRequest) GoString() string { return redactedTOTP }
+
+// LogValue hides the code from slog.
+func (TOTPRequest) LogValue() slog.Value { return slog.StringValue(redactedTOTP) }
 
 // Daemon is the pcb serve process that answers on the socket.
 type Daemon struct {

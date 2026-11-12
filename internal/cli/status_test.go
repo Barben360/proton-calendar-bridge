@@ -131,6 +131,18 @@ func startDaemon(t *testing.T, r *rig, api service.API, ln *ctl.Listener) {
 	})
 }
 
+// A login the daemon holds for its 2FA code shows until when.
+func TestStatusShowsWhenTheHeldLoginExpires(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})
+	exp := daemonNow.Add(5 * time.Minute)
+	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "needs-totp", LoginExpires: &exp}}, nil)
+	r.want(exitcode.OK, "status")
+	if !strings.Contains(r.out.String(), "login_expires: 2026-11-12T12:05:00Z\n") {
+		t.Errorf("status lacks the expiry:\n%s", r.out.String())
+	}
+}
+
 func TestStatusFallsBackOffline(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})

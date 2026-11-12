@@ -11,4 +11,6 @@ import (
 func Listen(string) (net.Listener, error) { return nil, ErrUnsupported }
 
 // dialSocket finds no daemon off Unix: the CLI is always offline there.
-func dialSocket(context.Context, string) (net.Conn, error) { return nil, ErrNoDaemon }
+func dialSocket(context.Context, string, func(net.Conn) (int, bool)) (net.Conn, error) {
+	return nil, ErrNoDaemon
+}
