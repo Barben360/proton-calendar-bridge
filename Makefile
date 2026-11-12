@@ -11,13 +11,20 @@ OUT     ?= bin/pcb
 # the service.
 PREFIX  ?= $(HOME)/.local
 
-.PHONY: build install test lint image container-smoke systemd-smoke
+.PHONY: build install test lint image container-smoke systemd-smoke pcb-fake rehearse
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
 
 install: build
 	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
+
+# The fake Proton for rehearsals (plan R2): developer only, never in the
+# image nor in make install.
+FAKE_OUT ?= bin/pcb-fake
+
+pcb-fake:
+	CGO_ENABLED=0 go build -trimpath -o $(FAKE_OUT) ./cmd/pcb-fake
 
 # PKGS narrows the packages (CI runs three shards in parallel).
 PKGS ?= ./...
@@ -47,3 +54,8 @@ container-smoke:
 
 systemd-smoke: build
 	scripts/systemd-smoke.sh $(OUT)
+
+# The live session rehearsed offline against pcb-fake (plan R2): builds pcb
+# and pcb-fake into a temporary run root and prints PASS last.
+rehearse:
+	scripts/live/rehearse.sh
