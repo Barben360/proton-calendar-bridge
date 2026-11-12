@@ -196,8 +196,12 @@ func TestLoginMissingCredsIsUsageAndKeepsGuardFree(t *testing.T) {
 	o := opts(t, f)
 	o.Creds.Password = ""
 	_, err := session.Login(t.Context(), o)
-	if e := exitErr(t, err); e.Code != exitcode.Usage {
+	e := exitErr(t, err)
+	if e.Code != exitcode.Usage {
 		t.Fatalf("code = %d, want %d", e.Code, exitcode.Usage)
+	}
+	if !strings.Contains(e.Hint, "--env-file ~/.config/pcb-live/lab.env ") {
+		t.Errorf("hint %q: want the filled local copy ~/.config/pcb-live/lab.env, not the placeholder example", e.Hint)
 	}
 	if _, err := os.Stat(filepath.Join(o.StateDir, "last-login")); err == nil {
 		t.Error("a usage error consumed the login window")
