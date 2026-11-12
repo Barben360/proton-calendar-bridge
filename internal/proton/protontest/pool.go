@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"strings"
 	"sync"
-	"testing"
 
 	"github.com/ProtonMail/go-proton-api/server"
 	"github.com/ProtonMail/go-proton-api/server/backend"
@@ -71,7 +70,7 @@ func generateKey(name, email string, pass []byte, keyType string, bits int) (str
 func secondAddress(username, domain string) string { return "second-" + username + "@" + domain }
 
 // borrow takes an idle backend, or starts one, and gives it back when t ends.
-func borrow(t testing.TB) *pooled {
+func borrow(t TB) *pooled {
 	fastKeys.Do(func() { backend.GenerateKey = generateKey })
 	pool.mu.Lock()
 	var p *pooled

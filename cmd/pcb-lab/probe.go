@@ -21,7 +21,7 @@ import (
 
 func probeCmd() *cobra.Command {
 	c := cli.Group("probe", "Live measurements on the saved session (never log in again)",
-		calendarAccessCmd(), refreshCmd(), aliveCmd(), feedCmd())
+		calendarAccessCmd(), refreshCmd(), aliveCmd(), feedCmd(), sessionsCmd(), writeMatrixCmd())
 	c.PersistentFlags().String("record-dir", "", "write redacted answers here (default: none)")
 	return c
 }

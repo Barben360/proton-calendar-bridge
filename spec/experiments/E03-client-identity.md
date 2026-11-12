@@ -35,6 +35,8 @@ Existing evidence only (above). No live measurement on the test account yet.
 
 Blocked on the test account's CAPTCHA (first login 2026-11-10 23:47 UTC answered Proton 9001; `hv.json` holds the challenge). After the author solves it, from `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m0` with `pcb-lab` built, in this order. Every login is at least 60 s after the previous one (the guard refuses sooner with exit 20); probes use the saved session and are not logins.
 
+**Not to be pasted as is: run through `scripts/live/run.sh` (`live`), as HUMAN-CHECKS step 2 (2a to 2d, one state dir each, `PCB_LAB_APPVERSION` per candidate) and step 3 spell it. The block below only shows the shape of the commands.**
+
 ```
 ENV='pass-cli run --env-file scripts/lab.env.example --'
 REC='--record-dir spec/experiments/raw/E03'

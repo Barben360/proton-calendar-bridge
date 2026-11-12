@@ -1,5 +1,5 @@
 [Unit]
-Description=E01 session lifetime sample every 6 hours (stops sampling after 14 days)
+Description=E01 session lifetime sample every 6 hours (runs until the author uninstalls it, after about 14 days)
 
 [Timer]
 OnCalendar=*-*-* 00/6:00:00

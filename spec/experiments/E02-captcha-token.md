@@ -31,6 +31,8 @@ Row 1 was recorded by hand: this HV happened before `hv-log.jsonl` existed (firs
 
 After the author solves the pending challenge and says when:
 
+**Not to be pasted as is: run through `scripts/live/run.sh` (`live`), as HUMAN-CHECKS step 1 and 2a spell it (the login is ledgered and uses the run root's lab dir).**
+
 ```
 cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0
 pass-cli run --env-file scripts/lab.env.example -- pcb-lab login --captcha-token <token from hv.json>
