@@ -726,3 +726,66 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 		}
 	}
 }
+
+// A clients.json that cannot be parsed is a state that can pass, not a wrong
+// password: every request, the valid one included, is a 503 wait; it is
+// logged once per distinct failure (path and cause, no content) and no
+// failure is charged to the remote (audit surface-I2).
+func TestCorruptClientsFileAnswersARetryLogsOnceAndChargesNoLimiter(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	clk := &clock{now: t0}
+	buf := &syncBuffer{}
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg, Now: clk.Now, Sleep: clk.Sleep,
+		Logger: slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	sec, err := svc.AddClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dirs.State, "clients.json")
+	if err := os.WriteFile(file, []byte(`{bad SECRET-CONTENT`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 { // far more than the limiter's 5
+		ok, wait := svc.CheckClient(t.Context(), sec.Password, "203.0.113.5:1")
+		if ok || wait <= 0 {
+			t.Fatalf("request %d: ok=%v wait=%v, want refused with a retry wait", i, ok, wait)
+		}
+	}
+	logs := func() string { buf.mu.Lock(); defer buf.mu.Unlock(); return buf.b.String() }
+	got := logs()
+	if n := strings.Count(got, "clients.json cannot be loaded"); n != 1 {
+		t.Fatalf("%d error lines for 20 requests, want 1:\n%s", n, got)
+	}
+	for _, want := range []string{"level=ERROR", file, "not valid JSON"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "SECRET-CONTENT") || strings.Contains(got, sec.Password) {
+		t.Errorf("log leaks content:\n%s", got)
+	}
+	// Repaired: the same password passes at once, so nothing was charged.
+	if err := os.WriteFile(file, []byte(`{"version":2,"clients":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, wait := svc.CheckClient(t.Context(), "wrong", "203.0.113.5:1")
+	if ok || wait != 0 {
+		t.Fatalf("after the repair: ok=%v wait=%v, want a plain refusal (the limiter was not charged)", ok, wait)
+	}
+	// A different failure is logged again.
+	if err := os.WriteFile(file, []byte(`{"version":99,"clients":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc.CheckClient(t.Context(), "x", "203.0.113.5:1") //nolint:errcheck // result not under test
+	if n := strings.Count(logs(), "clients.json cannot be loaded"); n != 2 {
+		t.Errorf("%d error lines after a second distinct failure, want 2", n)
+	}
+}

@@ -56,6 +56,7 @@ func (s *syncBuffer) String() string {
 type serveRun struct {
 	t         *testing.T
 	requested chan string
+	networks  chan string // the network of each Listen call
 	addr      chan net.Addr
 	code      chan exitcode.Code
 	stop      context.CancelFunc
@@ -76,10 +77,11 @@ func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, 
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := &serveRun{t: t, requested: make(chan string, 1), addr: make(chan net.Addr, 1), code: make(chan exitcode.Code, 1),
+	s := &serveRun{t: t, requested: make(chan string, 1), networks: make(chan string, 1), addr: make(chan net.Addr, 1), code: make(chan exitcode.Code, 1),
 		out: &syncBuffer{}, errb: &syncBuffer{}}
 	io := cli.IO{Stdout: s.out, Stderr: s.errb, Term: r.term, Env: func(k string) string { return r.env[k] },
 		Listen: func(network, address string) (net.Listener, error) {
+			s.networks <- network
 			s.requested <- address
 			ln, err := net.Listen(network, "127.0.0.1:0")
 			if err != nil {
@@ -348,6 +350,9 @@ func TestServeStopsOnSignal(t *testing.T) {
 	addr := s.listening()
 	if got := <-s.requested; got != "127.0.0.1:1999" {
 		t.Errorf("listened on %q, want the --listen address over the config's", got)
+	}
+	if got := <-s.networks; got != "tcp4" {
+		t.Errorf("listened on network %q, want tcp4 for an IPv4 literal (no dual stack)", got)
 	}
 	resp := options(t, http.DefaultClient, "http://"+addr+"/")
 	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("DAV"), "calendar-access") {

@@ -66,6 +66,9 @@ type Local struct {
 	slog    atomic.Pointer[slog.Logger] // Serve's logger while it runs (log)
 	limiter *access.Limiter             // failed CalDAV password checks per remote IP
 
+	xmu        sync.Mutex // guards clientsErr
+	clientsErr string     // the clients.json load failure last logged
+
 	tmu          sync.Mutex // guards touching and the start of touches
 	touching     map[string]bool
 	twg          sync.WaitGroup

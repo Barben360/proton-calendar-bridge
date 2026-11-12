@@ -862,7 +862,7 @@ writes (PUT, DELETE) since M4.
   (IPv4 /32, IPv6 /64) then 503. OPTIONS is answered without auth (M3-R23)
   [verified: `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`; the client
   store and limiter: `internal/access` tests, e.g. `TestAddedPasswordChecksAndIsNeverStored`, `TestRemovedClientIsRefused`].
-- Limits: request bodies 8 MiB, XML names and attributes capped, multiget 1 000 hrefs,
+- Limits: PUT bodies 8 MiB, PROPFIND and REPORT bodies 1 MiB, a requested property name or namespace 256 bytes, XML names and attributes capped, multiget 1 000 hrefs,
   `calendar-data` in a PROPFIND Depth 1 or a sync-collection rendered for the first
   1 000 objects only (the others keep `getetag` and get `calendar-data` in a 404
   propstat, M3-R35), `ReadHeaderTimeout` 10 s, no error text, Proton text or other

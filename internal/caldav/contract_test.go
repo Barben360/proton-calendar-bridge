@@ -1853,10 +1853,10 @@ func TestPropfindDepthInfinityIs403FiniteDepth(t *testing.T) {
 	wantStatus(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "2"), http.StatusBadRequest)
 }
 
-func TestBodiesOver8MiBAre413(t *testing.T) {
+func TestPropfindAndReportBodiesOver1MiBAre413(t *testing.T) {
 	t.Parallel()
 	h := caldav.Handler(newStub(), caldav.Options{})
-	const limit = 8 << 20
+	const limit = 1 << 20
 	valid := `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>`
 	pad := func(size int) string { return valid + "<!--" + strings.Repeat("x", size-len(valid)-7) + "-->" }
 	if len(pad(limit)) != limit {
@@ -2246,5 +2246,43 @@ func TestWriteBudgetCoversTheService(t *testing.T) {
 	t.Parallel()
 	if caldav.WriteBudget < 150*time.Second || caldav.WriteBudget <= service.MaxWriteDuration {
 		t.Errorf("write budget %v: want at least 150 s and more than the service's %v", caldav.WriteBudget, service.MaxWriteDuration)
+	}
+}
+
+// A requested property name or namespace over 256 bytes is 400 in PROPFIND
+// and in both reports (audit surface-I1: it is echoed on every resource); the
+// service is not asked. 256 bytes still passes.
+func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
+	t.Parallel()
+	long, ok := strings.Repeat("a", 257), strings.Repeat("b", 256)
+	prop := func(local, space string) string { return `<x:` + local + ` xmlns:x="` + space + `"/>` }
+	bodies := map[string]func(props string) string{
+		"PROPFIND": func(p string) string {
+			return `<D:propfind xmlns:D="DAV:"><D:prop>` + p + `</D:prop></D:propfind>`
+		},
+		"multiget": func(p string) string {
+			return `<C:calendar-multiget xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:prop>` + p + `</D:prop><D:href>` + calPath(workID) + `a.ics</D:href></C:calendar-multiget>`
+		},
+		"sync": func(p string) string {
+			return `<D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:sync-level>1</D:sync-level><D:prop>` + p + `</D:prop></D:sync-collection>`
+		},
+	}
+	for name, build := range bodies {
+		method := "REPORT"
+		if name == "PROPFIND" {
+			method = "PROPFIND"
+		}
+		for what, p := range map[string]string{"name": prop(long, "u:x"), "namespace": prop("n", "u:"+long)} {
+			s := newStub()
+			h := caldav.Handler(s, caldav.Options{})
+			wantStatus(t, do(h, method, calPath(workID), build(p), "Depth", "0"), http.StatusBadRequest)
+			if _, reads := s.counts(); reads != 0 {
+				t.Errorf("%s with a long %s made %d reads", name, what, reads)
+			}
+		}
+		rec := do(caldav.Handler(newStub(), caldav.Options{}), method, calPath(workID), build(prop("n", "u:"+ok[:253])), "Depth", "0")
+		if rec.Code == http.StatusBadRequest {
+			t.Errorf("%s: a 256-byte namespace was refused", name)
+		}
 	}
 }

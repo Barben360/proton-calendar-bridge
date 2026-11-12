@@ -535,10 +535,18 @@ func (s *Store) Remove(ctx context.Context, idOrName string) (Client, error) {
 // answer's time nor the position of the match tells anything. An unreadable
 // client file refuses everyone.
 func (s *Store) Check(password string) (Client, bool) {
+	c, ok, _ := s.Verify(password)
+	return c, ok
+}
+
+// Verify is Check that also returns why the client file could not be
+// loaded (secret-free: its path and cause, never its content); then no
+// password passes.
+func (s *Store) Verify(password string) (Client, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refresh(false); err != nil {
-		return Client{}, false
+		return Client{}, false, err
 	}
 	var found Client
 	ok := 0
@@ -549,7 +557,7 @@ func (s *Store) Check(password string) (Client, bool) {
 		}
 		ok |= match
 	}
-	return found, ok == 1
+	return found, ok == 1, nil
 }
 
 // Touch records that the client id was just used. It is throttled to once a

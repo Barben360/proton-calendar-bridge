@@ -50,7 +50,10 @@ const (
 	davClasses = "1, 3, calendar-access"
 	allowed    = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, REPORT"
 
-	maxBody = 8 << 20 // request bodies (a PUT's iCalendar too), larger: 413
+	maxBody = 8 << 20 // a PUT's iCalendar, larger: 413
+	// maxQueryBody caps a PROPFIND or REPORT body, larger: 413; Thunderbird
+	// sends under 100 KB (audit surface-M9).
+	maxQueryBody = 1 << 20
 	// maxHrefs bounds a calendar-multiget (Thunderbird sends 100); more is
 	// 413, the request being too large rather than forbidden.
 	maxHrefs = 1000
@@ -168,10 +171,10 @@ func unavailable(w http.ResponseWriter) {
 	empty(w, http.StatusServiceUnavailable)
 }
 
-// readBody reads the request body, at most maxBody bytes; it answers 413
+// readBody reads the request body, at most limit bytes; it answers 413
 // (larger) or 400 itself.
-func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {

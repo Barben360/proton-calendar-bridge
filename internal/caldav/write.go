@@ -63,7 +63,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 		empty(w, http.StatusPreconditionFailed)
 		return
 	}
-	body, ok := readBody(w, r)
+	body, ok := readBody(w, r, maxBody)
 	if !ok {
 		return
 	}

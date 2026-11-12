@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -135,5 +137,102 @@ func TestURLHostReportsAnInterfaceListingError(t *testing.T) {
 	got, err := urlHost(config.CalDAV{}, net.IPv4zero, denied)
 	if got != "localhost" || err == nil || !strings.Contains(err.Error(), "address family not supported") {
 		t.Errorf("urlHost(0.0.0.0) with no interface list = %q, %v; want localhost and the cause", got, err)
+	}
+}
+
+// A certificate replaced while another was stored (here: a new hostname)
+// rotates the fingerprint Thunderbird pinned: Warn, old and new fingerprint
+// (audit surface-M4). A first generation and a plain reuse stay quiet.
+func TestListenerTLSWarnsWhenAStoredCertificateIsReplaced(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	dir := filepath.Join(t.TempDir(), "tls")
+	cc := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"a.lan"}}
+	_, first, err := listenerTLS(log, io.Discard, net.IPv4zero, dir, cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := listenerTLS(log, io.Discard, net.IPv4zero, dir, cc); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Fatalf("a first generation and a reuse warned:\n%s", buf.String())
+	}
+	cc.Hostnames = []string{"b.lan"}
+	_, second, err := listenerTLS(log, io.Discard, net.IPv4zero, dir, cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("test bug: the certificate was not replaced")
+	}
+	got := buf.String()
+	for _, want := range []string{"level=WARN", `msg="the TLS certificate changed: Thunderbird will ask to confirm the new fingerprint"`,
+		"old_fingerprint=" + first, "new_fingerprint=" + second} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// chanHandler sends each record to ch.
+type chanHandler struct{ ch chan slog.Record }
+
+func (h chanHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h chanHandler) Handle(_ context.Context, r slog.Record) error {
+	h.ch <- r
+	return nil
+}
+func (h chanHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h chanHandler) WithGroup(string) slog.Handler      { return h }
+
+// A failed TLS handshake (a port scan, a client that distrusts the
+// certificate) is logged at Debug, not Warn (audit surface-M7); other
+// errors of the server stay Warn.
+func TestServerErrorLogPutsFailedTLSHandshakesAtDebug(t *testing.T) {
+	t.Parallel()
+	records := make(chan slog.Record, 16)
+	log := slog.New(chanHandler{records})
+	conf, _, err := listenerTLS(slog.New(slog.DiscardHandler), io.Discard, net.IPv4zero, filepath.Join(t.TempDir(), "tls"), config.CalDAV{Listen: "0.0.0.0:8443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{TLSConfig: conf, ErrorLog: serverErrorLog(log), Handler: http.NotFoundHandler()}
+	t.Cleanup(func() { _ = srv.Close() })
+	go func() { _ = srv.ServeTLS(ln, "", "") }()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Write([]byte("GET / HTTP/1.0\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	r := <-records
+	if !strings.Contains(r.Message, "TLS handshake error") || r.Level != slog.LevelDebug {
+		t.Errorf("handshake failure logged as %v %q, want DEBUG", r.Level, r.Message)
+	}
+	serverErrorLog(log).Print("http: Accept error: boom")
+	if r := <-records; r.Level != slog.LevelWarn {
+		t.Errorf("another server error logged at %v, want WARN", r.Level)
+	}
+}
+
+// 0.0.0.0 binds IPv4 only (audit surface-M1); [::], an empty host and a
+// name keep the dual stack.
+func TestListenNetworkIsTCP4OnlyForIPv4Literals(t *testing.T) {
+	t.Parallel()
+	for listen, want := range map[string]string{
+		"0.0.0.0:8443": "tcp4", "127.0.0.1:1080": "tcp4", "192.168.1.5:8443": "tcp4",
+		"[::]:8443": "tcp", ":8443": "tcp", "[::1]:8443": "tcp", "pcb.lan:8443": "tcp", "[::ffff:10.0.0.1]:1": "tcp",
+	} {
+		if got := listenNetwork(listen); got != want {
+			t.Errorf("listenNetwork(%q) = %q, want %q", listen, got, want)
+		}
 	}
 }

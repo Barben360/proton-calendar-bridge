@@ -124,7 +124,9 @@ type API interface {
 	// CheckClient reports whether password is a client's, for a request
 	// from remote ("ip:port"). A remote with 5 failures in the last minute
 	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
-	// otherwise a refusal has retryAfter 0 (401).
+	// otherwise a refusal has retryAfter 0 (401). While clients.json cannot be
+	// loaded every request is refused with a retryAfter (503) and no failure
+	// is charged to the remote.
 	CheckClient(ctx context.Context, password, remote string) (ok bool, retryAfter time.Duration)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
