@@ -1,6 +1,6 @@
 # Synthetic data set of the test account
 
-Later milestones (sync, CalDAV) are tested against the Proton test account (vault `pcb-dev`, item `proton-calendar-bridge-test`), so it must hold years of varied events. The data set is declared in `testdata/seed/dataset.yaml` and written to the account by `pcb-lab seed apply`, which drives the author's proton-cal fork CLI (built at `origin/main`, `bf71f0f` on 2026-11-11) as an external tool. Our own write path comes in M4; none of proton-cal's code is copied.
+Later milestones (sync, CalDAV) are tested against the Proton test account (decision 0005), so it must hold years of varied events. The data set is declared in `testdata/seed/dataset.yaml` and written to the account by `pcb-lab seed apply`, which drives the author's proton-cal fork CLI (built at `origin/main`, `bf71f0f` on 2026-11-11) as an external tool. Our own write path comes in M4; none of proton-cal's code is copied.
 
 Status: built and tested offline; **not yet applied** (the account's login is blocked by a pending CAPTCHA, ruling R12/R20). See "Pending live run".
 
@@ -44,23 +44,24 @@ Not run yet: proton-cal's own login on the test account would hit the same CAPTC
 cd <a checkout of main of this repository>
 
 # 1. build the fork at its current main into the run root (a scratch worktree of the fork; the clone's own tree is not touched)
-git -C /home/jduff/Workspace/github.com/Barben360/proton-cal fetch origin
-git -C /home/jduff/Workspace/github.com/Barben360/proton-cal worktree add --detach /tmp/pc-main origin/main
+PC=<your clone of https://github.com/Barben360/proton-cal>
+git -C "$PC" fetch origin
+git -C "$PC" worktree add --detach /tmp/pc-main origin/main
 (cd /tmp/pc-main && go build -o "$R/bin/proton-cal" ./cmd/proton-cal)
-git -C /home/jduff/Workspace/github.com/Barben360/proton-cal worktree remove /tmp/pc-main
+git -C "$PC" worktree remove /tmp/pc-main
 go build -trimpath -o "$R/bin/pcb-lab" ./cmd/pcb-lab        # if not built yet
 
 # 2. log proton-cal in with its own isolated config dir ($R/seed, set by live --proton-cal); credentials from pass-cli, never typed
-live --proton-cal --login 4 'seed: proton-cal login' -- pass-cli run --env-file scripts/seed.env.example -- proton-cal login --no-prompt
+live --proton-cal --login 4 'seed: proton-cal login' -- pass-cli run --env-file ~/.config/pcb-live/seed.env -- proton-cal login --no-prompt
 #    with a solved CAPTCHA token (also from a new process, 60 s after any other lab login; the ledger enforces the 60 s):
-live --proton-cal --login 4 'seed: proton-cal login with a solved token' -- pass-cli run --env-file scripts/seed.env.example -- proton-cal login --no-prompt --captcha-token <token>
+live --proton-cal --login 4 'seed: proton-cal login with a solved token' -- pass-cli run --env-file ~/.config/pcb-live/seed.env -- proton-cal login --no-prompt --captcha-token <token>
 
 # 3. check what is there, then seed (the same dir for the child: --config-dir)
 live -- pcb-lab seed plan | tail -1
 live --proton-cal -- pcb-lab seed apply --bin @RUN@/bin/proton-cal --config-dir @RUN@/seed
 ```
 
-`scripts/seed.env.example` has the same three `pass://` references as `scripts/lab.env.example` under proton-cal's variable names (`PROTON_CAL_USERNAME`, `PROTON_CAL_PASSWORD`, `PROTON_CAL_TOTP`; the TOTP URI lets proton-cal compute a fresh code).
+`scripts/seed.env.example` has the same three placeholders as `scripts/lab.env.example` under proton-cal's variable names (`PROTON_CAL_USERNAME`, `PROTON_CAL_PASSWORD`, `PROTON_CAL_TOTP`; the TOTP URI lets proton-cal compute a fresh code); `~/.config/pcb-live/seed.env` is its copy with your password manager's references filled in (HUMAN-CHECKS "Local files").
 
 - Exit 40 with a rate-limit message: wait a few minutes and rerun step 3's `apply` unchanged (the same `live` call); it resumes.
 - The login counts as a lab login (one per run, 60 s apart, honour `Retry-After`; AGENTS.md). A new CAPTCHA is a new row in `E02-captcha-token.md`.

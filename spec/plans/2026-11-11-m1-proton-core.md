@@ -273,7 +273,7 @@ The fake generalises the M0 lab front (`internal/lab/session/session_test.go`) i
   - `readPasswordFD(fd int) (string, error)`: up to 4096 bytes to EOF; strips exactly one trailing `\n` or `\r\n`; empty → Usage.
   - `pcb login [--username U] [--password-fd N] [--unattended-relogin]`; `pcb login resume --captcha-token T` (same flags; `--captcha-token` required; the token is a challenge, not an account secret). On `needs-captcha`: interactive → print URL, "press Enter once solved", retry with the token, at most 3 rounds; else exit 10, message has the URL, hint `pcb login resume --captcha-token <T>`, JSON `data` = the `LoginResult` alongside `error`.
   - `pcb logout`; `pcb status` (text: one `key: value` line per field; exit 0, 20 only if local files are unreadable); `pcb calendar list` (text columns `NAME  TYPE  ACCESS  DEFAULT  KEYS  ID`, ACCESS `rw`/`ro`, DEFAULT `*`; JSON `data.calendars` = `[]service.Calendar`).
-  - `scripts/pcb.env.example`: `PCB_USERNAME=pass://pcb-dev/proton-calendar-bridge-test/email`, `PCB_PASSWORD=…/password`, `PCB_TOTP=…/totp?totp=uri` [verified: M0 ruling R9].
+  - `scripts/pcb.env.example`: `PCB_USERNAME=pass://<vault>/<item>/<username field>`, `PCB_PASSWORD=…/<password field>`, `PCB_TOTP=…/<totp field>?totp=uri` [verified: M0 ruling R9].
 - [ ] **Step 1: Failing tests**:
   - `TestNoFlagTakesASecret` (`pcb login --password x` and `--totp 1` → exit 2).
   - `TestPasswordFDStripsOneNewline` (pipe `"pa ss\n"` → `pa ss`; `"pass\r\n"` → `pass`; `"pass\n\n"` → `pass\n`; `""` → exit 2 and zero fake calls).
@@ -296,7 +296,7 @@ The fake generalises the M0 lab front (`internal/lab/session/session_test.go`) i
 
 - [ ] **Step 1: Offline wrap-up now**: README Credits — proton-cal docs (key chain, locked scope and 9101, member-level calendar metadata, v2 bootstrap, default calendar setting) and the fork (two-step CAPTCHA, env/TOTP login, refresh-token race lesson), the go-proton-api server test pattern; README Status = M1. Write the live session below into `spec/HUMAN-CHECKS.md` as one ordered checklist. `make lint test` green in CI; commit (`📝 Close M1 offline, list the live session`).
 - [ ] **Step 2: Live session** (when the author can solve a CAPTCHA; at most 3 logins, ≥ 60 s apart; isolated dirs `XDG_CONFIG_HOME=~/.local/share/pcb-m1-live/config XDG_STATE_HOME=~/.local/share/pcb-m1-live/state`):
-  1. `make build`; `pass-cli run --env-file scripts/pcb.env.example -- bin/pcb login --non-interactive --unattended-relogin --json` → ready, or exit 10 with the URL (author solves it).
+  1. `make build`; `pass-cli run --env-file ~/.config/pcb-live/pcb.env -- bin/pcb login --non-interactive --unattended-relogin --json` → ready, or exit 10 with the URL (author solves it).
   2. ≥ 60 s later, new process: `pass-cli run … -- bin/pcb login resume --captcha-token <T> --non-interactive --unattended-relogin` → ready (E02: delay and cross-process result).
   3. `bin/pcb status`; `bin/pcb calendar list` → every calendar of the test account, types, read-only flags, default, `keys ok` (**M1 done**). Author adds one holidays and one subscribed calendar in the web app, rerun.
   4. `pcb-lab probe calendar-access` (M0 Task 6) records redacted `/calendar/v1`, `/settings/calendar`, bootstrap; copy the bodies to `internal/proton/calendar/testdata/`, add `TestDecodersAcceptRecordedFixtures` (each fixture decodes; ≥ 1 calendar; names non-empty), run, commit.

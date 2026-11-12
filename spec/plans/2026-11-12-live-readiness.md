@@ -39,8 +39,8 @@
 2. **`scripts/live/preflight.sh`**, run before the session:
    - it checks the binaries (`pcb`, `pcb-lab` and the `proton-cal` build) and their versions;
    - it checks the guard and the free ports;
-   - it confirms the host is not morpheus;
-   - it warns when the host is blackwater for the steps that reboot or cut the network;
+   - it confirms the host is not your production server;
+   - it warns when the host is your workstation for the steps that reboot or cut the network;
    - it prints the login budget;
    - it keeps a login ledger (time, step, purpose), and refuses a login within 60 s of the last one or beyond the budget.
 3. **Fix the documents:**
@@ -51,7 +51,7 @@
    - **G8:** build and install steps (worktrees are gone): `make build`, `go build ./cmd/pcb-lab`, into the run root, never `~/.local/bin`.
    - **G9:** the sudo steps are marked "author types this" (ruling R18), or rewritten to need no sudo where possible.
    - **G12:** `docker exec -it` stays only where a TTY is real; scripted steps drop `-t`.
-   - **G11:** step 7 runs on a throwaway Debian VM or container host, never blackwater, for the reboot, network cut and `--delete-data` steps. The compose file in HUMAN-CHECKS publishes 127.0.0.1 only. 6.3E names the second machine, or says "any LAN machine of the author's".
+   - **G11:** step 7 runs on a throwaway Debian VM or container host, never your workstation, for the reboot, network cut and `--delete-data` steps. The compose file in HUMAN-CHECKS publishes 127.0.0.1 only. 6.3E names the second machine, or says "any other machine on your LAN".
    - **G14:** as the triage says.
    - **G17:** step 2a asks the author to solve a fresh CAPTCHA right before it, not to reuse a stored token.
 4. **Mark 7.8 complete:** the unauthenticated pull answers `unauthorized`, and the CI runs are green (triage, "done now").

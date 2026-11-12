@@ -6,13 +6,31 @@ Keep every live command (anything that can reach the Proton test account) away f
 |---|---|
 | `run.sh` | One guarded command: `scripts/live/run.sh --run <name> [--lab <dir>] [--pcb <dir>] [--proton-cal] [--login STEP PURPOSE] -- COMMAND ...`. Sets the run-root dirs, sources the guard, records the login, runs the command (`@RUN@` and `@LAB@` in its arguments expand to the run root and the lab dir) with `$R/bin` first on `PATH`. |
 | `guard.sh` | Sourced by `run.sh` (or by hand, in the same command). Refuses unless `PCB_CONFIG_DIR`, `PCB_STATE_DIR`, `PCB_LAB_DIR` (the dir passed to `pcb-lab --state-dir`; the lab has no variable of its own) and, when used, `PROTON_CAL_CONFIG_DIR` are set, absolute and, symlinks resolved, below `~/pcb-live-run/<run>/`. Defines `live_login` (the login ledger). |
-| `common.sh` | Shared functions: the account's home from the user database (not `$HOME`), the step 7 fence, and the test hooks (`PCB_LIVE_HOME`, `PCB_LIVE_NOW`, `PCB_LIVE_HOSTNAME`, `PCB_LIVE_VIRT`, `PCB_LIVE_VM_MARKER`, budgets), honoured only with `PCB_LIVE_TEST=1`. |
-| `preflight.sh` | `make live-preflight RUN=~/pcb-live-run/<run> [STEP7=1]`: guard, the three binaries in `$R/bin`, ports 1080 and 8443, the host (morpheus refused, blackwater warned or refused for step 7), the login budget. Calls no API. |
-| `guard_test.sh` | `make live-preflight-test` (also in CI): the guard refuses each real dir, relative, unset and symlinked paths and accepts a run-root dir. Runs in a throwaway `HOME`. |
+| `common.sh` | Shared functions: the account's home from the user database (not `$HOME`), the hosts file, the step 7 fence, and the test hooks (`PCB_LIVE_HOME`, `PCB_LIVE_NOW`, `PCB_LIVE_HOSTNAME`, `PCB_LIVE_HOSTS`, `PCB_LIVE_VIRT`, `PCB_LIVE_VM_MARKER`, budgets), honoured only with `PCB_LIVE_TEST=1`. |
+| `preflight.sh` | `make live-preflight RUN=~/pcb-live-run/<run> [STEP7=1]`: guard, the three binaries in `$R/bin`, ports 1080 and 8443, the host (your production server refused, your workstation warned about or refused for step 7, per the hosts file), the login budget. Refuses to run without the hosts file. Calls no API. |
+| `guard_test.sh` | `make live-preflight-test` (also in CI): the guard refuses each real dir, relative, unset and symlinked paths and accepts a run-root dir; the hosts file's refusals in `run.sh` and `preflight.sh`. Runs in a throwaway `HOME`. |
+
+## Hosts file
+
+`run.sh` and `preflight.sh` name no host: the hosts they refuse are listed in a local file that never enters the repository, `~/.config/pcb-live/hosts` (`PCB_LIVE_HOSTS` overrides it in test mode only). One host per line, `#` starts a comment:
+
+```
+production <hostname>    # your production server: refused in every mode
+workstation <hostname>   # the machine you run the session from: refused for --vm,
+                         # warned about by preflight, refused by preflight --step7
+```
+
+Names match case-insensitively on their first label, so `Host.lan` matches `host`. An empty file means no such hosts. Both scripts refuse to run when the file is missing or unreadable, and print how to create it:
+
+```
+mkdir -p ~/.config/pcb-live && printf 'production <name>\nworkstation <name>\n' > ~/.config/pcb-live/hosts
+```
+
+The guard's refusal of `~/.config/*` concerns pcb's and proton-cal's dirs; this file is only read, never a dir a command writes to.
 
 ## `--vm` (step 7 only)
 
-`run.sh --vm` is for the throwaway VM, where pcb deliberately runs with the host's default dirs, so the dir guard cannot apply and `PCB_*_DIR` are removed from the command's environment. It runs only when `/etc/pcb-live-vm` exists and contains the word `throwaway` (the author creates it on the VM), `systemd-detect-virt` reports a VM or container, and the host name is not morpheus or blackwater (any case). Its ledger budget is 3. No `pass-cli` or secret exists on the VM: the author types the credentials at the prompts of an interactive `pcb login`.
+`run.sh --vm` is for the throwaway VM, where pcb deliberately runs with the host's default dirs, so the dir guard cannot apply and `PCB_*_DIR` are removed from the command's environment. It runs only when `/etc/pcb-live-vm` exists and contains the word `throwaway` (the author creates it on the VM), `systemd-detect-virt` reports a VM or container, and the hosts file lists the host neither as production nor as workstation (any case). The VM needs its own `~/.config/pcb-live/hosts` (the same two lines, so a VM cloned under a listed name is still refused). Its ledger budget is 3. No `pass-cli` or secret exists on the VM: the author types the credentials at the prompts of an interactive `pcb login`.
 
 ## Run root layout
 

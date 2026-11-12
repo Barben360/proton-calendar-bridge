@@ -5,7 +5,9 @@
 # Usage: scripts/live/preflight.sh RUN_ROOT [--step7]
 #   RUN_ROOT  $HOME/pcb-live-run/<run>, e.g. ~/pcb-live-run/2026-11-14
 #   --step7   this host will run step 7 (reboot, network cut, --delete-data):
-#             blackwater is then refused, not just warned about.
+#             your workstation is then refused, not just warned about.
+# The hosts it refuses come from $HOME/.config/pcb-live/hosts (common.sh); it
+# refuses to run without that file.
 # Exit 0: every check passed (warnings may print); 1: at least one FAIL.
 set -uo pipefail
 
@@ -25,6 +27,8 @@ if [[ -z $root ]]; then
   echo "usage: preflight.sh RUN_ROOT [--step7]   (RUN_ROOT = \$HOME/pcb-live-run/<run>)" >&2
   exit 2
 fi
+# The hosts file first: without it nothing is checked (fail closed).
+host_role=$(live_host_role) || { printf '\npreflight: refused: nothing was checked\n'; exit 1; }
 
 # The standard layout of a run root; HUMAN-CHECKS names the same dirs.
 export PCB_CONFIG_DIR=$root/pcb/config
@@ -75,17 +79,16 @@ for port in 1080 8443; do
 done
 
 # 4. The host.
-host=$(hostname -s 2>/dev/null || hostname)
-host=${host,,}
-case $host in
-  morpheus*) fail "host is morpheus: never run anything live here" ;;
-  blackwater*)
+host=$(live_host_name)
+case $host_role in
+  production) fail "host $host is your production server ($(live_hosts_file)): never run anything live here" ;;
+  workstation)
     if (( step7 )); then
-      fail "host is blackwater: step 7 reboots, cuts the network and deletes data; use a throwaway VM"
+      fail "host $host is your workstation: step 7 reboots, cuts the network and deletes data; use a throwaway VM"
     else
-      warn "host is blackwater: fine for steps 1-6; step 7 (reboot, network cut, --delete-data) must not run here"
+      warn "host $host is your workstation: fine for steps 1-6; step 7 (reboot, network cut, --delete-data) must not run here"
     fi ;;
-  *) ok "host $host" ;;
+  *) ok "host $host (neither production nor workstation in $(live_hosts_file))" ;;
 esac
 
 # 4b. Step 7 wants a host that has never run pcb (7.1) and deletes data (7.6).

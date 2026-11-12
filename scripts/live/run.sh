@@ -25,8 +25,12 @@
 #                  guard cannot apply and PCB_*_DIR are removed from the command's
 #                  environment; instead it requires the marker /etc/pcb-live-vm
 #                  ("throwaway", created by the author on the VM) and a VM or
-#                  container per systemd-detect-virt, refuses blackwater and
-#                  morpheus by host name, and the ledger keeps a budget of 3
+#                  container per systemd-detect-virt, refuses your workstation
+#                  and your production server by host name, and the ledger
+#                  keeps a budget of 3
+# Hosts: refuses to run without $HOME/.config/pcb-live/hosts (local, never in
+# the repository; see common.sh); the production host it lists is refused in
+# every mode.
 # In the arguments, @RUN@ is replaced by $R and @LAB@ by $R/lab/DIR (the
 # calling shell cannot know them).
 # The command sees PCB_CONFIG_DIR, PCB_STATE_DIR, PCB_LAB_DIR, PROTON_CAL_CONFIG_DIR

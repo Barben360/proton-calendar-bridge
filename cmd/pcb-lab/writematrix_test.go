@@ -147,6 +147,8 @@ func usage(t *testing.T, f *labtest.Front, dir, cal string) {
 	t.Setenv("PCB_LAB_PASSWORD", "")
 	if code, env := run(t, "probe", "write-matrix", "--state-dir", dir, "--calendar", cal); code != exitcode.Usage {
 		t.Errorf("no password: code %d, envelope %v; want a usage error", code, env)
+	} else if hint, _ := env["error"].(map[string]any)["hint"].(string); !strings.Contains(hint, "--env-file ~/.config/pcb-live/lab.env ") {
+		t.Errorf("no password: hint %q; want the filled local copy ~/.config/pcb-live/lab.env, not the placeholder example", hint)
 	}
 	f.Mu.Lock()
 	if f.Requests != before {

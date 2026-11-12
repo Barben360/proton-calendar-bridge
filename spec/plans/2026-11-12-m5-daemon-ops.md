@@ -38,7 +38,7 @@
   - every `service.API` error is an `*exitcode.Error` with a secret-free message and a hint;
   - nothing decrypted on disk;
   - tests bite: assert the observable outcome, and the reviewer checks by sabotage (no mutation testing);
-  - live checks only on the test account and only as deferred human-check steps, never morpheus (production, read-only commands only) and never the author's own account;
+  - live checks only on the test account and only as deferred human-check steps, never your production server (read-only commands only) and never the author's own account;
   - `make lint test` is the gate, and `GOOS=windows go vet ./...` stays clean.
 - **CTL (M5-Rpre1):**
   - The socket is `<state>/pcb.sock`, mode 0600. Its directory must grant group and other nothing, else `pcb serve` exits 20.
@@ -770,7 +770,7 @@ Made in this plan (record them in the SDD ledger as such):
   - **Install as a service:** `make install`, `pcb install`, linger, login, client and Thunderbird; `--system`; `pcb service`; uninstall.
   - **Run in a container:** a compose example (one `/data` volume; the key file as a compose secret at `/run/secrets/pcb_key` with `[secrets] key_file`, in the format `seal.KeyFile` reads; `hostnames` for the certificate; `docker exec -it pcb pcb login`; `pcb client add`). It also notes that `/data` must be writable by UID 65532 on a bind mount.
   - **Credits:** caloxide's standby idea, and the Proton Mail Bridge container model.
-- [ ] **Step 2: HUMAN-CHECKS step 7.** Run on the test account only, on blackwater or a fresh Debian VM; never morpheus, never the author's account. Exact commands and expected outputs:
+- [ ] **Step 2: HUMAN-CHECKS step 7.** Run on the test account only, on your workstation or a fresh Debian VM; never your production server, never the author's account. Exact commands and expected outputs:
   - 7.1 a fresh Debian host from source: install, linger, `pcb login` (TOTP held across `resume --totp`), Thunderbird, a reboot that keeps it serving;
   - 7.2 the container: `docker compose up`, `docker exec -it … pcb login`, healthy, Thunderbird over TLS with fingerprint pinning;
   - 7.3 a session ended by Proton: `needs-login`, 503, then a re-login with no restart;

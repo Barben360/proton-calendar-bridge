@@ -43,7 +43,7 @@ func writeMatrixCmd() *cobra.Command {
 			user, pass := os.Getenv("PCB_LAB_USERNAME"), os.Getenv("PCB_LAB_PASSWORD")
 			if user == "" || pass == "" {
 				return cli.Finish(cmd, nil, "", &exitcode.Error{Code: exitcode.Usage, Err: errors.New("PCB_LAB_USERNAME and PCB_LAB_PASSWORD are required (the keys are unlocked with the password)"),
-					Hint: "pass-cli run --env-file scripts/lab.env.example -- pcb-lab probe write-matrix ..."})
+					Hint: "pass-cli run --env-file ~/.config/pcb-live/lab.env -- pcb-lab probe write-matrix ... (lab.env: a filled copy of scripts/lab.env.example)"})
 			}
 			o, err := options(cmd)
 			if err != nil {

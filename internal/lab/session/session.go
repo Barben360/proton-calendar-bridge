@@ -151,7 +151,7 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 		return nil, &exitcode.Error{
 			Code: exitcode.Usage,
 			Err:  errors.New("missing credentials"),
-			Hint: "set PCB_LAB_USERNAME and PCB_LAB_PASSWORD, e.g. pass-cli run --env-file scripts/lab.env.example -- pcb-lab login",
+			Hint: "set PCB_LAB_USERNAME and PCB_LAB_PASSWORD, e.g. pass-cli run --env-file ~/.config/pcb-live/lab.env -- pcb-lab login (lab.env: a filled copy of scripts/lab.env.example)",
 		}
 	}
 	if err := ensureDir(o.StateDir); err != nil {
