@@ -228,7 +228,7 @@ Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely. F
 - events pcb cannot rewrite safely: one it cannot decrypt or verify, one written by another person, someone else's invitation, one whose key material changed since pcb first saw it;
 - edits of an event that holds per-user data pcb cannot rewrite yet (`pcb:personal-part`: typically alarms stored by older Proton clients; edit it in the Proton web app); deleting it works.
 
-`pcb serve` logs each refused write at warning level (`refused a CalDAV write`, with its code, calendar, href and reason, never the event's content), so a change Thunderbird keeps retrying silently shows up there.
+`pcb serve` logs each refused write at warning level (`refused a CalDAV write`, with its code, calendar, href and reason, never the event's content), so a change Thunderbird keeps retrying silently shows up there. The same code and href is logged at most once per 10 minutes; the next line after that carries `repeated=N`, the refusals left out.
 
 When Proton is unavailable, rate limiting or asking for a human verification (`pcb serve` logs it: open the Proton web app from the same network and complete it), or a change cannot be confirmed by reading it back, the answer is 503 and Thunderbird tries again later; pcb's cache then holds whatever Proton holds, which Thunderbird sees at its next sync. When someone changed the same event elsewhere in the meantime, the answer is 412 and Thunderbird offers its conflict dialog.
 

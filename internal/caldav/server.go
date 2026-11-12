@@ -74,6 +74,8 @@ type Options struct {
 	// Logger gets a warning for each request the service could not answer
 	// (503); nil discards them.
 	Logger *slog.Logger
+	// Now is the clock of the refusal log's window (nil: time.Now).
+	Now func() time.Time
 }
 
 // Handler serves api's calendars over CalDAV. It holds no state: every
@@ -82,13 +84,18 @@ func Handler(api service.API, o Options) http.Handler {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &server{api: api, log: o.Logger, dataCap: maxCalendarData}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	return &server{api: api, log: o.Logger, dataCap: maxCalendarData, refusals: newRefusalLog(o.Now)}
 }
 
 type server struct {
 	api     service.API
 	log     *slog.Logger
 	dataCap int // maxCalendarData (tests lower it)
+	// refusals deduplicates the refused-write Warn.
+	refusals *refusalLog
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

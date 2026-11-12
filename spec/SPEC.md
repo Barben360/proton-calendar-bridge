@@ -805,8 +805,8 @@ ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
   (`spec/mapping.md` §8);
 - writes to read-only calendars (`DAV:need-privileges`);
 - edits of a row that holds a personal part (`pcb:personal-part`, until live check L.4 #10; a DELETE is not refused).
-Each refusal (every 403, 409 and 412 of a write) is logged once at warning level: `refused a CalDAV write`
-(§15) [verified: `TestEachRefusedWriteLogsOneWarning`, `TestRefusedWritesAreLogged`].
+Each refusal (every 403, 409 and 412 of a write) is logged at warning level: `refused a CalDAV write`
+(§15), the same code and href at most once per 10 minutes (the next line after the window carries `repeated=N`, the refusals swallowed; at most 1 000 distinct refusals are remembered) [verified: `TestEachRefusedWriteLogsOneWarning`, `TestRefusedWritesAreLogged`, `TestRepeatedRefusalsAreLoggedOncePerWindow`, `TestRefusalLogMemoryIsBounded`].
 A Thunderbird calendar with offline support keeps a refused change locally
 and retries it silently (E08 §3.8, §4.2): refusals are few and logged. One
 without offline support shows an error and is disabled until the user
@@ -1153,8 +1153,8 @@ key packet changed since pcb first stored it` (calendar, row, field),
 concurrent change of its event`, `a write is not confirmed by the rows read
 back`, `a write is not confirmed: a row came back under other key packets`,
 `a write could not be read back`, and the adapter's `caldav: the service
-could not answer` for each 503. Every refused write (each 403, 409 and 412) logs exactly one
-`refused a CalDAV write` warning with `method`, `status`, `code` (`pcb:<code>`, `need-privileges`,
+could not answer` for each 503. Every refused write (each 403, 409 and 412) logs one
+`refused a CalDAV write` warning (the same code and href at most once per 10 minutes, then with `repeated=N`) with `method`, `status`, `code` (`pcb:<code>`, `need-privileges`,
 `no-uid-conflict`, `precondition-failed`), `calendar`, `href` and a fixed `reason`, plus `conflict` (the other href) on a 409: never a body, summary, attendee or
 password; the adapter's early 412 (an `If-None-Match` naming no ETag, a blank `If-Match`) is decided before any service call, so its `calendar` is empty. The
 diagnostic warnings above still fire beside it for the same refusals (`HUMAN-CHECKS.md` greps them as stop conditions) [verified:

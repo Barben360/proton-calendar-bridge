@@ -187,7 +187,7 @@ A DELETE skips the trust checks (placeholder, undecryptable, not ours, unverifie
 
 UIDs are compared unescaped (RFC 5545 TEXT, audit write-I2): should Proton's UID column hold `a,b` for `UID:a\,b` (the UID-escaping question, SPEC §5.3), a PUT of that object at its own name is the same object, never a 409 naming itself; pcb cannot rewrite it while the two forms differ, so it answers 503 (nothing sent). The same UID at another name is a 409 naming the object's name.
 
-Every refusal (each 403 `pcb:CODE`, 403 `need-privileges`, 409 `no-uid-conflict`, 412) is logged once by `pcb serve` at warning level: `refused a CalDAV write` with the method, status, code, calendar ID, href and reason (fixed text; a 409 adds the conflicting href), never the body or the event's content (audit write-I1).
+Every refusal (each 403 `pcb:CODE`, 403 `need-privileges`, 409 `no-uid-conflict`, 412) is logged by `pcb serve` at warning level (the same code and href at most once per 10 minutes, then with `repeated=N`): `refused a CalDAV write` with the method, status, code, calendar ID, href and reason (fixed text; a 409 adds the conflicting href), never the body or the event's content (audit write-I1).
 
 Not a pcb precondition: a read-only calendar is `DAV:need-privileges` (403); an undecided write gate is 503 (M4-R39). See SPEC §8.1 and §9 for the whole status mapping.
 

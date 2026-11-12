@@ -191,13 +191,19 @@ type writeRefusal struct {
 // support retries it silently, E08 §4.2), so each refusal is one warning
 // naming the code, the calendar (calID; "" for a request refused before
 // any calendar is looked up), the object's href as requested and the
-// reason. Never the body, the event's content or the credentials.
+// reason. The same code and href is logged at most once per refusalWindow, the
+// next line after it carrying repeated=N. Never the body, the event's content or the credentials.
 func (s *server) refuse(w http.ResponseWriter, r *http.Request, calID string, e writeRefusal) {
 	attrs := []any{"method", r.Method, "status", e.status, "code", e.code, "calendar", calID, "href", r.URL.EscapedPath(), "reason", e.reason}
 	if e.conflict != "" {
 		attrs = append(attrs, "conflict", e.conflict)
 	}
-	s.log.Warn("refused a CalDAV write", attrs...)
+	if repeated, ok := s.refusals.allow(e.code, r.URL.EscapedPath()); ok {
+		if repeated > 0 {
+			attrs = append(attrs, "repeated", repeated)
+		}
+		s.log.Warn("refused a CalDAV write", attrs...)
+	}
 	if e.body == "" {
 		empty(w, e.status)
 		return

@@ -17,3 +17,14 @@ func HandlerWithDataCap(api service.API, o Options, n int) http.Handler {
 
 // WriteBudget is how long a PUT or DELETE keeps its connection usable.
 const WriteBudget = writeBudget
+
+// RefusalLogSize is the number of distinct refusals the log's dedup keeps.
+const RefusalLogSize = refusalLogSize
+
+// RefusalLogLen is how many distinct refusals h's dedup holds.
+func RefusalLogLen(h http.Handler) int {
+	l := h.(*server).refusals
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.m)
+}

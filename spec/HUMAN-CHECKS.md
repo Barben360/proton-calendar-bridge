@@ -124,7 +124,7 @@ Order, chosen so the author acts once:
    ```
    Check: `"${C[@]}" -o /dev/null -w '%{http_code}\n' -X PROPFIND -H 'Depth: 0' "$BASE/"` prints `207`; `"${C[@]}" -X PROPFIND -H 'Depth: 0' -H 'Content-Type: text/xml' --data '<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/></D:prop></D:propfind>' "$BASE/"` contains `<D:privilege><D:write/></D:privilege>`.
 
-**6.2 Writes over the wire (agent alone).** Each line: the command, then what to expect. After each 2xx write, `grep -c 'not confirmed\|refusing a write' "$LIVE/serve.log"` must stay 0 unless the step says otherwise; a refused write (403, 409, 412) also logs one `refused a CalDAV write` line (method, status, code, calendar, href, reason), which a refusal step expects. Results go to the experiment named in brackets.
+**6.2 Writes over the wire (agent alone).** Each line: the command, then what to expect. After each 2xx write, `grep -c 'not confirmed\|refusing a write' "$LIVE/serve.log"` must stay 0 unless the step says otherwise; a refused write (403, 409, 412) also logs a `refused a CalDAV write` line (the same code and href at most once per 10 minutes) (method, status, code, calendar, href, reason), which a refusal step expects. Results go to the experiment named in brackets.
 
 *W1. Create, read back, signatures, key packets* [L.4 #1, E10, R32, `?UID=`]:
 ```sh

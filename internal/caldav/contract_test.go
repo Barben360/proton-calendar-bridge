@@ -2393,3 +2393,61 @@ func TestIfMatchListsReachTheService(t *testing.T) {
 		t.Errorf("the service got %+v", w)
 	}
 }
+
+// The same refusal (code and href) is logged once per 10 minutes; the next
+// line after the window carries repeated=N, and the refusal itself is still
+// answered every time. Another href or code is a new line (A12).
+func TestRepeatedRefusalsAreLoggedOncePerWindow(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	s := newStub()
+	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return now }})
+	put := func(uid string) {
+		t.Helper()
+		wantStatus(t, do(h, http.MethodPut, objPath(workID, uid), string(ics(uid, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`), http.StatusPreconditionFailed)
+	}
+	lines := func() []string {
+		return slices.DeleteFunc(strings.Split(logs.String(), "\n"), func(l string) bool { return l == "" })
+	}
+	put(plainUID)
+	now = now.Add(time.Minute)
+	put(plainUID)
+	now = now.Add(8 * time.Minute) // 9 minutes in: still inside the window
+	put(plainUID)
+	if n := len(lines()); n != 1 || strings.Contains(lines()[0], "repeated=") {
+		t.Fatalf("%d lines inside the window, want the first alone:\n%s", n, logs.String())
+	}
+	put("other-uid") // another href is its own refusal
+	if n := len(lines()); n != 2 {
+		t.Fatalf("%d lines after another href, want 2:\n%s", n, logs.String())
+	}
+	now = now.Add(2 * time.Minute) // 11 minutes after the first line
+	put(plainUID)
+	got := lines()
+	if len(got) != 3 || !strings.Contains(got[2], "repeated=2") || !strings.Contains(got[2], "href="+objPath(workID, plainUID)) {
+		t.Fatalf("after the window want a third line with repeated=2:\n%s", logs.String())
+	}
+	put(plainUID) // the window restarts
+	if n := len(lines()); n != 3 {
+		t.Errorf("%d lines, want the window to restart at the third", n)
+	}
+}
+
+// The dedup memory is bounded: a flood of distinct hrefs never grows it past
+// its cap, and the newest is always remembered (A12).
+func TestRefusalLogMemoryIsBounded(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	h := caldav.Handler(s, caldav.Options{Now: func() time.Time { return now }})
+	for i := range caldav.RefusalLogSize + 500 {
+		now = now.Add(time.Millisecond) // all inside one window: only the cap can prune
+		do(h, http.MethodPut, objPath(workID, "uid-"+strconv.Itoa(i)), string(ics(plainUID, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`)
+	}
+	if n := caldav.RefusalLogLen(h); n != caldav.RefusalLogSize {
+		t.Errorf("dedup holds %d entries, want exactly %d", n, caldav.RefusalLogSize)
+	}
+}
