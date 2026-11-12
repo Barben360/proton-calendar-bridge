@@ -51,7 +51,7 @@ func TestHealthOutsideServeIsStopped(t *testing.T) {
 		}
 	}
 	check("logged out")
-	e.login(t, e.req())
+	e.signIn(t)
 	check("logged in")
 	s := e.serve(t)
 	s.next(t, true)
@@ -140,7 +140,7 @@ func TestHealthReportsGatesWithReasons(t *testing.T) {
 	viewer := e.f.AddCalendar(u, protontest.Calendar{Name: "Viewer"})
 	broken := e.f.AddCalendar(u, protontest.Calendar{Name: "Broken", BrokenPassphrase: true})
 	noPrimary := e.f.AddCalendar(u, protontest.Calendar{Name: "NoPrimary", NoPrimaryKey: true})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.calendars(t) // the fake serves a calendar's member from its first bootstrap
 	e.f.SetPassphraseSignature(badSig, protontest.PassphraseSignedByStranger)
 	e.f.SetPassphraseSignature(noSig, protontest.PassphraseUnsigned)
@@ -189,7 +189,7 @@ func TestHealthCarriesTheErrorClass(t *testing.T) {
 	good := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Good"})
 	bad := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Bad"})
 	e.f.AddEvent(good, protontest.Event{UID: "a@x", Start: base, End: base + 3600})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext(http.MethodGet, "/calendar/v1/"+bad+"/events", http.StatusUnprocessableEntity, 2000, 0)
 	s := e.serve(t)
 	p := s.nextAny(t, true)

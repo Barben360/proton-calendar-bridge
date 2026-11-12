@@ -26,7 +26,7 @@ func TestRenderCountsFollowDeletedRows(t *testing.T) {
 	// Another calendar's rows are not pruned by work's listing.
 	e.f.AddEvent(other, protontest.Event{UID: "otherbroken@x", Start: base, End: base + 3600, BrokenPart: protontest.SharedEncryptedPart,
 		Card: card("otherbroken@x", "Secret", base)})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 
 	e.objects(t, work, "broken@x", "forged@x", "alarm@x")
@@ -65,7 +65,7 @@ func TestDuplicateExceptionMostRecentWins(t *testing.T) {
 		Card: card("s@x", "Mid exception", rid, "RECURRENCE-ID:"+stamp(rid))})
 	e.f.UpdateEvent(work, old, protontest.Event{UID: "s@x", Start: rid, End: rid + 3600, RecurrenceID: &rid,
 		Card: card("s@x", "Newest exception", rid, "RECURRENCE-ID:"+stamp(rid))})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	d := e.objects(t, work, "s@x")["s@x"].Data
 	if n := strings.Count(string(d), "RECURRENCE-ID:"); n != 1 {
@@ -93,7 +93,7 @@ func TestRenderCountsFollowDeletedRowsInChanges(t *testing.T) {
 	e.f.AddEvent(work, protontest.Event{UID: "s@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Card: card("s@x", "Series", base, "RRULE:FREQ=DAILY")})
 	exc := e.f.AddEvent(work, protontest.Event{UID: "s@x", Start: rid, End: rid + 3600, RecurrenceID: &rid, BrokenPart: protontest.SharedEncryptedPart,
 		Card: card("s@x", "Hidden", rid, "RECURRENCE-ID:"+stamp(rid))})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	_, tok := e.listing(t, work)
 	e.objects(t, work, "full@x", "delta@x", "s@x")

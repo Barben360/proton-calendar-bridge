@@ -118,6 +118,7 @@ type Local struct {
 	writeFault   func(stage string) error
 	humanHook    func()                                 // runs once a needs-login mark is decided, before its write
 	keyPassHook  func([]byte)                           // sees a login's key passphrase before it is sealed
+	skipSRP      func(username string) *auth.Pending    // replaces Login's SRP step when set
 	stateTimeout time.Duration                          // bounds humanNeeded's wait for state.lock when set
 	checkHook    func()                                 // runs at each login check of a Serve waiting for a login
 	wipeHook     func()                                 // runs in Logout just before the wipe

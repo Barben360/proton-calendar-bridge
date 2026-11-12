@@ -27,7 +27,7 @@ func TestCalendarsListsWithFlags(t *testing.T) {
 	feed := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
 	hol := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Holidays in France", Type: 2})
 	e.f.SetDefaultCalendar(e.f.Username, work)
-	e.login(t, e.req())
+	e.signIn(t)
 	want := []service.Calendar{
 		{ID: work, Name: "Work", Description: "the job", Color: "#3F51B5", Type: "normal", ReadOnly: false, Default: true, Keys: "ok"},
 		{ID: feed, Name: "Feed", Type: "subscribed", ReadOnly: true, Keys: "ok"},
@@ -43,7 +43,7 @@ func TestCalendarsReportsBrokenKeysPerCalendar(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	broken := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Broken", BrokenPassphrase: true})
 	good := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Good"})
-	e.login(t, e.req())
+	e.signIn(t)
 	got := e.calendars(t)
 	if len(got) != 2 || got[0].ID != broken || got[1].ID != good {
 		t.Fatalf("calendars = %+v, want Broken then Good", got)
@@ -67,7 +67,7 @@ func TestCalendarsNoDefaultWhenUnset(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
-	e.login(t, e.req())
+	e.signIn(t)
 	for _, c := range e.calendars(t) {
 		if c.Default {
 			t.Errorf("calendar %q is default with no default set", c.Name)
@@ -83,7 +83,7 @@ func TestCalendarsNoDefaultWhenUnlisted(t *testing.T) {
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
 	e.f.SetDefaultCalendar(e.f.Username, "a-calendar-not-in-the-list")
-	e.login(t, e.req())
+	e.signIn(t)
 	got := e.calendars(t)
 	if len(got) != 2 {
 		t.Fatalf("calendars = %+v", got)
@@ -118,7 +118,7 @@ func TestCalendarsTransientBootstrapFailureIsBlocked(t *testing.T) {
 			e := newEnv(t, protontest.Options{})
 			e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
 			b := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
-			e.login(t, e.req())
+			e.signIn(t)
 			for range 3 { // every attempt the client makes
 				e.f.FailNext("GET", "/calendar/v2/"+b+"/bootstrap", status, 0, 0)
 			}
@@ -136,7 +136,7 @@ func TestCalendarsRefusedBootstrapIsPerCalendar(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	a := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext("GET", "/calendar/v2/"+a+"/bootstrap", 422, 2501, 0)
 	got := e.calendars(t)
 	if len(got) != 2 || got[0].Keys != "error" || got[0].KeysError == "" || got[1].Keys != "ok" {

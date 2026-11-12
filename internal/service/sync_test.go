@@ -59,7 +59,7 @@ func TestSyncThenEvents(t *testing.T) {
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	a := e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 3600})
 	b := e.f.AddEvent(work, protontest.Event{UID: "b@x", Start: base + day, End: base + 2*day, FullDay: true})
-	e.login(t, e.req())
+	e.signIn(t)
 
 	first := calSync(t, e.sync(t, false), work)
 	if first.Name != "Work" || first.Mode != "initial" || first.Added != 2 || first.Events != 2 || first.Error != "" {
@@ -100,7 +100,7 @@ func TestSecondSyncIsBlocked(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	unlock, ok, err := filelock.TryLock(filepath.Join(e.dirs.State, "sync.lock"))
 	if err != nil || !ok {
 		t.Fatalf("TryLock = %v, %v", ok, err)
@@ -126,7 +126,7 @@ func TestSyncPartialExits40(t *testing.T) {
 	bad := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Bad"})
 	good := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Good"})
 	e.f.AddEvent(good, protontest.Event{UID: "g@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext("GET", "/calendar/v1/"+bad+"/events", 403, 2011, 0)
 	res, err := e.svc.Sync(t.Context(), service.SyncRequest{})
 	ee := wantExit(t, err, exitcode.Partial)
@@ -170,7 +170,7 @@ func TestSyncDeferredResyncIsPartial(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	e.f.ForceRefresh(cal) // the clock did not move: the fallback listing is deferred
 	res, err := e.svc.Sync(t.Context(), service.SyncRequest{})
@@ -218,7 +218,7 @@ func TestReadPaths(t *testing.T) {
 	// Status: one calendar with one event.
 	status := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Status"})
 	e.f.AddEvent(status, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 
 	t.Run("events without a cache", func(t *testing.T) {
 		before := dirNames(t, e.dirs.State)
@@ -362,7 +362,7 @@ func TestLogoutDeletesCache(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	path := cache.Path(e.dirs.State)
 	if _, err := os.Stat(path); err != nil {
@@ -385,7 +385,7 @@ func TestWatchStopsWhenLoginNeeded(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req()) // no unattended relogin: a person is needed once the session ends
+	e.signIn(t) // no unattended relogin: a person is needed once the session ends
 	e.f.RevokeSessions()
 	passes := 0
 	err := e.svc.WatchSync(t.Context(), service.SyncRequest{}, 0, func(p service.WatchPass) {
@@ -410,7 +410,7 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var modes []string
@@ -466,7 +466,7 @@ func TestWatchKeepsGoingAfterPartial(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Good"})
 	bad := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Bad"})
-	e.login(t, e.req())
+	e.signIn(t)
 	for range 2 {
 		e.f.FailNext("GET", "/calendar/v1/"+bad+"/events", 403, 2011, 0)
 	}
@@ -491,7 +491,7 @@ func TestWatchKeepsGoingAfterPartial(t *testing.T) {
 func TestWatchRefusesShortInterval(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	calls := e.f.Calls("", "/")
 	err := e.svc.WatchSync(t.Context(), service.SyncRequest{}, 9*time.Second, nil)
 	_ = wantExit(t, err, exitcode.Usage)
@@ -505,7 +505,7 @@ func TestLogoutDeletesCacheEvenWhenCancelled(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	path := cache.Path(e.dirs.State)
 	for _, p := range []string{path + "-wal", path + "-shm"} { // leftovers of a crashed writer
@@ -542,7 +542,7 @@ func TestStatusReportsAnUnreadableCache(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	if err := os.WriteFile(cache.Path(e.dirs.State), []byte(strings.Repeat("not sqlite ", 100)), 0o600); err != nil {
 		t.Fatal(err)
@@ -612,7 +612,7 @@ func TestWatchRetryAfterAndCachesNoRetryFixes(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext("GET", "/calendar/v1", 429, 0, 20*60)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -695,7 +695,7 @@ func TestEventsNotCachedKeepsSessionAndCancelErrors(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 
 	ctx, cancel := context.WithCancel(t.Context())

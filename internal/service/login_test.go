@@ -131,6 +131,17 @@ func (e *env) req() service.LoginRequest {
 	return service.LoginRequest{Username: e.f.Username, Password: e.f.Password}
 }
 
+// signIn logs in as e.req() would, but takes the session from the fake's
+// pool instead of paying for SRP (about 1.5 s of CPU under -race): all that
+// follows SRP (guard, keys, key passphrase, sealing, state, default client)
+// runs as usual. Tests of the login itself call login.
+func (e *env) signIn(t *testing.T) service.LoginResult {
+	t.Helper()
+	e.svc.SkipSRP(func(username string) (api.Tokens, string) { return e.f.Login(t, username), e.f.UserID(username) })
+	defer e.svc.SkipSRP(nil)
+	return e.login(t, e.req())
+}
+
 func (e *env) login(t *testing.T, r service.LoginRequest) service.LoginResult {
 	t.Helper()
 	res, err := e.svc.Login(t.Context(), r)
@@ -1534,5 +1545,33 @@ func TestLoginNamesWhyTheKeyCannotBeRead(t *testing.T) {
 	_, err := e.svc.Login(t.Context(), e.req())
 	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) {
 		t.Fatalf("Login = %v, want the key file and permission denied", err)
+	}
+}
+
+func TestSignInRunsAllThatFollowsSRP(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	res := e.signIn(t)
+	if n := e.f.Calls("POST", "/auth/v4"); n != 0 {
+		t.Fatalf("POST /auth/v4 calls = %d, want none: signIn must skip SRP", n)
+	}
+	if res.State != service.StateReady || res.AccountID != e.f.UserID(e.f.Username) || !res.DefaultClientCreated {
+		t.Fatalf("signIn = %+v, want ready on the fake's account with the default client", res)
+	}
+	a := e.account(t)
+	if len(a.KeyPass) == 0 || a.Username != e.f.Username {
+		t.Fatal("the sealed account lacks the key passphrase or the username")
+	}
+	if !sessionAlive(t, e, tokensOf(a)) {
+		t.Fatal("the sealed session does not authenticate")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseReady || st.AccountID != res.AccountID || !st.LastLogin.Equal(t0) {
+		t.Fatalf("state = %+v, want ready for the account, last login at the clock's time", st)
+	}
+	// The switch lasts one login: the next one runs SRP again.
+	e.clk.advance(2 * time.Minute) // past the login guard
+	e.login(t, e.req())
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Fatalf("POST /auth/v4 calls after a plain login = %d, want 1", n)
 	}
 }

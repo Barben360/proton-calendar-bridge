@@ -119,7 +119,7 @@ func newRig(t *testing.T, fo protontest.Options, seed func(f *protontest.Fake, c
 // start logs in and runs Serve until its first pass.
 func (r *rig) start(t *testing.T) *rig {
 	t.Helper()
-	r.login(t, r.req())
+	r.signIn(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	s := &serving{passes: make(chan service.WatchPass), resume: make(chan struct{}), done: make(chan error, 1), cancel: cancel}
 	log := slog.New(slog.NewTextHandler(r.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -1261,7 +1261,7 @@ func TestWritesNeedServe(t *testing.T) {
 	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
 		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
 	})
-	r.login(t, r.req())
+	r.signIn(t)
 	r.sync(t, false)
 	notServing := func(t *testing.T) {
 		t.Helper()
@@ -1945,7 +1945,7 @@ func TestUndecidedGateKeepsTheLastDecision(t *testing.T) {
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	fresh := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Fresh"})
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+fresh+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	if c := e.collection(t, work); c.ReadOnly || c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Fatalf("precondition: Work is decided writable, got %+v", c)
@@ -1955,7 +1955,7 @@ func TestUndecidedGateKeepsTheLastDecision(t *testing.T) {
 	}
 	// A new login drops the keys; Work's bootstrap then fails.
 	e.clk.advance(2 * time.Minute)
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+work+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
 	if c := e.collection(t, work); c.ReadOnly || !c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Errorf("Work undecided after a decision: ReadOnly %v, undecided %v; want the last decision (writable), undecided", c.ReadOnly, c.WriteGateUndecided)
@@ -1969,7 +1969,7 @@ func TestRefreshedGateIsTheLastDecision(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
 	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	s.next(t, true)
 	if c := e.collection(t, id); c.ReadOnly {
@@ -1983,7 +1983,7 @@ func TestRefreshedGateIsTheLastDecision(t *testing.T) {
 	}
 	s.stop(t)
 	e.clk.advance(2 * time.Minute)
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+id+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
 	if c := e.collection(t, id); !c.ReadOnly || !c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Errorf("undecided after the refresh's decision: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
@@ -2236,7 +2236,7 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{EmptyPassphraseSignature: true})
 	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	s.next(t, true)
 	wantGate := func(step string, cause error, code exitcode.Code) {
