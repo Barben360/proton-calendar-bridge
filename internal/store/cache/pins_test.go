@@ -239,3 +239,22 @@ func TestUpgradePinsTheStoredRows(t *testing.T) {
 		})
 	}
 }
+
+// A Sync answer may name any row ID: pinning by it must never replace the pin
+// of a row already seen (first seen wins, ruling M4-R30/R37).
+func TestPinRowsNeverReplacesAPin(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{prow("a", "S1", "C1", "", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PinRows(bg, "cal", map[string]Pin{"a": {Shared: "EVIL", Calendar: "EVIL-C"}, "n": {Shared: "SENT-N"}}); err != nil {
+		t.Fatal(err)
+	}
+	got := pins(t, c, "cal", "a", "n")
+	if got["a"] != (Pin{Shared: "S1", Calendar: "C1"}) {
+		t.Errorf("an existing pin was replaced: %+v", got["a"])
+	}
+	if got["n"] != (Pin{Shared: "SENT-N"}) {
+		t.Errorf("a new ID's pin = %+v, want the given one", got["n"])
+	}
+}
