@@ -265,6 +265,14 @@
     - `Precondition{IfMatch string; IfNoneMatchAny bool}`
   - Errors: `ErrPreconditionFailed`, `*UIDConflictError{Href}`, `ErrNotWritable`, `*WriteRefusal`, plus the existing unavailable errors (503).
   - Only during Serve (writer handle); otherwise `ErrNotServing`.
+- **Obligations added during execution (rulings in the SDD ledger; binding):**
+  - M4-R17 key-packet pinning: on the pre-write refresh, a row whose `SharedKeyPacket`, `CalendarKeyPacket` or `AddressKeyPacket` differs from the cached copy is untrusted for reuse → 403 `pcb:untrusted-key`, logged; test it.
+  - M4-R18/R19: refuse (403) a group with any part not authored by us, or any part of ours that is not `Verified` (unsigned parts of every kind included; do not reuse render's `unverifiedParts`), or any undecryptable part — before planning.
+  - 403 mappings with a pcb precondition: `ical.Refusal` codes (incl. `MisroutedStoredLine`), `cards.ErrMisroutedProperty`, `cards.ErrUntrustedSessionKey`, `cards.ErrNeedsNewSessionKey` (M4-R13/R15: `pcb:unsupported-change`).
+  - `SessionKeys()` returns `(shared, calendar, err)`; refuse whenever `err != nil`; Seal with `SealKeys{Update: true}` on updates; creates mint.
+  - M4-R8 (DTSTAMP = write time when absent; DTEND defaults), M4-R9 (attendee parameter edits ignored, `AttendeeEdits` with the row's statuses, debug log), M4-R11 (exceptions-only body after a faked master: update exception rows, never create a master), M4-R12/R5 rewrites already applied by `ParseWrite`.
+  - Keep comparing the proof's UID with the group's UID (re-review 3).
+  - Run the SEQUENCE and duplicate tests with the fake's `DropUnbumpedSequence` / `RejectDuplicateUID` on (M4-R3), and seed palette colours (Task 1 note).
 - [ ] **Step 1: failing tests, planner:**
   - `TestTitleEditChangesOnlyThatLine`
   - `TestUnchangedDefaultAlarmsKeepNull`
