@@ -29,6 +29,9 @@ func (l *Local) stored() (store.State, store.Account, error) {
 		return st, store.Account{}, err
 	}
 	accounts, err := l.secrets.Load()
+	if errors.Is(err, store.ErrRolledBack) {
+		l.revokeHeld()
+	}
 	if err != nil {
 		return st, store.Account{}, storeError(err, l.keyFile())
 	}
@@ -160,23 +163,23 @@ func (l *Local) withSession(ctx context.Context, op func(context.Context, *api.C
 	}
 	err = op(ctx, c, acc)
 	if !errors.Is(err, api.ErrSessionEnded) {
-		return l.opError(st, err)
+		return l.opError(ctx, st, err)
 	}
 	if c, acc, st, err = l.relogin(ctx, c.Tokens()); err != nil {
 		return err
 	}
 	err = op(ctx, c, acc)
 	if errors.Is(err, api.ErrSessionEnded) {
-		return l.humanNeeded(st, mustAct(sessionEnded, "run pcb login"))
+		return l.humanNeeded(ctx, st, mustAct(sessionEnded, "run pcb login"))
 	}
-	return l.opError(st, err)
+	return l.opError(ctx, st, err)
 }
 
 // opError maps what an operation returned; keys that no longer unlock mark
 // the login needs-login.
-func (l *Local) opError(st store.State, err error) error {
+func (l *Local) opError(ctx context.Context, st store.State, err error) error {
 	if errors.Is(err, errKeysChanged) {
-		return l.humanNeeded(st, mustAct(keysChanged, "run pcb login"))
+		return l.humanNeeded(ctx, st, mustAct(keysChanged, "run pcb login"))
 	}
 	return l.fail(err)
 }
@@ -199,7 +202,7 @@ func (l *Local) relogin(ctx context.Context, ended api.Tokens) (*api.Client, sto
 		return l.session(ctx)
 	}
 	if !st.Unattended || acc.Relogin == nil {
-		return nil, store.Account{}, store.State{}, l.humanNeeded(st, mustAct(sessionEnded, "run pcb login"))
+		return nil, store.Account{}, store.State{}, l.humanNeeded(ctx, st, mustAct(sessionEnded, "run pcb login"))
 	}
 	if err := l.reloginOnce(ctx, st, acc); err != nil {
 		return nil, store.Account{}, store.State{}, err
@@ -219,7 +222,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 	if uri := acc.Relogin.TOTPURI; uri != "" {
 		var err error
 		if totp, err = otp.Parse(uri); err != nil {
-			return l.humanNeeded(st, mustAct("the stored TOTP secret cannot be read", "run pcb login"))
+			return l.humanNeeded(ctx, st, mustAct("the stored TOTP secret cannot be read", "run pcb login"))
 		}
 	}
 	release, now, err := l.acquire(ctx, false, l.o.Now())
@@ -233,27 +236,27 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 	var ce *auth.CaptchaError
 	switch {
 	case errors.As(err, &ce):
-		if _, err := l.needsCaptcha(ce, st, now, acc.Username); err != nil {
+		if _, err := l.needsCaptcha(ctx, ce, st, now, acc.Username); err != nil {
 			return err
 		}
 		return phaseError(store.State{Phase: store.PhaseNeedsCaptcha, Captcha: &store.Captcha{URL: ce.URL, Token: ce.Token}})
 	case err != nil:
-		return l.humanNeeded(st, l.fail(err))
+		return l.humanNeeded(ctx, st, l.fail(err))
 	}
 	switch {
 	case p.UserID != acc.ID:
 		p.Abort(ctx)
-		return l.humanNeeded(st, mustAct("the stored credentials now open another Proton account", "run pcb login"))
+		return l.humanNeeded(ctx, st, mustAct("the stored credentials now open another Proton account", "run pcb login"))
 	case p.NeedsTOTP && totp == nil:
 		p.Abort(ctx)
-		return l.humanNeeded(st, mustAct("Proton now asks for a 2FA code and no TOTP secret is stored", "run pcb login"))
+		return l.humanNeeded(ctx, st, mustAct("Proton now asks for a 2FA code and no TOTP secret is stored", "run pcb login"))
 	}
 	pl := &pendingLogin{p: p, username: acc.Username, password: password, unattended: true, relogin: true, totpURI: acc.Relogin.TOTPURI, last: st}
 	if _, err := l.complete(ctx, pl, totp, now); err != nil {
 		if !pl.sealed {
 			l.abort(ctx, pl)
 		}
-		return l.humanNeeded(st, l.fail(err))
+		return l.humanNeeded(ctx, st, l.fail(err))
 	}
 	p.Close()
 	return nil
@@ -268,13 +271,23 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 // state.json takes (R10m): no login lands between them. The lock is held for
 // the file's load and write only, never across a login waiting for its 2FA
 // code.
-func (l *Local) humanNeeded(st store.State, err error) error {
+//
+// The mark is a durable decision (it stops further relogins), so it is
+// written even when ctx is cancelled; the wait for the lock is bounded by
+// its timeout (stateTimeout in tests).
+func (l *Local) humanNeeded(ctx context.Context, st store.State, err error) error {
 	var ee *exitcode.Error
 	if !errors.As(err, &ee) || ee.Code != exitcode.MustAct {
 		return err
 	}
+	ctx = context.WithoutCancel(ctx)
+	if l.stateTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, l.stateTimeout)
+		defer cancel()
+	}
 	loaded := false
-	uerr := store.UpdateState(l.o.Dirs.State, func(cur *store.State) error {
+	uerr := store.UpdateStateContext(ctx, l.o.Dirs.State, func(cur *store.State) error {
 		loaded = true
 		if !sameLogin(*cur, st) {
 			return store.ErrStateUnchanged
@@ -288,7 +301,9 @@ func (l *Local) humanNeeded(st store.State, err error) error {
 	switch {
 	case uerr == nil:
 		return err
-	case !loaded && !errors.Is(uerr, context.DeadlineExceeded):
+	case errors.Is(uerr, store.ErrStateLock):
+		return stateLockError(uerr, l.o.Dirs.State)
+	case !loaded:
 		return stateError(uerr) // state.json could not be read
 	}
 	return storeError(uerr, l.keyFile())

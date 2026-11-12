@@ -200,7 +200,7 @@ func protonDown(e *api.Error) error {
 // secrets.sealed (store.ErrRolledBack): only they know whether the restore
 // was meant, and a new login is the way out either way.
 func rolledBack(rb *store.RolledBackError) *exitcode.Error {
-	return mustAct(rb.Error()+": it was restored or replaced", "if you restored it on purpose, run pcb logout, then pcb login")
+	return mustAct(rb.Explain(), store.RolledBackHint)
 }
 
 // storeError maps a failure of the sealed store: a lost or foreign key names
@@ -218,12 +218,37 @@ func storeError(err error, keyFile string) error {
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory, or run pcb logout to discard the stored session")
 }
 
-// stateError maps an unreadable state.json (it fails closed).
+// stateError maps an unreadable state.json (it fails closed). A secrets
+// generation out of range was edited or damaged: a person resets it.
 func stateError(err error) error {
-	if errors.Is(err, context.Canceled) {
+	switch {
+	case errors.Is(err, context.Canceled):
 		return mapError(err, "")
+	case errors.Is(err, store.ErrGenerationOutOfRange):
+		return mustAct("the login state file holds a secrets generation out of range: it was edited or damaged", "run pcb logout, then pcb login")
 	}
 	return blocked("the login state file cannot be read", "run pcb logout to reset it")
+}
+
+// stateLockError maps a state-file lock that could not be taken
+// (store.ErrStateLock): held past its timeout by another process, or not
+// creatable.
+func stateLockError(err error, stateDir string) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return blocked("another pcb process holds the login state file's lock (state.lock) too long", "run the command again; if it persists, look for a stuck pcb process")
+	case errors.Is(err, context.Canceled):
+		return mapError(err, "")
+	}
+	return blocked("cannot take the lock of the login state file", "make sure "+stateDir+" is writable by this user")
+}
+
+// stateWriteError maps a failed SaveState or UpdateState of state.json.
+func (l *Local) stateWriteError(err error) error {
+	if errors.Is(err, store.ErrStateLock) {
+		return stateLockError(err, l.o.Dirs.State)
+	}
+	return storeError(err, l.keyFile())
 }
 
 // acquireError maps what loginguard.Acquire returns: its own refusals are

@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -1089,5 +1090,129 @@ func TestLogoutWipesRolledBackSecrets(t *testing.T) {
 	}
 	if st, err := e.svc.Status(t.Context()); err != nil || st.Secrets != "sealed" || st.Phase != "ready" {
 		t.Errorf("Status after a new login = %+v, %v", st, err)
+	}
+}
+
+// Logout is the reset of a damaged state.json: the new one carries the
+// wiped generation + 1, so the wiped file is still refused if restored.
+func TestLogoutOverMalformedStateKeepsTheGeneration(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	old, err := os.ReadFile(e.secrets().Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "state.json"), []byte("{damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut || st.SecretsGeneration != 2 {
+		t.Fatalf("state = %+v, want logged-out with generation 2", st)
+	}
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.secrets().Load(); !errors.Is(err, store.ErrRolledBack) {
+		t.Errorf("the wiped file restored: Load err = %v, want ErrRolledBack", err)
+	}
+}
+
+// A mirror edited out of range fails closed with a MustAct; logout resets
+// it and a new login works.
+func TestGenerationOutOfRangeNeedsALogout(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	var st map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(mustJSON(t, e.loadState(t))), &st); err != nil {
+		t.Fatal(err)
+	}
+	st["secrets_generation"] = json.RawMessage("18446744073709551615")
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "state.json"), []byte(mustJSON(t, st)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.Status(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "the login state file holds a secrets generation out of range: it was edited or damaged" ||
+		ee.Hint != "run pcb logout, then pcb login" {
+		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login after the reset: %+v", res)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "sealed" {
+		t.Errorf("Status = %+v, %v", s, err)
+	}
+	if g := e.loadState(t).SecretsGeneration; g != 3 {
+		t.Errorf("generation after logout and login = %d, want 3", g)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// The session pcb holds in memory when the store is found rolled back is
+// its newest, sealed only in the file the restore replaced: it is revoked
+// (ruling M5-R3), and the restored file's session is not.
+func TestRolledBackSecretsRevokeTheHeldSession(t *testing.T) {
+	t.Parallel()
+	for name, detect := range map[string]func(t *testing.T, e *env){
+		"operation": func(t *testing.T, e *env) {
+			_, err := e.svc.Calendars(t.Context())
+			if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != rolledBackHint {
+				t.Errorf("hint = %q", ee.Hint)
+			}
+		},
+		"logout": func(t *testing.T, e *env) {
+			if res, err := e.svc.Logout(t.Context()); err != nil || !res.WasLoggedIn {
+				t.Fatalf("Logout = %+v, %v", res, err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, protontest.Options{})
+			e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+			e.login(t, e.req())
+			old, err := os.ReadFile(e.secrets().Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.f.ExpireAccessTokens()
+			if got := e.calendars(t); len(got) != 1 { // refreshes: the held client has the newest tokens
+				t.Fatalf("calendars = %+v", got)
+			}
+			newest := e.account(t)
+			if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !sessionAlive(t, e, tokensOf(newest)) {
+				t.Fatal("the newest session is not alive before the check")
+			}
+			detect(t, e)
+			if sessionAlive(t, e, tokensOf(newest)) {
+				t.Error("the newest session, held in memory, is still alive")
+			}
+			if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+				t.Errorf("%d revocations, want 1 (the held session)", n)
+			}
+			// A second detection has nothing left to revoke.
+			_, _ = e.svc.Calendars(t.Context())
+			if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+				t.Errorf("%d revocations after a second detection, want 1", n)
+			}
+		})
 	}
 }

@@ -50,8 +50,7 @@ func (c SecretsCheck) Run(context.Context) Result {
 		var rb *store.RolledBackError
 		if _, err := store.NewSecrets(c.StateDir, &seal.KeyFile{Path: c.KeyFile}).Load(); errors.As(err, &rb) {
 			r.Status = StatusError
-			r.Message = rb.Error() + ": it was restored or replaced"
-			r.Fix = "if you restored it on purpose, run pcb logout, then pcb login"
+			r.Message, r.Fix = rb.Explain(), store.RolledBackHint
 			return r
 		}
 		msgs = append(msgs, "secrets sealed with a key file (headless fallback)")

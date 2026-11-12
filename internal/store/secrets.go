@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +36,10 @@ type Secrets struct {
 	Path     string // secrets.sealed; state.json is in the same directory
 	LockPath string // secrets.lock
 	Sealer   seal.Sealer
+	// Log, when set, returns the logger a failed mirror write is reported
+	// to (warning level; generations and the file error only). Nil
+	// discards it.
+	Log func() *slog.Logger
 }
 
 // NewSecrets returns the store in stateDir, sealed by s.
@@ -63,6 +68,15 @@ func (e *RolledBackError) Error() string {
 
 // Unwrap makes errors.Is(err, ErrRolledBack) hold.
 func (e *RolledBackError) Unwrap() error { return ErrRolledBack }
+
+// RolledBackHint is what a person does about a rolled-back store: only they
+// know whether the restore was meant, and a new login is the way out either
+// way.
+const RolledBackHint = "if you restored it on purpose, run pcb logout, then pcb login"
+
+// Explain is the message shown for e (pcb status, the service's MustAct,
+// pcb doctor): Error and its cause.
+func (e *RolledBackError) Explain() string { return e.Error() + ": it was restored or replaced" }
 
 type envelope struct {
 	Version int    `json:"version"`
@@ -192,7 +206,7 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 	if len(accounts) == 0 {
 		removed, err := s.wipe()
 		if removed {
-			s.setMirror(next)
+			s.setMirror(ctx, next)
 		}
 		return err
 	}
@@ -213,34 +227,42 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 	if err := atomicfile.Write(s.Path, out); err != nil {
 		return err
 	}
-	s.setMirror(next)
+	s.setMirror(ctx, next)
 	return nil
 }
 
 // setMirror raises the mirror in state.json to gen, best effort: if the
 // write fails the sealed file is ahead of the mirror, which Load accepts, and
-// the next write moves the mirror again.
-func (s *Secrets) setMirror(gen uint64) {
-	_ = UpdateState(s.stateDir(), func(st *State) error {
+// the next write moves the mirror again; the failure is logged. It ignores
+// ctx's cancellation: the file change it follows is already done, and the
+// state-file lock's own timeout bounds it.
+func (s *Secrets) setMirror(ctx context.Context, gen uint64) {
+	err := UpdateStateContext(context.WithoutCancel(ctx), s.stateDir(), func(st *State) error {
 		if st.SecretsGeneration >= gen {
 			return ErrStateUnchanged
 		}
 		st.SecretsGeneration = gen
 		return nil
 	})
+	if err != nil && s.Log != nil {
+		s.Log().Warn("the secrets generation could not be recorded in state.json; a restored secrets.sealed goes unnoticed until the next write",
+			"generation", gen, "error", err.Error())
+	}
 }
 
-// Wipe removes the sealed file under the store lock, for a store that can no
-// longer be opened or was rolled back; the mirror moves one above the last
-// generation, so the removed file is refused if restored. A missing file is
-// not an error.
-func (s *Secrets) Wipe(ctx context.Context) error {
+// Wipe removes the sealed file under the store lock (a logout, or a store
+// that can no longer be opened or was rolled back); the mirror moves one
+// above the last generation, so the removed file is refused if restored.
+// next is that generation, 0 when there was no file (a missing file is not
+// an error): a caller that rewrites state.json from scratch seeds it with
+// next, since the mirror write fails when state.json is unreadable.
+func (s *Secrets) Wipe(ctx context.Context) (next uint64, err error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return err
+		return 0, err
 	}
 	unlock, err := filelock.Lock(ctx, s.LockPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer unlock()
 	// The file's generation when it still opens (a rolled-back store), so
@@ -248,10 +270,12 @@ func (s *Secrets) Wipe(ctx context.Context) error {
 	_, gen, _, _ := s.open()
 	mirror := s.mirror()
 	removed, err := s.wipe()
-	if removed {
-		s.setMirror(max(gen, mirror) + 1)
+	if !removed {
+		return 0, err
 	}
-	return err
+	next = max(gen, mirror) + 1
+	s.setMirror(ctx, next)
+	return next, err
 }
 
 // wipe removes the file, then the mirror moves (the callers): a load racing

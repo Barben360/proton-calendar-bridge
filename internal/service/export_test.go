@@ -92,3 +92,6 @@ func (l *Local) WakesSent() int64 {
 // still describes the failed login), before it is written. Set it before
 // the first call.
 func (l *Local) OnHumanNeeded(f func()) { l.humanHook = f }
+
+// SetStateTimeout bounds humanNeeded's wait for state.lock.
+func (l *Local) SetStateTimeout(d time.Duration) { l.stateTimeout = d }

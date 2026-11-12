@@ -82,9 +82,10 @@ type Local struct {
 
 	// Tests only: a write's pre-send budget when set (preSendBudget
 	// otherwise), and a failure injected at a write's cache steps (fault).
-	preSend    time.Duration
-	writeFault func(stage string) error
-	humanHook  func() // runs once a needs-login mark is decided, before its write
+	preSend      time.Duration
+	writeFault   func(stage string) error
+	humanHook    func()        // runs once a needs-login mark is decided, before its write
+	stateTimeout time.Duration // bounds humanNeeded's wait for state.lock when set
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -131,6 +132,7 @@ func NewLocal(o Options) (*Local, error) {
 	}
 	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
+	l.secrets.Log = l.serveLog
 	return l, nil
 }
 
@@ -169,6 +171,24 @@ func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.T
 	})
 }
 
+// revokeHeld ends the session of the cached client, best effort within
+// revokeTimeout, and drops the client. It runs when secrets.sealed is found
+// rolled back: that session is pcb's newest, sealed only in the file the
+// restore replaced, so it is revoked rather than left live and forgotten
+// (ruling M5-R3). The restored file's own session is not revoked.
+func (l *Local) revokeHeld() {
+	l.cmu.Lock()
+	cc := l.cached
+	l.cmu.Unlock()
+	l.dropClient()
+	if cc == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
+	defer cancel()
+	_ = auth.Logout(ctx, cc.c)
+}
+
 // revoke ends acc's session, best effort within revokeTimeout.
 func (l *Local) revoke(ctx context.Context, acc store.Account) bool {
 	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
@@ -187,11 +207,15 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, errClosed()
 	}
 	l.dropPending(ctx)
+	accounts, err := l.secrets.Load()
+	if errors.Is(err, store.ErrRolledBack) {
+		l.revokeHeld()
+	}
 	l.dropClient()
 	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
 	defer cancel()
 	var res LogoutResult
-	accounts, err := l.secrets.Load()
+	var next uint64 // the mirror the wipe moved to: seeds state.json below
 	switch {
 	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack):
 		// Unopenable for good, or restored (its tokens are not the current
@@ -199,7 +223,8 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		// with, so wipe what cannot be used. The wipe moves the mirror past
 		// it, so the file is refused if restored again.
 		res.WasLoggedIn = true
-		if werr := l.secrets.Wipe(wipe); werr != nil {
+		var werr error
+		if next, werr = l.secrets.Wipe(wipe); werr != nil {
 			return LogoutResult{}, storeError(werr, l.keyFile())
 		}
 	case err != nil:
@@ -215,11 +240,9 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 			}
 		}
 		if len(accounts) > 0 {
-			if err := l.secrets.Update(wipe, func(a map[string]store.Account) error {
-				clear(a)
-				return nil
-			}); err != nil {
-				return LogoutResult{}, storeError(err, l.keyFile())
+			var werr error
+			if next, werr = l.secrets.Wipe(wipe); werr != nil {
+				return LogoutResult{}, storeError(werr, l.keyFile())
 			}
 		}
 	}
@@ -227,8 +250,11 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
 			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
 	}
-	if err := store.SaveState(l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut}); err != nil {
-		return LogoutResult{}, storeError(err, l.keyFile())
+	// Seeded with the wiped generation + 1: over an unreadable state.json
+	// (the reset logout is) the mirror write failed and SaveState cannot
+	// read the old one, so the mirror must not restart at 0.
+	if err := store.SaveStateContext(wipe, l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next}); err != nil {
+		return LogoutResult{}, l.stateWriteError(err)
 	}
 	return res, nil
 }
@@ -264,7 +290,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		var rb *store.RolledBackError
 		switch {
 		case errors.As(err, &rb):
-			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rolledBack(rb).Error()
+			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
 		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
 		default:

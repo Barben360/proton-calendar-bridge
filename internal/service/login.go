@@ -94,7 +94,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 	if err != nil {
 		var ce *auth.CaptchaError
 		if errors.As(err, &ce) {
-			return l.needsCaptcha(ce, last, now, req.Username)
+			return l.needsCaptcha(ctx, ce, last, now, req.Username)
 		}
 		return LoginResult{}, l.fail(err)
 	}
@@ -173,7 +173,7 @@ func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), 
 	return release, now, nil
 }
 
-func (l *Local) needsCaptcha(ce *auth.CaptchaError, last store.State, now time.Time, username string) (LoginResult, error) {
+func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last store.State, now time.Time, username string) (LoginResult, error) {
 	st := store.State{
 		AccountID:   last.AccountID,
 		Phase:       store.PhaseNeedsCaptcha,
@@ -183,8 +183,8 @@ func (l *Local) needsCaptcha(ce *auth.CaptchaError, last store.State, now time.T
 		LastLogin:   last.LastLogin,
 		LastRelogin: last.LastRelogin,
 	}
-	if err := store.SaveState(l.o.Dirs.State, st); err != nil {
-		return LoginResult{}, storeError(err, l.keyFile())
+	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
+		return LoginResult{}, l.stateWriteError(err)
 	}
 	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}, nil
 }
@@ -278,7 +278,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	if pl.relogin {
 		st.LastLogin, st.LastRelogin = pl.last.LastLogin, now
 	}
-	if err := store.SaveState(l.o.Dirs.State, st); err != nil {
+	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
 		// Put the secrets back as they were, so the stored session stays the
 		// one state.json describes. If that fails too, the new session is
 		// what is sealed and must not be revoked.
@@ -292,7 +292,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		}); rerr == nil {
 			pl.sealed = false
 		}
-		return LoginResult{}, storeError(err, l.keyFile())
+		return LoginResult{}, l.stateWriteError(err)
 	}
 	// A relogin replaces a session Proton already ended: nothing to revoke.
 	if replaced && old.UID != acc.UID && !pl.relogin {

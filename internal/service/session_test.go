@@ -593,3 +593,32 @@ func TestHumanNeededDoesNotOverwriteAFinishedLogin(t *testing.T) {
 		t.Errorf("state = %+v, want the finished login kept", st)
 	}
 }
+
+// A state.lock held past its timeout is reported as the lock, not as an
+// unreadable state.json, and nothing is written.
+func TestHumanNeededReportsAHeldStateLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file locks are Unix only")
+	}
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	before, _ := e.files(t)
+	unlock, ok, err := filelock.TryLock(filepath.Join(e.dirs.State, "state.lock"))
+	if err != nil || !ok {
+		t.Fatalf("TryLock = %v, %v", ok, err)
+	}
+	defer unlock()
+	e.svc.SetStateTimeout(50 * time.Millisecond)
+	_, err = e.svc.Calendars(t.Context())
+	ee := wantExit(t, err, exitcode.Blocked)
+	if ee.Error() != "another pcb process holds the login state file's lock (state.lock) too long" ||
+		ee.Hint != "run the command again; if it persists, look for a stuck pcb process" {
+		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if after, _ := e.files(t); !bytes.Equal(before, after) {
+		t.Errorf("state.json written without the lock:\n%s", after)
+	}
+}

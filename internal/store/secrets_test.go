@@ -130,13 +130,13 @@ func TestWipeRemovesUnreadableStore(t *testing.T) {
 	if err := os.Remove(f.key); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.secrets.Wipe(ctx(t)); err != nil {
+	if _, err := f.secrets.Wipe(ctx(t)); err != nil {
 		t.Fatal(err)
 	}
 	if m, err := f.secrets.Load(); err != nil || len(m) != 0 {
 		t.Fatalf("after wipe: %v, %v", m, err)
 	}
-	if err := f.secrets.Wipe(ctx(t)); err != nil { // nothing left: not an error
+	if _, err := f.secrets.Wipe(ctx(t)); err != nil { // nothing left: not an error
 		t.Fatal(err)
 	}
 }
@@ -290,14 +290,14 @@ func TestWipeWaitsForTheStoreLock(t *testing.T) {
 	unlock := lockFor(t, f)
 	c, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := f.secrets.Wipe(c); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := f.secrets.Wipe(c); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
 	}
 	if _, err := os.Stat(f.secrets.Path); err != nil {
 		t.Fatalf("store removed while locked: %v", err)
 	}
 	unlock()
-	if err := f.secrets.Wipe(ctx(t)); err != nil {
+	if _, err := f.secrets.Wipe(ctx(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.secrets.Path); !errors.Is(err, os.ErrNotExist) {
@@ -434,7 +434,7 @@ func TestFileRemovedByLogoutIsRefusedIfRestored(t *testing.T) {
 			}
 		},
 		"wipe": func(t *testing.T, f fixture) {
-			if err := f.secrets.Wipe(ctx(t)); err != nil {
+			if _, err := f.secrets.Wipe(ctx(t)); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -581,7 +581,7 @@ func TestWipeMovesTheMirrorPastAFileAhead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ahead := readFile(t, f.secrets.Path)
-	if err := f.secrets.Wipe(ctx(t)); err != nil {
+	if _, err := f.secrets.Wipe(ctx(t)); err != nil {
 		t.Fatal(err)
 	}
 	if m := mirrorOf(t, f); m != 3 {
@@ -590,4 +590,50 @@ func TestWipeMovesTheMirrorPastAFileAhead(t *testing.T) {
 	writeFile(t, f.secrets.Path, ahead)
 	_, err = f.secrets.Load()
 	wantRolledBack(t, err, 2, 3)
+}
+
+// Wipe returns the generation it moved the mirror to: the caller seeds a
+// state.json it rewrites from scratch with it (logout over a damaged one).
+func TestWipeReturnsTheNextGeneration(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.secrets, fullAccount("userA"))
+	put(t, f.secrets, fullAccount("userA"))
+	// A damaged state.json: the mirror cannot be read, nor moved.
+	writeFile(t, filepath.Join(f.state, "state.json"), []byte("{"))
+	next, err := f.secrets.Wipe(ctx(t))
+	if err != nil || next != 3 {
+		t.Fatalf("Wipe = %d, %v; want 3 (the file's generation 2 + 1)", next, err)
+	}
+	if next, err := f.secrets.Wipe(ctx(t)); err != nil || next != 0 {
+		t.Fatalf("Wipe with no file = %d, %v; want 0", next, err)
+	}
+}
+
+func TestFailedMirrorWriteIsLogged(t *testing.T) {
+	f := newFixture(t)
+	var logged bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logged, nil))
+	f.secrets.Log = func() *slog.Logger { return log }
+	a := fullAccount("userA")
+	put(t, f.secrets, a)
+	if logged.Len() != 0 {
+		t.Fatalf("logged on a good write: %s", logged.String())
+	}
+	statePath := filepath.Join(f.state, "state.json")
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	put(t, f.secrets, a) // still succeeds: the sealed file is ahead
+	out := logged.String()
+	if !strings.Contains(out, `"level":"WARN"`) || !strings.Contains(out, `"generation":2`) || !strings.Contains(out, "could not be recorded in state.json") {
+		t.Fatalf("log = %s", out)
+	}
+	for _, secret := range []string{a.Username, a.UID, a.AccessToken, a.RefreshToken, string(a.KeyPass), a.Relogin.Password, "TOTPSECRET"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("the log holds %q", secret)
+		}
+	}
 }
