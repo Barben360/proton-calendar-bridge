@@ -11,7 +11,7 @@ OUT     ?= bin/pcb
 # the service.
 PREFIX  ?= $(HOME)/.local
 
-.PHONY: build install test lint
+.PHONY: build install test lint image container-smoke systemd-smoke
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -31,3 +31,16 @@ lint:
 		if [ -n "$$files" ]; then echo "gofmt: run gofmt -w on:"; echo "$$files"; exit 1; fi
 	go vet ./...
 	golangci-lint run --allow-parallel-runners
+
+# The container image (M5-Rpre7), stamped like make build.
+IMAGE ?= pcb:local
+
+image:
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+
+# Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
+container-smoke:
+	scripts/container-smoke.sh
+
+systemd-smoke: build
+	scripts/systemd-smoke.sh $(OUT)

@@ -1,0 +1,7 @@
+.git
+bin
+spec
+*.md
+!README.md
+# The local SDD workspace (gitignored, absent in CI).
+.superpowers
