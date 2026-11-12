@@ -38,54 +38,54 @@ func (a *app) newStatus() *cobra.Command {
 
 // status is the daemon's status, else (unless daemonOnly) the offline view:
 // the login as the files describe it and its alerts.
-func (a *app) status(cmd *cobra.Command, daemonOnly bool) (ctl.Status, error) {
+func (a *app) status(cmd *cobra.Command, daemonOnly bool) (liveStatus, error) {
 	ctx := cmd.Context()
 	dirs, err := resolveDirs(a.Env)
 	if err != nil && daemonOnly {
-		return ctl.Status{}, err
+		return liveStatus{}, err
 	}
 	if err == nil {
 		st, ok, err := a.daemonStatus(ctx, dirs.Socket())
 		switch {
 		case err != nil:
-			return ctl.Status{}, err
+			return liveStatus{}, err
 		case ok:
 			return st, nil
 		case daemonOnly:
-			return ctl.Status{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
+			return liveStatus{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
 				Hint: startHint(a.Host)}
 		}
 	}
 	svc, err := a.service(cmd)
 	if err != nil {
-		return ctl.Status{}, err
+		return liveStatus{}, err
 	}
 	defer a.closeService(svc)
 	local, err := svc.Status(ctx)
 	if err != nil {
-		return ctl.Status{}, err
+		return liveStatus{}, err
 	}
-	return ctl.Status{Status: local, Alerts: ctl.Alerts(ctl.AlertInput{Login: local, Now: time.Now()})}, nil
+	return liveStatus{Status: local, Alerts: ctl.Alerts(ctl.AlertInput{Login: local, Now: time.Now()})}, nil
 }
 
 // daemonStatus asks the daemon on socket for its status; ok is false when
 // none answers there.
-func (a *app) daemonStatus(ctx context.Context, socket string) (st ctl.Status, ok bool, err error) {
+func (a *app) daemonStatus(ctx context.Context, socket string) (st liveStatus, ok bool, err error) {
 	c, err := a.dialDaemon(ctx, socket)
 	if c == nil || err != nil {
-		return ctl.Status{}, false, err
+		return liveStatus{}, false, err
 	}
 	defer func() { _ = c.Close() }()
-	st, err = c.Status(ctx)
+	cs, err := c.Status(ctx)
 	if err != nil {
-		return ctl.Status{}, false, err
+		return liveStatus{}, false, err
 	}
-	return st, true, nil
+	return flatStatus(cs), true, nil
 }
 
 // liveStatusText is statusText, then the daemon, its listener, each
 // calendar's live state, the render counters and one line per alert.
-func liveStatusText(s ctl.Status) string {
+func liveStatusText(s liveStatus) string {
 	var b strings.Builder
 	b.WriteString(statusText(s.Status))
 	line := func(format string, args ...any) { fmt.Fprintf(&b, "\n"+format, args...) }
@@ -124,7 +124,7 @@ func liveStatusText(s ctl.Status) string {
 // daemonState is "serving since T (pid N, version V)": since Serve began
 // serving, else since the daemon started; or "waiting for a login since T"
 // while Serve waits for one.
-func daemonState(s ctl.Status) string {
+func daemonState(s liveStatus) string {
 	since := s.Daemon.StartedAt
 	if s.Health != nil && s.Health.Since != nil {
 		since = *s.Health.Since

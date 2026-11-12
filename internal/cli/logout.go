@@ -51,9 +51,16 @@ func (a *app) logout(cmd *cobra.Command, yes bool) (service.LogoutResult, error)
 		defer func() { _ = c.Close() }()
 		status := func(ctx context.Context) (service.Status, error) {
 			st, err := c.Status(ctx)
-			return st.Status, err
+			return flatStatus(st).Status, err
 		}
-		return a.logoutWith(cmd, yes, status, c.Logout)
+		logout := func(ctx context.Context, req service.LogoutRequest) (service.LogoutResult, error) {
+			id, err := soleAccountID(ctx, c)
+			if err != nil {
+				return service.LogoutResult{}, err
+			}
+			return c.Logout(ctx, id, req)
+		}
+		return a.logoutWith(cmd, yes, status, logout)
 	}
 	svc, err := a.service(cmd)
 	if err != nil {

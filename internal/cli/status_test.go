@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -120,7 +121,7 @@ func startDaemon(t *testing.T, r *rig, api service.API, ln *ctl.Listener) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &ctl.Server{API: api, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
+	srv := &ctl.Server{Hub: cli.APIHub(api), Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
 		Daemon: ctl.Daemon{PID: 4242, Version: "v1.2.3", StartedAt: daemonNow.Add(-2 * time.Hour), LogLevel: "info", Socket: r.dirs.Socket()}}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(sl) }()
@@ -221,7 +222,12 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 	}
 
 	r.want(exitcode.OK, "status", "--json", "--daemon")
-	var st ctl.Status
+	var st struct { // the flat status of M1–M5
+		service.Status
+		Daemon *ctl.Daemon     `json:"daemon"`
+		Health *service.Health `json:"health"`
+		Alerts []ctl.Alert     `json:"alerts"`
+	}
 	mustUnmarshal(t, r.envelope().Data, &st)
 	if st.Daemon == nil || st.Daemon.PID != 4242 || st.Username != "alice" || st.Health == nil || len(st.Alerts) != 2 {
 		t.Errorf("status = %+v", st)

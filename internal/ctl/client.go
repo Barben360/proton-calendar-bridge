@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
-// The client's timeouts (ruling M5-Rpre1). A logout through the daemon
-// stops its sync loop and revokes the session: it gets the login's.
+// The client's timeouts (ruling M5-Rpre1). An account-changing call through
+// the daemon (a logout stops its sync loop and revokes the session) gets the
+// login's.
 const (
 	dialTimeout   = 2 * time.Second
 	statusTimeout = 10 * time.Second
@@ -110,51 +112,85 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Accounts lists the daemon's accounts.
+func (c *Client) Accounts(ctx context.Context) ([]service.AccountInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
+	defer cancel()
+	var res Accounts
+	err := c.do(ctx, http.MethodGet, "/v2/accounts", nil, &res)
+	return res.Accounts, err
+}
+
 // Status is the daemon's live status.
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 	var st Status
-	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &st)
+	err := c.do(ctx, http.MethodGet, "/v2/status", nil, &st)
 	return st, err
 }
 
-// Login asks the daemon to log in (service.API.Login). The credentials
-// travel in the request body only.
+// Login asks the daemon to log in or add an account (Hub.Login). The
+// credentials travel in the request body only.
 func (c *Client) Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error) {
-	return c.login(ctx, "/v1/login", req)
-}
-
-// SubmitTOTP sends the 2FA code of the login the daemon holds
-// (service.API.SubmitTOTP).
-func (c *Client) SubmitTOTP(ctx context.Context, code string) (service.LoginResult, error) {
-	return c.login(ctx, "/v1/login/totp", TOTPRequest{Code: code})
-}
-
-// Logout asks the daemon to log out (service.API.Logout).
-func (c *Client) Logout(ctx context.Context, req service.LogoutRequest) (service.LogoutResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
-	defer cancel()
-	b, err := json.Marshal(req)
-	if err != nil {
-		return service.LogoutResult{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("cannot encode the logout request"), Hint: "use the pcb of the same version as the daemon"}
-	}
-	var res service.LogoutResult
-	err = c.do(ctx, http.MethodPost, "/v1/logout", b, &res)
+	var res service.LoginResult
+	err := c.post(ctx, "/v2/login", req, &res)
 	return res, err
 }
 
-func (c *Client) login(ctx context.Context, target string, body any) (service.LoginResult, error) {
+// SubmitTOTP sends the 2FA code of the login the daemon holds for the
+// account (Hub.SubmitTOTP); accountID is a selector.
+func (c *Client) SubmitTOTP(ctx context.Context, accountID, code string) (service.LoginResult, error) {
+	var res service.LoginResult
+	err := c.post(ctx, accountRoute(accountID, "login/totp"), TOTPRequest{Code: code}, &res)
+	return res, err
+}
+
+// Logout asks the daemon to sign the account out (Hub.SignOut).
+func (c *Client) Logout(ctx context.Context, accountID string, req service.LogoutRequest) (service.LogoutResult, error) {
+	var res service.LogoutResult
+	err := c.post(ctx, accountRoute(accountID, "logout"), req, &res)
+	return res, err
+}
+
+// Remove asks the daemon to sign the account out and forget it (Hub.Remove).
+func (c *Client) Remove(ctx context.Context, accountID string, req service.LogoutRequest) (service.AccountInfo, error) {
+	var res service.AccountInfo
+	err := c.post(ctx, accountRoute(accountID, "remove"), req, &res)
+	return res, err
+}
+
+// SetCalDAV turns the account's CalDAV on or off (Hub.SetCalDAV).
+func (c *Client) SetCalDAV(ctx context.Context, accountID string, on bool) (service.AccountInfo, error) {
+	var res service.AccountInfo
+	err := c.post(ctx, accountRoute(accountID, "caldav"), CalDAVRequest{On: on}, &res)
+	return res, err
+}
+
+// Restart clears the account's park and starts its loop (Hub.Restart).
+func (c *Client) Restart(ctx context.Context, accountID string) (service.AccountInfo, error) {
+	var res service.AccountInfo
+	err := c.post(ctx, accountRoute(accountID, "restart"), struct{}{}, &res)
+	return res, err
+}
+
+// accountRoute is the path of an account's action; the selector (an
+// address holds characters a path does not) is escaped.
+func accountRoute(selector, action string) string {
+	return "/v2/accounts/" + url.PathEscape(selector) + "/" + action
+}
+
+// post sends body as JSON to target, within the login's timeout, and
+// decodes the answer into out. The body may hold secrets: it is cleared.
+func (c *Client) post(ctx context.Context, target string, body, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
 	b, err := json.Marshal(body)
 	if err != nil {
-		return service.LoginResult{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("cannot encode the login request"), Hint: "use the pcb of the same version as the daemon"}
+		return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("cannot encode the request"), Hint: "use the pcb of the same version as the daemon"}
 	}
 	defer clear(b)
-	var res service.LoginResult
-	err = c.do(ctx, http.MethodPost, target, b, &res)
-	return res, err
+	return c.do(ctx, http.MethodPost, target, b, out)
 }
 
 type envelopeIn struct {

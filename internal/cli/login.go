@@ -103,12 +103,16 @@ func (d daemonLogin) Login(ctx context.Context, req service.LoginRequest) (servi
 }
 
 func (d daemonLogin) SubmitTOTP(ctx context.Context, code string) (service.LoginResult, error) {
-	return d.c.SubmitTOTP(ctx, code)
+	id, err := soleAccountID(ctx, d.c)
+	if err != nil {
+		return service.LoginResult{}, err
+	}
+	return d.c.SubmitTOTP(ctx, id, code)
 }
 
 func (d daemonLogin) Status(ctx context.Context) (service.Status, error) {
 	st, err := d.c.Status(ctx)
-	return st.Status, err
+	return flatStatus(st).Status, err
 }
 
 func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error {

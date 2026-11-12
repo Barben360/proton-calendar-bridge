@@ -255,7 +255,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}
 
 	var published atomic.Pointer[ctl.Listener]
-	stopControl, err := startControl(log, svc, ctl.NewDaemon(dirs.Socket(), level, started), published.Load)
+	stopControl, err := startControl(log, svc, ctl.NewDaemon("serve", dirs.Socket(), level, started), published.Load)
 	if err != nil {
 		return finish(err)
 	}
@@ -380,7 +380,7 @@ func startControl(log *slog.Logger, svc service.API, d ctl.Daemon, listener func
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
 	}
-	srv := &ctl.Server{API: svc, Daemon: d, Listener: listener, Now: time.Now, Logger: log}
+	srv := &ctl.Server{Hub: apiHub{svc}, Daemon: d, Listener: listener, Now: time.Now, Logger: log}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

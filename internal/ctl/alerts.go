@@ -13,6 +13,7 @@ import (
 // The alert codes (stable) and severities.
 const (
 	CodeNeedsLogin         = "needs-login"
+	CodeAccountStopped     = "account-stopped"
 	CodeNeedsCaptcha       = "needs-captcha"
 	CodeHumanVerification  = "human-verification"
 	CodeSyncStalled        = "sync-stalled"
@@ -35,21 +36,26 @@ const (
 
 const certFix = "renew caldav.tls_cert; a generated one is renewed by restarting pcb"
 
-// AlertInput is what the alerts are computed from: the login, and Serve's
-// health and listener when a daemon answers (nil offline).
+// AlertInput is what one account's alerts are computed from: its local ID
+// (empty offline), its login, its serve loop's stop and, when a daemon
+// answers, Serve's health (nil offline).
 type AlertInput struct {
-	Login    service.Status
-	Health   *service.Health
-	Listener *Listener
-	Now      time.Time
+	Account string
+	Login   service.Status
+	Stopped *service.StopInfo
+	Health  *service.Health
+	Now     time.Time
 }
 
-// Alerts lists the problems in, errors first, then by code, then by
-// calendar ID; never nil.
+// Alerts lists the problems of one account, errors first, then by code,
+// then by calendar ID; never nil. Each carries in.Account.
 func Alerts(in AlertInput) []Alert {
 	out := []Alert{}
 	add := func(code, sev, msg, fix, cal string) {
-		out = append(out, Alert{Code: code, Severity: sev, Message: msg, Fix: fix, Calendar: cal})
+		out = append(out, Alert{Account: in.Account, Code: code, Severity: sev, Message: msg, Fix: fix, Calendar: cal})
+	}
+	if s := in.Stopped; s != nil {
+		add(CodeAccountStopped, SeverityError, s.Message, s.Hint, "")
 	}
 	switch in.Login.Phase {
 	case "logged-out", "needs-login":
@@ -73,19 +79,33 @@ func Alerts(in AlertInput) []Alert {
 	if h := in.Health; h != nil {
 		healthAlerts(h, in.Now, add)
 	}
-	if l := in.Listener; l != nil && l.TLS && l.CertNotAfter != nil {
-		left, date := l.CertNotAfter.Sub(in.Now), l.CertNotAfter.UTC().Format(time.DateOnly)
+	SortAlerts(out)
+	return out
+}
+
+// ProcessAlerts lists the alerts of the process, not of an account: the
+// CalDAV listener's certificate nearing its end or past it; never nil.
+func ProcessAlerts(l *Listener, now time.Time) []Alert {
+	out := []Alert{}
+	if l != nil && l.TLS && l.CertNotAfter != nil {
+		left, date := l.CertNotAfter.Sub(now), l.CertNotAfter.UTC().Format(time.DateOnly)
 		switch {
 		case left <= 0:
-			add(CodeTLSExpired, SeverityError, "the CalDAV certificate expired on "+date, certFix, "")
+			out = append(out, Alert{Code: CodeTLSExpired, Severity: SeverityError, Message: "the CalDAV certificate expired on " + date, Fix: certFix})
 		case left <= certWarn:
-			add(CodeTLSExpiring, SeverityWarning, "the CalDAV certificate expires on "+date, certFix, "")
+			out = append(out, Alert{Code: CodeTLSExpiring, Severity: SeverityWarning, Message: "the CalDAV certificate expires on " + date, Fix: certFix})
 		}
 	}
-	slices.SortStableFunc(out, func(a, b Alert) int {
-		return cmp.Or(cmp.Compare(rank(a.Severity), rank(b.Severity)), strings.Compare(a.Code, b.Code), strings.Compare(a.Calendar, b.Calendar))
-	})
 	return out
+}
+
+// SortAlerts orders alerts: errors first, then by account, code and
+// calendar ID.
+func SortAlerts(a []Alert) {
+	slices.SortStableFunc(a, func(a, b Alert) int {
+		return cmp.Or(cmp.Compare(rank(a.Severity), rank(b.Severity)), strings.Compare(a.Account, b.Account),
+			strings.Compare(a.Code, b.Code), strings.Compare(a.Calendar, b.Calendar))
+	})
 }
 
 func healthAlerts(h *service.Health, now time.Time, add func(code, sev, msg, fix, cal string)) {

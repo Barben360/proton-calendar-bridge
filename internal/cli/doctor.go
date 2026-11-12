@@ -75,7 +75,7 @@ func doctorFailure(results []doctor.Result) error {
 // doctorDaemon is what the doctor learnt from the control socket, asked
 // once: the CalDAV checks use its listener, the daemon results its state.
 type doctorDaemon struct {
-	st       ctl.Status
+	st       liveStatus
 	ok       bool
 	err      error
 	unplaced bool // the control socket cannot be located

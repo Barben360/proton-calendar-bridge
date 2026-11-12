@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
-	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -584,7 +583,10 @@ func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 		t.Errorf("%d DELETE /auth/v4, want 1 (the session revoked)", n)
 	}
 	r.want(exitcode.OK, "status", "--json", "--daemon")
-	var st ctl.Status
+	var st struct {
+		service.Status
+		Health *service.Health `json:"health"`
+	}
 	mustUnmarshal(t, r.envelope().Data, &st)
 	if st.Phase != "logged-out" || st.Health == nil || st.Health.Serve != service.ServeWaitingForLogin {
 		t.Errorf("status after the logout = %+v", st)

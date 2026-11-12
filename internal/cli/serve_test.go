@@ -911,7 +911,7 @@ func TestServeServesTheControlSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, port, _ := net.SplitHostPort(addr)
-	if st.Phase != "ready" || st.Daemon == nil || st.Daemon.PID != os.Getpid() || st.Daemon.LogLevel != "debug" ||
+	if len(st.Accounts) != 1 || st.Accounts[0].Login.Phase != "ready" || st.Daemon == nil || st.Daemon.PID != os.Getpid() || st.Daemon.LogLevel != "debug" ||
 		st.Daemon.Socket != r.dirs.Socket() || st.Daemon.Version == "" {
 		t.Errorf("status = %+v, daemon %+v", st, st.Daemon)
 	}
@@ -1139,12 +1139,16 @@ func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(st.Accounts) != 1 {
+			t.Fatalf("CTL status while waiting: %d accounts, want 1", len(st.Accounts))
+		}
+		acct := st.Accounts[0]
 		needsLogin := false
-		for _, a := range st.Alerts {
+		for _, a := range acct.Alerts {
 			needsLogin = needsLogin || a.Code == "needs-login"
 		}
-		if st.Health == nil || st.Health.Serve != service.ServeWaitingForLogin || !needsLogin {
-			t.Errorf("CTL status while waiting: health %+v, alerts %+v; want waiting-for-login and needs-login", st.Health, st.Alerts)
+		if acct.Health == nil || acct.Health.Serve != service.ServeWaitingForLogin || !needsLogin {
+			t.Errorf("CTL status while waiting: health %+v, alerts %+v; want waiting-for-login and needs-login", acct.Health, acct.Alerts)
 		}
 	}
 	out := s.out.String()
