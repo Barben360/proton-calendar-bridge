@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 )
 
 // SessionClient exposes the stored session's client so tests can tell a
@@ -41,3 +42,6 @@ func (l *Local) SetTouchHook(f func(phase, id string)) { l.touchHook = f }
 
 // SetTouchTimeout sets how long a background touch may wait for the clients lock.
 func (l *Local) SetTouchTimeout(d time.Duration) { l.touchTimeout = d }
+
+// AddressKeyTags exposes the address-key tags of u.
+func AddressKeyTags(u *keys.Unlocked) []string { return addressKeyTags(u) }

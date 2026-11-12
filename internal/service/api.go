@@ -263,10 +263,13 @@ type Calendar struct {
 	Description string `json:"description,omitempty"`
 	Color       string `json:"color,omitempty"`
 	Type        string `json:"type"`
-	ReadOnly    bool   `json:"read_only"`
-	Default     bool   `json:"default"`
-	Keys        string `json:"keys"`
-	KeysError   string `json:"keys_error,omitempty"`
+	// ReadOnly follows the write gate (ruling M4-R1): false only for a normal
+	// calendar whose keys unlocked, our member has the Write bit and the
+	// member passphrase signature verified.
+	ReadOnly  bool   `json:"read_only"`
+	Default   bool   `json:"default"`
+	Keys      string `json:"keys"`
+	KeysError string `json:"keys_error,omitempty"`
 }
 
 // Collection is a synced calendar as the read API serves it. CTag is
@@ -279,7 +282,9 @@ type Collection struct {
 	Name        string `json:"name"`
 	Color       string `json:"color,omitempty"`
 	Description string `json:"description,omitempty"`
-	ReadOnly    bool   `json:"read_only"`
+	// ReadOnly follows the write gate (ruling M4-R1), as Calendar.ReadOnly;
+	// true as well when the keys are not loaded.
+	ReadOnly bool `json:"read_only"`
 	// Pending: the cache knows the calendar but has not synced it yet (a
 	// first pass is on its way to it, or it failed): no CTag, no sync token,
 	// and its reads return ErrCalendarPending (ruling M3-R25).

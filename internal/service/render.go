@@ -135,7 +135,8 @@ func addressKeyTags(u *keys.Unlocked) []string {
 		}
 		for _, k := range addr.Keys {
 			unlocked := false
-			if key, err := crypto.NewKeyFromArmored(string(k.PrivateKey)); err == nil {
+			// go-proton-api decodes the armor: PrivateKey is the binary key.
+			if key, err := crypto.NewKey(k.PrivateKey); err == nil {
 				unlocked = open[key.GetFingerprint()]
 			}
 			tags = append(tags, keyTag(k.ID, unlocked))

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -38,11 +37,6 @@ const PermissionWrite = 8
 // keyFlagPrimary is the bit of a bootstrap calendar key's Flags that marks the
 // key new data is encrypted to (1 active, 2 primary; research B.3).
 const keyFlagPrimary = 2
-
-// copyMu serialises the copy of address keys: go-proton-api's and
-// go-crypto's key copy writes a serialisation cache on the first Serialize of
-// a shared key, so two concurrent copies of one key race (M4 ledger).
-var copyMu sync.Mutex
 
 // Access is an unlocked calendar: its keyring (in memory only) and our member.
 type Access struct {
@@ -149,7 +143,8 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 		return nil, fmt.Errorf("calendar %s: %w", cal.ID, err)
 	}
 	defer clear(passphrase)
-	var kr, primary *crypto.KeyRing
+	var kr *crypto.KeyRing
+	var flagged []*crypto.Key // unlocked keys flagged primary
 	states := make([]KeyState, 0, len(b.Keys))
 	for _, k := range b.Keys {
 		states = append(states, KeyState{ID: k.ID})
@@ -173,16 +168,21 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 			return nil, fmt.Errorf("calendar %s: building the keyring failed", cal.ID)
 		}
 		states[len(states)-1].Unlocked = true
-		if k.Flags&keyFlagPrimary != 0 && primary == nil {
-			primary, err = crypto.NewKeyRing(unlocked)
-			if err != nil {
-				kr.ClearPrivateParams()
-				return nil, fmt.Errorf("calendar %s: building the keyring failed", cal.ID)
-			}
+		if k.Flags&keyFlagPrimary != 0 {
+			flagged = append(flagged, unlocked)
 		}
 	}
 	if kr == nil {
 		return nil, fmt.Errorf("calendar %s: the passphrase unlocks no calendar key", cal.ID)
+	}
+	// Exactly one unlocked key flagged primary (ruling M4-R4): none or two is
+	// an anomaly, and the calendar then fails closed (no Primary, not writable).
+	var primary *crypto.KeyRing
+	if len(flagged) == 1 {
+		var perr error
+		if primary, perr = crypto.NewKeyRing(flagged[0]); perr != nil {
+			primary = nil
+		}
 	}
 	a := &Access{CalendarID: cal.ID, MemberID: memberID, AddressID: addressID, KR: kr, Primary: primary,
 		Type: cal.Type, Settings: b.CalendarSettings, Keys: states}
@@ -212,7 +212,8 @@ func verifyPassphrase(addrKR *crypto.KeyRing, passphrase []byte, sig string) boo
 
 // primarySigner returns a ring holding a copy of the primary key of address
 // addressID, matched by fingerprint among the unlocked keys of its keyring;
-// nil when there is none. The copy is made under copyMu.
+// nil when there is none. keys.Unlock serialised each address key once, so
+// the copy writes no cache and concurrent unlocks do not race.
 func primarySigner(u *keys.Unlocked, addressID string) *crypto.KeyRing {
 	kr := u.AddrKRs[addressID]
 	if kr == nil {
@@ -236,8 +237,6 @@ func primarySigner(u *keys.Unlocked, addressID string) *crypto.KeyRing {
 	if primaryFP == "" {
 		return nil
 	}
-	copyMu.Lock()
-	defer copyMu.Unlock()
 	for _, k := range kr.GetKeys() {
 		if k.GetFingerprint() != primaryFP {
 			continue

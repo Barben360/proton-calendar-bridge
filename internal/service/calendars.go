@@ -57,9 +57,11 @@ func (l *Local) calendars(ctx context.Context, c *api.Client, acc store.Account)
 	for _, cal := range cals {
 		sc := Calendar{
 			ID: cal.ID, Name: cal.Name, Description: cal.Description, Color: cal.Color,
-			Type: cal.Type.String(), ReadOnly: cal.Type.ReadOnly(),
-			Default: def != "" && cal.ID == def,
-			Keys:    "ok",
+			Type: cal.Type.String(),
+			// Read only until the keys prove the calendar writable (ruling M4-R1).
+			ReadOnly: true,
+			Default:  def != "" && cal.ID == def,
+			Keys:     "ok",
 		}
 		a, err := calendar.Unlock(ctx, c, u, cal)
 		switch {

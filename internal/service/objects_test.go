@@ -15,6 +15,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -675,13 +676,16 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 				t.Errorf("calendar %s: ReadOnly = %v, want %v", id, got, want)
 			}
 		}
-		// The CLI listing follows the same gate.
-		byID := map[string]bool{}
-		for _, c := range e.calendars(t) {
-			byID[c.ID] = c.ReadOnly
+		// The CLI listing follows the same gate, row by row.
+		want := map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true}
+		got := e.calendars(t)
+		if len(got) != len(want) {
+			t.Fatalf("calendar list has %d rows, want %d", len(got), len(want))
 		}
-		if byID[editor] || !byID[viewer] || byID[owner] {
-			t.Errorf("calendar list read-only flags = %v", byID)
+		for _, c := range got {
+			if c.ReadOnly != want[c.ID] {
+				t.Errorf("pcb calendar %s (%s, keys %s): ReadOnly = %v, want %v", c.ID, c.Name, c.Keys, c.ReadOnly, want[c.ID])
+			}
 		}
 	})
 	t.Run("bad passphrase signature", func(t *testing.T) {
@@ -728,4 +732,78 @@ func TestWritabilityChangeIsSeenByClients(t *testing.T) {
 			before.CTag, after.CTag, tok, tok2, etags["a@x"], etags2["a@x"])
 	}
 	s.stop(t)
+}
+
+// The fake's own address keys unlock through keys.Fetch and keys.Unlock and
+// every key tags as unlocked (it would not with the armor parse of M3).
+func TestAddressKeyTagsOfTheFakesKeysAreUnlocked(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	c, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, addrs, err := keys.Fetch(t.Context(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := keys.Unlock(user, addrs, e.account(t).KeyPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	tags := service.AddressKeyTags(u)
+	if len(tags) == 0 {
+		t.Fatal("no address key tagged")
+	}
+	for _, tag := range tags {
+		if !strings.HasSuffix(tag, ":unlocked") {
+			t.Errorf("tag %q: a key of the fake unlocked", tag)
+		}
+	}
+}
+
+// The cached type reaches the gate on every path that unlocks keys (ruling
+// M4-R1): a read that loads the keys before any listing, and the settings
+// refresh under Serve. A subscribed calendar with every permission stays
+// read only through both.
+func TestCachedTypeFeedsTheGateOnEveryKeyLoad(t *testing.T) {
+	t.Parallel()
+	t.Run("a read loads the keys first", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		e.sync(t, false)
+		e.objects(t, sub, "a@x") // calendarRead unlocks: no Collections call before
+		if !e.collection(t, sub).ReadOnly {
+			t.Error("a subscribed calendar became writable after calendarRead loaded its keys")
+		}
+	})
+	t.Run("refreshSettings", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		s := e.serve(t)
+		s.next(t, true)
+		if !e.collection(t, sub).ReadOnly {
+			t.Fatal("precondition: a subscribed calendar starts read only")
+		}
+		// A settings change makes the refresh replace the calendar's keys.
+		e.f.SetDefaultNotifications(sub, []protontest.Notification{{Type: 1, Trigger: "-PT30M"}}, nil)
+		boots := e.f.Calls("GET", "/calendar/v2/")
+		e.clk.advance(10*time.Minute + time.Second)
+		s.next(t, false)
+		if e.f.Calls("GET", "/calendar/v2/") == boots {
+			t.Fatal("the refresh read no bootstrap")
+		}
+		if !e.collection(t, sub).ReadOnly {
+			t.Error("a subscribed calendar became writable after a settings refresh")
+		}
+		s.stop(t)
+	})
 }

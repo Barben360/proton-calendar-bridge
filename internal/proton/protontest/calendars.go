@@ -28,6 +28,9 @@ type Calendar struct {
 	// Permissions is our member's bitmask (research H: 8 is Write); 0
 	// serves 127, every bit, as for an owned calendar.
 	Permissions int
+	// NoPrimaryKey flags no calendar key primary; TwoPrimaryKeys flags the
+	// retired key primary too (anomalies a client must fail closed on).
+	NoPrimaryKey, TwoPrimaryKeys bool
 	// The calendar's default reminders, as its bootstrap serves them; nil:
 	// one DISPLAY reminder, -PT1H for part-day events and -PT15H for full-day
 	// ones (see SetDefaultNotifications).
@@ -414,9 +417,16 @@ func (f *Fake) materialize(u *userCalendars, r *http.Request) bool {
 		if rec.encPass, err = msg.GetArmored(); err != nil {
 			return false
 		}
-		if rec.passSig, err = signPassphrase(rec, []byte(rec.passphrase), f.o.BadPassphraseSignature); err != nil {
+		signed := []byte(rec.passphrase)
+		if f.o.ReplayedPassphraseSignature {
+			signed = []byte("the passphrase of another calendar")
+		}
+		if rec.passSig, err = signPassphrase(rec, signed, f.o.BadPassphraseSignature); err != nil {
 			f.t.Errorf("protontest: sign passphrase: %v", err)
 			return false
+		}
+		if f.o.EmptyPassphraseSignature {
+			rec.passSig = ""
 		}
 		if rec.def.ForeignMemberFirst {
 			other, err := recipientRing(&calendarRec{def: Calendar{BrokenPassphrase: true}})
@@ -535,7 +545,7 @@ func (c *calendarRec) bootstrap() map[string]any {
 	keys := make([]any, 0, len(c.keys))
 	for i, k := range c.keys {
 		flags := 1 // active
-		if k.primary {
+		if (k.primary && !c.def.NoPrimaryKey) || (c.def.TwoPrimaryKeys && k.key == c.retired) {
 			flags = 3 // active and primary
 		}
 		keys = append(keys, map[string]any{"ID": "key" + strconv.Itoa(i), "CalendarID": c.id, "PassphraseID": "pass1", "PrivateKey": k.armored, "Flags": flags})

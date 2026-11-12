@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -427,5 +428,121 @@ func TestConcurrentUnlocksShareTheAddressKeySafely(t *testing.T) {
 			t.Fatalf("calendar %d: not writable after a concurrent unlock", i)
 		}
 		a.Close()
+	}
+}
+
+// Would fail if a stripped signature, or a genuine signature of ours over
+// another plaintext (a replay, research G), counted as verified; reads keep
+// working.
+func TestStrippedOrReplayedPassphraseSignatureIsNotVerified(t *testing.T) {
+	t.Parallel()
+	for name, o := range map[string]protontest.Options{
+		"empty":    {EmptyPassphraseSignature: true},
+		"replayed": {ReplayedPassphraseSignature: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, c, u := sessionWith(t, o)
+			id := f.AddCalendar(f.Username, protontest.Calendar{})
+			a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+			if err != nil {
+				t.Fatalf("must not be an unlock error: %v", err)
+			}
+			defer a.Close()
+			if a.PassphraseVerified || a.Writable() {
+				t.Errorf("verified %v, writable %v; want neither", a.PassphraseVerified, a.Writable())
+			}
+			decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
+		})
+	}
+}
+
+// The Signer is the address's primary key, not any key of its ring: the ring
+// here holds a stranger first, and the address lists it first, unflagged.
+func TestSignerIsThePrimaryKeyOfTheAddress(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{})
+	cal := firstCalendar(t, c)
+	extra, err := crypto.GenerateKey("x", "x@x", "x25519", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := extra.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr, err := crypto.NewKeyRing(extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range u.AddrKRs[cal.AddressID].GetKeys() {
+		if err := kr.AddKey(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u2 := *u
+	u2.AddrKRs = map[string]*crypto.KeyRing{}
+	for k, v := range u.AddrKRs {
+		u2.AddrKRs[k] = v
+	}
+	u2.AddrKRs[cal.AddressID] = kr
+	u2.Addresses = slices.Clone(u.Addresses)
+	for i, a := range u2.Addresses {
+		if a.ID == cal.AddressID {
+			u2.Addresses[i].Keys = append(gpa.Keys{{ID: "extra", PrivateKey: bin, Active: true}}, a.Keys...)
+		}
+	}
+	a, err := calendar.Unlock(t.Context(), c, &u2, cal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if got, want := fingerprints(a.Signer), fingerprints(f.AddressKeyRing()); !slices.Equal(got, want) {
+		t.Errorf("Signer = %v, want the address's primary key %v", got, want)
+	}
+}
+
+// Would fail if the permissions came from the first member of the bootstrap
+// (the foreign one, Permissions 1) rather than ours.
+func TestPermissionsAreOurOwnMembers(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{ForeignMemberFirst: true, Permissions: 8})
+	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.Permissions != 8 || !a.Writable() {
+		t.Errorf("Permissions = %d, writable %v; want our member's 8 and writable", a.Permissions, a.Writable())
+	}
+}
+
+// No flagged key, or two (ruling M4-R4), is an anomalous bootstrap: reads
+// work, there is no Primary and the calendar is not writable.
+func TestAnomalousPrimaryFlagsFailClosed(t *testing.T) {
+	t.Parallel()
+	for name, cal := range map[string]protontest.Calendar{
+		"no primary":  {NoPrimaryKey: true},
+		"two primary": {TwoPrimaryKeys: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, c, u := session(t)
+			id := f.AddCalendar(f.Username, cal)
+			a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			if a.Primary != nil || a.Writable() {
+				t.Errorf("Primary %v, writable %v; want none and read only", a.Primary, a.Writable())
+			}
+			if !a.PassphraseVerified {
+				t.Error("the passphrase itself is genuine")
+			}
+			decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
+		})
 	}
 }
