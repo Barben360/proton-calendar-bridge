@@ -1,5 +1,8 @@
 // Package session logs the lab harness into the dedicated Proton test
-// account and keeps the session between runs. It never unlocks keys.
+// account and keeps the session between runs. It never unlocks keys itself:
+// API hands a probe pcb's transport on the saved session, and Elevator the
+// locked scope for the key salts, proven with a password the probe gets from
+// the environment and never stores.
 package session
 
 import (
