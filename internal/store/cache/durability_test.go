@@ -161,3 +161,45 @@ func TestRemoveSyncsTheDirectory(t *testing.T) {
 		t.Errorf("pcb.db still there: %v", err)
 	}
 }
+
+// A version 2 file left by the old two-transaction migration (a crash
+// between them: the schema committed, the pins never backfilled) has rows
+// and an empty pins table: the next open backfills them, once (state-I6).
+func TestOpenBackfillsAnEmptyPinsTable(t *testing.T) {
+	path := Path(t.TempDir())
+	c := openAt(t, path, "acct-1")
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{prow("a", "S1", "C1", "", 1), prow("b", "S2", "C2", "A2", 2)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(bg, `DELETE FROM pins`); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	if info, err := Inspect(path); err != nil || info.Schema != 2 {
+		t.Fatalf("setup: %+v, %v; want a version 2 file", info, err)
+	}
+
+	var steps []string
+	migrateStep = func(s string) error { steps = append(steps, s); return nil }
+	defer func() { migrateStep = nil }()
+	c = openAt(t, path, "acct-1")
+	if want := []string{migratePins}; !slices.Equal(steps, want) {
+		t.Errorf("steps = %q, want %q", steps, want)
+	}
+	got := pins(t, c, "cal", "a", "b")
+	if got["a"] != (Pin{"S1", "C1", ""}) || got["b"] != (Pin{"S2", "C2", "A2"}) {
+		t.Errorf("pins after the open = %+v, want the stored rows' packets", got)
+	}
+	_ = c.Close()
+	steps = nil
+	_ = openAt(t, path, "acct-1")
+	if len(steps) != 0 {
+		t.Errorf("reopening ran %q, want nothing", steps)
+	}
+	// A file with no rows needs no pins: nothing runs.
+	steps = nil
+	_, _ = openNew(t)
+	if !slices.Equal(steps, []string{migrateSchema}) {
+		t.Errorf("a new file ran %q, want only the schema", steps)
+	}
+}

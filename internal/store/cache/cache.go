@@ -272,24 +272,25 @@ var migrateStep func(step string) error
 // transaction (state-I6): the tables, the pins of the stored rows and
 // user_version commit together or not at all, so a crash, SQLITE_BUSY or a
 // full disk half way leaves the file as it was and the next open migrates it
-// in full. A file with no pins table (version 1, or a version 2 file of a
-// build before the pins) has its stored rows pinned: they are the first
-// seen. Both are decided again under the write lock, since another process
-// may have migrated the file meanwhile.
+// in full. The stored rows are pinned (they are the first seen) when the
+// file has rows and no pins: a version 1 file, a version 2 file of a build
+// before the pins, or one the old two-transaction migration left with an
+// empty pins table (a crash between its two steps). The backfill keeps any
+// pin there is, so it is idempotent. Both are decided again under the write
+// lock, since another process may have migrated the file meanwhile.
 func (c *Cache) migrate(ctx context.Context, version int) error {
-	pinned, err := c.hasTable(ctx, "pins")
-	if err != nil || (version >= schemaVersion && pinned) {
+	backfill, err := needsPins(ctx, c.db, version)
+	if err != nil || (version >= schemaVersion && !backfill) {
 		return err
 	}
 	return c.tx(ctx, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 			return err
 		}
-		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'pins'`).Scan(&n); err != nil {
+		backfill, err := needsPins(ctx, tx, version)
+		if err != nil {
 			return err
 		}
-		hadPins := n > 0
 		if version < schemaVersion {
 			for _, ddl := range []string{schemaV1, schemaV2} {
 				if _, err := tx.ExecContext(ctx, ddl); err != nil {
@@ -303,7 +304,7 @@ func (c *Cache) migrate(ctx context.Context, version int) error {
 				return err
 			}
 		}
-		if !hadPins {
+		if backfill {
 			if err := backfillPins(ctx, tx); err != nil {
 				return err
 			}
@@ -313,6 +314,34 @@ func (c *Cache) migrate(ctx context.Context, version int) error {
 		}
 		return nil
 	})
+}
+
+// needsPins reports whether a file of schema version needs its stored rows
+// pinned: it has rows and no pins (no pins table, or an empty one), or it is
+// a version 2 file without the pins table at all (which the backfill
+// creates; a lower version gets it from the schema).
+func needsPins(ctx context.Context, q querier, version int) (bool, error) {
+	var pinsTable, eventsTable int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE name = 'pins'), count(*) FILTER (WHERE name = 'events')
+		FROM sqlite_master WHERE type = 'table'`).Scan(&pinsTable, &eventsTable); err != nil {
+		return false, err
+	}
+	if pinsTable == 0 && version >= schemaVersion {
+		return true, nil
+	}
+	if eventsTable == 0 {
+		return false, nil
+	}
+	var found bool
+	if pinsTable > 0 {
+		// The pins first: a file with pins (every file but the ones above)
+		// never reads its events here.
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pins)`).Scan(&found); err != nil || found {
+			return false, err
+		}
+	}
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM events)`).Scan(&found)
+	return found, err
 }
 
 func step(name string) error {

@@ -119,3 +119,57 @@ func TestOpenRemovesStaleTemporaryFiles(t *testing.T) {
 		}
 	}
 }
+
+// The key file's directory may be shared (a home directory): only .key-*
+// is swept there, never .tmp-* (another tool's file).
+func TestOpenSweepsOnlyKeyFilesInTheKeyDirectory(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	keyDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Secrets.KeyFile = filepath.Join(keyDir, "pcb.key")
+	old := t0.Add(-2 * time.Hour)
+	for _, name := range []string{".tmp-other-tool", ".key-1"} {
+		p := filepath.Join(keyDir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = e.open(t)
+	if _, err := os.Stat(filepath.Join(keyDir, ".tmp-other-tool")); err != nil {
+		t.Errorf("a .tmp-* file in the key file's directory was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, ".key-1")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".key-1 after the open: %v, want removed", err)
+	}
+}
+
+// The refusal to discard a store this pcb cannot read touches nothing: a
+// login waiting for its 2FA code is still waiting after it (state-I1).
+func TestLogoutRefusalKeepsAPendingLogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	res, err := e.svc.Login(t.Context(), e.req())
+	if err != nil || res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login = %+v, %v; want needs-totp", res, err)
+	}
+	if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.secrets().Path, []byte(`{"version":3,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.Logout(t.Context(), service.LogoutRequest{})
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "end the session in the Proton web app (Settings → Security → Sessions), then run pcb logout --yes" {
+		t.Errorf("refusal hint = %q", ee.Hint)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Phase != string(service.StateNeedsTOTP) || st.LoginExpires == nil {
+		t.Errorf("status after the refusal = %+v, %v; want the login still waiting for its code", st, err)
+	}
+}

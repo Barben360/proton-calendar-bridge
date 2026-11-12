@@ -142,7 +142,8 @@ var _ API = (*Local)(nil)
 
 // NewLocal returns the service for o. It touches no network, and no file
 // but the temporary files a crash left (atomicfile.RemoveStale, older than
-// an hour) in the state, config and key file directories, which it removes.
+// an hour), which it removes: .tmp-* and .key-* in the state and config
+// directories, .key-* only in the key file's directory.
 func NewLocal(o Options) (*Local, error) {
 	if o.Dirs.State == "" || o.Config.Proton.BaseURL == "" || o.Config.Secrets.KeyFile == "" {
 		return nil, usage("the service needs the state directory, the Proton base URL and the key file", "load the configuration with config.Load")
@@ -174,11 +175,14 @@ func NewLocal(o Options) (*Local, error) {
 	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
 	l.secrets.Log = l.serveLog
-	for _, dir := range []string{o.Dirs.State, o.Dirs.Config, filepath.Dir(o.Config.Secrets.KeyFile)} {
+	for _, dir := range []string{o.Dirs.State, o.Dirs.Config} {
 		if dir != "" {
-			atomicfile.RemoveStale(dir, o.Now())
+			atomicfile.RemoveStale(dir, o.Now(), atomicfile.TempPrefix, atomicfile.KeyPrefix)
 		}
 	}
+	// The key file's directory is the person's choice and may be shared
+	// (a home directory): only the key file's own temporary files go.
+	atomicfile.RemoveStale(filepath.Dir(o.Config.Secrets.KeyFile), o.Now(), atomicfile.KeyPrefix)
 	return l, nil
 }
 
@@ -276,17 +280,19 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	if l.closed.Load() {
 		return LogoutResult{}, errClosed()
 	}
-	l.dropPending(ctx)
-	l.expired = false
 	accounts, err := l.secrets.Load()
-	if errors.Is(err, store.ErrRolledBack) {
-		l.revokeHeld()
-	}
 	var ue *store.UnsupportedError
 	if errors.As(err, &ue) && !req.Discard {
-		// A newer pcb could still read it: never discarded unasked (state-I1).
+		// A newer pcb could still read it: never discarded unasked, and the
+		// refusal changes nothing, a login waiting for its code included
+		// (state-I1).
 		return LogoutResult{}, mustAct(ue.Explain()+", so pcb cannot revoke the Proton session",
 			"end the session in "+SessionsPage+", then run pcb logout --yes")
+	}
+	l.dropPending(ctx)
+	l.expired = false
+	if errors.Is(err, store.ErrRolledBack) {
+		l.revokeHeld()
 	}
 	l.dropClient()
 	if l.wipeHook != nil {

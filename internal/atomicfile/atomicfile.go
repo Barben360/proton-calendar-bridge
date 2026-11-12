@@ -53,23 +53,27 @@ func SyncDir(dir string) {
 // one a crash left: a write holds its file for milliseconds.
 const StaleAfter = time.Hour
 
-// stalePrefixes are the temporary files pcb creates next to the files it
+// The prefixes of the temporary files pcb creates next to the files it
 // replaces: Write's, and the key file's creation (seal.KeyFile, a raw copy
 // of the key).
-var stalePrefixes = []string{".tmp-", ".key-"}
+const (
+	TempPrefix = ".tmp-"
+	KeyPrefix  = ".key-"
+)
 
-// RemoveStale removes from dir the regular files named like pcb's
-// temporary files and last modified more than StaleAfter before now: a
-// process that died between creating one and renaming or removing it left
-// them, with the contents they were to hold. Best effort: a file it cannot
-// remove stays, and a missing dir is nothing to do.
-func RemoveStale(dir string, now time.Time) {
+// RemoveStale removes from dir the regular files named with one of
+// prefixes and last modified more than StaleAfter before now: a process
+// that died between creating one and renaming or removing it left them,
+// with the contents they were to hold. A symbolic link is never followed
+// nor removed. Best effort: a file it cannot remove stays, and a missing
+// dir is nothing to do.
+func RemoveStale(dir string, now time.Time, prefixes ...string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !slices.ContainsFunc(stalePrefixes, func(p string) bool { return strings.HasPrefix(e.Name(), p) }) {
+		if !e.Type().IsRegular() || !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(e.Name(), p) }) {
 			continue
 		}
 		info, err := e.Info()
