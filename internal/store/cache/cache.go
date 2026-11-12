@@ -599,9 +599,8 @@ func (w *writer) tombstone(id string, known map[string]string) error {
 	if err := w.tx.QueryRowContext(w.ctx, `DELETE FROM events WHERE calendar_id = ? AND id = ? RETURNING uid`, w.cal, id).Scan(&uid); err != nil {
 		return err
 	}
-	if _, err := w.tx.ExecContext(w.ctx, `DELETE FROM pins WHERE calendar_id = ? AND id = ?`, w.cal, id); err != nil {
-		return err
-	}
+	// The pin stays (ruling M4-R35): Proton never reuses an event ID, so
+	// a row hidden once and served again must match its first packets.
 	// The UID names the deleted CalDAV resource (ruling R16).
 	if _, err := w.tx.ExecContext(w.ctx, `INSERT INTO tombstones (calendar_id, id, uid, seq) VALUES (?, ?, ?, ?)
 		ON CONFLICT(calendar_id, id) DO UPDATE SET uid = excluded.uid, seq = excluded.seq`, w.cal, id, uid, w.next()); err != nil {
@@ -717,6 +716,14 @@ func (c *Cache) ApplyDelta(ctx context.Context, calID, cursor string, upserts []
 // nothing is written. Unlike ApplyDelta it never touches the feed cursor, so
 // the syncer's next pass re-reads the same rows and finds them unchanged.
 func (c *Cache) ApplyWrite(ctx context.Context, calID, uid string, rows []Row, at time.Time) (Changes, error) {
+	return c.ApplyWritePinned(ctx, calID, uid, rows, nil, at)
+}
+
+// ApplyWritePinned is ApplyWrite that first pins the rows of pins (row ID
+// to its packets) that have no pin yet: a create's rows are pinned with the
+// packets the write sent, never with the ones Proton echoed (ruling
+// M4-R36).
+func (c *Cache) ApplyWritePinned(ctx context.Context, calID, uid string, rows []Row, pins map[string]Pin, at time.Time) (Changes, error) {
 	if uid == "" {
 		return Changes{}, errors.New("cache: empty UID")
 	}
@@ -738,6 +745,11 @@ func (c *Cache) ApplyWrite(ctx context.Context, calID, uid string, rows []Row, a
 		own, err := w.idsOf(uid)
 		if err != nil {
 			return err
+		}
+		for id, p := range pins {
+			if err := w.pinAs(id, p); err != nil {
+				return err
+			}
 		}
 		keep := make(map[string]bool, len(rows))
 		for _, r := range rows {
@@ -895,14 +907,15 @@ func (c *Cache) DeferResync(ctx context.Context, calID, why string) error {
 	return nil
 }
 
-// DropCalendar removes a calendar with its rows and tombstones.
+// DropCalendar removes a calendar with its rows, tombstones and aliases.
+// Its pins stay until the epoch changes (ruling M4-R35): a calendar hidden
+// once and listed again must serve its rows' first packets.
 func (c *Cache) DropCalendar(ctx context.Context, id string) error {
 	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`DELETE FROM events WHERE calendar_id = ?`,
 			`DELETE FROM tombstones WHERE calendar_id = ?`,
 			`DELETE FROM aliases WHERE calendar_id = ?`,
-			`DELETE FROM pins WHERE calendar_id = ?`,
 			`DELETE FROM calendars WHERE id = ?`,
 		} {
 			if _, err := tx.ExecContext(ctx, q, id); err != nil {

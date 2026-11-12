@@ -165,7 +165,7 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 		}
 		describe := func(err error) string { return calendarError(ctx, err) }
 		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe,
-			Lock: func(calID string) func() { return l.cals.lock(calID, nil) }})
+			Lock: func(ctx context.Context, calID string) (func(), error) { return l.cals.lock(ctx, calID, nil) }})
 		if err != nil {
 			return err
 		}

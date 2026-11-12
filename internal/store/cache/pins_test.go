@@ -85,9 +85,10 @@ func TestPinsKeepTheFirstPacketsSeen(t *testing.T) {
 	}
 }
 
-// A pin dies with its row, whichever path deletes it: the row first seen
-// again afterwards is pinned anew.
-func TestPinsDieWithTheirRow(t *testing.T) {
+// A pin outlives its row, whichever path deletes it (ruling M4-R35):
+// Proton never reuses an event ID, so a row hidden once and served again
+// keeps its first packets as its pin.
+func TestPinsOutliveTheirRow(t *testing.T) {
 	c, _ := openNew(t)
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{prow("a", "S1", "", "", 1), prow("b", "SB", "", "", 1), prow("x", "SX", "", "", 1)}, time.Unix(100, 0)); err != nil {
 		t.Fatal(err)
@@ -98,25 +99,28 @@ func TestPinsDieWithTheirRow(t *testing.T) {
 	if _, err := c.ReplaceCalendar(bg, "cal", "c3", []Row{prow("x", "SX", "", "", 1)}, time.Unix(120, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got := pins(t, c, "cal", "a", "b", "x"); len(got) != 1 || got["x"].Shared != "SX" {
-		t.Fatalf("pins after deletions %+v, want x only", got)
-	}
 	if _, err := c.ApplyWrite(bg, "cal", "u1", nil, time.Unix(130, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got := pins(t, c, "cal", "x"); len(got) != 0 {
-		t.Fatalf("pin of a row ApplyWrite deleted: %+v", got)
+	want := map[string]Pin{"a": {Shared: "S1"}, "b": {Shared: "SB"}, "x": {Shared: "SX"}}
+	got := pins(t, c, "cal", "a", "b", "x")
+	for id, p := range want {
+		if got[id] != p {
+			t.Errorf("pin of %s after its row's deletion = %+v, want %+v", id, got[id], p)
+		}
 	}
-	if _, err := c.ApplyDelta(bg, "cal", "c4", []Row{prow("a", "S2", "", "", 2)}, nil, time.Unix(140, 0)); err != nil {
+	// Served again with other packets: the first stay.
+	if _, err := c.ApplyDelta(bg, "cal", "c4", []Row{prow("a", "S2", "C2", "", 2)}, nil, time.Unix(140, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if p := pins(t, c, "cal", "a")["a"]; p.Shared != "S2" {
-		t.Errorf("pin of a row seen again after its deletion = %+v", p)
+	if p := pins(t, c, "cal", "a")["a"]; p != want["a"] {
+		t.Errorf("pin of a row served again = %+v, want %+v", p, want["a"])
 	}
 }
 
-// Pins die with their calendar and with a new epoch (another account).
-func TestPinsDieWithTheCalendarAndTheEpoch(t *testing.T) {
+// Pins outlive their calendar's drop, and die with a new epoch (another
+// account).
+func TestPinsDieWithTheEpochOnly(t *testing.T) {
 	c, path := openNew(t)
 	for i, cal := range []string{"cal", "cal2"} {
 		if _, err := c.ReplaceCalendar(bg, cal, "c1", []Row{prow("a", "S"+strconv.Itoa(i), "", "", 1)}, time.Unix(100, 0)); err != nil {
@@ -126,17 +130,65 @@ func TestPinsDieWithTheCalendarAndTheEpoch(t *testing.T) {
 	if err := c.DropCalendar(bg, "cal2"); err != nil {
 		t.Fatal(err)
 	}
-	if got := pins(t, c, "cal2", "a"); len(got) != 0 {
-		t.Errorf("a dropped calendar kept its pins: %+v", got)
+	if p := pins(t, c, "cal2", "a")["a"]; p.Shared != "S1" {
+		t.Errorf("a dropped calendar's pin = %+v, want S1", p)
+	}
+	if _, err := c.ReplaceCalendar(bg, "cal2", "c2", []Row{prow("a", "S9", "", "", 2)}, time.Unix(110, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if p := pins(t, c, "cal2", "a")["a"]; p.Shared != "S1" {
+		t.Errorf("the pin of a calendar listed again = %+v, want S1", p)
 	}
 	if p := pins(t, c, "cal", "a")["a"]; p.Shared != "S0" {
-		t.Errorf("dropping cal2 removed cal's pin: %+v", p)
+		t.Errorf("cal's pin = %+v, want S0", p)
 	}
 	_ = c.Close()
 	other := openAt(t, path, "acct-2")
 	var n int
 	if err := other.db.QueryRowContext(bg, `SELECT count(*) FROM pins`).Scan(&n); err != nil || n != 0 {
 		t.Errorf("pins after an account switch = %d, %v", n, err)
+	}
+}
+
+// A write pins the rows it created with the packets it sent, not the ones
+// echoed (ruling M4-R36); a row already pinned keeps its pin.
+func TestApplyWritePinnedPinsWhatWasSent(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{prow("a", "S1", "", "", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	sent := map[string]Pin{"a": {Shared: "SENT-A"}, "n": {Shared: "SENT-N", Calendar: "SENT-C"}}
+	if _, err := c.ApplyWritePinned(bg, "cal", "u1", []Row{prow("a", "S1", "", "", 2), prow("n", "ECHO", "ECHO-C", "", 1)}, sent, time.Unix(110, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got := pins(t, c, "cal", "a", "n")
+	if got["a"] != (Pin{Shared: "S1"}) {
+		t.Errorf("an already pinned row: %+v", got["a"])
+	}
+	if got["n"] != sent["n"] {
+		t.Errorf("a created row's pin = %+v, want what was sent %+v", got["n"], sent["n"])
+	}
+}
+
+func TestSamePacket(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true},
+		{"wcBMA0", "wcBMA0", true},
+		{"AAECAwQ=", "AAEC\r\nAwQ", true},
+		{"AAECAwQ=", "AAECAwU=", false},
+		{"", "AAECAwQ=", false},
+		{"not base64!", "not base64!", true},
+		{"not base64!", "not base64?", false},
+	} {
+		if got := SamePacket(c.a, c.b); got != c.want {
+			t.Errorf("SamePacket(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+	if !(Pin{Shared: "AAECAwQ="}).Same(Pin{Shared: "AAECAwQ"}) || (Pin{Address: "AAECAwQ="}).Same(Pin{}) {
+		t.Error("Pin.Same compares the wrong fields")
 	}
 }
 

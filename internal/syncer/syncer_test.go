@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -878,5 +879,51 @@ func TestListingThatNeverSettlesUsesTheUnion(t *testing.T) {
 	}
 	if cal := cached(t, db, a); !cal.FullAt.Equal(t0.Add(time.Hour)) || cal.Error != ue.Error() {
 		t.Errorf("cached %+v, want the listing stored (FullAt %v) and the note recorded", cal, t0.Add(time.Hour))
+	}
+}
+
+// A calendar Proton no longer lists is dropped under its lock (Options.Lock),
+// as its pass would run: a write of it never stores rows beside the drop.
+// A lock that cannot be taken ends the pass with its error.
+func TestCalendarDropRunsUnderItsLock(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ctx := t.Context()
+	if err := db.PutCalendar(ctx, cache.Calendar{ID: "gone-cal", Name: "Old"}); err != nil {
+		t.Fatal(err)
+	}
+	cached := func() bool {
+		cals, err := db.Calendars(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(cals, func(c cache.Calendar) bool { return c.ID == "gone-cal" })
+	}
+	var locked []string
+	o := at(t0)
+	o.Lock = func(_ context.Context, calID string) (func(), error) {
+		locked = append(locked, calID)
+		if calID == "gone-cal" && !cached() {
+			t.Error("the calendar was dropped before its lock was taken")
+		}
+		return func() {
+			if calID == "gone-cal" && cached() {
+				t.Error("the lock was released before the drop")
+			}
+		}, nil
+	}
+	pass(t, c, db, o)
+	if !slices.Equal(locked, []string{"gone-cal", a}) {
+		t.Errorf("locked %v, want gone-cal then %s", locked, a)
+	}
+	if cached() {
+		t.Error("the calendar was not dropped")
+	}
+
+	stop := errors.New("lock not taken")
+	o.Lock = func(context.Context, string) (func(), error) { return nil, stop }
+	if _, err := syncer.Pass(ctx, c, db, o); !errors.Is(err, stop) {
+		t.Errorf("Pass with a lock that fails = %v, want its error", err)
 	}
 }

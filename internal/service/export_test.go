@@ -50,3 +50,9 @@ func AddressKeyTags(u *keys.Unlocked) []string { return addressKeyTags(u) }
 // another write or the syncer's pass of the calendar), before it waits. Set
 // it before Serve.
 func (l *Local) OnWriteWait(fn func(calID string)) { l.cals.waiting = fn }
+
+// LockCalendar takes calendar calID's write lock, as a write or the
+// syncer's pass of the calendar does.
+func (l *Local) LockCalendar(ctx context.Context, calID string) (func(), error) {
+	return l.cals.lock(ctx, calID, nil)
+}

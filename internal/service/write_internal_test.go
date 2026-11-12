@@ -7,7 +7,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 )
 
-// fieldsHold is the row-field half of a write's confirmation. Through the
+// fieldsHold is the row-field half of a write's confirmation: the
+// attendees' tokens and statuses, the notifications and the colour. Through the
 // fake every edit re-seals its parts, so the parts alone already differ
 // there; here each field is checked alone. The parts half (partsHold) is
 // covered by the executor's tests.
@@ -26,6 +27,18 @@ func TestFieldsHoldComparesEachFieldSent(t *testing.T) {
 	list := events.NotificationList{{Type: 1, Trigger: "-PT15M"}, {Type: 0, Trigger: "-PT1H"}}
 	body := func(n events.Optional[events.NotificationList], c events.Optional[string]) events.Body {
 		return events.Body{Notifications: n, Color: c}
+	}
+	sentAttendees := events.AttendeeList{{Token: "tok1", Status: 3}, {Token: "tok2", Status: 0}}
+	withAttendees := func(b events.Body) events.Body {
+		b.Attendees = sentAttendees
+		return b
+	}
+	stored := func(list ...map[string]any) map[string]any {
+		out := make([]any, len(list))
+		for i, a := range list {
+			out[i] = a
+		}
+		return map[string]any{"Attendees": out}
 	}
 	none, noColour := events.Null[events.NotificationList](), events.Null[string]()
 	reversed := []map[string]any{{"Type": 0, "Trigger": "-PT1H"}, {"Type": 1, "Trigger": "-PT15M"}}
@@ -49,6 +62,14 @@ func TestFieldsHoldComparesEachFieldSent(t *testing.T) {
 		{"colour sent, none stored", row(nil), body(none, events.Value("#3CBB3A")), false},
 		{"null colour: the row's kept", row(map[string]any{"Color": "#8080FF"}), body(none, noColour), true},
 		{"not a row", json.RawMessage(`[1]`), body(none, noColour), false},
+		{"attendees stored as sent, in another order", row(stored(map[string]any{"ID": "a2", "Token": "tok2", "Status": 0}, map[string]any{"ID": "a1", "Token": "tok1", "Status": 3})),
+			withAttendees(body(none, noColour)), true},
+		{"an attendee's status not stored", row(stored(map[string]any{"Token": "tok1", "Status": 0}, map[string]any{"Token": "tok2", "Status": 0})),
+			withAttendees(body(none, noColour)), false},
+		{"an attendee not stored", row(stored(map[string]any{"Token": "tok1", "Status": 3})), withAttendees(body(none, noColour)), false},
+		{"another token stored", row(stored(map[string]any{"Token": "tok1", "Status": 3}, map[string]any{"Token": "tok9", "Status": 0})),
+			withAttendees(body(none, noColour)), false},
+		{"attendees stored, none sent", row(stored(map[string]any{"Token": "tok1", "Status": 3})), body(none, noColour), false},
 	} {
 		if got := fieldsHold(c.row, c.body); got != c.want {
 			t.Errorf("%s: fieldsHold = %v, want %v", c.name, got, c.want)

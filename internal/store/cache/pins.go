@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 )
 
 // Pin is a row's key packets as the cache first stored them (ruling
-// M4-R30): Proton never changes a row's key packets (research B.5), so a
-// refreshed row whose packets differ from its pin is not trusted for a
-// write. "" stands for a packet the row lacks.
+// M4-R30), or as pcb sent them for a row it created (M4-R36): Proton never
+// changes a row's key packets (research B.5), so a refreshed row whose
+// packets differ from its pin is not trusted for a write. "" stands for a
+// packet the row lacks. A pin outlives its row and its calendar, and dies
+// only with the epoch (M4-R35): Proton never reuses an event ID.
 type Pin struct {
 	Shared, Calendar, Address string
 }
@@ -36,12 +39,45 @@ func PinOf(raw json.RawMessage) Pin {
 	return Pin{Shared: field("SharedKeyPacket"), Calendar: field("CalendarKeyPacket"), Address: field("AddressKeyPacket")}
 }
 
+// SamePacket reports whether two spellings of a key packet are the same
+// packet: equal once decoded from base64, whitespace and padding aside
+// (Proton may wrap or re-pad what it echoes); compared as written when
+// either does not decode.
+func SamePacket(a, b string) bool {
+	da, okA := decodePacket(a)
+	db, okB := decodePacket(b)
+	if okA && okB {
+		return bytes.Equal(da, db)
+	}
+	return a == b
+}
+
+func decodePacket(s string) ([]byte, bool) {
+	s = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, s)
+	b, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
+	return b, err == nil
+}
+
+// Same reports whether p and q hold the same packets (SamePacket).
+func (p Pin) Same(q Pin) bool {
+	return SamePacket(p.Shared, q.Shared) && SamePacket(p.Calendar, q.Calendar) && SamePacket(p.Address, q.Address)
+}
+
 // pin records r's key packets unless its row already has a pin: the first
 // seen wins.
 func (w *writer) pin(r Row) error {
-	p := PinOf(r.Raw)
+	return w.pinAs(r.ID, PinOf(r.Raw))
+}
+
+// pinAs records p as row id's pin unless it already has one.
+func (w *writer) pinAs(id string, p Pin) error {
 	_, err := w.tx.ExecContext(w.ctx, `INSERT OR IGNORE INTO pins (calendar_id, id, shared, calendar, address) VALUES (?, ?, ?, ?, ?)`,
-		w.cal, r.ID, p.Shared, p.Calendar, p.Address)
+		w.cal, id, p.Shared, p.Calendar, p.Address)
 	return err
 }
 
