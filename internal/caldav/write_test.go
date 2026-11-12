@@ -620,23 +620,25 @@ func TestALaterUIDMovesAsideForAnAlias(t *testing.T) {
 	}
 }
 
-// Proton unavailable or rate limiting is a 503 with Retry-After (Proton's
-// own wait when it gave one), never a 4xx, and the write is never sent
-// again; a service that does not serve (no pcb serve) is a 503 too.
+// Proton unavailable, rate limiting or asking for a human verification
+// (422, code 9001: ruling M4-R44) is a 503 with Retry-After (Proton's own
+// wait when it gave one), never a 4xx, and the write is never sent again; a
+// service that does not serve (no pcb serve) is a 503 too.
 func TestUnavailableWritesAre503WithRetryAfter(t *testing.T) {
 	t.Parallel()
 	var cal string
 	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
 	syncPath := "/calendar/v1/" + cal + "/events/sync"
 	for _, tc := range []struct {
-		status, retry int
-		want          string
+		status, code, retry int
+		want                string
 	}{
-		{http.StatusServiceUnavailable, 0, "30"},
-		{http.StatusTooManyRequests, 7, "7"},
+		{http.StatusServiceUnavailable, 0, 0, "30"},
+		{http.StatusTooManyRequests, 0, 7, "7"},
+		{http.StatusUnprocessableEntity, 9001, 0, "30"},
 	} {
 		before := r.sent()
-		r.f.FailNext(http.MethodPut, syncPath, tc.status, 0, tc.retry)
+		r.f.FailNext(http.MethodPut, syncPath, tc.status, tc.code, tc.retry)
 		rec := r.put(objPath(cal, "busy@x"), thunderbird("busy@x", "Busy"), "If-None-Match", "*")
 		wantStatus(t, rec, http.StatusServiceUnavailable)
 		if got := rec.Header().Get("Retry-After"); got != tc.want {

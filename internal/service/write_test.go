@@ -1989,3 +1989,240 @@ func TestRefreshedGateIsTheLastDecision(t *testing.T) {
 		t.Errorf("undecided after the refresh's decision: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
 	}
 }
+
+// Ruling M4-R42: a write whose preparation (the wait for the calendar's
+// lock, the refresh from Proton) runs past its budget answers unavailable
+// (ErrWriteNotSent: CalDAV 503) while its caller still waits, logged, and
+// sends nothing: a Sync call sent so late could land after the client gave
+// up on the answer.
+func TestSlowPreparationSendsNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		slow func(t *testing.T, r *rig)
+	}{
+		{"the calendar's lock held", func(t *testing.T, r *rig) {
+			unlock, err := r.svc.LockCalendar(t.Context(), r.cal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(unlock)
+		}},
+		{"the refresh unanswered", func(_ *testing.T, r *rig) {
+			r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+				if r.isReadBack(req) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}
+				return send()
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+				f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+			})
+			r.svc.SetPreSendBudget(50 * time.Millisecond)
+			r.start(t)
+			obj := r.object(t, "a@x")
+			body := edit(t, obj.Data, "SUMMARY:Lunch", "SUMMARY:Dinner")
+			tc.slow(t, r)
+			for _, write := range []struct {
+				method string
+				run    func() error
+			}{
+				{http.MethodPut, func() error {
+					_, err := r.svc.PutObject(t.Context(), r.cal, "a@x.ics", body, service.Precondition{IfMatch: obj.ETag})
+					return err
+				}},
+				{http.MethodDelete, func() error {
+					return r.svc.DeleteObject(t.Context(), r.cal, "a@x.ics", service.Precondition{IfMatch: obj.ETag})
+				}},
+			} {
+				done := make(chan error, 1)
+				go func() { done <- write.run() }()
+				select {
+				case err := <-done:
+					_ = wantExit(t, err, exitcode.Blocked)
+					wantIs(t, err, service.ErrWriteNotSent)
+				case <-time.After(waitLimit):
+					t.Fatalf("%s still waits past its budget", write.method)
+				}
+			}
+			if n := r.sendCalls(); n != 0 {
+				t.Errorf("%d requests reached the sync endpoint", n)
+			}
+			if !strings.Contains(r.logs.String(), "a write was not sent") {
+				t.Errorf("the log does not name the late preparation:\n%s", r.logs)
+			}
+		})
+	}
+}
+
+// Ruling M4-R43: once the read-back shows the write landed, a cache that
+// cannot store the rows read back does not change the answer: success,
+// logged; the next sync pass stores what Proton holds.
+func TestLandedWriteSurvivesACacheFailure(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+	})
+	var failing sync.Map
+	r.svc.SetWriteFault(func(stage string) error {
+		if _, ok := failing.Load(stage); ok {
+			return errors.New("disk I/O error")
+		}
+		return nil
+	})
+	r.start(t)
+	obj := r.object(t, "a@x")
+	failing.Store("store", true)
+	if _, err := r.put(t, "a@x.ics", edit(t, obj.Data, "SUMMARY:Lunch", "SUMMARY:Dinner"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("PutObject = %v, want success: Proton holds the write", err)
+	}
+	if n := r.sendCalls(); n != 1 {
+		t.Errorf("%d requests reached the sync endpoint, want 1", n)
+	}
+	if !strings.Contains(r.logs.String(), "a write landed but the cache could not store it") {
+		t.Errorf("the log does not name the cache failure:\n%s", r.logs)
+	}
+	failing.Delete("store")
+	r.s.next(t, false)
+	contains(t, "the object after the next pass", r.object(t, "a@x").Data, "SUMMARY:Dinner")
+}
+
+// Ruling M4-R43: a create whose rows cannot be pinned when Proton answers
+// still reads back, and the answer follows the read-back: 201, logged, the
+// row pinned with the packets sent when the read-back stores it.
+func TestPinFailureStillReadsBack(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil)
+	r.svc.SetWriteFault(func(stage string) error {
+		if stage == "pin" {
+			return errors.New("database is locked")
+		}
+		return nil
+	})
+	r.start(t)
+	res, err := r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+	if err != nil || !res.Created {
+		t.Fatalf("PutObject = %+v, %v; want created", res, err)
+	}
+	if !strings.Contains(r.logs.String(), "could not be pinned before its read-back") {
+		t.Errorf("the log does not name the missing pin:\n%s", r.logs)
+	}
+	rows := r.proton(t, "n@x")
+	if len(rows) != 1 {
+		t.Fatalf("Proton holds %d rows, want 1", len(rows))
+	}
+	if pins := r.pins(t, rows[0].ID); len(pins) != 1 || pins[rows[0].ID] != cache.PinOf(rows[0].Raw) {
+		t.Errorf("pins %+v, want the created row's packets", pins)
+	}
+	contains(t, "the created object", r.object(t, "n@x").Data, "SUMMARY:New")
+}
+
+// Ruling M4-R44: Proton asking for a human verification (422, code 9001) on
+// a write's calls is unavailable (CalDAV 503), logged as needing a person,
+// never a refusal: on the Sync call (nothing applied) and on the refresh
+// (nothing sent).
+func TestHumanVerificationIsUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, method string
+		path         func(r *rig) string
+		sent         int
+	}{
+		{"on the Sync call", http.MethodPut, func(r *rig) string { return r.syncPath() }, 1},
+		{"on the refresh", http.MethodGet, func(r *rig) string { return "/calendar/v1/" + r.cal + "/events" }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, protontest.Options{}, nil).start(t)
+			r.f.FailNext(tc.method, tc.path(r), http.StatusUnprocessableEntity, api.CodeHumanVerification, 0)
+			_, err := r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+			_ = wantExit(t, err, exitcode.Blocked)
+			wantIs(t, err, service.ErrHumanVerification)
+			var wr *service.WriteRefusal
+			if errors.As(err, &wr) {
+				t.Errorf("a refusal %s: a human verification is never a 403", wr.Code)
+			}
+			if n := r.sendCalls(); n != tc.sent {
+				t.Errorf("%d requests reached the sync endpoint, want %d", n, tc.sent)
+			}
+			if n := len(r.proton(t, "n@x")); n != 0 {
+				t.Errorf("Proton holds %d rows", n)
+			}
+			if !strings.Contains(r.logs.String(), "Proton asks for a human verification") {
+				t.Errorf("the log does not say a person is needed:\n%s", r.logs)
+			}
+		})
+	}
+}
+
+// Ruling M4-R45: a UID listing that holds rows of another UID (Proton's
+// filter not exact) does not block the write: those rows are ignored,
+// logged by ID without content, and neither stored under the UID written
+// nor sent anything.
+func TestUIDListingKeepsOnlyThatUID(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+		f.AddEvent(cal, protontest.Event{UID: "b@x", Start: base, End: base + 3600, Color: green, Card: card("b@x", "Secret topic", base)})
+	}).start(t)
+	other := r.proton(t, "b@x")[0]
+	var stranger map[string]any
+	dec := json.NewDecoder(bytes.NewReader(other.Raw))
+	dec.UseNumber()
+	if err := dec.Decode(&stranger); err != nil {
+		t.Fatal(err)
+	}
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		resp, err := send()
+		if err != nil || !r.isReadBack(req) || req.URL.Query().Get("UID") != "a@x" {
+			return resp, err
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var page map[string]any
+		d := json.NewDecoder(bytes.NewReader(body))
+		d.UseNumber()
+		if err := d.Decode(&page); err != nil {
+			return nil, err
+		}
+		rows, _ := page["Events"].([]any)
+		page["Events"] = append(rows, stranger)
+		out, err := json.Marshal(page)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(out))
+		resp.ContentLength = int64(len(out))
+		resp.Header.Del("Content-Length")
+		return resp, nil
+	})
+	defer r.tr.set(nil)
+	objB := r.object(t, "b@x")
+	obj := r.object(t, "a@x")
+	if _, err := r.put(t, "a@x.ics", edit(t, obj.Data, "SUMMARY:Lunch", "SUMMARY:Dinner"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("PutObject = %v, want success: the other UID's row is not the object", err)
+	}
+	if calls := r.f.SyncCalls(); len(calls) != 1 {
+		t.Fatalf("%d sync calls, want 1", len(calls))
+	}
+	contains(t, "the written object", r.object(t, "a@x").Data, "SUMMARY:Dinner")
+	lacks(t, "the written object", r.object(t, "a@x").Data, "Secret topic")
+	if got := r.object(t, "b@x"); got.ETag != objB.ETag || got.Missing {
+		t.Errorf("the other UID's object changed: %+v", got)
+	}
+	log := r.logs.String()
+	if !strings.Contains(log, "rows of another UID") || !strings.Contains(log, other.ID) {
+		t.Errorf("the log does not name the ignored row:\n%s", log)
+	}
+	if strings.Contains(log, "Secret topic") || strings.Contains(log, "b@x") {
+		t.Errorf("the log carries event content:\n%s", log)
+	}
+}

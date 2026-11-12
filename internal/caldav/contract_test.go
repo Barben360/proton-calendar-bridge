@@ -188,6 +188,10 @@ type stub struct {
 	writes   []write
 	putRes   service.PutResult
 	writeErr error
+	// slow, when set, runs in each write before it answers, outside the
+	// lock; its error is the write's (a write that outlasts the listener's
+	// timeouts, or whose context ends meanwhile).
+	slow func(ctx context.Context) error
 	// misnamed makes ObjectsByName answer each object under another name
 	// (a service that broke its contract).
 	misnamed bool
@@ -342,7 +346,12 @@ func (s *stub) ObjectsByName(ctx context.Context, calID string, names []string) 
 	return out, nil
 }
 
-func (s *stub) PutObject(_ context.Context, calID, name string, body []byte, cond service.Precondition) (service.PutResult, error) {
+func (s *stub) PutObject(ctx context.Context, calID, name string, body []byte, cond service.Precondition) (service.PutResult, error) {
+	if s.slow != nil {
+		if err := s.slow(ctx); err != nil {
+			return service.PutResult{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writes = append(s.writes, write{method: http.MethodPut, calID: calID, name: name, body: slices.Clone(body), cond: cond})
@@ -352,7 +361,12 @@ func (s *stub) PutObject(_ context.Context, calID, name string, body []byte, con
 	return s.putRes, nil
 }
 
-func (s *stub) DeleteObject(_ context.Context, calID, name string, cond service.Precondition) error {
+func (s *stub) DeleteObject(ctx context.Context, calID, name string, cond service.Precondition) error {
+	if s.slow != nil {
+		if err := s.slow(ctx); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writes = append(s.writes, write{method: http.MethodDelete, calID: calID, name: name, cond: cond})
@@ -2170,5 +2184,67 @@ func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
 		if len(ms.responses) != want {
 			t.Errorf("one synced, Depth %s: %d responses, want %d", depth, len(ms.responses), want)
 		}
+	}
+}
+
+// Ruling M4-R42: a write may outlast the listener's timeouts (Proton slow
+// or rate limiting). PUT and DELETE extend their connection's write
+// deadline, so a write that landed still delivers its 201 or 204; the read
+// timeout does not cut the request's context meanwhile (a cut context is a
+// 503 here, as the service would give).
+func TestSlowWriteStillDeliversItsAnswer(t *testing.T) {
+	t.Parallel()
+	const timeout = 250 * time.Millisecond
+	s := newStub()
+	s.putRes = service.PutResult{Created: true}
+	s.slow = func(ctx context.Context) error {
+		select {
+		case <-time.After(3 * timeout): // past both listener timeouts
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	srv := httptest.NewUnstartedServer(caldav.Handler(s, caldav.Options{}))
+	srv.Config.ReadTimeout, srv.Config.WriteTimeout = timeout, timeout
+	srv.Start()
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		method string
+		body   []byte
+		hdr    []string
+		want   int
+	}{
+		{http.MethodPut, ics("new@x", "New"), []string{"Content-Type", "text/calendar", "If-None-Match", "*"}, http.StatusCreated},
+		{http.MethodDelete, nil, nil, http.StatusNoContent},
+	} {
+		req, err := http.NewRequestWithContext(t.Context(), tc.method, srv.URL+objPath(workID, "new@x"), bytes.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(tc.hdr); i += 2 {
+			req.Header.Set(tc.hdr[i], tc.hdr[i+1])
+		}
+		resp, err := srv.Client().Do(authed(req))
+		if err != nil {
+			t.Errorf("%s: %v: the answer of a write that took longer than the listener's timeouts was lost", tc.method, err)
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.method, resp.StatusCode, tc.want)
+		}
+	}
+	if n := len(s.writeCalls()); n != 2 {
+		t.Errorf("%d writes reached the service, want 2", n)
+	}
+}
+
+// Ruling M4-R42: the connection of a write stays usable for at least
+// 150 s, longer than the service may take.
+func TestWriteBudgetCoversTheService(t *testing.T) {
+	t.Parallel()
+	if caldav.WriteBudget < 150*time.Second || caldav.WriteBudget <= service.MaxWriteDuration {
+		t.Errorf("write budget %v: want at least 150 s and more than the service's %v", caldav.WriteBudget, service.MaxWriteDuration)
 	}
 }

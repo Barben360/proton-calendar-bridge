@@ -21,6 +21,10 @@ package caldav
 //	503 + Retry-After for anything else: the service is not ready, Proton is
 //	    unavailable or rate limiting (its own Retry-After), or the write is
 //	    not confirmed (ruling M3-R22: never a 4xx for a state that passes)
+//
+// A write may run longer than the listener's timeouts allow a read
+// (ruling M4-R42): PUT and DELETE extend their connection's write deadline
+// to writeBudget, so a write that landed delivers its answer.
 
 import (
 	"errors"
@@ -28,9 +32,25 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
+
+// writeBudget is how long a PUT or DELETE keeps its connection usable: the
+// service's bound on a write (lock wait, refresh and plan, Sync call,
+// read-back) and a margin for sending the answer (ruling M4-R42: at least
+// 150 s).
+const writeBudget = service.MaxWriteDuration + 40*time.Second
+
+// extendDeadline gives a write's answer writeBudget from now, past the
+// listener's write timeout, so a write that landed still delivers its
+// answer. The read timeout needs nothing: net/http clears the read
+// deadline once the body is read, so it never ends the request's context.
+// A writer without deadlines (a test recorder) is left as it is.
+func extendDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeBudget))
+}
 
 // put answers PUT on an object.
 func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
@@ -47,6 +67,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 	if !ok {
 		return
 	}
+	extendDeadline(w)
 	c, ok := s.collection(w, r, t.calseg)
 	if !ok {
 		return
@@ -74,6 +95,7 @@ func (s *server) delete(w http.ResponseWriter, r *http.Request, t target) {
 		empty(w, http.StatusPreconditionFailed)
 		return
 	}
+	extendDeadline(w)
 	c, ok := s.collection(w, r, t.calseg)
 	if !ok {
 		return

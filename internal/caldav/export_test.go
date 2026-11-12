@@ -14,3 +14,6 @@ func HandlerWithDataCap(api service.API, o Options, n int) http.Handler {
 	s.dataCap = n
 	return s
 }
+
+// WriteBudget is how long a PUT or DELETE keeps its connection usable.
+const WriteBudget = writeBudget

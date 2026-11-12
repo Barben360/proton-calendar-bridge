@@ -84,6 +84,16 @@ var (
 	// edit): the rows read back do not show it. The cache holds what Proton
 	// has, if it could be read (CalDAV: 503, the client reads again).
 	ErrWriteNotConfirmed = errors.New("the write was not confirmed by Proton")
+	// ErrWriteNotSent: the write's preparation (the wait for the
+	// calendar's lock, the keys, the refresh from Proton, the plan) ran
+	// past its budget, so nothing was sent (ruling M4-R42). Unavailable
+	// (CalDAV: 503).
+	ErrWriteNotSent = errors.New("the write was not sent: preparing it took too long")
+	// ErrHumanVerification: Proton asks for a human verification before it
+	// answers the write's calls (422, code 9001); a person must complete it
+	// in the Proton web app (ruling M4-R44). Unavailable (CalDAV: 503),
+	// never a refusal.
+	ErrHumanVerification = errors.New("a human verification is needed before Proton accepts writes")
 )
 
 // UIDConflictError: the PUT's UID lives at another name of the calendar,
@@ -110,9 +120,29 @@ const (
 // maxNameBytes bounds a client-chosen resource name.
 const maxNameBytes = 255
 
-// readBackTimeout bounds the read-back of a write once its Sync call left:
-// it runs even when the caller hung up, so the cache holds what Proton has.
-const readBackTimeout = 30 * time.Second
+// A write's time budget (ruling M4-R42): it runs within MaxWriteDuration,
+// which the CalDAV adapter keeps its answer deliverable for, past the
+// listener's own write timeout.
+const (
+	// preSendBudget bounds what precedes the Sync call: the wait for the
+	// calendar's lock (the syncer may hold it through a GET's backoff),
+	// the keys, the refresh from Proton and the plan. Past it the write
+	// answers ErrWriteNotSent and sends nothing.
+	preSendBudget = 20 * time.Second
+	// sendBudget bounds the Sync call, a renewed session and the one
+	// resend after a 401 included; past it the call is ambiguous and read
+	// back.
+	sendBudget = 60 * time.Second
+	// readBackTimeout bounds what follows the Sync call: the pins, the
+	// read-back and the store. It runs even when the caller hung up, so the
+	// cache holds what Proton has.
+	readBackTimeout = 30 * time.Second
+)
+
+// MaxWriteDuration bounds how long PutObject and DeleteObject run once
+// they have the body: the CalDAV adapter keeps the response writable at
+// least that long (ruling M4-R42).
+const MaxWriteDuration = preSendBudget + sendBudget + readBackTimeout
 
 func writeFail(code exitcode.Code, cause error, hint string) *exitcode.Error {
 	return &exitcode.Error{Code: code, Err: cause, Hint: hint}
@@ -152,6 +182,21 @@ func uidConflict(href string) error {
 
 func refusal(r *WriteRefusal) error {
 	return writeFail(exitcode.Usage, r, "pcb does not write this change to Proton; make it in the Proton web app")
+}
+
+func notSentInTime() error {
+	return writeFail(exitcode.Blocked, ErrWriteNotSent, "retry the change: the calendar was busy or Proton was slow")
+}
+
+func humanVerification() error {
+	return writeFail(exitcode.Blocked, ErrHumanVerification, "open the Proton web app from this network and complete its verification, then retry the change")
+}
+
+// humanVerificationAsked reports whether err is Proton asking for a human
+// verification (422, code 9001).
+func humanVerificationAsked(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.Code == api.CodeHumanVerification
 }
 
 func notConfirmed() error {
@@ -459,18 +504,41 @@ func movedBy(v cache.View, n nameIndex, uid string) (string, error) {
 }
 
 // listRows reads uid's rows from Proton (ListByUID), on the session of
-// Serve's account.
+// Serve's account. Only the rows of uid itself are kept (ruling M4-R45):
+// a row of another UID in the answer is not the object written, it is
+// ignored and logged (its ID, no content).
 func (l *Local) listRows(ctx context.Context, w *write, uid string) ([]events.Row, error) {
 	var rows []events.Row
+	verify := false
 	err := l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
 		if acc.ID != w.account {
 			return otherAccount()
 		}
 		var err error
 		rows, err = events.ListByUID(ctx, c, w.calID, uid)
+		verify = humanVerificationAsked(err)
 		return err
 	})
-	return rows, err
+	if verify {
+		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
+		return nil, humanVerification()
+	}
+	if err != nil {
+		return nil, err
+	}
+	own := rows[:0:0]
+	var other []string
+	for _, r := range rows {
+		if r.UID == uid {
+			own = append(own, r)
+		} else {
+			other = append(other, r.ID)
+		}
+	}
+	if len(other) > 0 {
+		w.log.Warn("Proton listed rows of another UID for a write's UID: they are ignored", "calendar", w.calID, "rows", len(other), "ids", strings.Join(other, ","))
+	}
+	return own, nil
 }
 
 func otherAccount() error {
@@ -658,32 +726,109 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	if err != nil {
 		return PutResult{}, planError(asRefusal(err))
 	}
-	w, err := l.beginWrite(ctx, calID)
+	pre, cancel := l.preSendContext(ctx)
+	defer cancel()
+	w, err := l.beginWrite(pre, calID)
 	if err != nil {
-		return PutResult{}, err
+		return PutResult{}, l.unsent(ctx, pre, calID, err)
 	}
 	defer w.unlock()
-
-	fresh, err := l.listRows(ctx, w, in.UID)
+	st, p, err := l.preparePut(ctx, pre, w, name, in, cond)
 	if err != nil {
+		return PutResult{}, l.unsent(ctx, pre, calID, err)
+	}
+	if len(p.Ops) == 0 {
+		return PutResult{}, nil
+	}
+	if err := l.execute(ctx, w, in.UID, st.group, p, false); err != nil {
 		return PutResult{}, err
 	}
-	pins, err := l.pinned(ctx, w, rowIDs(fresh))
+	return PutResult{Created: p.Created}, nil
+}
+
+// preSendBudget is the budget of a write's preparation: preSendBudget, or
+// the one a test set.
+func (l *Local) preSendBudget() time.Duration {
+	if l.preSend > 0 {
+		return l.preSend
+	}
+	return preSendBudget
+}
+
+// errPreSendSpent is the cause of a write's preparation context once its
+// budget is spent.
+var errPreSendSpent = errors.New("the write's pre-send budget is spent")
+
+// preSendContext is ctx, ended with cause errPreSendSpent once the pre-send
+// budget is spent. It has no deadline on purpose: a rate limiter refuses at
+// once a wait it predicts to pass a deadline, which would end the
+// preparation before its budget did, with another cause.
+func (l *Local) preSendContext(ctx context.Context) (context.Context, func()) {
+	pre, cancel := context.WithCancelCause(ctx)
+	t := time.AfterFunc(l.preSendBudget(), func() { cancel(errPreSendSpent) })
+	return pre, func() {
+		t.Stop()
+		cancel(nil)
+	}
+}
+
+// unsent maps what a write's preparation (on pre, from preSendContext)
+// returned: once the budget is spent while the caller still waits,
+// anything but a definite answer of the client's class (412, 409, 403, 404)
+// is ErrWriteNotSent, logged. Nothing was sent either way.
+func (l *Local) unsent(ctx, pre context.Context, calID string, err error) error {
+	if !errors.Is(context.Cause(pre), errPreSendSpent) || ctx.Err() != nil || exitcode.From(err) == exitcode.Usage {
+		return err
+	}
+	l.serveLog().Warn("a write was not sent: preparing it took longer than its budget (the calendar's lock or Proton's answers)",
+		"calendar", calID, "budget", l.preSendBudget())
+	return notSentInTime()
+}
+
+// sendable is pre's error, mapped, once it ended: the Sync call is never
+// sent past the pre-send budget (ruling M4-R42).
+func (l *Local) sendable(pre context.Context) error {
+	if err := pre.Err(); err != nil {
+		return l.fail(err)
+	}
+	return nil
+}
+
+// serveLog is Serve's logger, a discarding one outside Serve.
+func (l *Local) serveLog() *slog.Logger {
+	l.smu.RLock()
+	defer l.smu.RUnlock()
+	if l.served == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return l.served.log
+}
+
+// preparePut is PutObject up to the Sync call, on pre (ctx with the
+// pre-send budget): the refresh, the checks, the plan, and for a create at
+// a name of the client's, its alias. It returns the object's state and the
+// plan; the plan's Ops are empty when there is nothing to send.
+func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in ical.Incoming, cond Precondition) (objectState, planned, error) {
+	fresh, err := l.listRows(pre, w, in.UID)
 	if err != nil {
-		return PutResult{}, err
+		return objectState{}, planned{}, err
+	}
+	pins, err := l.pinned(pre, w, rowIDs(fresh))
+	if err != nil {
+		return objectState{}, planned{}, err
 	}
 	if id, field := changedPackets(pins, fresh); id != "" {
 		// Not stored either: the sync passes store what Proton serves, the
 		// pin stays what was first seen.
-		w.log.Warn("refusing a write: a row's key packet changed since pcb first stored it", "calendar", calID, "row", id, "field", field)
-		return PutResult{}, refusal(refused(RefuseUntrustedKey, "a key packet of the event changed since pcb read it"))
+		w.log.Warn("refusing a write: a row's key packet changed since pcb first stored it", "calendar", w.calID, "row", id, "field", field)
+		return objectState{}, planned{}, refusal(refused(RefuseUntrustedKey, "a key packet of the event changed since pcb read it"))
 	}
-	if err := l.storeRows(ctx, w, in.UID, fresh); err != nil {
-		return PutResult{}, err
+	if err := l.storeRows(pre, w, in.UID, fresh); err != nil {
+		return objectState{}, planned{}, err
 	}
-	st, err := l.read(ctx, w, in.UID, name)
+	st, err := l.read(pre, w, in.UID, name)
 	if err != nil {
-		return PutResult{}, err
+		return objectState{}, planned{}, err
 	}
 	// One object per UID, one UID per name: the UID served at another
 	// name, or the name serving another UID, is a conflict naming the
@@ -691,55 +836,56 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	// of a UID with no rows, or the alias of a deleted UID (ruling M4-R22),
 	// is free.
 	if href := st.hrefOf(in.UID); st.live && href != name {
-		return PutResult{}, uidConflict(href)
+		return objectState{}, planned{}, uidConflict(href)
 	}
 	if st.nameUID != "" && st.nameUID != in.UID && st.nameLive && st.hrefOf(st.nameUID) == name {
-		return PutResult{}, uidConflict(name)
+		return objectState{}, planned{}, uidConflict(name)
 	}
 	// Another UID's alternative name is reserved for it (ruling M4-R38): an
 	// alias there could later stand where that UID must be served.
 	if alt, ok := uidOfAlternativeName(name); ok && alt != in.UID {
-		return PutResult{}, refusal(refused(RefuseBadName, "the resource name is reserved for another event"))
+		return objectState{}, planned{}, refusal(refused(RefuseBadName, "the resource name is reserved for another event"))
 	}
 	etag, err := l.etagNow(w, st.group)
 	if err != nil {
-		return PutResult{}, err
+		return objectState{}, planned{}, err
 	}
 	if err := checkPrecondition(cond, st.live, etag); err != nil {
-		return PutResult{}, err
+		return objectState{}, planned{}, err
 	}
 	p, err := l.plan(w, st.group, func(g Group, a *calendar.Access) (WritePlan, error) {
 		return Plan(g, in, writeDefaults(a, l.o.Now()))
 	})
 	if err != nil {
-		return PutResult{}, err
+		return objectState{}, planned{}, err
 	}
 	if len(p.Notes) > 0 {
-		w.log.Debug("write normalised", "calendar", calID, "notes", strings.Join(p.Notes, "; "))
+		w.log.Debug("write normalised", "calendar", w.calID, "notes", strings.Join(p.Notes, "; "))
 	}
 	if len(p.Ops) == 0 {
-		return PutResult{}, nil
+		return st, p, nil
+	}
+	if err := l.sendable(pre); err != nil {
+		return objectState{}, planned{}, err
 	}
 	if p.Created && st.hrefOf(in.UID) != name {
 		if !validName(name) {
-			return PutResult{}, refusal(refused(RefuseBadName, "the resource name cannot name an event"))
+			return objectState{}, planned{}, refusal(refused(RefuseBadName, "the resource name cannot name an event"))
 		}
 		// Before the write: a create that reaches Proton is then served at
 		// the client's name, whatever happens to the answer. A UID served
 		// at its alternative name because of the alias this create moves
-		// keeps that name (ruling M4-R41).
+		// keeps that name (ruling M4-R41). On ctx, not pre: once the
+		// budget allowed the send, the alias must be recorded.
 		keep := st.displacedBy(in.UID, name)
 		err := l.onWriter(func(db *cache.Cache, _ *served) error {
-			return l.cacheFail(db.PutAliasKeeping(ctx, calID, name, in.UID, keep))
+			return l.cacheFail(db.PutAliasKeeping(ctx, w.calID, name, in.UID, keep))
 		})
 		if err != nil {
-			return PutResult{}, err
+			return objectState{}, planned{}, err
 		}
 	}
-	if err := l.execute(ctx, w, in.UID, st.group, p, false); err != nil {
-		return PutResult{}, err
-	}
-	return PutResult{Created: p.Created}, nil
+	return st, p, nil
 }
 
 // DeleteObject implements API.
@@ -752,47 +898,62 @@ func (l *Local) DeleteObject(ctx context.Context, calID, name string, cond Preco
 	}
 	// No check of the name: it is only looked up, any length (a served
 	// name may be longer than an alias may).
-	w, err := l.beginWrite(ctx, calID)
+	pre, cancel := l.preSendContext(ctx)
+	defer cancel()
+	w, err := l.beginWrite(pre, calID)
 	if err != nil {
-		return err
+		return l.unsent(ctx, pre, calID, err)
 	}
 	defer w.unlock()
-
-	named, err := l.read(ctx, w, "", name)
+	uid, st, p, err := l.prepareDelete(pre, w, name, cond)
 	if err != nil {
-		return err
+		return l.unsent(ctx, pre, calID, err)
+	}
+	return l.execute(ctx, w, uid, st.group, p, true)
+}
+
+// prepareDelete is DeleteObject up to the Sync call, on pre (ctx with the
+// pre-send budget): the UID name serves, its refresh, the checks and the
+// plan.
+func (l *Local) prepareDelete(pre context.Context, w *write, name string, cond Precondition) (string, objectState, planned, error) {
+	named, err := l.read(pre, w, "", name)
+	if err != nil {
+		return "", objectState{}, planned{}, err
 	}
 	uid := named.nameUID
 	if uid == "" || named.hrefOf(uid) != name {
-		return noSuchObject()
+		return "", objectState{}, planned{}, noSuchObject()
 	}
-	fresh, err := l.listRows(ctx, w, uid)
+	fresh, err := l.listRows(pre, w, uid)
 	if err != nil {
-		return err
+		return "", objectState{}, planned{}, err
 	}
 	// No key-packet check: a delete encrypts nothing (ruling M4-R27).
-	if err := l.storeRows(ctx, w, uid, fresh); err != nil {
-		return err
+	if err := l.storeRows(pre, w, uid, fresh); err != nil {
+		return "", objectState{}, planned{}, err
 	}
-	st, err := l.read(ctx, w, uid, name)
+	st, err := l.read(pre, w, uid, name)
 	if err != nil {
-		return err
+		return "", objectState{}, planned{}, err
 	}
 	if !st.live || st.hrefOf(uid) != name {
-		return noSuchObject()
+		return "", objectState{}, planned{}, noSuchObject()
 	}
 	etag, err := l.etagNow(w, st.group)
 	if err != nil {
-		return err
+		return "", objectState{}, planned{}, err
 	}
 	if err := checkPrecondition(cond, true, etag); err != nil {
-		return err
+		return "", objectState{}, planned{}, err
 	}
 	p, err := l.plan(w, st.group, func(g Group, _ *calendar.Access) (WritePlan, error) { return PlanDelete(g) })
 	if err != nil {
-		return err
+		return "", objectState{}, planned{}, err
 	}
-	return l.execute(ctx, w, uid, st.group, p, true)
+	if err := l.sendable(pre); err != nil {
+		return "", objectState{}, planned{}, err
+	}
+	return uid, st, p, nil
 }
 
 // execute sends p in one Sync call, never sent again, reads uid's rows back
@@ -812,7 +973,9 @@ func (l *Local) DeleteObject(ctx context.Context, calID, name string, cond Preco
 // read back under other packets than its pin or the sent ones is never
 // confirmed (ruling M4-R36).
 func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.Group, p planned, whole bool) error {
-	res, syncErr, err := l.sendOnce(ctx, w, p)
+	sendCtx, cancelSend := context.WithTimeout(ctx, sendBudget)
+	res, syncErr, err := l.sendOnce(sendCtx, w, p)
+	cancelSend()
 	if err != nil {
 		return err
 	}
@@ -833,6 +996,11 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 			applied[i] = r.Err == nil || errors.Is(r.Err, events.ErrAmbiguous)
 		}
 	case errors.Is(syncErr, events.ErrAmbiguous):
+	case humanVerificationAsked(syncErr):
+		// Asked before the call is processed, as a 429 is (ruling M4-R44):
+		// nothing applied, and never a refusal.
+		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
+		return humanVerification()
 	case errors.As(syncErr, &ae) && !api.SessionWide(ctx, syncErr):
 		// Refused as a whole, before anything was applied.
 		applied = make([]bool, len(p.Ops))
@@ -850,16 +1018,24 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		return protonRefused(ae.Status, ae.Code)
 	}
 	refused := entry != nil || ae != nil
-	if err := l.pinAnswered(ctx, w, p.Ops, res); err != nil {
-		return err
-	}
 
-	// The read-back runs even when the caller hung up meanwhile.
+	// The read-back runs even when the caller hung up meanwhile, and
+	// whatever the cache does: the answer follows what Proton holds (ruling
+	// M4-R43).
 	backCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBackTimeout)
 	defer cancel()
+	if err := l.pinAnswered(backCtx, w, p.Ops, res); err != nil {
+		// The read-back below pins the rows it finds created when it
+		// stores them; if that fails too, the next sync pass pins them at
+		// first sight (ruling M4-R37's residual).
+		w.log.Warn("the rows a write created could not be pinned before its read-back", "calendar", w.calID)
+	}
 	pins, err := l.pinned(backCtx, w, storedIDs(before))
 	if err != nil {
-		return err
+		// Without the pins no update is confirmed (confirm fails closed);
+		// a create still is.
+		w.log.Warn("a write's pins could not be read for its read-back", "calendar", w.calID)
+		pins = nil
 	}
 	rows, err := l.listRows(backCtx, w, uid)
 	if err != nil {
@@ -878,15 +1054,26 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		// told apart, so they cannot be pinned with what was sent.
 		return err
 	}
-	if err := l.storeRowsPinned(backCtx, w, uid, rows, v.sent); err != nil {
-		return err
+	stored := l.fault("store")
+	if stored == nil {
+		stored = l.storeRowsPinned(backCtx, w, uid, rows, v.sent)
+	} else {
+		stored = l.cacheFail(stored)
 	}
 	switch {
 	case v.packetRow != "":
 		w.log.Warn("a write is not confirmed: a row came back under other key packets than pcb sent or pinned", "calendar", w.calID, "row", v.packetRow, "field", v.packetField)
 		return notConfirmed()
 	case v.ok:
+		if stored != nil {
+			// Proton holds the write: the answer says so (ruling M4-R43),
+			// and the next sync pass stores the rows (and pins a row the
+			// write created at first sight, ruling M4-R37's residual).
+			w.log.Warn("a write landed but the cache could not store it; the next sync pass will", "calendar", w.calID)
+		}
 		return nil
+	case stored != nil:
+		return stored
 	case (refused || whole) && applied != nil && changedSince(before, p.Ops, applied, rows):
 		w.log.Warn("a write met a concurrent change of its event", "calendar", w.calID, "refused", refused)
 		return preconditionFailed()
@@ -901,17 +1088,27 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 // sent (ruling M4-R37), before the read-back: a read-back that fails then
 // leaves the next sync pass a pin to check, not a first sight to take.
 func (l *Local) pinAnswered(ctx context.Context, w *write, ops []events.Op, res []events.Result) error {
+	if err := l.fault("pin"); err != nil {
+		return l.cacheFail(err)
+	}
 	pins := map[string]cache.Pin{}
 	for i, r := range res {
 		if r.Err == nil && r.Row != nil && r.Row.ID != "" && i < len(ops) && ops[i].Create != nil {
 			pins[r.Row.ID] = cache.Pin{Shared: ops[i].Create.SharedKeyPacket, Calendar: ops[i].Create.CalendarKeyPacket}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBackTimeout)
-	defer cancel()
 	return l.onWriter(func(db *cache.Cache, _ *served) error {
 		return l.cacheFail(db.PinRows(ctx, w.calID, pins))
 	})
+}
+
+// fault is the failure a test injects at a write's cache step (stage "pin":
+// pinAnswered, "store": the read-back's store), nil in production.
+func (l *Local) fault(stage string) error {
+	if l.writeFault == nil {
+		return nil
+	}
+	return l.writeFault(stage)
 }
 
 // changedSince reports whether uid's rows read back show a change the

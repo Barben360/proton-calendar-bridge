@@ -25,7 +25,10 @@ import (
 // adapter's cap) decrypts and renders up to 1 000 events and sends the
 // result; 60 s for reading a request (8 MiB at most) and 60 s for writing a
 // response leave it room on a slow machine or link, while a stalled client
-// still cannot hold a connection open forever.
+// still cannot hold a connection open forever. A PUT or DELETE may run
+// longer when Proton is slow: it extends its own write deadline once its
+// body is read (caldav, ruling M4-R42), so a write that landed delivers its
+// answer; the read timeout never cuts a request once its body is read.
 const (
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 60 * time.Second

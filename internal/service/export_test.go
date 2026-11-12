@@ -56,3 +56,12 @@ func (l *Local) OnWriteWait(fn func(calID string)) { l.cals.waiting = fn }
 func (l *Local) LockCalendar(ctx context.Context, calID string) (func(), error) {
 	return l.cals.lock(ctx, calID, nil)
 }
+
+// SetPreSendBudget sets how long a write may take before its Sync call
+// (preSendBudget in production). Set it before Serve.
+func (l *Local) SetPreSendBudget(d time.Duration) { l.preSend = d }
+
+// SetWriteFault makes fn fail a write's cache steps: stage "pin" (the rows
+// Proton answered as created, before the read-back) and "store" (the rows
+// read back); a nil return lets the step run. Set it before Serve.
+func (l *Local) SetWriteFault(fn func(stage string) error) { l.writeFault = fn }
