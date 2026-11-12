@@ -10,6 +10,9 @@
 set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=common.sh
+. "$here/common.sh"
+uhome=$(live_home) || exit 2
 root=${1-}
 step7=0
 [[ ${2-} == --step7 ]] && step7=1
@@ -39,7 +42,7 @@ if guard_out=$(. "$here/guard.sh" 2>&1); then
 else
   fail "guard refuses the run-root layout: $guard_out"
 fi
-for bad in "$HOME/.config/pcb" "$HOME/.config/proton-cal" "$HOME/.local/state/pcb" "$HOME/.local/share/pcb"; do
+for bad in "$uhome/.config/pcb" "$uhome/.config/proton-cal" "$uhome/.local/state/pcb" "$uhome/.local/share/pcb"; do
   # shellcheck source=guard.sh
   if (PCB_STATE_DIR=$bad; . "$here/guard.sh") >/dev/null 2>&1; then
     fail "guard ACCEPTS $bad"
@@ -48,7 +51,9 @@ done
 ok "guard refuses the author's real dirs"
 
 # 2. Binaries, built into the run root (never ~/.local/bin).
-for b in pcb pcb-lab proton-cal; do
+tools=(pcb pcb-lab proton-cal)
+(( step7 )) && tools=(pcb)   # step 7 runs pcb only
+for b in "${tools[@]}"; do
   p=$root/bin/$b
   if [[ ! -x $p ]]; then
     fail "$p missing (build it: HUMAN-CHECKS 'Build into the run root')"
@@ -84,15 +89,17 @@ esac
 
 # 4b. Step 7 wants a host that has never run pcb (7.1) and deletes data (7.6).
 if (( step7 )); then
+  if vmerr=$(live_vm_check 2>&1); then ok "step 7: VM marker, virtualisation and host name accepted"; else fail "step 7: $vmerr"; fi
   seen=0
-  for d in "$HOME/.config/pcb" "$HOME/.local/state/pcb" "$HOME/.config/systemd/user/pcb.service"; do
+  for d in "$uhome/.config/pcb" "$uhome/.local/state/pcb" "$uhome/.config/systemd/user/pcb.service"; do
     if [[ -e $d ]]; then fail "$d exists: this host has run pcb; step 7 needs a throwaway VM that never did"; seen=1; fi
   done
   if (( ! seen )); then ok "step 7: no pcb dir or unit on this host yet"; fi
 fi
 
 # 5. Login budget and ledger.
-budget=${PCB_LIVE_LOGIN_BUDGET:-$(( step7 ? 3 : 11 ))}
+budget=$(( step7 ? 3 : 11 ))
+budget=$(live_hook PCB_LIVE_LOGIN_BUDGET "$budget")
 ledger=$root/logins.tsv
 if [[ -f $ledger ]]; then
   used=$(grep -c . "$ledger" || true)

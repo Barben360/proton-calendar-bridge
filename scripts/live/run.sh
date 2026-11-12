@@ -19,8 +19,10 @@
 #   --vm           step 7 only, on its throwaway VM: pcb runs with the host's
 #                  default dirs there (that is what `pcb install` tests), so the dir
 #                  guard cannot apply and PCB_*_DIR are removed from the command's
-#                  environment; instead the host is checked (blackwater and
-#                  morpheus are refused) and the ledger keeps a budget of 3
+#                  environment; instead it requires the marker /etc/pcb-live-vm
+#                  ("throwaway", created by the author on the VM) and a VM or
+#                  container per systemd-detect-virt, refuses blackwater and
+#                  morpheus by host name, and the ledger keeps a budget of 3
 # In the arguments, @RUN@ is replaced by $R and @LAB@ by $R/lab/DIR (the
 # calling shell cannot know them).
 # The command sees PCB_CONFIG_DIR, PCB_STATE_DIR, PCB_LAB_DIR, PROTON_CAL_CONFIG_DIR
@@ -49,15 +51,15 @@ for v in "$name" "$lab" "$pcbdir"; do
   [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "run.sh: '$v' is not a plain name (letters, digits, . _ -)" >&2; exit 2; }
 done
 
+# shellcheck source=common.sh
+. "$here/common.sh"
 if (( vm )); then
-  host=${PCB_LIVE_HOSTNAME:-$(hostname -s 2>/dev/null || hostname)}
-  case $host in
-    morpheus* | blackwater*) echo "run.sh --vm: host $host is not a throwaway VM: refused" >&2; exit 1 ;;
-  esac
-  export PCB_LIVE_LOGIN_BUDGET=${PCB_LIVE_LOGIN_BUDGET:-3}
+  live_vm_check || { echo "run.sh --vm: refused, nothing was run" >&2; exit 1; }
+  export PCB_LIVE_VM=1
 fi
+home=$(live_home) || exit 1
 
-R=$HOME/pcb-live-run/$name
+R=$home/pcb-live-run/$name
 export PCB_CONFIG_DIR=$R/$pcbdir/config
 export PCB_STATE_DIR=$R/$pcbdir/state
 export PCB_LAB_DIR=$R/lab/$lab
@@ -68,10 +70,15 @@ unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
 # shellcheck source=guard.sh
 . "$here/guard.sh" || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
 
-case $1 in
-  pcb | pcb-lab | proton-cal)
-    [[ -x $PCB_LIVE_RUN/bin/$1 ]] || { echo "run.sh: $PCB_LIVE_RUN/bin/$1 is missing: build it into the run root first" >&2; exit 1; } ;;
-esac
+# The first word that names one of our tools must exist in $R/bin, also when
+# the command is wrapped (env ..., pass-cli run ... --).
+for w in "$@"; do
+  case $w in
+    pcb | pcb-lab | proton-cal)
+      [[ -x $PCB_LIVE_RUN/bin/$w ]] || { echo "run.sh: $PCB_LIVE_RUN/bin/$w is missing: build it into the run root first" >&2; exit 1; }
+      break ;;
+  esac
+done
 if [[ -n $step ]]; then live_login "$step" "$purpose" || exit; fi
 args=()
 for a in "$@"; do
