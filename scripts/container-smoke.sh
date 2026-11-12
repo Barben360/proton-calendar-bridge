@@ -112,6 +112,16 @@ step "7. the image runs as 65532"
 user=$(docker image inspect -f '{{.Config.User}}' "$image")
 [ "$user" = 65532 ] || fail "Config.User is '$user', want 65532"
 
+step "7b. with no daemon on its socket, pcb status --daemon hints the container's restart, not systemd"
+out=$(docker exec -e PCB_STATE_DIR=/tmp/no-daemon "$container" pcb status --json --daemon) && fail "pcb status --daemon answered with no daemon: $out"
+jq -e '.error.hint | startswith("restart the container")' <<<"$out" >/dev/null || fail "unexpected hint: $out"
+
+step "7c. pcb doctor reports the daemon's listener (all interfaces, TLS) and reads the key"
+doc=$(docker exec "$container" pcb doctor) || true # exit 20: the needs-login alert
+# 0.0.0.0 binds dual stack, which Go names [::].
+grep -Eq '^✓  caldav listener: (0\.0\.0\.0|\[::\]):1080, TLS \(the running daemon; URL https://' <<<"$doc" || fail "doctor's listener is not the daemon's: $doc"
+grep -q '^✓  key file: /data/config/secrets.key 600, 32 bytes$' <<<"$doc" || fail "doctor's key file line: $doc"
+
 step "8. /data: config and state 0700 65532, no secrets.sealed"
 listing=$(docker cp "$container:/data" - | tar --numeric-owner -tvf -)
 for d in data/config/ data/state/; do

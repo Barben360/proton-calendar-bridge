@@ -179,8 +179,11 @@ type rig struct {
 	ctrlC bool
 	// cancelled is when ctrlC fired during the last run; zero if it did not.
 	cancelled time.Time
-	out       bytes.Buffer
-	errb      bytes.Buffer
+	// hostRoot, when set, is the root of the host's files (systemd,
+	// container markers) instead of a root that does not exist.
+	hostRoot string
+	out      bytes.Buffer
+	errb     bytes.Buffer
 }
 
 // stubRig is a rig on a stub service, without a Proton: nothing can reach one.
@@ -258,6 +261,10 @@ func (r *rig) run(args ...string) exitcode.Code {
 	}
 	io.DialDaemon = r.dial
 	io.Host = noSystemHost()
+	if r.hostRoot != "" {
+		io.Host.Root = r.hostRoot
+		io.Host.Env = func(k string) string { return r.env[k] }
+	}
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()
 	if r.ctrlC {

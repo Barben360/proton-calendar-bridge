@@ -93,6 +93,13 @@ func SystemdRunning(h Host) bool {
 	return err == nil && fi.IsDir()
 }
 
+// InContainer reports whether pcb runs in a container: Docker writes
+// /.dockerenv, Podman /run/.containerenv. There is no systemd there; the
+// container's restart restarts pcb.
+func InContainer(h Host) bool {
+	return exists(h, "/.dockerenv") || exists(h, "/run/.containerenv")
+}
+
 func exists(h Host, p string) bool {
 	_, err := os.Lstat(h.Path(p))
 	return err == nil

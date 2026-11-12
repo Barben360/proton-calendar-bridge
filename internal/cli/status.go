@@ -11,6 +11,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -52,7 +53,7 @@ func (a *app) status(cmd *cobra.Command, daemonOnly bool) (ctl.Status, error) {
 			return st, nil
 		case daemonOnly:
 			return ctl.Status{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
-				Hint: "start it: pcb service start, or pcb serve"}
+				Hint: startHint(a.Host)}
 		}
 	}
 	svc, err := a.service(cmd)
@@ -209,4 +210,20 @@ func orNever(s string) string {
 		return "never"
 	}
 	return s
+}
+
+// startHint is how to start a daemon that does not answer, on this host
+// (final review M2): the service where a unit is installed, the
+// container's restart in a container (no systemd there), else pcb serve.
+func startHint(h install.Host) string {
+	switch {
+	case install.SystemdRunning(h):
+		if _, _, err := install.Detect(h); err == nil {
+			return "start it: pcb service start (pcb service logs says why it stopped)"
+		}
+		return "start it: pcb serve, or pcb install to run it as a service"
+	case install.InContainer(h):
+		return "restart the container (docker restart NAME, or docker compose up -d); docker logs NAME says why it stopped"
+	}
+	return "start it: pcb serve"
 }

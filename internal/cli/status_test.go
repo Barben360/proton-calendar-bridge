@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -255,12 +256,51 @@ func TestStatusDaemonFlagNeedsADaemon(t *testing.T) {
 	r := stubRig(t, &stubAPI{statusPhase: "ready"})
 	r.want(exitcode.Blocked, "status", "--daemon", "--json")
 	e := r.envelope()
-	if e.Error == nil || e.Error.Message != "no pcb daemon answers on "+r.dirs.Socket() || e.Error.Hint != "start it: pcb service start, or pcb serve" {
+	if e.Error == nil || e.Error.Message != "no pcb daemon answers on "+r.dirs.Socket() || e.Error.Hint != "start it: pcb serve" {
 		t.Errorf("error = %+v", e.Error)
 	}
 	r.want(exitcode.Blocked, "status", "--daemon")
 	if !strings.Contains(r.errb.String(), "no pcb daemon answers on "+r.dirs.Socket()) {
 		t.Errorf("stderr = %q", r.errb.String())
+	}
+}
+
+// Final review M2: the hint names a way to start pcb that exists here: the
+// service where a unit is installed, the container's restart in one (no
+// systemd there), else pcb serve.
+func TestStatusDaemonHintFitsTheHost(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		files []string
+		want  string
+	}{
+		{"systemd, no unit", []string{"/run/systemd/system/"}, "start it: pcb serve, or pcb install to run it as a service"},
+		{"systemd, a unit", []string{"/run/systemd/system/", "/etc/systemd/system/pcb.service"}, "start it: pcb service start (pcb service logs says why it stopped)"},
+		{"docker", []string{"/.dockerenv"}, "restart the container (docker restart NAME, or docker compose up -d); docker logs NAME says why it stopped"},
+		{"podman", []string{"/run/.containerenv"}, "restart the container (docker restart NAME, or docker compose up -d); docker logs NAME says why it stopped"},
+	} {
+		r := stubRig(t, &stubAPI{statusPhase: "ready"})
+		r.hostRoot = t.TempDir()
+		for _, f := range c.files {
+			p := filepath.Join(r.hostRoot, f)
+			if strings.HasSuffix(f, "/") {
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.want(exitcode.Blocked, "status", "--daemon", "--json")
+		if e := r.envelope(); e.Error == nil || e.Error.Hint != c.want {
+			t.Errorf("%s: error = %+v, want the hint %q", c.name, e.Error, c.want)
+		}
 	}
 }
 
