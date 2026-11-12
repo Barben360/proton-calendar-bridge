@@ -22,11 +22,23 @@ live_home() {
   printf '%s\n' "$h"
 }
 
+# live_host_check: refuses morpheus and blackwater by host name (case-insensitive,
+# FQDN too) when $1 is "all", morpheus only otherwise. Prints why on failure.
+live_host_check() {
+  local host
+  host=$(live_hook PCB_LIVE_HOSTNAME "$(hostname -s 2>/dev/null || hostname)")
+  host=${host,,}
+  case $host in
+    morpheus*) echo "live: host $host is never a live host: refused" >&2; return 1 ;;
+    blackwater*) if [[ ${1-} == all ]]; then echo "live: host $host is not a throwaway VM: refused" >&2; return 1; fi ;;
+  esac
+}
+
 # live_vm_check: step 7's fence. The marker the author creates on the VM
 # (/etc/pcb-live-vm containing "throwaway"), a VM or container per
 # systemd-detect-virt, and a host name that is not morpheus or blackwater.
 live_vm_check() {
-  local marker virt host
+  local marker virt
   marker=$(live_hook PCB_LIVE_VM_MARKER /etc/pcb-live-vm)
   if [[ ! -r $marker ]] || ! grep -qx 'throwaway' "$marker"; then
     echo "live: $marker missing or without the word 'throwaway': the author creates it on the VM (sudo sh -c 'echo throwaway > /etc/pcb-live-vm')" >&2
@@ -41,9 +53,5 @@ live_vm_check() {
     echo "live: systemd-detect-virt reports no VM or container (or is missing): refused" >&2
     return 1
   fi
-  host=$(live_hook PCB_LIVE_HOSTNAME "$(hostname -s 2>/dev/null || hostname)")
-  host=${host,,}
-  case $host in
-    morpheus* | blackwater*) echo "live: host $host is not a throwaway VM: refused" >&2; return 1 ;;
-  esac
+  live_host_check all
 }

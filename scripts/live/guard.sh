@@ -81,14 +81,16 @@ live_guard() {
 
 live_now() { live_hook PCB_LIVE_NOW "$(date +%s)"; }
 
-# live_ledger_check FILE BUDGET NOW: 0 when a login is allowed by that ledger.
+# live_ledger_check FILE BUDGET NOW [EXTRA]: 0 when a login is allowed by that
+# ledger. A non-empty EXTRA (the author's reason, ruling L7) waives the budget,
+# never the 60 s spacing.
 live_ledger_check() {
-  local ledger=$1 budget=$2 now=$3 count=0 last=0
+  local ledger=$1 budget=$2 now=$3 extra=${4-} count=0 last=0
   if [[ -f $ledger ]]; then
     count=$(grep -c . "$ledger" || true)
     last=$(tail -n 1 "$ledger" | cut -f1)
   fi
-  if (( count >= budget )); then
+  if (( count >= budget )) && [[ -z $extra ]]; then
     live_guard_fail "login budget spent ($count of $budget in $ledger): stop and ask the author"
     return 20
   fi
@@ -98,12 +100,14 @@ live_ledger_check() {
   fi
 }
 
-# live_login STEP PURPOSE: call right before a command that logs in.
+# live_login STEP PURPOSE [EXTRA_REASON]: call right before a command that logs in.
 # Checks the run's ledger and the global one above the run roots
 # (<home>/pcb-live-run/.ledger), under one flock, then records in both.
+# EXTRA_REASON (non-empty) is the author's override of the budgets (main and
+# global): it is printed loudly and recorded with the login in both ledgers.
 # Returns 20 (the lab's "too soon" code) when refused; nothing is recorded then.
 live_login() {
-  local step=${1-} purpose=${2-} home base budget gbudget now rc
+  local step=${1-} purpose=${2-} extra=${3-} home base budget gbudget now rc
   if [[ -z $step || -z $purpose ]]; then live_guard_fail "live_login STEP PURPOSE"; return 2; fi
   if [[ -z ${PCB_LIVE_RUN-} ]]; then live_guard >/dev/null || return 1; fi
   home=$(realpath -m -- "$(live_home)") || return 1
@@ -116,8 +120,12 @@ live_login() {
     mkdir -p "$base" "$PCB_LIVE_RUN"
     exec 9>"$base/.ledger.lock"
     flock 9 || exit 1
-    live_ledger_check "$PCB_LIVE_RUN/logins.tsv" "$budget" "$now" || exit
-    live_ledger_check "$base/.ledger" "$gbudget" "$now" || exit
+    live_ledger_check "$PCB_LIVE_RUN/logins.tsv" "$budget" "$now" "$extra" || exit
+    live_ledger_check "$base/.ledger" "$gbudget" "$now" "$extra" || exit
+    if [[ -n $extra ]]; then
+      purpose="$purpose [EXTRA LOGIN: $extra]"
+      printf 'live: EXTRA LOGIN by the author, past the budgets if need be (%s)\n' "$extra" >&2
+    fi
     row=$(printf '%s\t%s\t%s\t%s\t%s' "$now" "$(date -u -d "@$now" +%FT%TZ)" "$step" "$purpose" "${PCB_LIVE_RUN##*/}")
     printf '%s\n' "${row%$'\t'*}" >> "$PCB_LIVE_RUN/logins.tsv"
     printf '%s\n' "$row" >> "$base/.ledger"

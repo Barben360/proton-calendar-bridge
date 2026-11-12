@@ -191,6 +191,27 @@ out=$(vm deb13-vm kvm "$tmp/marker" 6000 v2 --login 7.4 'a fourth' -- true); rc=
 check "run.sh --vm budget is 3 (the fourth login is refused)" "$rc" 20
 check "run.sh --vm ledger holds three logins" "$(grep -c . "$vmhome/pcb-live-run/v2/logins.tsv")" 3
 
+# M7: morpheus is refused without --vm too (any case); blackwater is the normal host; a missing tool burns no ledger slot.
+mh=$tmp/mhome; mkdir -p "$mh/pcb-live-run/m1/bin"
+cp "$HOME/pcb-live-run/t3/bin/pcb" "$mh/pcb-live-run/m1/bin/pcb"
+mrun() { # HOSTNAME NOW [run.sh args before --]  (command: pcb status unless given after --)
+  local host=$1 now=$2; shift 2
+  env -i HOME="$mh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTNAME="$host" PCB_LIVE_NOW="$now" "$here/run.sh" --run m1 "$@" 2>&1
+}
+out=$(mrun MorPheus.lan 1 -- pcb status); rc=$?
+check "run.sh refuses morpheus without --vm, in any case" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+out=$(mrun blackwater 1 -- pcb status); rc=$?
+check "run.sh runs on blackwater (the author's own machine)" "$rc" 0
+out=$(mrun blackwater 1 --login 1 'typo' -- no-such-tool-xyz status); rc=$?
+check "run.sh --login: an unknown command is refused before the ledger" "$rc $(test -e "$mh/pcb-live-run/m1/logins.tsv" && echo ledger)" "1 "
+nopass=$tmp/nopass; mkdir -p "$nopass"
+for t in bash env getent id cut grep tail date flock realpath mkdir hostname dirname cat sed; do ln -sf "$(command -v "$t")" "$nopass/$t"; done
+out=$(env -i HOME="$mh" PATH="$nopass" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTNAME=blackwater PCB_LIVE_NOW=1 "$nopass/bash" "$here/run.sh" --run m1 --login 1 'no pass-cli' -- env pass-cli run -- pcb status 2>&1); rc=$?
+check "run.sh --login: pass-cli missing is refused before the ledger" "$rc $(grep -c 'pass-cli not found' <<<"$out") $(test -e "$mh/pcb-live-run/m1/logins.tsv" && echo ledger)" "1 1 "
+# M9: --proton-cal needs the run root's proton-cal.
+out=$(mrun blackwater 1 --proton-cal -- pcb status); rc=$?
+check "run.sh --proton-cal refuses a proton-cal missing from the run root" "$rc $(grep -c 'proton-cal' <<<"$out") $(grep -c 'pcb sees' <<<"$out")" "1 1 0"
+
 # The global ledger above the run roots: spacing and budget hold across runs.
 gh=$tmp/ghome; mkdir -p "$gh"
 glogin() { # NOW RUN [BUDGET]
@@ -204,6 +225,31 @@ glogin 200 g2 2 >/dev/null
 out=$(glogin 300 g3 2); rc=$?
 check "global ledger: the budget counts logins of all runs" "$rc" 20
 check "global ledger holds two logins" "$(grep -c . "$gh/pcb-live-run/.ledger")" 2
+
+# L7: --extra-login "<reason>" permits one login past the budget, never the 60 s spacing.
+eh=$tmp/ehome; mkdir -p "$eh"
+elogin() { # NOW RUN BUDGET GBUDGET [run.sh args before --]
+  local now=$1 run=$2 b=$3 gb=$4; shift 4
+  env -i HOME="$eh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$eh" PCB_LIVE_NOW="$now" PCB_LIVE_LOGIN_BUDGET="$b" PCB_LIVE_GLOBAL_BUDGET="$gb" \
+    "$here/run.sh" --run "$run" "$@" -- true 2>&1
+}
+elogin 100 e1 1 14 --login 1 'first' >/dev/null
+out=$(elogin 200 e1 1 14 --login 2 'past the main budget'); rc=$?
+check "extra: past the budget without --extra-login is refused (20)" "$rc" 20
+out=$(elogin 200 e1 1 14 --login 2 'past the main budget' --extra-login ''); rc=$?
+check "extra: an empty reason is refused (2)" "$rc 20" "2 20"
+out=$(elogin 200 e1 1 14 --extra-login 'no login here'); rc=$?
+check "extra: --extra-login without --login is refused (2)" "$rc" 2
+check "extra: refusals recorded nothing" "$(grep -c . "$eh/pcb-live-run/e1/logins.tsv") $(grep -c . "$eh/pcb-live-run/.ledger")" "1 1"
+out=$(elogin 130 e1 1 14 --login 2 'too soon' --extra-login 'CAPTCHA re-solve'); rc=$?
+check "extra: the 60 s spacing still holds (20, 'wait 30 s')" "$rc $(grep -c 'wait 30 s' <<<"$out")" "20 1"
+out=$(elogin 200 e1 1 14 --login 2 'solve again' --extra-login 'CAPTCHA re-solve'); rc=$?
+check "extra: one login past the main budget passes, loudly" "$rc $(grep -c '^live: EXTRA LOGIN' <<<"$out")" "0 1"
+check "extra: both ledgers record the reason" "$(grep -c 'CAPTCHA re-solve' "$eh/pcb-live-run/e1/logins.tsv") $(grep -c 'CAPTCHA re-solve' "$eh/pcb-live-run/.ledger")" "1 1"
+out=$(elogin 300 e2 14 2 --login 1 'second run' --extra-login 'second attempt after a partial run'); rc=$?
+check "extra: past the global budget passes in a second run" "$rc" 0
+out=$(elogin 400 e2 14 2 --login 2 'again'); rc=$?
+check "extra: the next login without the override is refused again (global)" "$rc" 20
 
 # Parallel logins: the ledger lock lets exactly one through.
 for round in 1 2 3; do
