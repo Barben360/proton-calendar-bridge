@@ -69,7 +69,8 @@ type API interface {
 	// (never sent again) and reads the rows back into the cache before it
 	// answers: success only when Proton holds what was sent. Errors:
 	// ErrPreconditionFailed (412), *UIDConflictError (409),
-	// ErrNotWritable (403 need-privileges), *WriteRefusal (403 with its
+	// ErrNotWritable (403 need-privileges: the gate decided read only;
+	// undecided is ErrGateUndecided, unavailable, ruling M4-R39), *WriteRefusal (403 with its
 	// pcb precondition), ErrNoSuchObject and ErrNoSuchCalendar (404);
 	// ErrWriteNotConfirmed, ErrCalendarPending, ErrNotServing and every
 	// other error are unavailable (503, ProtonRetryAfter says how long
@@ -314,9 +315,14 @@ type Collection struct {
 	// Pending: the cache knows the calendar but has not synced it yet (a
 	// first pass is on its way to it, or it failed): no CTag, no sync token,
 	// and its reads return ErrCalendarPending (ruling M3-R25).
-	Pending   bool   `json:"pending,omitempty"`
-	CTag      string `json:"ctag"`
-	SyncToken string `json:"sync_token"`
+	Pending bool `json:"pending,omitempty"`
+	// WriteGateUndecided: the gate cannot be decided now (ruling M4-R39:
+	// the keys did not unlock, the passphrase signature cannot be checked):
+	// ReadOnly is the last decided value, and a write answers unavailable
+	// (503), not ErrNotWritable.
+	WriteGateUndecided bool   `json:"write_gate_undecided,omitempty"`
+	CTag               string `json:"ctag"`
+	SyncToken          string `json:"sync_token"`
 }
 
 // ObjectInfo names one object: the UID of its rows, the resource name it is

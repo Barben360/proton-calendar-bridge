@@ -1212,6 +1212,28 @@ func TestWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T) {
 	wantBody(t, rec, fmt.Sprintf(delBody, calPath(workID)))
 }
 
+// Ruling M4-R39: a calendar advertised read only whose gate is undecided
+// is not refused by the adapter: the write goes to the service, whose
+// ErrGateUndecided is a 503 with Retry-After.
+func TestUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.colls[1].WriteGateUndecided = true // Holidays: read only, undecided
+	s.writeErr = svcErr(exitcode.Blocked, service.ErrGateUndecided)
+	h := caldav.Handler(s, caldav.Options{})
+	for _, rec := range []*httptest.ResponseRecorder{
+		do(h, http.MethodPut, objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
+		do(h, http.MethodDelete, objPath(holID, "newyear@x"), ""),
+	} {
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
+			t.Errorf("%d, Retry-After %q; want 503, 30", rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+	if w := s.writeCalls(); len(w) != 2 {
+		t.Errorf("the service got %d writes, want both", len(w))
+	}
+}
+
 // A change the bridge refuses is a 403 whose DAV:error holds its pcb
 // precondition in the urn:pcb namespace and its reason (ours: the service
 // keeps Proton's text out of it), XML-escaped; a code that is not one of
@@ -1306,6 +1328,7 @@ func TestWritesAre503WhenTheServiceCannotAnswer(t *testing.T) {
 		{"not serving", svcErr(exitcode.Blocked, service.ErrNotServing), true},
 		{"pending", svcErr(exitcode.Blocked, service.ErrCalendarPending), false},
 		{"not confirmed", svcErr(exitcode.Blocked, service.ErrWriteNotConfirmed), true},
+		{"gate undecided", svcErr(exitcode.Blocked, service.ErrGateUndecided), true},
 		{"blocked", svcErr(exitcode.Blocked, errors.New(secretText)), true},
 		{"must act", svcErr(exitcode.MustAct, errors.New(secretText)), true},
 		{"a Usage error outside the contract", svcErr(exitcode.Usage, service.ErrInvalidSyncToken), true},

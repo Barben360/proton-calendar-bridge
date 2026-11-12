@@ -216,7 +216,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 			discard()
 			return err
 		default:
-			fresh[id] = failedCalKeys(id, keysError(err))
+			fresh[id] = failedCalKeys(id, cals[id], keysError(err))
 		}
 	}
 	l.r.kmu.Lock()
@@ -237,6 +237,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		l.r.refreshedAt = l.o.Now()
 	}
 	maps.Copy(l.r.ks.cals, fresh)
+	l.r.noteGates(acc.ID, fresh)
 	return nil
 }
 
@@ -291,9 +292,12 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 			if ck == nil {
 				return errKeysDropped()
 			}
-			// The write gate (ruling M4-R1, replacing M3-R1): calendars whose
-			// keys did not unlock are read only too.
-			coll.ReadOnly = !ck.access.Writable()
+			// The write gate (rulings M4-R1, M4-R39): when it cannot be
+			// decided now (keys that did not unlock, a passphrase signature
+			// not checkable), the last decided privileges, read only before
+			// any.
+			coll.ReadOnly = !l.r.advertisedWritable(c.ID, ck)
+			coll.WriteGateUndecided = ck.gate == calendar.GateUndecided
 			var epoch string
 			var seq int64
 			if err := db.Snapshot(ctx, c.ID, func(v cache.View) error {

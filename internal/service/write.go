@@ -61,9 +61,13 @@ var (
 	// ErrPreconditionFailed: If-Match or If-None-Match does not hold on the
 	// object as Proton has it now (CalDAV: 412).
 	ErrPreconditionFailed = errors.New("the object does not match the request's precondition")
-	// ErrNotWritable: the write gate refuses the calendar (ruling M4-R1;
-	// CalDAV: 403 need-privileges).
+	// ErrNotWritable: the write gate refuses the calendar, decided from
+	// good data (rulings M4-R1, M4-R39; CalDAV: 403 need-privileges).
 	ErrNotWritable = errors.New("the calendar is read only")
+	// ErrGateUndecided: the write gate cannot be decided now (ruling
+	// M4-R39): the calendar's keys did not unlock, or the passphrase
+	// signature cannot be checked. Unavailable (CalDAV: 503).
+	ErrGateUndecided = errors.New("whether the calendar may be written cannot be checked now")
 	// ErrNoSuchObject: no object has that name in the calendar (CalDAV:
 	// 404).
 	ErrNoSuchObject = errors.New("no such object in the calendar")
@@ -116,6 +120,18 @@ func preconditionFailed() error {
 
 func notWritable() error {
 	return writeFail(exitcode.Usage, ErrNotWritable, "the calendar is not yours to write to, or its keys could not be checked; pcb calendar list shows it read only")
+}
+
+func gateUndecided() error {
+	return writeFail(exitcode.Blocked, ErrGateUndecided, "retry later; pcb calendar list shows the calendar's keys")
+}
+
+// gateError maps a gate that is not open.
+func gateError(g calendar.Gate) error {
+	if g == calendar.GateClosed {
+		return notWritable()
+	}
+	return gateUndecided()
 }
 
 func noSuchObject() error {
@@ -271,6 +287,7 @@ func (c *calLocks) lock(ctx context.Context, calID string, waiting func(string))
 // and the calendar's lock, held until done.
 type write struct {
 	calID, account string
+	typ            calendar.Type // the cached type, for the gate
 	log            *slog.Logger
 	unlock         func()
 }
@@ -303,6 +320,7 @@ func (l *Local) beginWrite(ctx context.Context, calID string) (*write, error) {
 		w.account, w.log = s.account, s.log
 		c, err := syncedCalendar(ctx, db, calID)
 		typ = calendar.ParseType(c.Type)
+		w.typ = typ
 		return l.fail(err)
 	})
 	if err != nil {
@@ -315,8 +333,8 @@ func (l *Local) beginWrite(ctx context.Context, calID string) (*write, error) {
 	if ck == nil {
 		return nil, errKeysDropped()
 	}
-	if !ck.access.Writable() {
-		return nil, notWritable()
+	if ck.gate != calendar.GateOpen {
+		return nil, gateError(ck.gate)
 	}
 	unlock, err := l.cals.lock(ctx, calID, l.cals.waiting)
 	if err != nil {
@@ -514,8 +532,8 @@ func (l *Local) withKeys(w *write, fn func(*calendar.Access, GroupKeys) error) e
 func (l *Local) plan(w *write, g cache.Group, fn func(Group, *calendar.Access) (WritePlan, error)) (planned, error) {
 	var out planned
 	err := l.withKeys(w, func(a *calendar.Access, k GroupKeys) error {
-		if !a.Writable() {
-			return notWritable()
+		if g := a.Gate(w.typ); g != calendar.GateOpen {
+			return gateError(g)
 		}
 		p, err := fn(OpenGroup(g, k), a)
 		if err != nil {

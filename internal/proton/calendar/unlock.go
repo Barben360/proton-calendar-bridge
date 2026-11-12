@@ -59,7 +59,12 @@ type Access struct {
 	// server substituted. False is not an unlock error: the calendar stays
 	// readable.
 	PassphraseVerified bool
-	Settings           Settings
+	// PassphraseChecked reports that the verification ran on good data: a
+	// signature was served and our member's address keyring is unlocked.
+	// Checked and not verified is a verdict (ruling M4-R39: read only);
+	// not checked leaves the write gate undecided.
+	PassphraseChecked bool
+	Settings          Settings
 	// Keys are the calendar keys the bootstrap lists, in its order, and
 	// whether each unlocked: they change when the calendar key rotates or a
 	// key opens again (reactivation).
@@ -78,6 +83,39 @@ type KeyState struct {
 func (a *Access) Writable() bool {
 	return a != nil && a.Type == Normal && a.Permissions&PermissionWrite != 0 && a.PassphraseVerified &&
 		a.Primary != nil && a.Signer != nil
+}
+
+// Gate is the write gate's verdict (ruling M4-R39).
+type Gate int
+
+// The verdicts.
+const (
+	// GateUndecided: the data to decide is missing or not checkable yet
+	// (the keys, the passphrase signature, a write key): neither writable
+	// nor read only (CalDAV: 503 on a write).
+	GateUndecided Gate = iota
+	// GateOpen: Writable.
+	GateOpen
+	// GateClosed: read only, decided from good data: the type is not
+	// normal, the Write bit is off, or the passphrase signature was checked
+	// and does not verify (CalDAV: 403 need-privileges).
+	GateClosed
+)
+
+// Gate is the write gate's verdict on a (ruling M4-R39); a nil Access
+// (keys not unlocked) is undecided unless typ alone closes it.
+func (a *Access) Gate(typ Type) Gate {
+	switch {
+	case typ != Normal:
+		return GateClosed
+	case a == nil:
+		return GateUndecided
+	case a.Type != Normal, a.Permissions&PermissionWrite == 0, a.PassphraseChecked && !a.PassphraseVerified:
+		return GateClosed
+	case a.Writable():
+		return GateOpen
+	}
+	return GateUndecided
 }
 
 // Close clears the keyrings' private parameters. It is idempotent and
@@ -191,6 +229,7 @@ func Unlock(ctx context.Context, c *api.Client, u *keys.Unlocked, cal Calendar) 
 			a.Permissions = m.Permissions
 		}
 	}
+	a.PassphraseChecked = u.AddrKRs[addressID] != nil && sig != ""
 	a.PassphraseVerified = verifyPassphrase(u.AddrKRs[addressID], passphrase, sig)
 	a.Signer = primarySigner(u, addressID)
 	return a, nil

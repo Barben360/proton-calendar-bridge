@@ -672,8 +672,14 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 		e.login(t, e.req())
 		e.sync(t, false)
 		for id, want := range map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true} {
-			if got := e.collection(t, id).ReadOnly; got != want {
-				t.Errorf("calendar %s: ReadOnly = %v, want %v", id, got, want)
+			c := e.collection(t, id)
+			if c.ReadOnly != want {
+				t.Errorf("calendar %s: ReadOnly = %v, want %v", id, c.ReadOnly, want)
+			}
+			// Only the calendar whose keys do not unlock is undecided (ruling
+			// M4-R39); the others are decided from their type and bits.
+			if c.WriteGateUndecided != (id == locked) {
+				t.Errorf("calendar %s: WriteGateUndecided = %v", id, c.WriteGateUndecided)
 			}
 		}
 		// The CLI listing follows the same gate, row by row.

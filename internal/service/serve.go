@@ -164,6 +164,7 @@ func (l *Local) refreshSettings(ctx context.Context, live map[string]calendar.Ty
 			ks.cals[id] = ck
 			old.access.Close() // no render holds it: they hold kmu for reading
 		}
+		l.r.noteGates(ks.account, fresh)
 		for _, id := range gone {
 			ks.cals[id].access.Close()
 			delete(ks.cals, id)

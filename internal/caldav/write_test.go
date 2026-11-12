@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -726,5 +727,56 @@ func TestGoWebdavClientWritesAndReadsBack(t *testing.T) {
 	}
 	if n := r.sent(); n != 3 {
 		t.Errorf("%d requests reached Proton's write endpoint, want 3", n)
+	}
+}
+
+// Ruling M4-R39: a write is 403 need-privileges only when the gate is
+// decided from good data (here the Write bit, turned off with
+// SetPermissions); when it cannot be decided (a bootstrap Proton refused,
+// whatever its status, or a passphrase that opens no key) the write is a
+// 503 with Retry-After, which Thunderbird retries, and nothing is sent.
+func TestUndecidedWriteGateIs503(t *testing.T) {
+	t.Parallel()
+	statuses := []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity}
+	undecided := map[string]string{}
+	var decided, holidays string
+	r := newServingRig(t, func(f *protontest.Fake) {
+		for _, st := range statuses {
+			id := f.AddCalendar(f.Username, protontest.Calendar{Name: fmt.Sprint("Bootstrap ", st)})
+			f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "A", base)})
+			f.FailNext(http.MethodGet, "/calendar/v2/"+id+"/bootstrap", st, 2501, 0)
+			undecided[id] = fmt.Sprint("bootstrap ", st)
+		}
+		locked := f.AddCalendar(f.Username, protontest.Calendar{Name: "Locked", BrokenPassphrase: true})
+		f.AddEvent(locked, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "A", base)})
+		undecided[locked] = "keys locked"
+		// A holidays calendar is decided by its cached type, keys or not.
+		hol := f.AddCalendar(f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
+		f.AddEvent(hol, protontest.Event{UID: "h@x", Start: base, End: base + 3600, Card: card("h@x", "H", base)})
+		f.FailNext(http.MethodGet, "/calendar/v2/"+hol+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
+		holidays = hol
+		decided = f.AddCalendar(f.Username, protontest.Calendar{Name: "Viewer"})
+		f.AddEvent(decided, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "A", base)})
+		f.SetPermissions(decided, 127&^8)
+	})
+	ms := parseMS(t, r.do("PROPFIND", home, tbHomeSet, "Depth", "1"))
+	for id, what := range undecided {
+		// Never decided: advertised read only, but a write is retried, not refused.
+		wantNames(t, what, privileges(t, ms.get(t, calPath(id)).prop(t, nsD, "current-user-privilege-set")), n(nsD, "read"))
+		for _, rec := range []*httptest.ResponseRecorder{
+			r.put(objPath(id, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"),
+			r.put(objPath(id, "a@x"), thunderbird("a@x", "Edited")),
+			r.do(http.MethodDelete, objPath(id, "a@x"), ""),
+		} {
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
+				t.Errorf("%s: %d, Retry-After %q, body %q; want 503, 30, none", what, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+			}
+		}
+	}
+	wantNeedPrivileges(t, "PUT, Write bit off", r.put(objPath(decided, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"))
+	wantNeedPrivileges(t, "DELETE, Write bit off", r.do(http.MethodDelete, objPath(decided, "a@x"), ""))
+	wantNeedPrivileges(t, "PUT, holidays without keys", r.put(objPath(holidays, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"))
+	if n := r.sent(); n != 0 {
+		t.Errorf("%d requests reached Proton's write endpoint", n)
 	}
 }

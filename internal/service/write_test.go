@@ -1887,3 +1887,101 @@ func TestWriteWaitingForTheLockEndsWithItsContext(t *testing.T) {
 		t.Errorf("%d requests reached the sync endpoint", n)
 	}
 }
+
+// Ruling M4-R39: a write is refused (ErrNotWritable, CalDAV 403) only when
+// the gate is decided from good data; when it cannot be decided (a
+// passphrase signature that cannot be checked, keys that did not unlock)
+// the write is unavailable (ErrGateUndecided, Blocked: CalDAV 503). Nothing
+// is sent either way.
+func TestWriteGateDecidedOrUndecided(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		fo        protontest.Options
+		bootstrap int // the first bootstrap read's failure status, 0: none
+		cause     error
+		code      exitcode.Code
+	}{
+		{"signature checked and bad", protontest.Options{BadPassphraseSignature: true}, 0, service.ErrNotWritable, exitcode.Usage},
+		{"no signature to check", protontest.Options{EmptyPassphraseSignature: true}, 0, service.ErrGateUndecided, exitcode.Blocked},
+		{"bootstrap refused", protontest.Options{}, http.StatusUnprocessableEntity, service.ErrGateUndecided, exitcode.Blocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, tc.fo, func(f *protontest.Fake, cal string) {
+				f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+				if tc.bootstrap != 0 {
+					f.FailNext(http.MethodGet, "/calendar/v2/"+cal+"/bootstrap", tc.bootstrap, 2501, 0)
+				}
+			}).start(t)
+			_, err := r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+			_ = wantExit(t, err, tc.code)
+			wantIs(t, err, tc.cause)
+			err = r.svc.DeleteObject(t.Context(), r.cal, "a@x.ics", service.Precondition{})
+			_ = wantExit(t, err, tc.code)
+			wantIs(t, err, tc.cause)
+			if n := r.sendCalls(); n != 0 {
+				t.Errorf("%d requests reached the sync endpoint", n)
+			}
+			c := r.collection(t, r.cal)
+			if !c.ReadOnly || c.WriteGateUndecided != errors.Is(tc.cause, service.ErrGateUndecided) {
+				t.Errorf("collection ReadOnly %v, WriteGateUndecided %v; want read only, undecided %v",
+					c.ReadOnly, c.WriteGateUndecided, errors.Is(tc.cause, service.ErrGateUndecided))
+			}
+		})
+	}
+}
+
+// Ruling M4-R39: a calendar whose gate cannot be decided now keeps
+// advertising the privileges last decided for it (read and write here),
+// while its writes are unavailable; one never decided is read only.
+func TestUndecidedGateKeepsTheLastDecision(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	fresh := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Fresh"})
+	e.f.FailNext(http.MethodGet, "/calendar/v2/"+fresh+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
+	e.login(t, e.req())
+	e.sync(t, false)
+	if c := e.collection(t, work); c.ReadOnly || c.WriteGateUndecided {
+		t.Fatalf("precondition: Work is decided writable, got %+v", c)
+	}
+	if c := e.collection(t, fresh); !c.ReadOnly || !c.WriteGateUndecided {
+		t.Errorf("a calendar never decided: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
+	}
+	// A new login drops the keys; Work's bootstrap then fails.
+	e.clk.advance(2 * time.Minute)
+	e.login(t, e.req())
+	e.f.FailNext(http.MethodGet, "/calendar/v2/"+work+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
+	if c := e.collection(t, work); c.ReadOnly || !c.WriteGateUndecided {
+		t.Errorf("Work undecided after a decision: ReadOnly %v, undecided %v; want the last decision (writable), undecided", c.ReadOnly, c.WriteGateUndecided)
+	}
+}
+
+// Ruling M4-R39: the last decision is the one the settings refresh made
+// too: a calendar downgraded to a viewer under Serve, whose gate later
+// cannot be decided, keeps advertising read only.
+func TestRefreshedGateIsTheLastDecision(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	if c := e.collection(t, id); c.ReadOnly {
+		t.Fatal("precondition: the calendar starts writable")
+	}
+	e.f.SetPermissions(id, 2)
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	if c := e.collection(t, id); !c.ReadOnly || c.WriteGateUndecided {
+		t.Fatalf("precondition: the refresh decided read only, got %+v", c)
+	}
+	s.stop(t)
+	e.clk.advance(2 * time.Minute)
+	e.login(t, e.req())
+	e.f.FailNext(http.MethodGet, "/calendar/v2/"+id+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
+	if c := e.collection(t, id); !c.ReadOnly || !c.WriteGateUndecided {
+		t.Errorf("undecided after the refresh's decision: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
+	}
+}

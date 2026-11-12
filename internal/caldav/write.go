@@ -12,7 +12,8 @@ package caldav
 //	    concurrent change Proton showed, ruling M4-R34)
 //	409 the UID lives at another name, or the name holds another UID:
 //	    <C:no-uid-conflict> naming that object (RFC 4791 §5.3.2.1)
-//	403 the calendar is read only (need-privileges, ruling M4-R1), or the
+//	403 the calendar is read only, decided from good data (need-privileges,
+//	    rulings M4-R1, M4-R39; an undecided gate is a 503), or the
 //	    bridge refuses the change: <pcb:CODE xmlns:pcb="urn:pcb"/> and a
 //	    short reason of ours, never Proton's text
 //	404 DELETE of a name that serves no object (Thunderbird: success)
@@ -50,7 +51,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 	if !ok {
 		return
 	}
-	if c.ReadOnly {
+	if c.ReadOnly && !c.WriteGateUndecided {
 		needPrivileges(w, r)
 		return
 	}
@@ -77,7 +78,7 @@ func (s *server) delete(w http.ResponseWriter, r *http.Request, t target) {
 	if !ok {
 		return
 	}
-	if c.ReadOnly {
+	if c.ReadOnly && !c.WriteGateUndecided {
 		needPrivileges(w, r)
 		return
 	}
