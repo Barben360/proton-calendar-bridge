@@ -13,6 +13,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/output"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // Root builds a binary's root command: the persistent --json flag, usage
@@ -136,6 +137,27 @@ func OneOperand(c *cobra.Command, what string) *cobra.Command {
 	return c
 }
 
+// MaxOperandsKey is the annotation naming how many operands at most a
+// command takes when it may take none (set by AtMostOneOperand), so the
+// usage contract can tell an extra one.
+const MaxOperandsKey = "pcb/max-operands"
+
+// AtMostOneOperand makes c take no operand or one, named what in its error
+// message. More is a usage error (exit 2) that names the extra operand.
+func AtMostOneOperand(c *cobra.Command, what string) *cobra.Command {
+	if c.Annotations == nil {
+		c.Annotations = map[string]string{}
+	}
+	c.Annotations[MaxOperandsKey] = "1"
+	c.Args = func(cmd *cobra.Command, args []string) error {
+		if len(args) > 1 {
+			return UsageError(fmt.Errorf("unexpected operand %q for %q: it takes at most one %s", args[1], cmd.CommandPath(), what))
+		}
+		return nil
+	}
+	return c
+}
+
 type jsonKey struct{}
 
 // JSONMode reports whether the running command was asked for --json. Run
@@ -174,7 +196,7 @@ func jsonRequested(args []string) bool {
 // returns err, marked as already reported once its envelope is out.
 func Finish(cmd *cobra.Command, data any, text string, err error) error {
 	if JSONMode(cmd) {
-		if werr := output.Write(cmd.OutOrStdout(), CommandName(cmd), data, err); werr != nil {
+		if werr := output.Write(cmd.OutOrStdout(), CommandName(cmd), errorData(data, err), err); werr != nil {
 			return werr
 		}
 		if err != nil {
@@ -215,12 +237,35 @@ func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout,
 	case errors.As(err, &reported):
 	case asJSON:
 		// A failed write has nowhere left to be reported.
-		_ = output.Write(stdout, CommandName(cmd), nil, err)
+		_ = output.Write(stdout, CommandName(cmd), errorData(nil, err), err)
 	default:
 		fmt.Fprintf(stderr, "Error: %s\n", err)
 		if hint := exitcode.HintOf(err); hint != "" {
 			fmt.Fprintf(stderr, "Hint: %s\n", hint)
 		}
+		var several *service.SeveralAccountsError
+		if errors.As(err, &several) {
+			for _, info := range several.Accounts {
+				fmt.Fprintf(stderr, "Account: %s\n", accountName(info))
+			}
+		}
 	}
 	return exitcode.From(err)
+}
+
+// accountsData is the data of a refusal to choose among several accounts.
+type accountsData struct {
+	Accounts []service.AccountInfo `json:"accounts"`
+}
+
+// errorData is the data of a failure's envelope: data, else the accounts
+// a refusal to choose among them lists (design §4.6: data.accounts),
+// whether the Hub refused in process or over the control socket (ctl
+// rebuilds the error).
+func errorData(data any, err error) any {
+	var several *service.SeveralAccountsError
+	if data == nil && errors.As(err, &several) {
+		return accountsData{Accounts: several.Accounts}
+	}
+	return data
 }

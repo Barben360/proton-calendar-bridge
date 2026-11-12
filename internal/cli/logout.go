@@ -14,10 +14,13 @@ import (
 
 func (a *app) newLogout() *cobra.Command {
 	var yes bool
-	c := &cobra.Command{
+	c := selecting(&cobra.Command{
 		Use:   "logout",
-		Short: "Revoke the Proton session and forget the stored credentials (through pcb serve when it runs)",
-		Args:  NoArgs,
+		Short: "Sign the account out: revoke its Proton session and forget its stored credentials (through pcb serve when it runs)",
+		Long: "Sign the account out: revoke its Proton session, delete its stored credentials and event cache. The " +
+			"account stays listed (pcb account list), with its address and its CalDAV passwords; pcb login signs " +
+			"it in again, pcb account remove forgets it.",
+		Args: NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			res, err := a.logout(cmd, yes)
 			if err != nil {
@@ -35,40 +38,61 @@ func (a *app) newLogout() *cobra.Command {
 			}
 			return Finish(cmd, res, text, nil)
 		},
-	}
+	})
 	c.Flags().BoolVar(&yes, "yes", false, "discard a stored session this pcb cannot read without asking (it cannot be revoked)")
 	return c
 }
 
-// logout logs out through the daemon when one runs (its Serve then waits
-// for a login, or stops), else in process.
+// logout signs the selected account out through the daemon when one runs
+// (its loop then waits for a login), else in process (ruling R14: through
+// the Hub, never the account's own API).
 func (a *app) logout(cmd *cobra.Command, yes bool) (service.LogoutResult, error) {
 	c, err := a.daemon(cmd)
 	if err != nil {
 		return service.LogoutResult{}, err
 	}
+	sel := a.selector(cmd)
 	if c != nil {
 		defer func() { _ = c.Close() }()
+		list, err := c.Accounts(cmd.Context())
+		if err != nil || (sel == "" && len(list) == 0) {
+			return service.LogoutResult{}, err // no account: not logged in
+		}
+		info, err := chooseAccount(list, sel, anyAccount)
+		if err != nil {
+			return service.LogoutResult{}, err
+		}
 		status := func(ctx context.Context) (service.Status, error) {
 			st, err := c.Status(ctx)
-			return flatStatus(st).Status, err
+			for _, as := range st.Accounts {
+				if as.ID == info.ID {
+					return as.Login, err
+				}
+			}
+			return service.Status{}, err
 		}
 		logout := func(ctx context.Context, req service.LogoutRequest) (service.LogoutResult, error) {
-			id, err := soleAccountID(ctx, c)
-			if err != nil {
-				return service.LogoutResult{}, err
-			}
-			return c.Logout(ctx, id, req)
+			return c.Logout(ctx, info.ID, req)
 		}
 		return a.logoutWith(cmd, yes, status, logout)
 	}
-	svc, err := a.service(cmd)
+	h, err := a.hub(cmd)
 	if err != nil {
 		return service.LogoutResult{}, err
 	}
-	defer a.closeService(svc)
+	defer a.closeHub(h)
 	a.noDaemonNote(cmd)
-	return a.logoutWith(cmd, yes, svc.Status, svc.Logout)
+	if sel == "" && len(h.Accounts()) == 0 {
+		return service.LogoutResult{}, nil // no account: not logged in
+	}
+	api, info, err := h.Account(sel)
+	if err != nil {
+		return service.LogoutResult{}, err
+	}
+	logout := func(ctx context.Context, req service.LogoutRequest) (service.LogoutResult, error) {
+		return h.SignOut(ctx, info.ID, req)
+	}
+	return a.logoutWith(cmd, yes, api.Status, logout)
 }
 
 // logoutWith runs the logout on status and logout. A stored session this

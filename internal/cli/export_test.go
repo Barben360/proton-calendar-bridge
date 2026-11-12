@@ -1,10 +1,9 @@
 package cli
 
 import (
+	"context"
+	"log/slog"
 	"time"
-
-	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
-	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // SetLocalZone replaces the zone of date bounds and printed times, returning
@@ -15,5 +14,6 @@ func SetLocalZone(z *time.Location) (restore func()) {
 	return func() { localZone = old }
 }
 
-// APIHub is the one-account ctl.Hub the daemon serves, over api.
-func APIHub(api service.API) ctl.Hub { return apiHub{api} }
+// LoggerFrom is the logger a command's context carries (nil: none), the
+// one IO.OpenHub's accounts warn on.
+func LoggerFrom(ctx context.Context) *slog.Logger { return loggerFrom(ctx) }

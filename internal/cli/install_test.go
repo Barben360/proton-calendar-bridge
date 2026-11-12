@@ -61,9 +61,12 @@ type sysRig struct {
 	codes  map[string]int    // exit code of a command line (default 0)
 	events []string
 
-	// logout is what the logout hook's service answers.
+	// logout is what the logout hook's account answers (a stub's).
 	logout func() (service.LogoutResult, error)
-	// logoutEnv is the directories the hook's service was opened on.
+	// openHub, when set, opens the accounts the logout hook signs out
+	// instead of a stub Hub of one account answering logout.
+	openHub func(env func(string) string) (cli.Hub, error)
+	// logoutEnv is the directories the hook's accounts were opened on.
 	logoutEnv [2]string
 	// ids are the uid and gid LookupUser gives a user (default: the test
 	// process's, so a rerun finds its own files owned right).
@@ -186,7 +189,7 @@ func (s *sysRig) Stream(_ context.Context, stdout, stderr io.Writer, name string
 	return s.codes[line], nil
 }
 
-// logoutAPI is the service the logout hook opens.
+// logoutAPI is the account the logout hook signs out.
 type logoutAPI struct {
 	stubAPI
 	s *sysRig
@@ -205,9 +208,12 @@ func (s *sysRig) run(args ...string) exitcode.Code {
 	s.stdout.Reset()
 	s.errb.Reset()
 	io := cli.IO{Stdout: &s.stdout, Stderr: &s.errb, Term: s.term, Env: func(k string) string { return s.env[k] }, Host: s.host(),
-		NewService: func(_ context.Context, env func(string) string) (service.API, error) {
+		OpenHub: func(_ context.Context, env func(string) string) (cli.Hub, error) {
 			s.logoutEnv = [2]string{env("PCB_CONFIG_DIR"), env("PCB_STATE_DIR")}
-			return &logoutAPI{s: s}, nil
+			if s.openHub != nil {
+				return s.openHub(env)
+			}
+			return newStubHub(&logoutAPI{s: s}), nil
 		}}
 	return cli.Main(s.t.Context(), args, io)
 }

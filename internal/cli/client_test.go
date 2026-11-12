@@ -17,12 +17,24 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
-// clientRig is a rig on the real service, logged out, with no Proton.
+// clientRig is a rig on the fake with its account logged in and the
+// client its first login created (default) removed: no client.
 func clientRig(t *testing.T) *rig {
 	t.Helper()
-	r := newRig(t, nil)
-	r.useLocal()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive")
+	r.want(exitcode.OK, "client", "remove", "default")
 	return r
+}
+
+// accountDir is the directory of the rig's only account.
+func accountDir(t *testing.T, r *rig) string {
+	t.Helper()
+	list := accountList(t, r)
+	if len(list) != 1 {
+		t.Fatalf("accounts = %+v, want one", list)
+	}
+	return filepath.Join(r.dirs.State, "accounts", list[0].ID)
 }
 
 func addClient(t *testing.T, r *rig, name string) service.ClientSecret {
@@ -65,7 +77,7 @@ func TestClientAddTextShowsThePasswordAndHowToUseIt(t *testing.T) {
 	if len(pw) != 32 || strings.Count(out, pw) != 1 {
 		t.Errorf("password %q (%d chars) appears %d times, want 32 chars, once", pw, len(pw), strings.Count(out, pw))
 	}
-	for _, want := range []string{"Thunderbird", "Username  Phone", "pcb client show Phone"} {
+	for _, want := range []string{"Thunderbird", "Username  " + r.f.Username, "pcb client show Phone"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("instructions miss %q:\n%s", want, out)
 		}
@@ -212,8 +224,9 @@ func TestClientShowPrintsWhatThunderbirdNeeds(t *testing.T) {
 		t.Parallel()
 		r := clientRig(t)
 		sec := addClient(t, r, "Phone")
+		id := accountID(t, r, r.f.Username)
 		got := showText(t, r, "Phone")
-		if got["URL"] != "http://localhost:1080/" || got["Username"] != "Phone" || got["Password"] != sec.Password {
+		if got["URL"] != "http://localhost:1080/dav/"+id+"/" || got["Username"] != r.f.Username || got["Password"] != sec.Password {
 			t.Errorf("show = %q", r.out.String())
 		}
 		if _, ok := got[fpLabel]; ok {
@@ -225,10 +238,11 @@ func TestClientShowPrintsWhatThunderbirdNeeds(t *testing.T) {
 		r := clientRig(t)
 		writeConfig(t, r, "[caldav]\nlisten = \"192.0.2.10:8443\"\n")
 		sec := addClient(t, r, "Phone")
+		id := accountID(t, r, r.f.Username)
 		// Before pcb serve made the certificate there is no fingerprint
 		// yet, and show creates none.
 		got := showText(t, r, "Phone")
-		if got["URL"] != "https://192.0.2.10:8443/" || got["Password"] != sec.Password || !strings.Contains(got[fpLabel], "pcb serve") {
+		if got["URL"] != "https://192.0.2.10:8443/dav/"+id+"/" || got["Password"] != sec.Password || !strings.Contains(got[fpLabel], "pcb serve") {
 			t.Errorf("show before a certificate = %q", r.out.String())
 		}
 		if _, err := os.Stat(filepath.Join(r.dirs.State, "tls")); err == nil {
@@ -246,9 +260,12 @@ func TestClientShowPrintsWhatThunderbirdNeeds(t *testing.T) {
 		t.Parallel()
 		r := clientRig(t)
 		sec := addClient(t, r, "Phone")
-		startDaemon(t, r, &daemonAPI{}, &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD"})
+		id := accountID(t, r, r.f.Username)
+		// The daemon's listener names the base; the account and its
+		// client are read in process (ruling R15).
+		startDaemon(t, r, newStubHub(&daemonAPI{}), &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443", TLS: true, Fingerprint: "AB:CD"})
 		got := showText(t, r, "Phone")
-		if got["URL"] != "https://pcb.lan:8443/" || got[fpLabel] != "AB:CD" || got["Username"] != "Phone" || got["Password"] != sec.Password {
+		if got["URL"] != "https://pcb.lan:8443/dav/"+id+"/" || got[fpLabel] != "AB:CD" || got["Username"] != r.f.Username || got["Password"] != sec.Password {
 			t.Errorf("show with a daemon = %q", r.out.String())
 		}
 	})
@@ -257,7 +274,11 @@ func TestClientShowPrintsWhatThunderbirdNeeds(t *testing.T) {
 // writeConfig replaces the rig's config.toml, keeping its Proton URL.
 func writeConfig(t *testing.T, r *rig, extra string) {
 	t.Helper()
-	if err := os.WriteFile(config.Path(r.dirs), []byte("[proton]\nbase_url = \"http://127.0.0.1:1\"\n"+extra), 0o600); err != nil {
+	base := "http://127.0.0.1:1"
+	if r.f != nil {
+		base = r.f.URL
+	}
+	if err := os.WriteFile(config.Path(r.dirs), []byte("[proton]\nbase_url = \""+base+"\"\n"+extra), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -266,6 +287,7 @@ func TestClientShowJSONHidesThePasswordWithoutReveal(t *testing.T) {
 	t.Parallel()
 	r := clientRig(t)
 	sec := addClient(t, r, "Phone")
+	id := accountID(t, r, r.f.Username)
 	r.want(exitcode.OK, "client", "show", "Phone", "--json")
 	e := r.envelope()
 	var data map[string]any
@@ -273,7 +295,7 @@ func TestClientShowJSONHidesThePasswordWithoutReveal(t *testing.T) {
 	if strings.Contains(r.out.String(), sec.Password) || data["password"] != nil {
 		t.Fatalf("--json without --reveal carries the password: %s", r.out.String())
 	}
-	if !e.OK || e.Command != "client show" || data["username"] != "Phone" || data["url"] != "http://localhost:1080/" || data["recoverable"] != true || data["id"] != sec.ID {
+	if !e.OK || e.Command != "client show" || data["username"] != r.f.Username || data["url"] != "http://localhost:1080/dav/"+id+"/" || data["recoverable"] != true || data["id"] != sec.ID {
 		t.Fatalf("envelope = %+v, data %v", e, data)
 	}
 	r.want(exitcode.OK, "client", "show", "Phone", "--json", "--reveal")
@@ -290,7 +312,7 @@ func TestClientShowNamesRotateForAnUnrecoverablePassword(t *testing.T) {
 	t.Parallel()
 	r := clientRig(t)
 	addClient(t, r, "Old")
-	path := filepath.Join(r.dirs.State, "clients.json")
+	path := filepath.Join(accountDir(t, r), "clients.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +350,7 @@ func TestClientShowWithoutANamePicksDefaultElseTheOnlyClient(t *testing.T) {
 	t.Parallel()
 	r := clientRig(t)
 	phone := addClient(t, r, "Phone")
-	if got := showText(t, r); got["Username"] != "Phone" || got["Password"] != phone.Password {
+	if got := showText(t, r); !strings.HasPrefix(r.out.String(), `CalDAV client "Phone"`) || got["Password"] != phone.Password {
 		t.Errorf("the only client: %q", r.out.String())
 	}
 	addClient(t, r, "Laptop")
@@ -361,7 +383,7 @@ func TestLoginTextNamesClientShowWhenItCreatedDefault(t *testing.T) {
 		t.Errorf("login text = %q, want it to end with the credentials line", r.out.String())
 	}
 	got := showText(t, r)
-	if got["Username"] != "default" || len(got["Password"]) != 32 {
+	if !strings.HasPrefix(r.out.String(), `CalDAV client "default"`) || got["Username"] != r.f.Username || len(got["Password"]) != 32 {
 		t.Errorf("show after the first login = %q", r.out.String())
 	}
 	// A login that created nothing does not say it.
@@ -402,17 +424,12 @@ func TestClientShowNamesAnUnknownURL(t *testing.T) {
 // header: clients, calendars, and cached events (with and without a range).
 func TestEmptyListsSaySo(t *testing.T) {
 	t.Parallel()
-	r := newRig(t, nil)
-	r.useLocal()
-	r.want(exitcode.OK, "client", "list")
-	if got, want := r.out.String(), "No CalDAV client yet.\nHint: run pcb client add NAME\n"; got != want {
-		t.Errorf("pcb client list: stdout %q, want %q", got, want)
-	}
 	s := stubRig(t, &stubAPI{})
 	for _, c := range []struct {
 		args []string
 		want string
 	}{
+		{[]string{"client", "list"}, "No CalDAV client yet.\nHint: run pcb client add NAME\n"},
 		{[]string{"calendar", "list"}, "No calendar yet.\nHint: create one in the Proton Calendar web app, then run pcb calendar list again\n"},
 		{[]string{"event", "list", "--calendar", "Work"}, "No event cached for this calendar.\nHint: run pcb sync to bring the cache up to date\n"},
 		{[]string{"event", "list", "--calendar", "Work", "--from", "2026-11-01"},

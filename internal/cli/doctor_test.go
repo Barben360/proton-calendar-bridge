@@ -67,12 +67,14 @@ func TestDoctorExitCode(t *testing.T) {
 		names = append(names, r.Name)
 		statuses = append(statuses, r.Status)
 	}
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients,service,daemon"; got != want {
+	// No account yet: the process checks, then "accounts" in place of the
+	// account checks (design §4.6).
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip,skip"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,ok,skip,warn,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,skip,ok,skip,warn,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -89,14 +91,14 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 14 { // 11 checks, the clients warning with its fix line, the service, the daemon
-		t.Fatalf("stdout = %q, want 14 lines", out)
+	if len(lines) != 11 { // 8 checks, the accounts warning with its fix line, the service, the daemon
+		t.Fatalf("stdout = %q, want 11 lines", out)
 	}
-	if want := "–  service: no systemd here"; lines[12] != want {
-		t.Errorf("line 12 = %q, want %q", lines[12], want)
+	if want := "–  service: no systemd here"; lines[9] != want {
+		t.Errorf("line 9 = %q, want %q", lines[9], want)
 	}
-	if want := "–  daemon: not running: offline checks only"; lines[13] != want {
-		t.Errorf("line 13 = %q, want %q", lines[13], want)
+	if want := "–  daemon: not running: offline checks only"; lines[10] != want {
+		t.Errorf("line 10 = %q, want %q", lines[10], want)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)
@@ -110,20 +112,14 @@ func TestDoctorTextOK(t *testing.T) {
 	if want := "✓  config file: defaults, no file"; lines[3] != want {
 		t.Errorf("line 3 = %q, want %q", lines[3], want)
 	}
-	if want := "–  secrets: no secrets stored yet"; lines[6] != want {
+	if want := "✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)"; lines[5] != want {
+		t.Errorf("line 5 = %q, want %q", lines[5], want)
+	}
+	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[6] != want {
 		t.Errorf("line 6 = %q, want %q", lines[6], want)
 	}
-	if want := "✓  cache: no cache yet"; lines[7] != want {
-		t.Errorf("line 7 = %q, want %q", lines[7], want)
-	}
-	if want := "✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)"; lines[8] != want {
-		t.Errorf("line 8 = %q, want %q", lines[8], want)
-	}
-	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[9] != want {
-		t.Errorf("line 9 = %q, want %q", lines[9], want)
-	}
-	if want := "!  caldav clients: no CalDAV client: nothing can sign in to pcb serve"; lines[10] != want || lines[11] != "   fix: pcb login (it creates the client default), then pcb client show" {
-		t.Errorf("lines 10-11 = %q, want %q and its fix", lines[10:], want)
+	if want := "!  accounts: no account: nothing can sign in to pcb serve"; lines[7] != want || lines[8] != "   fix: pcb login (it creates the client default), then pcb client show" {
+		t.Errorf("lines 7-8 = %q, want %q and its fix", lines[7:9], want)
 	}
 }
 
@@ -183,12 +179,12 @@ func TestDoctorListsAlerts(t *testing.T) {
 	since := daemonNow.Add(-time.Hour)
 	api := &daemonAPI{status: service.Status{Phase: "ready"}, health: service.Health{Serve: service.ServeServing, Since: &since, IntervalSeconds: 30,
 		Calendars: []service.CalendarHealth{{ID: "cal-2", Name: "Home", SyncedAt: &daemonNow, Gate: "undecided", GateReason: "the keys were not loaded yet"}}}}
-	startDaemon(t, r, api, nil)
+	startDaemon(t, r, newStubHub(api), nil)
 
 	r.want(exitcode.OK, "doctor")
 	for _, want := range []string{
-		"✓  daemon: serving since 2026-11-12T11:00:00Z (pid 4242, version v1.2.3)\n",
-		"!  alert write-gate-undecided cal-2: writes to Home answer 503: the keys were not loaded yet\n" +
+		"✓  daemon: running since 2026-11-12T10:00:00Z (pid 4242, version v1.2.3)\n",
+		"!  " + stubAccountID + ": alert write-gate-undecided cal-2: writes to Home answer 503: the keys were not loaded yet\n" +
 			"   fix: check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container)\n",
 	} {
 		if !strings.Contains(r.out.String(), want) {
@@ -198,7 +194,7 @@ func TestDoctorListsAlerts(t *testing.T) {
 
 	api.status = service.Status{Phase: "needs-login", Reason: "Proton ended the session"}
 	r.want(exitcode.MustAct, "doctor")
-	if want := "✗  alert needs-login: Proton ended the session\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
+	if want := "✗  " + stubAccountID + ": alert needs-login: Proton ended the session\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 
@@ -209,7 +205,7 @@ func TestDoctorListsAlerts(t *testing.T) {
 	mustUnmarshal(t, r.envelope().Data, &data)
 	var found bool
 	for _, res := range data.Results {
-		if res.Name == "alert needs-login" && res.Status == "error" && res.Fix == "run pcb login" {
+		if res.Name == stubAccountID+": alert needs-login" && res.Status == "error" && res.Fix == "run pcb login" {
 			found = true
 		}
 	}
@@ -224,7 +220,7 @@ func TestDoctorUsesTheDaemonsListener(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{})
 	notAfter := time.Now().Add(365 * 24 * time.Hour).UTC()
-	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "ready"}},
+	startDaemon(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "ready"}}),
 		&ctl.Listener{Addr: "0.0.0.0:1080", URL: "https://pcb.lan:1080/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
 	r.want(exitcode.OK, "doctor")
 	for _, want := range []string{
@@ -244,14 +240,14 @@ func TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{})
 	api := &daemonAPI{status: service.Status{Phase: "logged-out"}, health: service.Health{Serve: service.ServeWaitingForLogin}}
-	startDaemon(t, r, api, nil)
+	startDaemon(t, r, newStubHub(api), nil)
 	r.want(exitcode.OK, "doctor")
-	if want := "!  alert needs-login: not logged in to Proton\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
+	if want := "!  " + stubAccountID + ": alert needs-login: not logged in to Proton\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 	api.health.Serve = service.ServeServing
 	r.want(exitcode.MustAct, "doctor")
-	if want := "✗  alert needs-login: not logged in to Proton\n"; !strings.Contains(r.out.String(), want) {
+	if want := "✗  " + stubAccountID + ": alert needs-login: not logged in to Proton\n"; !strings.Contains(r.out.String(), want) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 }
@@ -282,18 +278,20 @@ func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
 }
 
 // ux Minor: pcb doctor warns per client whose sealed password the key
-// file no longer opens (here: a new key file), with the rotation to run.
+// file no longer opens (here: a new key file), with the rotation to run,
+// named by its account. (Signed out first: the new key would fail the
+// sealed session's check too.)
 func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
 	t.Parallel()
-	r := newRig(t, nil)
-	r.useLocal()
+	r := clientRig(t)
 	r.want(exitcode.OK, "client", "add", "phone")
+	r.want(exitcode.OK, "logout")
 	key := filepath.Join(r.dirs.Config, "secrets.key")
 	if err := os.WriteFile(key, []byte(strings.Repeat("k", 32)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r.want(exitcode.OK, "doctor")
-	if want := "!  caldav client phone: password cannot be shown\n   fix: pcb client rotate phone\n"; !strings.Contains(r.out.String(), want) {
+	if want := "!  " + r.f.Username + ": caldav client phone: password cannot be shown\n   fix: pcb client rotate phone\n"; !strings.Contains(r.out.String(), want) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 }

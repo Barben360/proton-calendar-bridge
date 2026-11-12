@@ -17,7 +17,7 @@ import (
 func newerStore(t *testing.T, r *rig) string {
 	t.Helper()
 	r.want(exitcode.OK, "login", "--non-interactive")
-	path := filepath.Join(r.dirs.State, "secrets.sealed")
+	path := filepath.Join(accountDir(t, r), "secrets.sealed")
 	if err := os.WriteFile(path, []byte(`{"version":3,"sealer":"keyfile","data":""}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

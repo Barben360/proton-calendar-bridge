@@ -295,7 +295,7 @@ func TestStatusOverTheSocket(t *testing.T) {
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: d, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return now }})
 
 	resp, env := raw(t, s.path, http.MethodGet, "/v2/status", nil)
-	if resp.StatusCode != http.StatusOK || env["ok"] != true || env["command"] != "status" || env["schema_version"] != float64(1) {
+	if resp.StatusCode != http.StatusOK || env["ok"] != true || env["command"] != "status" || env["schema_version"] != float64(2) {
 		t.Fatalf("HTTP %d, envelope %v", resp.StatusCode, env)
 	}
 	data := env["data"].(map[string]any)

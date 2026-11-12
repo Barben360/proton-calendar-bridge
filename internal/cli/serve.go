@@ -61,14 +61,21 @@ func (a *app) newServe() *cobra.Command {
 			if cmd.Flags().Changed("listen") {
 				cfg.CalDAV.Listen = listen
 			}
+			lvl, err := config.ParseLevel(cfg.Log.Level)
+			if err != nil { // Load validated it
+				return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("log level %w", err), Hint: "use debug, info, warn or error"}
+			}
+			// The accounts log on the daemon's logger: what they say while
+			// serving (a login through the socket included) is its.
+			log := slog.New(slog.NewTextHandler(a.Stderr, &slog.HandlerOptions{Level: lvl}))
 			if err := a.stateOwner(); err != nil {
 				return err
 			}
-			hub, err := a.NewHub(withLogger(cmd.Context(), newNoteLogger(a.Stderr)), dirs, cfg)
+			hub, err := a.OpenHub(withLogger(cmd.Context(), log), a.Env)
 			if err != nil {
 				return err
 			}
-			err = a.serve(cmd, hub, dirs, cfg, waitForLogin)
+			err = a.serve(cmd, hub, log, dirs, cfg, waitForLogin)
 			if !errors.Is(err, daemon.ErrCut) { // cut: the process ends with the loops still running
 				if cerr := hub.Close(); cerr != nil {
 					fmt.Fprintf(a.Stderr, "Warning: closing the accounts failed: %s\n", cerr)
@@ -134,11 +141,13 @@ func (n *waitNotice) state(_ string, s service.ServeState) {
 	}
 }
 
-func (n *waitNotice) intro() {
+// intro marks the intro printed. none: there is no account, so no loop
+// reports a wait (Hub.Serve has none to run) and the line is printed now.
+func (n *waitNotice) intro(none bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.introDone = true
-	if n.waiting {
+	if n.waiting || none {
 		fmt.Fprintln(n.w, waitingLine)
 	}
 }
@@ -148,17 +157,12 @@ func (n *waitNotice) intro() {
 // exit 0; a second signal meanwhile ends at once with exit 20 (ruling
 // M5-P22). Hub.Serve stopping on an error drains the listener and ends
 // with that error.
-func (a *app) serve(cmd *cobra.Command, hub Hub, dirs paths.Dirs, cfg config.Config, waitForLogin bool) error {
+func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Dirs, cfg config.Config, waitForLogin bool) error {
 	ctx := cmd.Context()
 	sigs, unsubscribe := a.Signals()
 	defer unsubscribe()
 	stopping, cut, endSignals := stopSignals(ctx, sigs)
 	defer endSignals()
-	lvl, err := config.ParseLevel(cfg.Log.Level)
-	if err != nil { // Load validated it; this is for a caller that did not
-		return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("log level %w", err), Hint: "use debug, info, warn or error"}
-	}
-	log := slog.New(slog.NewTextHandler(a.Stderr, &slog.HandlerOptions{Level: lvl}))
 	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRun()
 	go func() {
@@ -180,19 +184,26 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, dirs paths.Dirs, cfg config.Con
 			counters.log(l, p.Render)
 		},
 		Ready: func(info daemon.Info) {
-			a.printIntro(cmd, hub, log, info)
-			notice.intro()
+			n := a.printIntro(cmd, hub, log, info)
+			notice.intro(waitForLogin && n == 0)
 		},
 	})
 }
 
-// printIntro writes what to enter in Thunderbird: the URL of each account,
-// the fingerprint over TLS, and how to get a password when an account has
-// no client.
-func (a *app) printIntro(cmd *cobra.Command, hub Hub, log *slog.Logger, info daemon.Info) {
+// printIntro writes what to enter in Thunderbird: the URL of each account
+// CalDAV serves (neither a pending add nor one whose adapter is off), the
+// fingerprint over TLS, and how to get a password when an account has no
+// client. It returns how many accounts there are.
+func (a *app) printIntro(cmd *cobra.Command, hub Hub, log *slog.Logger, info daemon.Info) int {
 	w := cmd.OutOrStdout()
 	accounts := hub.Accounts()
+	var served []service.AccountInfo
 	for _, ac := range accounts {
+		if !ac.Pending && ac.CalDAV {
+			served = append(served, ac)
+		}
+	}
+	for _, ac := range served {
 		fmt.Fprintf(w, "Thunderbird URL (%s): %s\n", accountLabel(ac), info.AccountURL(ac.ID))
 	}
 	if info.TLS {
@@ -201,7 +212,7 @@ func (a *app) printIntro(cmd *cobra.Command, hub Hub, log *slog.Logger, info dae
 	if len(accounts) == 0 {
 		fmt.Fprintln(w, "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password.")
 	}
-	for _, ac := range accounts {
+	for _, ac := range served {
 		svc, _, err := hub.Account(ac.ID)
 		if err != nil {
 			log.Warn("cannot read an account", "account", ac.ID, "error", err.Error())
@@ -215,12 +226,13 @@ func (a *app) printIntro(cmd *cobra.Command, hub Hub, log *slog.Logger, info dae
 			// Decision 0013: a login creates the client default; once logged
 			// in, only client add makes one.
 			if ac.Phase == string(service.StateReady) {
-				fmt.Fprintln(w, "No CalDAV client: run pcb client add NAME, then use its password in Thunderbird.")
+				fmt.Fprintf(w, "No CalDAV client for %s: run pcb client add NAME --account %s, then use its password in Thunderbird.\n", accountLabel(ac), ac.ID)
 			} else {
-				fmt.Fprintln(w, "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password.")
+				fmt.Fprintf(w, "No CalDAV client yet for %s: run pcb login (it creates the client default), then pcb client show for its password.\n", accountLabel(ac))
 			}
 		}
 	}
+	return len(accounts)
 }
 
 // accountLabel is how the intro names an account: its address, else its ID.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,12 +172,16 @@ type rig struct {
 	dirs paths.Dirs
 	env  map[string]string
 	term *fakeTerm
-	svc  service.API // injected service, or nil for the default one
-	mk   func() (service.API, error)
-	// realHub makes pcb serve open a real Hub on the rig's directories
-	// (with the fixed clock and passes that wait for the next interval)
-	// instead of serving svc or mk's service as the one account of a Hub.
-	realHub bool
+	// svc, when set, is a stub service: the one account of a stubHub the
+	// commands and pcb serve open instead of the real accounts.
+	svc service.API
+	// hub, when set, is the stub Hub they open (over its own stubs).
+	hub *stubHub
+	// open, when set, replaces how the commands open their accounts
+	// (noInProcess); production makes them open them as pcb does (the
+	// real clock, config.toml read by the default IO.OpenHub).
+	open       func() (cli.Hub, error)
+	production bool
 	// dial, when set, replaces ctl.Dial (IO.DialDaemon).
 	dial func(ctx context.Context, path string) (*ctl.Client, error)
 	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
@@ -192,7 +197,17 @@ type rig struct {
 	userName func(uid int) (string, error)
 	out      bytes.Buffer
 	errb     bytes.Buffer
+	// offset is how far the rig's clock (now) runs ahead of t0.
+	offset atomic.Int64
 }
+
+// now is the rig's clock: t0 until advance moves it. The fake and every
+// service the rig opens read it.
+func (r *rig) now() time.Time { return t0.Add(time.Duration(r.offset.Load())) }
+
+// advance moves the rig's clock on by d (the login guard allows one
+// login a minute).
+func (r *rig) advance(d time.Duration) { r.offset.Add(int64(d)) }
 
 // stubRig is a rig on a stub service, without a Proton: nothing can reach one.
 func stubRig(t *testing.T, s *stubAPI) *rig {
@@ -207,9 +222,10 @@ func stubRig(t *testing.T, s *stubAPI) *rig {
 func newRig(t *testing.T, o *protontest.Options) *rig {
 	t.Helper()
 	var f *protontest.Fake
+	r := &rig{t: t, term: &fakeTerm{}}
 	user, password, baseURL := "user", "pw", "http://127.0.0.1:1"
 	if o != nil {
-		o.Now = func() time.Time { return t0 }
+		o.Now = r.now
 		f = protontest.New(t, *o)
 		user, password, baseURL = f.Username, f.Password, f.URL
 	}
@@ -228,31 +244,65 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 	if err := os.WriteFile(config.Path(dirs), []byte(toml), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := &rig{t: t, f: f, dirs: dirs, term: &fakeTerm{}, env: map[string]string{
+	r.f, r.dirs, r.env = f, dirs, map[string]string{
 		"XDG_CONFIG_HOME": filepath.Dir(dirs.Config),
 		"XDG_STATE_HOME":  filepath.Dir(dirs.State),
 		"PCB_USERNAME":    user,
 		"PCB_PASSWORD":    password,
-	}}
-	if f != nil {
-		r.useLocal()
 	}
 	return r
 }
 
-// useLocal makes the rig open the real service on its directories with the
-// fixed clock and no sleeping (the way the default one does, config.toml
-// included).
-func (r *rig) useLocal() {
-	r.mk = func() (service.API, error) {
+// openHub is IO.OpenHub for the rig: the stub Hub (hub, else one over
+// svc), else the real accounts of the rig's directories on the rig's
+// clock, whose services sleep for nothing (a command) or until the next
+// pass (serve: no busy loop). nil (the default) with production.
+func (r *rig) openHub(serve bool) func(context.Context, func(string) string) (cli.Hub, error) {
+	h, svc, open := r.hub, r.svc, r.open
+	switch {
+	case open != nil:
+		return func(context.Context, func(string) string) (cli.Hub, error) { return open() }
+	case h != nil:
+		return func(context.Context, func(string) string) (cli.Hub, error) { return h, nil }
+	case svc != nil:
+		return func(context.Context, func(string) string) (cli.Hub, error) { return newStubHub(svc), nil }
+	case r.production:
+		return nil
+	}
+	sleep := func(context.Context, time.Duration) error { return nil }
+	if serve {
+		sleep = func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }
+	}
+	return func(ctx context.Context, _ func(string) string) (cli.Hub, error) {
 		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
 		if err != nil {
 			return nil, err
 		}
-		return service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg,
-			Now:   func() time.Time { return t0 },
-			Sleep: func(context.Context, time.Duration) error { return nil }})
+		h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: r.dirs, Config: cfg, Now: r.now, Sleep: sleep,
+			Logger: cli.LoggerFrom(ctx)}})
+		if err != nil {
+			return nil, err
+		}
+		return h, nil
 	}
+}
+
+// realHub opens the real accounts of the rig's directories, as a daemon
+// holds them (their services sleep until the next pass), closed with the
+// test.
+func realHub(t *testing.T, r *rig) *service.Hub {
+	t.Helper()
+	cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: r.dirs, Config: cfg, Now: r.now,
+		Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
 }
 
 func (r *rig) run(args ...string) exitcode.Code {
@@ -261,13 +311,7 @@ func (r *rig) run(args ...string) exitcode.Code {
 	r.errb.Reset()
 	r.cancelled = time.Time{}
 	io := cli.IO{Stdout: &r.out, Stderr: &r.errb, Term: r.term, Env: func(k string) string { return r.env[k] }}
-	switch {
-	case r.svc != nil:
-		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.svc, nil }
-	case r.mk != nil:
-		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
-	}
-	io.NewHub = r.newHub()
+	io.OpenHub = r.openHub(false)
 	io.DialDaemon = r.dial
 	io.Host = noSystemHost()
 	if r.hostRoot != "" {

@@ -26,7 +26,6 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
-	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
@@ -94,7 +93,7 @@ func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, 
 			}
 			return &acceptSignal{Listener: ln, first: func() { s.addr <- ln.Addr() }}, nil
 		}}
-	io.NewHub = r.newHub()
+	io.OpenHub = r.openHub(true)
 	if sigs != nil {
 		io.Signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
 	}
@@ -110,92 +109,6 @@ func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, 
 		}
 	})
 	return s
-}
-
-// newHub is IO.NewHub for the rig: a real Hub on the rig's directories when
-// realHub is set; else the rig's service (the stub, or the one r.mk opens)
-// behind the daemon as the one account of a Hub; nil (the default) when the
-// rig has none.
-func (r *rig) newHub() func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) {
-	switch {
-	case r.realHub:
-		return func(_ context.Context, dirs paths.Dirs, cfg config.Config) (cli.Hub, error) {
-			// Passes wait for the next interval: no busy loop.
-			return service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg, Now: func() time.Time { return t0 },
-				Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }}})
-		}
-	case r.svc != nil:
-		return func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) { return oneAccountHub{r.svc}, nil }
-	case r.mk != nil:
-		return func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) {
-			svc, err := r.mk()
-			if err != nil {
-				return nil, err
-			}
-			return oneAccountHub{svc}, nil
-		}
-	}
-	return nil
-}
-
-// oneAccountHub is a cli.Hub of one account, stubAccountID, over api: the
-// serve tests' stub services run behind the daemon as an account of a Hub.
-type oneAccountHub struct{ api service.API }
-
-const stubAccountID = "00000000"
-
-func (h oneAccountHub) Accounts() []service.AccountInfo { return cli.APIHub(h.api).Accounts() }
-func (h oneAccountHub) Account(sel string) (service.API, service.AccountInfo, error) {
-	return cli.APIHub(h.api).Account(sel)
-}
-func (h oneAccountHub) Login(ctx context.Context, r service.LoginRequest) (service.LoginResult, error) {
-	return cli.APIHub(h.api).Login(ctx, r)
-}
-func (h oneAccountHub) SubmitTOTP(ctx context.Context, sel, code string) (service.LoginResult, error) {
-	return cli.APIHub(h.api).SubmitTOTP(ctx, sel, code)
-}
-func (h oneAccountHub) SignOut(ctx context.Context, sel string, r service.LogoutRequest) (service.LogoutResult, error) {
-	return cli.APIHub(h.api).SignOut(ctx, sel, r)
-}
-func (h oneAccountHub) Remove(ctx context.Context, sel string, r service.LogoutRequest) (service.AccountInfo, error) {
-	return cli.APIHub(h.api).Remove(ctx, sel, r)
-}
-func (h oneAccountHub) SetCalDAV(ctx context.Context, sel string, on bool) (service.AccountInfo, error) {
-	return cli.APIHub(h.api).SetCalDAV(ctx, sel, on)
-}
-func (h oneAccountHub) Restart(ctx context.Context, sel string) (service.AccountInfo, error) {
-	return cli.APIHub(h.api).Restart(ctx, sel)
-}
-func (h oneAccountHub) Health(ctx context.Context, sel string) (service.Health, error) {
-	return cli.APIHub(h.api).Health(ctx, sel)
-}
-func (h oneAccountHub) OnChange(func()) {}
-func (h oneAccountHub) Close() error    { return h.api.Close() }
-
-// Route answers the compatibility URLs and the account's own.
-func (h oneAccountHub) Route(ctx context.Context, accountID, password, remote string) (service.API, string, time.Duration, error) {
-	if accountID != "" && accountID != stubAccountID {
-		return nil, "", 0, nil
-	}
-	if ok, wait := h.api.CheckClient(ctx, password, remote); !ok {
-		return nil, "", wait, nil
-	}
-	return h.api, stubAccountID, 0, nil
-}
-
-func (h oneAccountHub) Serve(ctx context.Context, o service.HubServeOptions) error {
-	so := o.ServeOptions
-	so.OnState = func(s service.ServeState) {
-		if o.OnState != nil {
-			o.OnState(stubAccountID, s)
-		}
-	}
-	so.OnPass = func(p service.WatchPass) {
-		if o.OnPass != nil {
-			o.OnPass(stubAccountID, p)
-		}
-	}
-	return h.api.Serve(ctx, so)
 }
 
 // acceptSignal calls first when the server first accepts: it is serving
@@ -350,8 +263,6 @@ func refusesConnections(t *testing.T, addr string) {
 func TestServeRefusesWhileSyncRuns(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, nil)
-	r.useLocal()
-	r.realHub = true
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -373,8 +284,6 @@ func TestServeRefusesWhileSyncRuns(t *testing.T) {
 func TestServeRefusesWhenLoggedOut(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, nil)
-	r.useLocal()
-	r.realHub = true
 	s := startServe(t, r, nil)
 	if code := s.exit(); code != exitcode.MustAct {
 		t.Fatalf("exit %d, want 10\nstderr: %s", code, s.errb.String())
@@ -399,7 +308,7 @@ func TestServeIntroHintsClientAddWhenLoggedIn(t *testing.T) {
 	if code := s.exit(); code != exitcode.OK {
 		t.Fatalf("exit %d, want 0\nstderr: %s", code, s.errb.String())
 	}
-	if want := "No CalDAV client: run pcb client add NAME, then use its password in Thunderbird."; !strings.Contains(s.out.String(), want) {
+	if want := "No CalDAV client for " + stubAccountID + ": run pcb client add NAME --account " + stubAccountID + ", then use its password in Thunderbird."; !strings.Contains(s.out.String(), want) {
 		t.Errorf("stdout lacks %q: %q", want, s.out.String())
 	}
 	if strings.Contains(s.out.String(), "pcb login") {
@@ -430,7 +339,7 @@ func TestServeStopsOnSignal(t *testing.T) {
 	t.Parallel()
 	stub := newServeStub()
 	r := stubRig(t, &stub.stubAPI)
-	r.svc = stub
+	r.hub = newStubHub(stub)
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:1999")
 	addr := s.listening()
 	if got := <-s.requested; got != "127.0.0.1:1999" {
@@ -453,6 +362,9 @@ func TestServeStopsOnSignal(t *testing.T) {
 	default:
 		t.Error("pcb serve exited while the sync loop still ran")
 	}
+	if n := r.hub.closes(); n != 1 {
+		t.Errorf("the accounts were closed %d times, want once after the stop", n)
+	}
 	refusesConnections(t, addr)
 
 	_, port, _ := net.SplitHostPort(addr)
@@ -461,7 +373,7 @@ func TestServeStopsOnSignal(t *testing.T) {
 		t.Errorf("first line %q, want %q", lines[0], want)
 	}
 	// Not logged in (decision 0013): the login creates the client default.
-	if want := "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password."; !strings.Contains(s.out.String(), want) {
+	if want := "No CalDAV client yet for " + stubAccountID + ": run pcb login (it creates the client default), then pcb client show for its password."; !strings.Contains(s.out.String(), want) {
 		t.Errorf("stdout lacks %q with no client and no login: %q", want, s.out.String())
 	}
 	if strings.Contains(s.out.String(), "fingerprint") {
@@ -717,7 +629,6 @@ func TestServeEndToEndPropfindsTheHomeSet(t *testing.T) {
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
 	r.want(exitcode.OK, "sync", "--json")
 	sec := addClient(t, r, "Thunderbird")
-	r.realHub = true // the real Hub migrates the state the commands above made
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	addr := s.listening()
 	body := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>`
@@ -1104,53 +1015,6 @@ func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 	})
 }
 
-// fastPoll is the real service with a short login poll (poll, 0: 20 ms),
-// reporting Serve's states and passes to channels (the CLI's own callbacks
-// still run).
-type fastPoll struct {
-	*service.Local
-	states chan service.ServeState
-	passes chan service.WatchPass
-	poll   time.Duration
-	run    *serveRun // set by serveWaiting
-}
-
-func (f *fastPoll) Serve(ctx context.Context, o service.ServeOptions) error {
-	o.LoginPoll = 20 * time.Millisecond
-	if f.poll > 0 {
-		o.LoginPoll = f.poll
-	}
-	onState, onPass := o.OnState, o.OnPass
-	o.OnState = func(s service.ServeState) {
-		if onState != nil {
-			onState(s)
-		}
-		f.states <- s
-	}
-	o.OnPass = func(p service.WatchPass) {
-		if onPass != nil {
-			onPass(p)
-		}
-		select {
-		case f.passes <- p:
-		default:
-		}
-	}
-	return f.Local.Serve(ctx, o)
-}
-
-func wantServeState(t *testing.T, states chan service.ServeState, want service.ServeState) {
-	t.Helper()
-	select {
-	case s := <-states:
-		if s != want {
-			t.Fatalf("Serve reported %q, want %q", s, want)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatalf("Serve never reported %q", want)
-	}
-}
-
 // propfindHome sends Thunderbird's home-set PROPFIND to addr, with the
 // client's password when pw is set.
 func propfindHome(t *testing.T, addr, pw string) (*http.Response, string) {
@@ -1175,30 +1039,23 @@ func propfindHome(t *testing.T, addr, pw string) (*http.Response, string) {
 }
 
 // Review Focus 2 (rulings M5-P8, M5-P9): Thunderbird polling a pcb serve
-// --wait-for-login that has no login gets 503 + Retry-After: 30 (never a
-// 4xx), 401 without credentials; CTL says it waits; after a pcb login by
-// another process, the same request gets 207 from the same pcb serve.
+// --wait-for-login whose account is signed out gets 503 + Retry-After: 30
+// (never a 4xx), 401 without credentials; CTL says it waits; after a pcb
+// login (through the daemon: ruling R15), the same request gets 207 from
+// the same pcb serve.
 func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	work := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
 	r.f.AddEvent(work, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 3600})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
 	sec := addClient(t, r, "Thunderbird")
-	fp := &fastPoll{states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16)}
-	r.mk = func() (service.API, error) { // passes wait for the next interval: no busy loop
-		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-		if err != nil {
-			return nil, err
-		}
-		l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
-			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
-		fp.Local = l
-		return fp, err
-	}
+	r.want(exitcode.OK, "logout") // signed out: the account and its clients stay
+	r.advance(2 * time.Minute)    // the login guard: one login a minute
+	id := accountID(t, r, r.f.Username)
 	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
 	addr := s.listening()
-	r.useLocal() // pcb login below runs as another process would
-	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+	acct := waitForServe(t, r, r.f.Username, service.ServeWaitingForLogin)
 
 	resp, _ := propfindHome(t, addr, sec.Password)
 	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "30" {
@@ -1207,31 +1064,16 @@ func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 	if resp, _ := propfindHome(t, addr, ""); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("PROPFIND without credentials while waiting: %d, want 401", resp.StatusCode)
 	}
-	if runtime.GOOS != "windows" {
-		c, err := ctl.Dial(t.Context(), r.dirs.Socket())
-		if err != nil {
-			t.Fatalf("Dial while waiting: %v", err)
-		}
-		st, err := c.Status(t.Context())
-		_ = c.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(st.Accounts) != 1 {
-			t.Fatalf("CTL status while waiting: %d accounts, want 1", len(st.Accounts))
-		}
-		acct := st.Accounts[0]
-		needsLogin := false
-		for _, a := range acct.Alerts {
-			needsLogin = needsLogin || a.Code == "needs-login"
-		}
-		if acct.Health == nil || acct.Health.Serve != service.ServeWaitingForLogin || !needsLogin {
-			t.Errorf("CTL status while waiting: health %+v, alerts %+v; want waiting-for-login and needs-login", acct.Health, acct.Alerts)
-		}
+	needsLogin := false
+	for _, a := range acct.Alerts {
+		needsLogin = needsLogin || a.Code == "needs-login"
+	}
+	if !needsLogin {
+		t.Errorf("CTL status while waiting: alerts %+v; want needs-login", acct.Alerts)
 	}
 	out := s.out.String()
-	if lines := strings.Split(out, "\n"); !strings.HasPrefix(lines[0], "Thunderbird URL ("+stubAccountID+"): http://localhost:") ||
-		!strings.Contains(out, "\nWaiting for a login: run pcb login\n") {
+	if lines := strings.Split(out, "\n"); !strings.HasPrefix(lines[0], "Thunderbird URL ("+r.f.Username+"): http://localhost:") ||
+		!strings.HasSuffix(lines[0], "/dav/"+id+"/") || !strings.Contains(out, "\nWaiting for a login: run pcb login\n") {
 		t.Errorf("stdout = %q, want the intro then the waiting line", out)
 	}
 	if !strings.Contains(s.errb.String(), "waiting for a login") {
@@ -1239,18 +1081,17 @@ func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 	}
 
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
-	wantServeState(t, fp.states, service.ServeServing)
-	select {
-	case p := <-fp.passes:
-		if p.Err != nil {
-			t.Fatalf("first pass after the login: %v", p.Err)
+	waitForServe(t, r, r.f.Username, service.ServeServing)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		resp, got := propfindHome(t, addr, sec.Password)
+		if resp.StatusCode == http.StatusMultiStatus && strings.Contains(got, "<D:displayname>Work</D:displayname>") {
+			break
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("no pass after the login")
-	}
-	resp, got := propfindHome(t, addr, sec.Password)
-	if resp.StatusCode != http.StatusMultiStatus || !strings.Contains(got, "<D:displayname>Work</D:displayname>") {
-		t.Fatalf("PROPFIND after the login = %d\n%s", resp.StatusCode, got)
+		if time.Now().After(deadline) {
+			t.Fatalf("PROPFIND after the login = %d\n%s", resp.StatusCode, got)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	select {
 	case c := <-s.code:
@@ -1273,7 +1114,7 @@ func TestSecondSignalForcesExit(t *testing.T) {
 	stub := newServeStub()
 	stub.hang, stub.hung = make(chan struct{}), make(chan struct{})
 	r := stubRig(t, &stub.stubAPI)
-	r.svc = stub
+	r.hub = newStubHub(stub)
 	closed := make(chan struct{})
 	sigs := make(chan os.Signal, 2)
 	s := startServeWith(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} }, sigs)
@@ -1298,6 +1139,11 @@ func TestSecondSignalForcesExit(t *testing.T) {
 	case <-stub.served:
 		t.Error("the sync loop ended: the test did not reach the forced exit")
 	default:
+	}
+	// The process ends with the loop still running: the accounts are not
+	// closed under it.
+	if n := r.hub.closes(); n != 0 {
+		t.Errorf("the accounts were closed %d times after the cut, want none", n)
 	}
 }
 
@@ -1343,22 +1189,9 @@ func TestOneSignalOnBothPathsStopsCleanly(t *testing.T) {
 	}
 }
 
-// slowLocal is the rig's service whose watch waits for its context between
-// passes, so a logged-in pcb serve does not loop on the fake.
-func slowLocal(r *rig) func() (service.API, error) {
-	return func() (service.API, error) {
-		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-		if err != nil {
-			return nil, err
-		}
-		return service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
-			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
-	}
-}
-
-// ux-I1: while pcb serve holds the sync lock and answers on the control
-// socket, pcb sync has nothing to do (exit 0, it says so) and a second
-// pcb serve names the running one (exit 20, as any refused start).
+// ux-I1: while pcb serve serves the account (its loop holds the
+// account's sync lock) and answers on the control socket, pcb sync has
+// nothing to do (exit 0, it says so).
 func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -1367,10 +1200,9 @@ func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
 	r := newRig(t, &protontest.Options{})
 	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
-	r.mk = slowLocal(r)
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	s.listening()
-	r.useLocal()
+	waitForServe(t, r, r.f.Username, service.ServeServing)
 
 	r.want(exitcode.OK, "sync")
 	if got, want := r.out.String(), "pcb serve is running and already syncs: see pcb status\n"; got != want || r.errb.Len() != 0 {
@@ -1404,7 +1236,6 @@ func TestASecondServeNamesTheRunningDaemon(t *testing.T) {
 	r := newRig(t, &protontest.Options{})
 	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
-	r.realHub = true
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	s.listening()
 
@@ -1423,15 +1254,16 @@ func TestASecondServeNamesTheRunningDaemon(t *testing.T) {
 	}
 }
 
-// ux-I1: logged out, pcb sync says to log in, even while pcb serve
-// --wait-for-login holds the sync lock: the login is checked first.
+// ux-I1: signed out, pcb sync says to log in, even while pcb serve
+// --wait-for-login serves the account: the login is checked first.
 func TestSyncChecksTheLoginBeforeTheRunningDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	r.mk = slowLocal(r)
+	r.want(exitcode.OK, "login", "--non-interactive")
+	r.want(exitcode.OK, "logout")
 	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
 	s.listening()
-	r.useLocal()
+	waitForServe(t, r, r.f.Username, service.ServeWaitingForLogin)
 	calls := r.f.Calls("", "/")
 	for _, args := range [][]string{{"sync"}, {"sync", "--watch"}} {
 		r.want(exitcode.MustAct, args...)
@@ -1470,5 +1302,55 @@ func TestServePortInUseSaysWhyOnce(t *testing.T) {
 		"Hint: stop what uses that address, or choose another with --listen or [caldav] listen\n"
 	if got := r.errb.String(); !strings.HasSuffix(got, want) {
 		t.Errorf("stderr = %q, want it to end with %q", got, want)
+	}
+}
+
+// Design §4.1: with --wait-for-login the process never exits for an
+// account's sake: an account whose state.json cannot be read is parked
+// (stopped, its error as an account-stopped alert) while pcb serve keeps
+// running; M5 exited 10 there.
+func TestServeWaitForLoginParksAnUnreadableAccount(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive")
+	if err := os.WriteFile(filepath.Join(accountDir(t, r), "state.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+	s.listening()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var stopped *ctl.Alert
+		if c, err := ctl.Dial(t.Context(), r.dirs.Socket()); err == nil {
+			st, err := c.Status(t.Context())
+			_ = c.Close()
+			for i := 0; err == nil && len(st.Accounts) == 1 && i < len(st.Accounts[0].Alerts); i++ {
+				if a := st.Accounts[0].Alerts[i]; a.Code == "account-stopped" {
+					stopped = &a
+				}
+			}
+		}
+		if stopped != nil {
+			if stopped.Message != "the login state file cannot be read" || stopped.Fix != "run pcb logout to reset it" {
+				t.Errorf("account-stopped = %+v", stopped)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the account was never shown stopped\nstderr: %s", s.errb.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case c := <-s.code:
+		t.Fatalf("pcb serve --wait-for-login exited %d for an account's sake", c)
+	default:
+	}
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
 	}
 }
