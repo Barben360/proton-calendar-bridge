@@ -11,7 +11,7 @@ OUT     ?= bin/pcb
 # the service.
 PREFIX  ?= $(HOME)/.local
 
-.PHONY: build install test lint image container-smoke systemd-smoke
+.PHONY: build install test lint image container-smoke systemd-smoke live-preflight live-preflight-test
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -47,3 +47,13 @@ container-smoke:
 
 systemd-smoke: build
 	scripts/systemd-smoke.sh $(OUT)
+
+# The live session (spec/HUMAN-CHECKS.md): preflight of a run root, and the
+# test of the guard that keeps live commands off the author's real dirs.
+# make live-preflight RUN=$$HOME/pcb-live-run/<date> [STEP7=1]
+live-preflight:
+	@test -n "$(RUN)" || { echo "usage: make live-preflight RUN=\$$HOME/pcb-live-run/<date> [STEP7=1]" >&2; exit 2; }
+	scripts/live/preflight.sh "$(RUN)" $(if $(STEP7),--step7)
+
+live-preflight-test:
+	scripts/live/guard_test.sh

@@ -27,7 +27,7 @@ Every summary starts `pcb-seed <id> `. That prefix is how a rerun finds what exi
 
 `pcb-lab seed apply` (flags `--dataset`, `--bin proton-cal`, `--config-dir`, `--interval 2s`):
 
-1. Sets `PROTON_CAL_CONFIG_DIR=$XDG_STATE_HOME/pcb-lab-seed` (default `~/.local/state/pcb-lab-seed`) so proton-cal's session never mixes with the author's own. The child gets an environment allowlist (`PATH`, `HOME`, `XDG_*`, `TZ`, `LANG`, `LC_*`, `SSL_CERT_FILE/DIR`, `HTTP(S)_PROXY`, `NO_PROXY`) and no credential variable; apply never logs in.
+1. Sets `PROTON_CAL_CONFIG_DIR` to `--config-dir`, else `$XDG_STATE_HOME/pcb-lab-seed` (default `~/.local/state/pcb-lab-seed`), so proton-cal's session never mixes with the author's own; **the live run always passes `--config-dir` under the run root** (`$R/seed`, HUMAN-CHECKS "The run root"), never the default. The child gets an environment allowlist (`PATH`, `HOME`, `XDG_*`, `TZ`, `LANG`, `LC_*`, `SSL_CERT_FILE/DIR`, `HTTP(S)_PROXY`, `NO_PROXY`) and no credential variable; apply never logs in.
 2. Lists calendars, creates the missing ones, lists existing `pcb-seed` events (`events --all-calendars --from 2020-12-31 --days 2374 -o json`: the range widened by a day each side, since proton-cal filters in its own time zone).
 3. Plans the missing commands (`Plan`), then runs them in order, **one write per 2 s**. Commands carry `{cal}` (calendar id) and `{id}` (event id of the series an edit or delete addresses); the id comes from the `-o json` output of the create, or from the listing on a resumed run.
 4. **Stops on the first 429 / rate limit, on a write or a listing** (exit 40) and prints how to resume: rerun the same command. Idempotent: an event whose id exists is skipped; a series without its `.e` edit gets the edit; a series still listing its to-delete occurrence gets the delete.
@@ -38,33 +38,33 @@ About 370 writes, so roughly 12 minutes at 2 s each.
 
 ## Pending live run
 
-Not run yet: proton-cal's own login on the test account would hit the same pending CAPTCHA as `pcb-lab login` (HUMAN-CHECKS step 4, after steps 1 to 3). After the CAPTCHA is solved:
+Not run yet: proton-cal's own login on the test account would hit the same CAPTCHA handling as `pcb-lab login` (HUMAN-CHECKS step 4, after steps 1 to 3). Everything below runs through `scripts/live/run.sh` (`live` for short, HUMAN-CHECKS "The run root"): one call per command, so `PROTON_CAL_CONFIG_DIR` can never be lost between calls and fall back to the author's own `~/.config/proton-cal` (the guard refuses it). `R=$HOME/pcb-live-run/<run>`; the worktrees of the earlier milestones are gone, so everything is built from main or from the fork's `origin/main` into `$R/bin`.
 
 ```
-cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0
+cd <a checkout of main of this repository>
 
-# 1. build the fork at its current main (a scratch worktree; the clone's own tree is not touched)
+# 1. build the fork at its current main into the run root (a scratch worktree of the fork; the clone's own tree is not touched)
 git -C /home/jduff/Workspace/github.com/Barben360/proton-cal fetch origin
 git -C /home/jduff/Workspace/github.com/Barben360/proton-cal worktree add --detach /tmp/pc-main origin/main
-(cd /tmp/pc-main && go build -o /tmp/proton-cal ./cmd/proton-cal)
+(cd /tmp/pc-main && go build -o "$R/bin/proton-cal" ./cmd/proton-cal)
 git -C /home/jduff/Workspace/github.com/Barben360/proton-cal worktree remove /tmp/pc-main
+go build -trimpath -o "$R/bin/pcb-lab" ./cmd/pcb-lab        # if not built yet
 
-# 2. log proton-cal in with its own isolated config dir (credentials from pass-cli, never typed)
-export PROTON_CAL_CONFIG_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/pcb-lab-seed
-pass-cli run --env-file scripts/seed.env.example -- /tmp/proton-cal login --no-prompt
-#    with a solved CAPTCHA token (also from a new process, 60 s after any other lab login):
-pass-cli run --env-file scripts/seed.env.example -- /tmp/proton-cal login --no-prompt --captcha-token <token>
+# 2. log proton-cal in with its own isolated config dir ($R/seed, set by live --proton-cal); credentials from pass-cli, never typed
+live --proton-cal --login 4 'seed: proton-cal login' -- pass-cli run --env-file scripts/seed.env.example -- proton-cal login --no-prompt
+#    with a solved CAPTCHA token (also from a new process, 60 s after any other lab login; the ledger enforces the 60 s):
+live --proton-cal --login 4 'seed: proton-cal login with a solved token' -- pass-cli run --env-file scripts/seed.env.example -- proton-cal login --no-prompt --captcha-token <token>
 
-# 3. check what is there, then seed
-go run ./cmd/pcb-lab seed plan | tail -1
-go run ./cmd/pcb-lab seed apply --bin /tmp/proton-cal
+# 3. check what is there, then seed (the same dir for the child: --config-dir)
+live -- pcb-lab seed plan | tail -1
+live --proton-cal -- pcb-lab seed apply --bin @RUN@/bin/proton-cal --config-dir @RUN@/seed
 ```
 
 `scripts/seed.env.example` has the same three `pass://` references as `scripts/lab.env.example` under proton-cal's variable names (`PROTON_CAL_USERNAME`, `PROTON_CAL_PASSWORD`, `PROTON_CAL_TOTP`; the TOTP URI lets proton-cal compute a fresh code).
 
-- Exit 40 with a rate-limit message: wait a few minutes and rerun step 3's `apply` unchanged; it resumes.
+- Exit 40 with a rate-limit message: wait a few minutes and rerun step 3's `apply` unchanged (the same `live` call); it resumes.
 - The login counts as a lab login (one per run, 60 s apart, honour `Retry-After`; AGENTS.md). A new CAPTCHA is a new row in `E02-captcha-token.md`.
-- After a successful run, record the final counts here (`proton-cal events --all-calendars --from 2020-12-31 --days 2374 -o json | jq length`) and any occurrence edit proton-cal refused.
+- After a successful run, record the final counts here (`live --proton-cal -- proton-cal events --all-calendars --from 2020-12-31 --days 2374 -o json | jq length`) and any occurrence edit proton-cal refused.
 
 Things the offline tests cannot show and the first live run may reveal: proton-cal limits `--count` to 49 (all series stay below), requires a series start that matches its RRULE (the file's starts do), and may refuse moving an all-day occurrence or an unbounded RRULE; a refusal shows as a failed command naming its id (`s346.e`, ...), to fix in the file.
 
@@ -74,13 +74,13 @@ Edit `testdata/seed/dataset.yaml` (or its `seed:`), wipe, rerun `seed apply`. Wi
 
 ## Wipe
 
-Delete every event whose summary starts with `pcb-seed` (it is the whole data set, nothing else):
+Delete every event whose summary starts with `pcb-seed` (it is the whole data set, nothing else). One guarded call, so the config dir is the run root's (`$R/seed`, never `~/.config/proton-cal`); the loop runs in a `bash -c` of that call:
 
 ```
-export PROTON_CAL_CONFIG_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/pcb-lab-seed
-/tmp/proton-cal events --all-calendars --from 2020-12-31 --days 2374 -o json \
-  | jq -r '.[] | select(.summary | startswith("pcb-seed ")) | "\(.id)\t\(.calendar_id)"' | sort -u \
-  | while IFS=$'\t' read -r id cal; do /tmp/proton-cal delete event "$id" --calendar "$cal"; sleep 2; done
+live --proton-cal -- bash -c '
+  proton-cal events --all-calendars --from 2020-12-31 --days 2374 -o json \
+    | jq -r ".[] | select(.summary | startswith(\"pcb-seed \")) | \"\(.id)\t\(.calendar_id)\"" | sort -u \
+    | while IFS=$(printf "\t") read -r id cal; do proton-cal delete event "$id" --calendar "$cal"; sleep 2; done'
 ```
 
-Deleting a series id removes the series with its edited occurrences; ids of edited occurrences listed afterwards may already be gone (ignore the error). The `Work` and `Sport` calendars stay; delete them with `proton-cal delete calendar Work --yes` if needed.
+Deleting a series id removes the series with its edited occurrences; ids of edited occurrences listed afterwards may already be gone (ignore the error). The `Work` and `Sport` calendars stay; delete them with `live --proton-cal -- proton-cal delete calendar Work --yes` if needed.
