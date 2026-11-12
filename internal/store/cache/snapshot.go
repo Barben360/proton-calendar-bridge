@@ -87,6 +87,9 @@ type View interface {
 	AliasOf(name string) (uid string, ok bool, err error)
 	// AliasesFor returns every alias of the calendar, UID to name.
 	AliasesFor() (map[string]string, error)
+	// Pins returns the pins of the rows ids of the calendar that have one
+	// (ruling M4-R30), by row ID.
+	Pins(ids []string) (map[string]Pin, error)
 }
 
 // Snapshot runs fn inside one read transaction on calID: everything fn reads

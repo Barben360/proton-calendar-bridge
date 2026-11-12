@@ -30,6 +30,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/calendar"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/cards"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -392,47 +393,40 @@ func (l *Local) storeRows(ctx context.Context, w *write, uid string, rows []even
 	})
 }
 
-// keyPackets are a row's key packets as received, "" for absent or null.
-type keyPackets struct{ shared, calendar, address string }
-
-func packetsOf(raw json.RawMessage) keyPackets {
-	var m map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &m) // a row that does not decode has no packets to compare
-	field := func(name string) string {
-		v := bytes.TrimSpace(m[name])
-		var s string
-		if json.Unmarshal(v, &s) == nil {
-			return s
-		}
-		if string(v) == "null" {
-			return ""
-		}
-		return string(v)
+// pinned returns the pins of rows' IDs (ruling M4-R30).
+func (l *Local) pinned(ctx context.Context, w *write, rows []events.Row) (map[string]cache.Pin, error) {
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
 	}
-	return keyPackets{field("SharedKeyPacket"), field("CalendarKeyPacket"), field("AddressKeyPacket")}
+	var out map[string]cache.Pin
+	err := l.onWriter(func(db *cache.Cache, _ *served) error {
+		return l.cacheFail(db.Snapshot(ctx, w.calID, func(v cache.View) error {
+			var err error
+			out, err = v.Pins(ids)
+			return err
+		}))
+	})
+	return out, err
 }
 
-// changedPackets returns the ID of a refreshed row whose key packets
-// differ from the cached copy of that row (ruling M4-R17: Proton never
-// changes a row's key packets, research B.5), and which packet; "" when
-// none does. A row the cache does not hold has nothing to compare with.
-func changedPackets(cached []cache.StoredRow, fresh []events.Row) (id, field string) {
-	held := make(map[string]keyPackets, len(cached))
-	for _, r := range cached {
-		held[r.ID] = packetsOf(r.Raw)
-	}
+// changedPackets returns the ID of a refreshed row whose key packets differ
+// from its pin, the packets the cache first stored for it (ruling M4-R30:
+// Proton never changes a row's key packets, research B.5, so a later sync
+// pass storing other ones does not move the pin), and which packet; "" when
+// none does. A row never stored has no pin: it is pinned when stored.
+func changedPackets(pins map[string]cache.Pin, fresh []events.Row) (id, field string) {
 	for _, r := range fresh {
-		old, ok := held[r.ID]
+		old, ok := pins[r.ID]
 		if !ok {
 			continue
 		}
-		now := packetsOf(r.Raw)
-		switch {
-		case now.shared != old.shared:
+		switch now := cache.PinOf(r.Raw); {
+		case now.Shared != old.Shared:
 			return r.ID, "SharedKeyPacket"
-		case now.calendar != old.calendar:
+		case now.Calendar != old.Calendar:
 			return r.ID, "CalendarKeyPacket"
-		case now.address != old.address:
+		case now.Address != old.Address:
 			return r.ID, "AddressKeyPacket"
 		}
 	}
@@ -462,27 +456,37 @@ type planned struct {
 	memberID string
 }
 
-// plan runs fn on the calendar's keys, as held now, and the group opened
-// with them; the write gate is checked again on those keys.
-func (l *Local) plan(w *write, g cache.Group, fn func(Group, *calendar.Access) (WritePlan, error)) (planned, error) {
+// withKeys runs fn on the calendar's keys as held now (Access and the
+// group keys of the render), under kmu.
+func (l *Local) withKeys(w *write, fn func(*calendar.Access, GroupKeys) error) error {
 	l.r.kmu.RLock()
 	defer l.r.kmu.RUnlock()
 	ks := l.r.ks
-	if ks == nil || ks.account != w.account || ks.cals[w.calID] == nil {
-		return planned{}, errKeysDropped()
+	if ks == nil || ks.account != w.account || ks.cals[w.calID] == nil || ks.cals[w.calID].access == nil {
+		return errKeysDropped()
 	}
 	a := ks.cals[w.calID].access
-	if !a.Writable() {
-		return planned{}, notWritable()
-	}
-	opened := OpenGroup(g, GroupKeys{Calendar: a.KR, Addresses: ks.u.AddrKRs, Own: func(email string) *crypto.KeyRing {
+	return fn(a, GroupKeys{Calendar: a.KR, Addresses: ks.u.AddrKRs, Own: func(email string) *crypto.KeyRing {
 		return ks.own[strings.ToLower(email)]
 	}})
-	p, err := fn(opened, a)
-	if err != nil {
-		return planned{}, planError(err)
-	}
-	return planned{WritePlan: p, memberID: a.MemberID}, nil
+}
+
+// plan runs fn on the calendar's keys, as held now, and the group opened
+// with them; the write gate is checked again on those keys.
+func (l *Local) plan(w *write, g cache.Group, fn func(Group, *calendar.Access) (WritePlan, error)) (planned, error) {
+	var out planned
+	err := l.withKeys(w, func(a *calendar.Access, k GroupKeys) error {
+		if !a.Writable() {
+			return notWritable()
+		}
+		p, err := fn(OpenGroup(g, k), a)
+		if err != nil {
+			return planError(err)
+		}
+		out = planned{WritePlan: p, memberID: a.MemberID}
+		return nil
+	})
+	return out, err
 }
 
 // etagNow is the object's ETag under the calendar's keys as held now.
@@ -529,18 +533,18 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	}
 	defer w.unlock()
 
-	before, err := l.read(ctx, w, in.UID, name)
-	if err != nil {
-		return PutResult{}, err
-	}
 	fresh, err := l.listRows(ctx, w, in.UID)
 	if err != nil {
 		return PutResult{}, err
 	}
-	if id, field := changedPackets(before.group.Rows, fresh); id != "" {
-		// Not stored: the cached packets stay the ones the next write is
-		// checked against.
-		w.log.Warn("refusing a write: a row's key packet changed since pcb cached it", "calendar", calID, "row", id, "field", field)
+	pins, err := l.pinned(ctx, w, fresh)
+	if err != nil {
+		return PutResult{}, err
+	}
+	if id, field := changedPackets(pins, fresh); id != "" {
+		// Not stored either: the sync passes store what Proton serves, the
+		// pin stays what was first seen.
+		w.log.Warn("refusing a write: a row's key packet changed since pcb first stored it", "calendar", calID, "row", id, "field", field)
 		return PutResult{}, refusal(refused(RefuseUntrustedKey, "a key packet of the event changed since pcb read it"))
 	}
 	if err := l.storeRows(ctx, w, in.UID, fresh); err != nil {
@@ -702,7 +706,11 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		w.log.Warn("Proton refused a write", "calendar", w.calID, "entry", entry.Index, "code", entry.Code)
 		return protonRefused(0, entry.Code)
 	}
-	if !confirmed(p.Ops, before, rows) {
+	ok := false
+	if err := l.withKeys(w, func(_ *calendar.Access, k GroupKeys) error {
+		ok = confirmed(p.Ops, before, rows, k)
+		return nil
+	}); err != nil || !ok {
 		w.log.Warn("a write is not confirmed by the rows read back", "calendar", w.calID, "ambiguous", syncErr != nil)
 		return notConfirmed()
 	}
@@ -732,42 +740,10 @@ func (l *Local) sendOnce(ctx context.Context, w *write, p planned) (res []events
 	return res, syncErr, err
 }
 
-// storedRow is what confirmed reads of a row as Proton lists it.
-type storedRow struct {
-	SharedEvents, CalendarEvents, AttendeesEvents []storedPart
-	Notifications                                 json.RawMessage
-	Color                                         *string
-}
-
-type storedPart struct {
-	Type int
-	Data string
-}
-
-// partKey is a part's type and content: the signed text, or the bytes of
-// the encrypted data packet (Proton cannot re-encrypt it: it holds no
-// session key), whatever its base64 spelling.
-func partKey(typ int, data string) string {
-	if typ&1 != 0 {
-		if b, err := base64.StdEncoding.DecodeString(data); err == nil {
-			data = string(b)
-		}
-	}
-	return fmt.Sprint(typ) + "\x00" + data
-}
-
-func sameParts(sent events.PartList, stored []storedPart) bool {
-	a := make([]string, len(sent))
-	for i, p := range sent {
-		a[i] = partKey(p.Type, p.Data)
-	}
-	b := make([]string, len(stored))
-	for i, p := range stored {
-		b[i] = partKey(p.Type, p.Data)
-	}
-	slices.Sort(a)
-	slices.Sort(b)
-	return slices.Equal(a, b)
+// rowFields are the row fields confirmed compares.
+type rowFields struct {
+	Notifications json.RawMessage
+	Color         *string
 }
 
 // normalNotifications is a Notifications value, null or a list, in a form
@@ -789,15 +765,11 @@ func normalNotifications(raw []byte) (string, bool) {
 	return "[" + strings.Join(keys, "\x01") + "]", true
 }
 
-// holds reports whether row, as listed, holds body: the same parts, the
-// notifications sent (when sent) and the colour sent (when one is).
-func holds(row events.Row, body events.Body) bool {
-	var s storedRow
-	if json.Unmarshal(row.Raw, &s) != nil {
-		return false
-	}
-	if !sameParts(body.SharedEventContent, s.SharedEvents) || !sameParts(body.CalendarEventContent, s.CalendarEvents) ||
-		!sameParts(body.AttendeesEventContent, s.AttendeesEvents) {
+// fieldsHold reports whether a listed row's fields hold what body sent:
+// the notifications (when sent) and the colour (when one is).
+func fieldsHold(raw json.RawMessage, body events.Body) bool {
+	var s rowFields
+	if json.Unmarshal(raw, &s) != nil {
 		return false
 	}
 	if !body.Notifications.IsZero() {
@@ -819,11 +791,68 @@ func holds(row events.Row, body events.Body) bool {
 	return true
 }
 
+// plaintexts are an opened event's parts, kind and text, sorted; the
+// personal part is left out (never written).
+func plaintexts(ev cards.Event) []string {
+	var out []string
+	for _, p := range ev.Parts {
+		if p.Kind != cards.Personal {
+			out = append(out, fmt.Sprint(int(p.Kind))+"\x00"+string(p.Text))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// partsHold reports whether a listed row holds the parts body sent, by
+// meaning (ruling M4-R32): the row opens with the calendar's keys, every
+// part of it is ours and verifies, and its plaintext per part is the
+// plaintext sent, whatever armour or base64 spelling Proton serves. The sent
+// parts open with the key packets body carries (a create) or else the
+// row's (an update reuses them).
+func partsHold(row events.Row, body events.Body, k GroupKeys) bool {
+	got, err := cards.Open(row.Raw, k.Calendar, k.Addresses, k.Own)
+	if err != nil {
+		return false
+	}
+	for _, p := range got.Parts {
+		if p.Kind != cards.Personal && (!p.Own || !p.Verified) {
+			return false
+		}
+	}
+	pin := cache.PinOf(row.Raw)
+	shared, calendarPacket := body.SharedKeyPacket, body.CalendarKeyPacket
+	if shared == "" {
+		shared = pin.Shared
+	}
+	if calendarPacket == "" {
+		calendarPacket = pin.Calendar
+	}
+	sentRaw, err := json.Marshal(map[string]any{
+		"ID": "sent", "UID": row.UID, "SharedKeyPacket": shared, "CalendarKeyPacket": calendarPacket,
+		"SharedEvents": body.SharedEventContent, "CalendarEvents": body.CalendarEventContent, "AttendeesEvents": body.AttendeesEventContent,
+	})
+	if err != nil {
+		return false
+	}
+	sent, err := cards.Open(sentRaw, k.Calendar, nil, nil)
+	if err != nil {
+		return false
+	}
+	return slices.Equal(plaintexts(got), plaintexts(sent))
+}
+
+// holds reports whether row, as listed, holds body: its parts (partsHold)
+// and its fields (fieldsHold).
+func holds(row events.Row, body events.Body, k GroupKeys) bool {
+	return fieldsHold(row.Raw, body) && partsHold(row, body, k)
+}
+
 // confirmed reports whether rows, uid's rows read back after the write,
 // show every operation of ops done: a deleted row gone, an updated row
 // holding what was sent, a created row (one that was not in before)
 // holding what was sent, each row standing for one operation.
-func confirmed(ops []events.Op, before cache.Group, rows []events.Row) bool {
+func confirmed(ops []events.Op, before cache.Group, rows []events.Row, k GroupKeys) bool {
 	old := make(map[string]bool, len(before.Rows))
 	for _, r := range before.Rows {
 		old[r.ID] = true
@@ -841,12 +870,12 @@ func confirmed(ops []events.Op, before cache.Group, rows []events.Row) bool {
 			}
 		case op.Update != nil:
 			r, ok := byID[op.Update.ID]
-			if !ok || used[r.ID] || !holds(r, op.Update.Body) {
+			if !ok || used[r.ID] || !holds(r, op.Update.Body, k) {
 				return false
 			}
 			used[r.ID] = true
 		case op.Create != nil:
-			i := slices.IndexFunc(rows, func(r events.Row) bool { return !old[r.ID] && !used[r.ID] && holds(r, *op.Create) })
+			i := slices.IndexFunc(rows, func(r events.Row) bool { return !old[r.ID] && !used[r.ID] && holds(r, *op.Create, k) })
 			if i < 0 {
 				return false
 			}

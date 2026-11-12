@@ -138,6 +138,8 @@ type Cache struct {
 	noMeta bool
 	// noAliases: a version 1 file, which has no aliases table (same case).
 	noAliases bool
+	// noPins: a file without the pins table, read only (same case).
+	noPins bool
 }
 
 // Path is the cache file inside the state directory.
@@ -203,6 +205,10 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 		}
 	}
+	hadPins, err := c.hasTable(ctx, "pins")
+	if err != nil {
+		return fmt.Errorf("cache: read %s: %w", path, c.classify(err))
+	}
 	if version < schemaVersion {
 		err := c.tx(ctx, func(tx *sql.Tx) error {
 			for _, ddl := range []string{schemaV1, schemaV2} {
@@ -217,6 +223,13 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return fmt.Errorf("cache: create schema: %w", c.classify(err))
 		}
 	}
+	if !hadPins {
+		// A version 1 file, or a version 2 file of a build before the pins:
+		// its stored rows are the first seen.
+		if err := c.tx(ctx, func(tx *sql.Tx) error { return backfillPins(ctx, tx) }); err != nil {
+			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
+		}
+	}
 	// Read first: opening for the same account must not take the write lock.
 	if got, err := c.account(ctx, c.db); err != nil {
 		return fmt.Errorf("cache: %w", c.classify(err))
@@ -227,7 +240,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return fmt.Errorf("cache: %w", err)
 		}
 	}
-	err := c.tx(ctx, func(tx *sql.Tx) error {
+	err = c.tx(ctx, func(tx *sql.Tx) error {
 		got, err := c.account(ctx, tx)
 		if err != nil {
 			return err
@@ -237,7 +250,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return err
 		}
 		if got != "" {
-			for _, t := range []string{"aliases", "tombstones", "events", "calendars", "meta"} {
+			for _, t := range []string{"pins", "aliases", "tombstones", "events", "calendars", "meta"} {
 				if _, err := tx.ExecContext(ctx, `DELETE FROM `+t); err != nil {
 					return err
 				}
@@ -436,6 +449,11 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 		return ErrNoCache // empty file: nothing was ever stored
 	}
 	c.noAliases = version < 2 // a read-only handle never upgrades
+	pins, err := c.hasTable(ctx, "pins")
+	if err != nil {
+		return fmt.Errorf("cache: %w", c.classify(err))
+	}
+	c.noPins = !pins
 	got, err := c.account(ctx, c.db)
 	if err != nil {
 		return fmt.Errorf("cache: %w", err)
@@ -540,6 +558,9 @@ func (w *writer) upsert(r Row, known map[string]string) error {
 		return fmt.Errorf("event %q: %w", r.ID, err)
 	}
 	old, existed := known[r.ID]
+	if err := w.pin(r); err != nil {
+		return fmt.Errorf("event %q: %w", r.ID, err)
+	}
 	if existed && old == tag {
 		return nil
 	}
@@ -576,6 +597,9 @@ func (w *writer) tombstone(id string, known map[string]string) error {
 	}
 	var uid string
 	if err := w.tx.QueryRowContext(w.ctx, `DELETE FROM events WHERE calendar_id = ? AND id = ? RETURNING uid`, w.cal, id).Scan(&uid); err != nil {
+		return err
+	}
+	if _, err := w.tx.ExecContext(w.ctx, `DELETE FROM pins WHERE calendar_id = ? AND id = ?`, w.cal, id); err != nil {
 		return err
 	}
 	// The UID names the deleted CalDAV resource (ruling R16).
@@ -878,6 +902,7 @@ func (c *Cache) DropCalendar(ctx context.Context, id string) error {
 			`DELETE FROM events WHERE calendar_id = ?`,
 			`DELETE FROM tombstones WHERE calendar_id = ?`,
 			`DELETE FROM aliases WHERE calendar_id = ?`,
+			`DELETE FROM pins WHERE calendar_id = ?`,
 			`DELETE FROM calendars WHERE id = ?`,
 		} {
 			if _, err := tx.ExecContext(ctx, q, id); err != nil {

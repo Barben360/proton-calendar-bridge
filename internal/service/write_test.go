@@ -14,11 +14,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProtonMail/gopenpgp/v2/crypto"
+
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
 // The executor's tests run the service against the fake Proton during
@@ -194,6 +198,34 @@ func (r *rig) webEdit(t *testing.T, row events.Row, notifications events.Notific
 		body.Color = events.Value(*w.Color)
 	}
 	res, err := events.Sync(t.Context(), r.pc, r.cal, r.f.MemberID(r.cal), []events.Op{{Update: &events.Update{ID: row.ID, Body: body}}})
+	if err != nil || events.FirstError(res) != nil {
+		t.Fatalf("web edit: %v, %v", err, events.FirstError(res))
+	}
+}
+
+// webPut is an edit made in Proton's web app through the write endpoint:
+// body planned over uid's rows as Proton holds them, sealed with the
+// account's keys; the rows keep their key packets, as Proton keeps them
+// (research B.5).
+func (r *rig) webPut(t *testing.T, uid string, body []byte) {
+	t.Helper()
+	g := cache.Group{UID: uid}
+	for _, row := range r.proton(t, uid) {
+		g.Rows = append(g.Rows, cache.StoredRow{ID: row.ID, UID: row.UID, Start: row.Start, End: row.End, FullDay: row.FullDay,
+			RecurrenceID: row.RecurrenceID, RRule: row.RRule, LastEdit: row.LastEditTime, Raw: row.Raw})
+	}
+	addr := r.f.AddressKeyRing()
+	keys := service.GroupKeys{Calendar: r.f.CalendarKeyRing(r.cal), Own: func(string) *crypto.KeyRing { return addr }}
+	in, err := ical.ParseWrite(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := service.Plan(service.OpenGroup(g, keys), in, service.Defaults{PartDay: []ical.Notification{{Type: 1, Trigger: "-PT1H"}},
+		Signer: addr, CalendarPrimary: r.f.CalendarKeyRing(r.cal), Now: t0})
+	if err != nil || len(p.Ops) == 0 {
+		t.Fatalf("web edit plan: %d ops, %v", len(p.Ops), err)
+	}
+	res, err := events.Sync(context.Background(), r.pc, r.cal, r.f.MemberID(r.cal), p.Ops)
 	if err != nil || events.FirstError(res) != nil {
 		t.Fatalf("web edit: %v, %v", err, events.FirstError(res))
 	}
@@ -610,10 +642,9 @@ func TestAmbiguousFailureReadsBack(t *testing.T) {
 // the master's SEQUENCE in that window: ruling M4-R24) both refresh it.
 func TestEntryRefusalIs403AndCacheRefreshed(t *testing.T) {
 	t.Parallel()
-	var master string
 	rid := base + day
 	r := newRig(t, protontest.Options{Write: protontest.WriteOptions{RejectDuplicateUID: true}}, func(f *protontest.Fake, cal string) {
-		master = f.AddEvent(cal, protontest.Event{UID: "series@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Color: green,
+		f.AddEvent(cal, protontest.Event{UID: "series@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Color: green,
 			Card: card("series@x", "Standup", base, "RRULE:FREQ=DAILY")})
 	}).start(t)
 	// before runs once, as the call leaves.
@@ -648,32 +679,39 @@ func TestEntryRefusalIs403AndCacheRefreshed(t *testing.T) {
 		}
 	})
 	t.Run("SequenceRefusedThenRefreshed", func(t *testing.T) {
-		obj := r.object(t, "series@x")
-		exception := []string{"UID:series@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID:" + stamp(rid),
+		// Written by pcb, so the body's master is unchanged: the call holds
+		// the exception's create alone.
+		series := vcal([]string{"UID:pcbseries@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600),
+			"RRULE:FREQ=DAILY", "SUMMARY:Standup"})
+		if _, err := r.put(t, "pcbseries@x.ics", series, service.Precondition{IfNoneMatchAny: true}); err != nil {
+			t.Fatal(err)
+		}
+		obj := r.object(t, "pcbseries@x")
+		exception := []string{"UID:pcbseries@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID:" + stamp(rid),
 			"DTSTART:" + stamp(rid+1800), "DTEND:" + stamp(rid+5400), "SUMMARY:Standup moved"}
 		body := edit(t, obj.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(exception, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
-		once(func() {
-			r.f.UpdateEvent(r.cal, master, protontest.Event{UID: "series@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Color: green,
-				Card: card("series@x", "Standup", base, "RRULE:FREQ=DAILY", "SEQUENCE:5")})
-		})
+		// The web app bumps the master's SEQUENCE in the window (through the
+		// write endpoint: its key packets stay).
+		bumped := edit(t, obj.Data, "RRULE:FREQ=DAILY", "RRULE:FREQ=DAILY\r\nSEQUENCE:5")
+		once(func() { r.webPut(t, "pcbseries@x", bumped) })
 		defer r.tr.set(nil)
 		calls := len(r.f.SyncCalls())
-		_, err := r.put(t, "series@x.ics", body, service.Precondition{IfMatch: obj.ETag})
+		_, err := r.put(t, "pcbseries@x.ics", body, service.Precondition{IfMatch: obj.ETag})
 		wantRefused(t, err, service.RefuseProtonRefused)
-		if n := len(r.f.SyncCalls()) - calls; n != 1 {
-			t.Errorf("%d sync calls, want 1 (never retried)", n)
+		if n := len(r.f.SyncCalls()) - calls; n != 2 {
+			t.Errorf("%d sync calls, want 2: the web edit and ours, never retried", n)
 		}
-		fresh := r.object(t, "series@x")
+		fresh := r.object(t, "pcbseries@x")
 		contains(t, "the refreshed object", fresh.Data, "SEQUENCE:5")
 		lacks(t, "the refreshed object", fresh.Data, "RECURRENCE-ID")
 
 		// The client reads the object again and retries: the exception now
 		// takes the master's SEQUENCE.
 		retry := edit(t, fresh.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(exception, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
-		if _, err := r.put(t, "series@x.ics", retry, service.Precondition{IfMatch: fresh.ETag}); err != nil {
+		if _, err := r.put(t, "pcbseries@x.ics", retry, service.Precondition{IfMatch: fresh.ETag}); err != nil {
 			t.Fatalf("the retry: %v", err)
 		}
-		contains(t, "the object", r.object(t, "series@x").Data, "RECURRENCE-ID:"+stamp(rid), "SUMMARY:Standup moved")
+		contains(t, "the object", r.object(t, "pcbseries@x").Data, "RECURRENCE-ID:"+stamp(rid), "SUMMARY:Standup moved")
 	})
 	t.Run("CreateOfAnEventProtonHasIsNoDuplicate", func(t *testing.T) {
 		// Created in the web app after the last pass: the refresh finds it.
@@ -929,6 +967,21 @@ func TestChangedKeyPacketRefusesTheWrite(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the log holds %q:\n%s", secret, logs)
 		}
+	}
+
+	// A sync pass stores the swapped row: the pin is still the first
+	// packets (ruling M4-R30), so the write stays refused.
+	if p := r.s.next(t, false); calSync(t, p.Result, r.cal).Updated != 1 {
+		t.Fatalf("the pass did not store the swapped row: %+v", calSync(t, p.Result, r.cal))
+	}
+	synced := r.object(t, "a@x")
+	if synced.ETag == obj.ETag {
+		t.Fatal("the cache still holds the first row")
+	}
+	_, err = r.put(t, "a@x.ics", edit(t, synced.Data, "SUMMARY:Lunch", "SUMMARY:Dinner"), service.Precondition{IfMatch: synced.ETag})
+	wantRefused(t, err, service.RefuseUntrustedKey)
+	if n := len(r.f.SyncCalls()); n != 0 {
+		t.Errorf("%d sync calls after the pass", n)
 	}
 
 	// A delete encrypts nothing: the owner may remove the event (ruling
@@ -1199,4 +1252,153 @@ func TestDeleteReadsBack(t *testing.T) {
 	if p := r.s.next(t, false); calSync(t, p.Result, r.cal).Deleted != 0 {
 		t.Errorf("the pass deleted again: %+v", calSync(t, p.Result, r.cal))
 	}
+}
+
+// rewriteReadBack makes the rig's transport hand every row of a read-back
+// (a UID listing after the write left) through fn, as if Proton served it
+// so.
+func (r *rig) rewriteReadBack(t *testing.T, fn func(row map[string]any)) {
+	t.Helper()
+	var mu sync.Mutex
+	sent := false
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		mu.Lock()
+		if r.isSync(req) {
+			sent = true
+		}
+		after := sent && r.isReadBack(req)
+		mu.Unlock()
+		resp, err := send()
+		if err != nil || !after {
+			return resp, err
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var page map[string]any
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
+		if err := dec.Decode(&page); err != nil {
+			t.Errorf("read-back page: %v", err)
+			return nil, err
+		}
+		rows, _ := page["Events"].([]any)
+		for _, row := range rows {
+			fn(row.(map[string]any))
+		}
+		out, err := json.Marshal(page)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(out))
+		resp.ContentLength = int64(len(out))
+		resp.Header.Del("Content-Length")
+		return resp, nil
+	})
+}
+
+// cardParts are a row's card parts, every list.
+func cardParts(row map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, list := range []string{"SharedEvents", "CalendarEvents", "AttendeesEvents"} {
+		parts, _ := row[list].([]any)
+		for _, p := range parts {
+			out = append(out, p.(map[string]any))
+		}
+	}
+	return out
+}
+
+// encrypted reports whether a part, as decoded with UseNumber, is
+// encrypted.
+func encrypted(part map[string]any) bool {
+	n, _ := part["Type"].(json.Number).Int64()
+	return n&1 != 0
+}
+
+// The read-back is compared by meaning (ruling M4-R32): Proton serving the
+// same parts in another armour or base64 spelling confirms the write; a
+// part with other plaintext, or one whose signature does not verify, does
+// not.
+func TestReadBackComparesPlaintext(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	if _, err := r.put(t, "a@x.ics", newEvent("a@x", "Lunch"), service.Precondition{IfNoneMatchAny: true}); err != nil {
+		t.Fatal(err)
+	}
+	stored := r.proton(t, "a@x")[0]
+	var old struct{ SharedEvents []map[string]any }
+	if err := json.Unmarshal(stored.Raw, &old); err != nil || len(old.SharedEvents) != 2 {
+		t.Fatalf("the stored row's shared parts: %v", err)
+	}
+	// put retitles the event. No If-Match, and the body is built afresh: a
+	// read-back rewritten below leaves the cache with what Proton did not
+	// store.
+	put := func(t *testing.T, to string) error {
+		t.Helper()
+		_, err := r.put(t, "a@x.ics", newEvent("a@x", to), service.Precondition{})
+		return err
+	}
+
+	t.Run("ReEncodedIsConfirmed", func(t *testing.T) {
+		defer r.tr.set(nil)
+		r.rewriteReadBack(t, func(row map[string]any) {
+			for _, p := range cardParts(row) {
+				if data := p["Data"].(string); encrypted(p) {
+					var wrapped strings.Builder
+					for i := 0; i < len(data); i += 40 {
+						wrapped.WriteString(data[i:min(i+40, len(data))] + "\r\n")
+					}
+					p["Data"] = wrapped.String()
+				}
+				var kept []string
+				for _, line := range strings.Split(p["Signature"].(string), "\n") {
+					if !strings.HasPrefix(line, "Comment:") && !strings.HasPrefix(line, "Version:") {
+						kept = append(kept, line)
+					}
+				}
+				p["Signature"] = strings.Join(kept, "\r\n")
+			}
+		})
+		if err := put(t, "Dinner"); err != nil {
+			t.Fatalf("a write Proton serves re-encoded: %v", err)
+		}
+		contains(t, "the object", r.object(t, "a@x").Data, "SUMMARY:Dinner")
+	})
+	t.Run("OtherPlaintextIsNotConfirmed", func(t *testing.T) {
+		defer r.tr.set(nil)
+		// The encrypted shared part read back is the first one, Lunch: a
+		// part of ours, signed, under the row's key, but not what was sent.
+		r.rewriteReadBack(t, func(row map[string]any) {
+			parts := row["SharedEvents"].([]any)
+			for i, p := range parts {
+				if encrypted(p.(map[string]any)) {
+					parts[i] = old.SharedEvents[i]
+				}
+			}
+		})
+		wantUnconfirmed(t, put(t, "Supper"))
+	})
+	t.Run("UnverifiedIsNotConfirmed", func(t *testing.T) {
+		defer r.tr.set(nil)
+		// The encrypted part's signature is the signed part's: well formed,
+		// ours, over other bytes.
+		r.rewriteReadBack(t, func(row map[string]any) {
+			var clear string
+			for _, p := range cardParts(row) {
+				if !encrypted(p) {
+					clear = p["Signature"].(string)
+					break
+				}
+			}
+			for _, p := range cardParts(row) {
+				if encrypted(p) {
+					p["Signature"] = clear
+				}
+			}
+		})
+		wantUnconfirmed(t, put(t, "Brunch"))
+	})
 }
