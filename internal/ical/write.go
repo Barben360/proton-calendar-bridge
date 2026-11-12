@@ -305,9 +305,9 @@ type entry struct {
 // (calendar encrypted, attendees) appears with its first line and goes
 // when the patch empties it. With no current part, this is a create:
 // Fragment of Route. changed[k] is true when out[k] differs from
-// current[k] in bytes or presence: an unchanged part may be sent as
-// stored, with its stored signature. Errors name the part, never its
-// content.
+// current[k] in bytes or presence; the caller still re-signs and
+// re-encrypts every part it sends (cards.Seal). Errors name the part,
+// never its content.
 func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte, map[PartKind]bool, error) {
 	var in []Property
 	for _, p := range incoming.Props() {
