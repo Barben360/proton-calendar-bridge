@@ -60,15 +60,16 @@ func MergeEvent(parts [][]byte) (Component, error) {
 		}
 		for _, it := range ev.Items {
 			if it.Comp != nil {
+				if hasControl(it.Comp.Name) {
+					continue
+				}
 				sub := it.Comp.Clone()
 				sub.stripControls()
 				out.Items = append(out.Items, Item{Comp: &sub})
 				continue
 			}
-			if dropControls(it.Prop.Name) != it.Prop.Name {
-				// Stripping would make another name of it (BEGIN, a blank that
-				// folds the line): the line is garbage, not served.
-				continue
+			if hasControl(it.Prop.Name) {
+				continue // the rule of Component.stripControls
 			}
 			it.Prop = it.Prop.stripControls()
 			name := strings.ToUpper(it.Prop.Name)
@@ -197,19 +198,29 @@ func dropControls(s string) string {
 func isControl(r rune) bool { return r < 0x20 && r != '\t' || r == 0x7f }
 
 func (p Property) stripControls() Property {
-	return Property{Name: dropControls(p.Name), Params: dropControls(p.Params), Value: dropControls(p.Value)}
+	return Property{Name: p.Name, Params: dropControls(p.Params), Value: dropControls(p.Value)}
 }
 
-// stripControls applies Property.stripControls to c and its nested components.
+// stripControls drops the controls from the parameters and values of c's
+// properties and, recursively, its nested components, and drops every
+// property and component whose name holds one: stripping would make another
+// name of it (an empty one, BEGIN, END) and break the output's nesting. c's
+// own name is the caller's to check. It filters c.Items in place: c must be
+// a private copy (Clone).
 func (c *Component) stripControls() {
-	c.Name = dropControls(c.Name)
-	for i := range c.Items {
-		if sub := c.Items[i].Comp; sub != nil {
-			sub.stripControls()
+	kept := c.Items[:0]
+	for _, it := range c.Items {
+		switch {
+		case it.Comp != nil && hasControl(it.Comp.Name), it.Comp == nil && hasControl(it.Prop.Name):
 			continue
+		case it.Comp != nil:
+			it.Comp.stripControls()
+		default:
+			it.Prop = it.Prop.stripControls()
 		}
-		c.Items[i].Prop = c.Items[i].Prop.stripControls()
+		kept = append(kept, it)
 	}
+	c.Items = kept
 }
 
 func (c *Component) add(p Property) { c.Items = append(c.Items, Item{Prop: p}) }
