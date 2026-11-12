@@ -51,17 +51,28 @@ func (a *app) newService() *cobra.Command {
 
 const notInstalledHint = "pcb install"
 
+// serviceScope is the scope a pcb service command acts on. The system one
+// needs root (M5-R7): refused before anything runs, as systemctl run
+// without a terminal cannot ask for a password.
+func (a *app) serviceScope(scope scopeFlags, verb string) (install.Scope, error) {
+	s, err := scope.detectScope(a.Host, notInstalledHint)
+	if err != nil {
+		return "", err
+	}
+	if s == install.ScopeSystem && a.Host.Euid() != 0 {
+		return "", &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("needs root: sudo pcb service " + verb),
+			Hint: "sudo pcb service " + verb}
+	}
+	return s, nil
+}
+
 func (a *app) serviceVerb(cmd *cobra.Command, scope scopeFlags, verb, done string) error {
 	h := a.Host
-	s, err := scope.detectScope(h, notInstalledHint)
+	s, err := a.serviceScope(scope, verb)
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
-	var args []string
-	if off, _ := cmd.Flags().GetBool("non-interactive"); off && s == install.ScopeSystem && h.Euid() != 0 {
-		args = append(args, "--no-ask-password")
-	}
-	argv := install.Systemctl(s, append(args, verb, install.UnitName)...)
+	argv := install.Systemctl(s, verb, install.UnitName)
 	var stderr bytes.Buffer
 	code, err := h.Run.Stream(cmd.Context(), io.Discard, &stderr, argv[0], argv[1:]...)
 	if err == nil && code != 0 {
@@ -80,7 +91,7 @@ func (a *app) serviceVerb(cmd *cobra.Command, scope scopeFlags, verb, done strin
 
 func (a *app) serviceStatus(cmd *cobra.Command, scope scopeFlags) error {
 	h := a.Host
-	s, err := scope.detectScope(h, notInstalledHint)
+	s, err := a.serviceScope(scope, "status")
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
@@ -100,7 +111,7 @@ func (a *app) serviceLogs(cmd *cobra.Command, scope scopeFlags, follow bool) err
 		return UsageError(errors.New("pcb service logs streams the journal: --json is not supported"))
 	}
 	h := a.Host
-	s, err := scope.detectScope(h, notInstalledHint)
+	s, err := a.serviceScope(scope, "logs")
 	if err != nil {
 		return err
 	}

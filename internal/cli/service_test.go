@@ -27,22 +27,38 @@ func TestServiceDetectsTheScope(t *testing.T) {
 	if _, msg, _ := s.failure(); !strings.Contains(msg, "both") {
 		t.Errorf("ambiguous: %q", msg)
 	}
-	s.want(exitcode.OK, "service", "restart", "--system")
-	s.want(exitcode.OK, "service", "restart", "--system", "--non-interactive")
 	s.want(exitcode.OK, "service", "stop", "--user")
 	if err := os.Remove(filepath.Join(s.root, userUnit)); err != nil {
 		t.Fatal(err)
 	}
 	s.euid = 0
-	s.want(exitcode.OK, "service", "start", "--non-interactive")
+	s.want(exitcode.OK, "service", "restart")
 	if got, want := s.takeEvents(), []string{
 		"systemctl --user start pcb.service",
-		"systemctl restart pcb.service",
-		"systemctl --no-ask-password restart pcb.service",
 		"systemctl --user stop pcb.service",
-		"systemctl start pcb.service",
+		"systemctl restart pcb.service",
 	}; !slices.Equal(got, want) {
 		t.Errorf("commands = %q, want %q", got, want)
+	}
+}
+
+// M5-R7: the system service as non-root is refused before anything runs.
+func TestServiceSystemNeedsRoot(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.write(install.SystemUnitPath, "[Unit]\n", 0o644)
+	for _, verb := range []string{"start", "stop", "restart", "status"} {
+		s.want(exitcode.MustAct, "service", verb, "--json")
+		if _, msg, hint := s.failure(); msg != "needs root: sudo pcb service "+verb || hint != "sudo pcb service "+verb {
+			t.Errorf("%s: %q, hint %q", verb, msg, hint)
+		}
+	}
+	s.want(exitcode.MustAct, "service", "logs")
+	if want := "Error: needs root: sudo pcb service logs\n"; !strings.HasPrefix(s.errb.String(), want) {
+		t.Errorf("logs stderr = %q, want %q", s.errb.String(), want)
+	}
+	if e := s.takeEvents(); len(e) != 0 {
+		t.Errorf("ran %q as non-root on the system scope", e)
 	}
 }
 
@@ -78,6 +94,13 @@ func TestServiceStatusParsesShow(t *testing.T) {
 	s.want(exitcode.OK, "service", "status")
 	if want := "pcb.service (user): failed (failed), enabled\n"; s.stdout.String() != want {
 		t.Errorf("text = %q, want %q", s.stdout.String(), want)
+	}
+	// systemctl failing: its last stderr line is the message.
+	s.codes[show] = 1
+	s.stderr[show] = "Failed to connect to bus: No medium found\n"
+	s.want(exitcode.Blocked, "service", "status", "--json")
+	if _, msg, _ := s.failure(); !strings.Contains(msg, "Failed to connect to bus: No medium found") {
+		t.Errorf("failure = %q, want systemctl's stderr", msg)
 	}
 }
 

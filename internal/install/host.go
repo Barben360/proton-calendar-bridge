@@ -33,14 +33,18 @@ type Host struct {
 	Euid       func() int
 	Executable func() (string, error)
 	LookupUser func(name string) (uid, gid int, ok bool, err error)
-	Chown      func(path string, uid, gid int) error
-	Env        func(string) string
+	// UserName is the name of the user with uid (the linger hint).
+	UserName func(uid int) (string, error)
+	// Chown never follows a final symlink (os.Lchown): root chowning in a
+	// directory pcb owns must not be steered at another file.
+	Chown func(path string, uid, gid int) error
+	Env   func(string) string
 }
 
 // OSHost is the machine pcb runs on.
 func OSHost() Host {
 	return Host{Run: osRunner{}, Euid: os.Geteuid, Executable: os.Executable, LookupUser: lookupUser,
-		Chown: os.Chown, Env: os.Getenv}
+		UserName: userName, Chown: os.Lchown, Env: os.Getenv}
 }
 
 // Path is where the absolute path p lies on h: p under Root.
@@ -67,6 +71,14 @@ func lookupUser(name string) (uid, gid int, ok bool, err error) {
 		return 0, 0, false, err
 	}
 	return uid, gid, true, nil
+}
+
+func userName(uid int) (string, error) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
 }
 
 type osRunner struct{}

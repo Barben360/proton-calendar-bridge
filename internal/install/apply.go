@@ -11,14 +11,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
 // Hooks are what Apply cannot do on its own.
 type Hooks struct {
-	// Logout revokes the Proton session of the scope's directories (a
-	// logout step). Its failure becomes the step's note: the uninstall goes
-	// on (M5-P19).
-	Logout func(ctx context.Context) error
+	// Logout revokes the Proton session of dirs, the scope's directories
+	// the plan resolved (a logout step). Its failure becomes the step's
+	// note: the uninstall goes on (M5-P19).
+	Logout func(ctx context.Context, dirs paths.Dirs) error
 }
 
 // StepError is the step Apply stopped at. The steps before it are done and
@@ -55,6 +58,10 @@ func apply(ctx context.Context, h Host, s *Step, hooks Hooks) error {
 	switch {
 	case s.Action == ActionKeep || s.Action == ActionSkip:
 		return nil
+	case s.Action == ActionUnknown:
+		return errors.New("the plan could not inspect it: plan again as root")
+	case s.Action == ActionUpdate && s.Kind == KindFile && s.fixOnly:
+		return fixFile(h, *s)
 	case (s.Action == ActionCreate || s.Action == ActionUpdate) && s.Kind == KindDir:
 		return makeDir(h, *s)
 	case (s.Action == ActionCreate || s.Action == ActionUpdate) && s.Kind == KindFile:
@@ -66,7 +73,7 @@ func apply(ctx context.Context, h Host, s *Step, hooks Hooks) error {
 			s.Note = "not logged out: revoke the session in the Proton account settings"
 			return nil
 		}
-		if err := hooks.Logout(ctx); err != nil {
+		if err := hooks.Logout(ctx, s.dirs); err != nil {
 			s.Note = "logout failed (" + err.Error() + "): revoke the session in the Proton account settings"
 		}
 		return nil
@@ -142,9 +149,61 @@ func writeFile(h Host, s Step) error {
 		return err
 	}
 	if s.Action == ActionCreate {
-		return os.Link(tmp, p)
+		return createFrom(tmp, p)
 	}
 	return os.Rename(tmp, p)
+}
+
+// link is os.Link; tests replace it to stand for a filesystem without
+// hard links.
+var link = os.Link
+
+// createFrom puts tmp in place as p, never replacing an existing p: a hard
+// link, or where the filesystem has none, a check then a rename.
+func createFrom(tmp, p string) error {
+	err := link(tmp, p)
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if _, lerr := os.Lstat(p); !errors.Is(lerr, fs.ErrNotExist) {
+		return &fs.PathError{Op: "create", Path: p, Err: fs.ErrExist}
+	}
+	return os.Rename(tmp, p)
+}
+
+// fixFile puts an existing file's mode and owner right without touching
+// its content (M8). The mode is set through a descriptor checked to be the
+// regular file the path named, and Host.Chown does not follow a symlink, so
+// a swap in a directory pcb owns cannot steer either at another file.
+func fixFile(h Host, s Step) error {
+	p := h.Path(s.Path)
+	mode, err := parseMode(s.Mode)
+	if err != nil {
+		return err
+	}
+	before, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", s.Path)
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	now, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(before, now) {
+		return fmt.Errorf("%s changed while being fixed", s.Path)
+	}
+	if err := f.Chmod(mode); err != nil {
+		return err
+	}
+	return chown(h, p, s.Owner)
 }
 
 // chown gives p to owner ("user" or "user:group", the group being the
@@ -165,10 +224,10 @@ func chown(h Host, p, owner string) error {
 }
 
 // removeDir removes a directory and everything in it. A relative path, or
-// one without "pcb" in its name, is refused here too, whatever the plan
-// said.
+// one not named exactly pcb (M5-R5), is refused here too, whatever the
+// plan said.
 func removeDir(h Host, dir string) error {
-	if !filepath.IsAbs(dir) || !strings.Contains(filepath.Base(dir), "pcb") {
+	if !filepath.IsAbs(dir) || filepath.Base(dir) != removableName {
 		return fmt.Errorf("refusing to remove %s", dir)
 	}
 	return os.RemoveAll(h.Path(dir))

@@ -97,7 +97,8 @@ func checkUnitParams(p UnitParams) error {
 	for _, v := range []struct{ name, value string }{{"the pcb binary", p.Exec}, {"the config directory", p.ConfigDir}, {"the state directory", p.StateDir}} {
 		if i := strings.IndexFunc(v.value, unsafeInUnit); i >= 0 {
 			r, _ := utf8.DecodeRuneInString(v.value[i:])
-			return fmt.Errorf("%s, %s, holds %q, which a systemd unit cannot hold as it is", v.name, v.value, r)
+			return fmt.Errorf("%s, %s, holds %q (U+%04X): pcb writes into a systemd unit only paths made of ASCII letters, digits and /._-+@,:=~",
+				v.name, v.value, r, r)
 		}
 	}
 	return nil

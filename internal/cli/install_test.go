@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -29,6 +30,7 @@ func noSystemHost() install.Host {
 		Euid:       func() int { return 1000 },
 		Executable: func() (string, error) { return "", errors.New("no binary in tests") },
 		LookupUser: func(string) (int, int, bool, error) { return 0, 0, false, nil },
+		UserName:   func(int) (string, error) { return "", errors.New("no users in tests") },
 		Chown:      func(string, int, int) error { return errors.New("no chown in tests") }}
 }
 
@@ -63,6 +65,12 @@ type sysRig struct {
 	logout func() (service.LogoutResult, error)
 	// logoutEnv is the directories the hook's service was opened on.
 	logoutEnv [2]string
+	// ids are the uid and gid LookupUser gives a user (default: the test
+	// process's, so a rerun finds its own files owned right).
+	ids map[string][2]int
+	// chowns are the Chown calls, by file identity: a temporary file
+	// linked or renamed in place counts for its final path.
+	chowns []chownCall
 
 	stdout, errb bytes.Buffer
 }
@@ -70,8 +78,10 @@ type sysRig struct {
 func newSysRig(t *testing.T) *sysRig {
 	t.Helper()
 	s := &sysRig{t: t, root: t.TempDir(), euid: 1000, term: &fakeTerm{},
-		env:   map[string]string{"HOME": "/home/alice", "USER": "alice"},
-		users: map[string]bool{"root": true}, out: map[string]string{}, stderr: map[string]string{}, codes: map[string]int{},
+		// $USER is not the effective user (su without -): the linger
+		// hint must name alice, the euid's user (M7).
+		env:   map[string]string{"HOME": "/home/alice", "USER": "mallory"},
+		users: map[string]bool{"root": true}, out: map[string]string{}, stderr: map[string]string{}, codes: map[string]int{}, ids: map[string][2]int{},
 		logout: func() (service.LogoutResult, error) {
 			return service.LogoutResult{WasLoggedIn: true, Revoked: true}, nil
 		}}
@@ -81,16 +91,69 @@ func newSysRig(t *testing.T) *sysRig {
 	return s
 }
 
+type chownCall struct {
+	fi       os.FileInfo
+	uid, gid int
+}
+
+// ownerSet is the owner the last Chown gave the file at p ("" if none).
+func (s *sysRig) ownerSet(p string) string {
+	s.t.Helper()
+	fi, err := os.Stat(filepath.Join(s.root, p))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owner := ""
+	for _, c := range s.chowns {
+		if os.SameFile(c.fi, fi) {
+			owner = fmt.Sprintf("%d:%d", c.uid, c.gid)
+		}
+	}
+	return owner
+}
+
 func (s *sysRig) host() install.Host {
 	return install.Host{Root: s.root, Run: s, Euid: func() int { return s.euid },
 		Executable: func() (string, error) { return "/opt/pcb/pcb", nil },
 		LookupUser: func(name string) (int, int, bool, error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			// Every user owns what the test process creates.
+			if id, ok := s.ids[name]; ok {
+				return id[0], id[1], s.users[name], nil
+			}
 			return os.Getuid(), os.Getgid(), s.users[name], nil
 		},
-		Chown: func(string, int, int) error { return nil }}
+		UserName: func(uid int) (string, error) {
+			if uid == 1000 {
+				return "alice", nil
+			}
+			return "", errors.New("unknown uid")
+		},
+		Chown: func(p string, uid, gid int) error {
+			fi, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.chowns = append(s.chowns, chownCall{fi, uid, gid})
+			return nil
+		}}
+}
+
+// showEnvironment is what systemd answers to show -p Environment: the
+// Environment= lines of the user unit on disk.
+func (s *sysRig) showEnvironment() string {
+	b, _ := os.ReadFile(filepath.Join(s.root, userUnit))
+	var vals []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "Environment="); ok {
+			vals = append(vals, v)
+		}
+	}
+	return "Environment=" + strings.Join(vals, " ") + "\n"
 }
 
 func (s *sysRig) record(name string, args []string) string {
@@ -114,7 +177,11 @@ func (s *sysRig) Output(_ context.Context, name string, args ...string) ([]byte,
 
 func (s *sysRig) Stream(_ context.Context, stdout, stderr io.Writer, name string, args ...string) (int, error) {
 	line := s.record(name, args)
-	_, _ = io.WriteString(stdout, s.out[line])
+	out, ok := s.out[line]
+	if !ok && line == "systemctl --user show pcb.service -p Environment" {
+		out = s.showEnvironment()
+	}
+	_, _ = io.WriteString(stdout, out)
 	_, _ = io.WriteString(stderr, s.stderr[line])
 	return s.codes[line], nil
 }
@@ -251,6 +318,8 @@ func (s *sysRig) takeEvents() []string {
 }
 
 const (
+	showEnv       = "systemctl --user show pcb.service -p Environment"
+	showState     = "systemctl --user show pcb.service --property=ActiveState,SubState,UnitFileState,MainPID"
 	userConfigDir = "/home/alice/.config/pcb"
 	userStateDir  = "/home/alice/.local/state/pcb"
 	userUnit      = "/home/alice/.config/systemd/user/pcb.service"
@@ -327,7 +396,7 @@ func TestInstallUserCreatesThenKeeps(t *testing.T) {
 			t.Errorf("second run: %s, want keep", st)
 		}
 	}
-	if got, want := s.takeEvents(), []string{"systemctl --user enable --now pcb.service", "loginctl show-user alice -p Linger"}; !slices.Equal(got, want) {
+	if got, want := s.takeEvents(), []string{"systemctl --user enable --now pcb.service", showState, "loginctl show-user alice -p Linger"}; !slices.Equal(got, want) {
 		t.Errorf("second run commands = %q, want %q", got, want)
 	}
 	if want := []string{"pcb login", "pcb client add NAME"}; !slices.Equal(d.Next, want) {
@@ -375,22 +444,38 @@ func TestInstallUpdatesAChangedUnitAndRestarts(t *testing.T) {
 	}
 }
 
+// M5-R4: applying a system install or uninstall needs root (exit 10, before
+// anything runs); planning one does not: the plan ends with the note.
 func TestInstallSystemNeedsRoot(t *testing.T) {
 	t.Parallel()
 	s := newSysRig(t)
+	s.write(install.SystemUnitPath, "[Unit]\n", 0o644)
 	before := s.tree()
-	for _, args := range [][]string{{"install", "--system"}, {"install", "--system", "--plan"}, {"uninstall", "--system"}} {
+	for _, args := range [][]string{{"install", "--system"}, {"uninstall", "--system"}, {"uninstall", "--system", "--delete-data", "--yes"}} {
 		s.want(exitcode.MustAct, append(args, "--json")...)
 		cmd := args[0]
 		if _, _, hint := s.failure(); hint != "sudo pcb "+cmd+" --system" {
 			t.Errorf("%v: hint = %q", args, hint)
 		}
+		if e := s.takeEvents(); len(e) != 0 {
+			t.Errorf("%v: the refusal ran %q", args, e)
+		}
+	}
+	for _, cmd := range []string{"install", "uninstall"} {
+		s.want(exitcode.OK, cmd, "--system", "--plan")
+		if want := "Note: applying it needs root (sudo pcb " + cmd + " --system)\nPlan only: nothing was changed.\n"; !strings.HasSuffix(s.stdout.String(), want) {
+			t.Errorf("pcb %s --system --plan does not end with %q:\n%s", cmd, want, s.stdout.String())
+		}
+		s.want(exitcode.OK, cmd, "--system", "--plan", "--json")
+		if d := s.data(); !d.Plan || !slices.Contains(d.Next, "applying it needs root (sudo pcb "+cmd+" --system)") {
+			t.Errorf("pcb %s --system --plan --json: %+v", cmd, d)
+		}
 	}
 	if after := s.tree(); !slices.Equal(before, after) {
-		t.Errorf("the refusal changed the tree: %q", after)
+		t.Errorf("the tree changed: %q", after)
 	}
 	if e := s.takeEvents(); len(e) != 0 {
-		t.Errorf("the refusal ran %q", e)
+		t.Errorf("the system plans ran %q", e)
 	}
 }
 
@@ -529,7 +614,7 @@ func TestUninstallKeepsDataByDefault(t *testing.T) {
 	s.want(exitcode.OK, "install")
 	s.takeEvents()
 	s.want(exitcode.OK, "uninstall")
-	if got, want := s.takeEvents(), []string{"systemctl --user disable --now pcb.service", "systemctl --user daemon-reload"}; !slices.Equal(got, want) {
+	if got, want := s.takeEvents(), []string{showEnv, "systemctl --user disable --now pcb.service", "systemctl --user daemon-reload"}; !slices.Equal(got, want) {
 		t.Errorf("commands = %q, want %q", got, want)
 	}
 	if s.exists(userUnit) {
@@ -607,6 +692,7 @@ func TestUninstallDeleteDataStopsThenLogsOutThenDeletes(t *testing.T) {
 	s.env["PCB_STATE_DIR"] = "/elsewhere/pcb-state"
 	s.want(exitcode.OK, "uninstall", "--delete-data", "--yes", "--non-interactive")
 	if got, want := s.takeEvents(), []string{
+		showEnv,
 		"systemctl --user disable --now pcb.service",
 		"systemctl --user daemon-reload",
 		"logout (state present: yes)",
@@ -669,5 +755,133 @@ func TestUninstallSystemDeleteData(t *testing.T) {
 	}
 	if !s.exists("/usr/local/bin/pcb") || !strings.HasSuffix(s.stdout.String(), "keep file /usr/local/bin/pcb — kept /usr/local/bin/pcb: rm it if unused\n") {
 		t.Errorf("binary not kept or not named last:\n%s", s.stdout.String())
+	}
+}
+
+// I2: every directory and written file of a system install ends with its
+// owner and mode, existing directories included.
+func TestInstallSystemSetsOwnersAndModes(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.euid = 0
+	pcb, root := [2]int{os.Getuid() + 1, os.Getgid() + 1}, [2]int{os.Getuid() + 2, os.Getgid() + 2}
+	s.ids["pcb"], s.ids["root"] = pcb, root
+	for _, d := range []string{"/etc/pcb", "/var/lib/pcb"} {
+		s.mkdir(d)
+		if err := os.Chmod(filepath.Join(s.root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.want(exitcode.OK, "install", "--system")
+	id := func(v [2]int) string { return fmt.Sprintf("%d:%d", v[0], v[1]) }
+	for p, want := range map[string]struct {
+		mode  fs.FileMode
+		owner string
+	}{
+		"/etc/pcb":             {0o700, id(pcb)},
+		"/var/lib/pcb":         {0o700, id(pcb)},
+		"/etc/pcb/config.toml": {0o600, id(pcb)},
+		"/usr/local/bin/pcb":   {0o755, id(root)},
+		install.SystemUnitPath: {0o644, ""},
+	} {
+		if got := s.mode(p); got != want.mode {
+			t.Errorf("mode of %s = %o, want %o", p, got, want.mode)
+		}
+		if got := s.ownerSet(p); got != want.owner {
+			t.Errorf("owner set on %s = %q, want %q", p, got, want.owner)
+		}
+	}
+}
+
+// I2: existing user directories with a looser mode end at 0700.
+func TestInstallUserPutsExistingDirectoriesRight(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	for _, d := range []string{userConfigDir, userStateDir} {
+		s.mkdir(d)
+		if err := os.Chmod(filepath.Join(s.root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.want(exitcode.OK, "install")
+	for _, d := range []string{userConfigDir, userStateDir} {
+		if got := s.mode(d); got != 0o700 {
+			t.Errorf("mode of %s = %o, want 700", d, got)
+		}
+		if !strings.Contains(s.stdout.String(), "update dir "+d+" 0700\n") {
+			t.Errorf("output lacks the update of %s:\n%s", d, s.stdout.String())
+		}
+	}
+}
+
+// M5: a user install that keeps the unit while the service runs reminds
+// that the running service keeps its binary.
+func TestInstallUserHintsARestartWhenTheServiceRuns(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	const hint = "pcb service restart   (only if you rebuilt pcb: the running service keeps the binary it started with)"
+	s.out[showState] = "ActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=42\n"
+	s.want(exitcode.OK, "install", "--json")
+	if slices.Contains(s.data().Next, hint) {
+		t.Errorf("a fresh install hints a restart: %q", s.data().Next)
+	}
+	s.want(exitcode.OK, "install", "--json")
+	if d := s.data(); len(d.Next) == 0 || d.Next[0] != hint {
+		t.Errorf("next = %q, want the restart hint first", d.Next)
+	}
+	s.out[showState] = "ActiveState=inactive\nSubState=dead\nUnitFileState=enabled\nMainPID=0\n"
+	s.want(exitcode.OK, "install", "--json")
+	if slices.Contains(s.data().Next, hint) {
+		t.Errorf("an inactive service gets the hint: %q", s.data().Next)
+	}
+}
+
+// M5-R6: --delete-data acts only on the directories systemd says the unit
+// uses; when they cannot be read it refuses (exit 10) and deletes nothing,
+// never falling back to the caller's environment.
+func TestUninstallDeleteDataNeedsTheUnitsDirectories(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.want(exitcode.OK, "install")
+	s.takeEvents()
+	s.out[showEnv] = "Environment=\n"
+	s.want(exitcode.MustAct, "uninstall", "--delete-data", "--yes", "--json")
+	code, msg, hint := s.failure()
+	if code != 10 || !strings.Contains(msg, "cannot be read") || !strings.Contains(hint, userConfigDir+" and "+userStateDir) {
+		t.Errorf("failure = %d %q, hint %q", code, msg, hint)
+	}
+	if got := s.takeEvents(); !slices.Equal(got, []string{showEnv}) {
+		t.Errorf("ran %q", got)
+	}
+	for _, p := range []string{userUnit, userConfigDir, userStateDir} {
+		if !s.exists(p) {
+			t.Errorf("%s was removed", p)
+		}
+	}
+	// Without --delete-data the unit goes and no directory is named.
+	s.want(exitcode.OK, "uninstall")
+	if s.exists(userUnit) || strings.Contains(s.stdout.String(), "keep dir") {
+		t.Errorf("uninstall:\n%s", s.stdout.String())
+	}
+}
+
+// M3: the prompt names only what will be deleted, from the one plan.
+func TestUninstallPromptNamesOnlyWhatIsDeleted(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.write(userUnit, string(install.UserUnit(install.UnitParams{Exec: "/opt/pcb/pcb", ConfigDir: "/srv/pcb-config", StateDir: userStateDir})), 0o644)
+	s.mkdir("/srv/pcb-config")
+	s.mkdir(userStateDir)
+	s.term.interactive = true
+	s.term.lines = []string{"delete"}
+	s.want(exitcode.OK, "uninstall", "--delete-data")
+	if want := []string{"Delete " + userStateDir + " (Proton session, cache, CalDAV clients)? Type delete to confirm: "}; !slices.Equal(s.term.linePrompts, want) {
+		t.Errorf("prompts = %q, want %q", s.term.linePrompts, want)
+	}
+	if !s.exists("/srv/pcb-config") || s.exists(userStateDir) {
+		t.Errorf("tree after: %q", s.tree())
+	}
+	if want := "keep dir /srv/pcb-config — not removed: only a directory named pcb is deleted; to delete it: rm -r -- /srv/pcb-config\n"; !strings.Contains(s.stdout.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, s.stdout.String())
 	}
 }

@@ -95,6 +95,12 @@ func (a *app) newInstall() *cobra.Command {
 func (a *app) install(cmd *cobra.Command, s install.Scope, plan bool) error {
 	ctx := cmd.Context()
 	h := a.Host
+	if !plan {
+		// Applying needs root for --system; planning never does (M5-R4).
+		if err := install.NeedsRoot(h, s, "install"); err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+	}
 	steps, err := install.Plan(ctx, h, install.Request{Scope: s})
 	if err != nil {
 		return Finish(cmd, nil, "", err)
@@ -102,11 +108,9 @@ func (a *app) install(cmd *cobra.Command, s install.Scope, plan bool) error {
 	data := installData{Scope: s, Plan: plan, Steps: steps}
 	running := install.SystemdRunning(h)
 	if plan {
-		data.Next = install.Next(ctx, h, s)
-		if !running {
-			data.Next = append([]string{noSystemdNote}, data.Next...)
-		}
-		return Finish(cmd, data, planText(steps, running), nil)
+		notes := planNotes(h, s, "install", !running)
+		data.Next = append(append([]string{}, notes...), install.Next(ctx, h, s, steps)...)
+		return Finish(cmd, data, planText(steps, notes), nil)
 	}
 	if !running {
 		return Finish(cmd, nil, "", errNoSystemd())
@@ -114,21 +118,34 @@ func (a *app) install(cmd *cobra.Command, s install.Scope, plan bool) error {
 	if err := install.Apply(ctx, h, steps, install.Hooks{}); err != nil {
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
-	data.Next = install.Next(ctx, h, s)
+	data.Next = install.Next(ctx, h, s, steps)
 	return Finish(cmd, data, appliedText(steps, data.Next), nil)
 }
 
 const noSystemdNote = "systemd is not running here: applying this plan fails (in a container, run pcb serve as the entrypoint, see the README)"
 
-// planText is a plan's text: one line per step, the systemd note, the
-// reminder that nothing changed.
-func planText(steps []install.Step, running bool) string {
+// planNotes are what a plan ends with: systemd missing (noSystemd), then
+// root needed to apply it (M5-R4).
+func planNotes(h install.Host, s install.Scope, command string, noSystemd bool) []string {
+	notes := []string{}
+	if noSystemd {
+		notes = append(notes, noSystemdNote)
+	}
+	if install.NeedsRoot(h, s, command) != nil {
+		notes = append(notes, install.RootNote(command))
+	}
+	return notes
+}
+
+// planText is a plan's text: one line per step, its notes, the reminder
+// that nothing changed.
+func planText(steps []install.Step, notes []string) string {
 	var b strings.Builder
 	for _, st := range steps {
 		b.WriteString(st.String() + "\n")
 	}
-	if !running {
-		b.WriteString("Note: " + noSystemdNote + "\n")
+	for _, n := range notes {
+		b.WriteString("Note: " + n + "\n")
 	}
 	b.WriteString("Plan only: nothing was changed.")
 	return b.String()
@@ -184,32 +201,33 @@ func (a *app) newUninstall() *cobra.Command {
 func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, plan bool) error {
 	ctx := cmd.Context()
 	h := a.Host
+	if !plan {
+		if err := install.NeedsRoot(h, s, "uninstall"); err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+	}
+	// The plan resolves the directories once (M3): the logout step carries
+	// them and the prompt names its remove steps.
 	steps, err := install.PlanUninstall(ctx, h, install.UninstallRequest{Scope: s, DeleteData: deleteData})
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
-	data := installData{Scope: s, Plan: plan, Steps: steps, Next: []string{}}
-	running := install.SystemdRunning(h)
+	data := installData{Scope: s, Plan: plan, Steps: steps}
+	noSystemd := !install.SystemdRunning(h) && runsSystemctl(steps)
 	if plan {
-		if !running && runsSystemctl(steps) {
-			data.Next = []string{noSystemdNote}
-		}
-		return Finish(cmd, data, planText(steps, running || !runsSystemctl(steps)), nil)
+		data.Next = planNotes(h, s, "uninstall", noSystemd)
+		return Finish(cmd, data, planText(steps, data.Next), nil)
 	}
-	if !running && runsSystemctl(steps) {
+	data.Next = []string{}
+	if noSystemd {
 		return Finish(cmd, nil, "", errNoSystemd())
 	}
-	// The directories now, while the unit that names them exists.
-	dirs, err := install.ScopeDirs(h, s)
-	if err != nil {
-		return Finish(cmd, nil, "", &exitcode.Error{Code: exitcode.Blocked, Err: err})
-	}
-	if deleteData && !yes {
-		if err := a.confirmDelete(cmd, dirs); err != nil {
+	if removed := install.RemovedDirs(steps); len(removed) > 0 && !yes {
+		if err := a.confirmDelete(cmd, removed); err != nil {
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h, dirs)}); err != nil {
+	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h)}); err != nil {
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
 	return Finish(cmd, data, appliedText(steps, nil), nil)
@@ -225,16 +243,17 @@ func runsSystemctl(steps []install.Step) bool {
 	return false
 }
 
-// confirmDelete asks the person to type "delete"; without a person it
-// fails naming --yes (exit 10).
-func (a *app) confirmDelete(cmd *cobra.Command, dirs paths.Dirs) error {
+// confirmDelete asks the person to type "delete" before removed go; without
+// a person it fails naming --yes (exit 10).
+func (a *app) confirmDelete(cmd *cobra.Command, removed []string) error {
+	what := strings.Join(removed, " and ")
 	if !a.interactive(cmd) {
 		return &exitcode.Error{Code: exitcode.MustAct,
-			Err:  fmt.Errorf("--delete-data deletes %s and %s: confirm with --yes", dirs.Config, dirs.State),
+			Err:  fmt.Errorf("--delete-data deletes %s: confirm with --yes", what),
 			Hint: "pcb uninstall --delete-data --yes"}
 	}
 	answer, err := a.Term.ReadLine(cmd.Context(),
-		fmt.Sprintf("Delete %s and %s (Proton session, cache, CalDAV clients)? Type delete to confirm: ", dirs.Config, dirs.State))
+		fmt.Sprintf("Delete %s (Proton session, cache, CalDAV clients)? Type delete to confirm: ", what))
 	if err != nil {
 		return err
 	}
@@ -245,10 +264,10 @@ func (a *app) confirmDelete(cmd *cobra.Command, dirs paths.Dirs) error {
 	return nil
 }
 
-// logoutHook revokes the session of the scope's directories with the
-// in-process service, never the caller's own directories (M5-P19).
-func (a *app) logoutHook(h install.Host, dirs paths.Dirs) func(context.Context) error {
-	return func(ctx context.Context) error {
+// logoutHook revokes the session of the directories the plan resolved,
+// with the in-process service, never the caller's own (M5-P19).
+func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error {
+	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
 			switch k {
 			case paths.EnvConfigDir:

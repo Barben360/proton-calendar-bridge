@@ -122,35 +122,84 @@ func Journalctl(s Scope, follow bool) []string {
 }
 
 // ScopeDirs are the config and state directories scope's service uses:
-// /etc/pcb and /var/lib/pcb for the system; for the user, those the
-// installed unit names (M5-P18), else those paths.Resolve gives.
-func ScopeDirs(h Host, s Scope) (paths.Dirs, error) {
+// /etc/pcb and /var/lib/pcb for the system (constants, never read back);
+// for the user, those `systemctl --user show pcb.service -p Environment`
+// gives (M5-R6: drop-ins and quoting are systemd's), never the caller's
+// environment. It fails when they cannot be read.
+func ScopeDirs(ctx context.Context, h Host, s Scope) (paths.Dirs, error) {
 	if s == ScopeSystem {
 		return paths.Dirs{Config: SystemConfigDir, State: SystemStateDir}, nil
 	}
-	if unit, err := UnitPath(h, s); err == nil {
-		if data, err := os.ReadFile(h.Path(unit)); err == nil {
-			env := unitEnv(data)
-			if c, st := env[paths.EnvConfigDir], env[paths.EnvStateDir]; filepath.IsAbs(c) && filepath.IsAbs(st) {
-				return paths.Dirs{Config: c, State: st}, nil
-			}
-		}
+	out, err := runShow(ctx, h, Systemctl(s, "show", UnitName, "-p", "Environment"))
+	if err != nil {
+		return paths.Dirs{}, err
 	}
-	return paths.Resolve(h.Env)
-}
-
-// unitEnv reads a unit's Environment=NAME=VALUE lines.
-func unitEnv(unit []byte) map[string]string {
 	env := map[string]string{}
-	sc := bufio.NewScanner(bytes.NewReader(unit))
+	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "Environment="); ok {
-			if name, value, ok := strings.Cut(v, "="); ok {
-				env[name] = value
+			for _, w := range splitWords(v) {
+				if name, value, ok := strings.Cut(w, "="); ok {
+					env[name] = value
+				}
 			}
 		}
 	}
-	return env
+	c, st := env[paths.EnvConfigDir], env[paths.EnvStateDir]
+	if !filepath.IsAbs(c) || !filepath.IsAbs(st) {
+		return paths.Dirs{}, fmt.Errorf("%s sets no absolute %s and %s", UnitName, paths.EnvConfigDir, paths.EnvStateDir)
+	}
+	return paths.Dirs{Config: filepath.Clean(c), State: filepath.Clean(st)}, nil
+}
+
+// splitWords splits systemctl show's Environment value: words separated by
+// spaces, a word quoted in double quotes with backslash escapes when it
+// holds a space or a special character.
+func splitWords(s string) []string {
+	var words []string
+	var w strings.Builder
+	in, quoted, escaped := false, false, false
+	for _, r := range s {
+		switch {
+		case escaped:
+			w.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped, in = true, true
+		case r == '"':
+			quoted, in = !quoted, true
+		case r == ' ' && !quoted:
+			if in {
+				words = append(words, w.String())
+				w.Reset()
+				in = false
+			}
+		default:
+			w.WriteRune(r)
+			in = true
+		}
+	}
+	if in {
+		words = append(words, w.String())
+	}
+	return words
+}
+
+// runShow runs a read-only systemctl query; a failure carries systemctl's
+// last stderr line.
+func runShow(ctx context.Context, h Host, argv []string) ([]byte, error) {
+	var out, stderr bytes.Buffer
+	code, err := h.Run.Stream(ctx, &out, &stderr, argv[0], argv[1:]...)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+	case code != 0:
+		if line := LastLine(stderr.Bytes()); line != "" {
+			return nil, fmt.Errorf("%s: %s", strings.Join(argv, " "), line)
+		}
+		return nil, fmt.Errorf("%s exited with %d", strings.Join(argv, " "), code)
+	}
+	return out.Bytes(), nil
 }
 
 // UnitStatus is the unit's state as systemctl show reports it.
@@ -169,13 +218,9 @@ func Show(ctx context.Context, h Host, s Scope) (UnitStatus, error) {
 	if err != nil {
 		return UnitStatus{}, err
 	}
-	argv := Systemctl(s, "show", UnitName, "--property=ActiveState,SubState,UnitFileState,MainPID")
-	out, code, err := h.Run.Output(ctx, argv[0], argv[1:]...)
-	switch {
-	case err != nil:
-		return UnitStatus{}, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
-	case code != 0:
-		return UnitStatus{}, fmt.Errorf("%s exited with %d", strings.Join(argv, " "), code)
+	out, err := runShow(ctx, h, Systemctl(s, "show", UnitName, "--property=ActiveState,SubState,UnitFileState,MainPID"))
+	if err != nil {
+		return UnitStatus{}, err
 	}
 	st := UnitStatus{Scope: s, Unit: unit}
 	sc := bufio.NewScanner(bytes.NewReader(out))
