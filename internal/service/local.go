@@ -427,6 +427,11 @@ func (l *Local) Status(context.Context) (Status, error) {
 		s.LoginExpires = &t
 	}
 	s.Sync = l.syncStatus()
+	if l.clients != nil {
+		if _, err := l.clients.List(); err != nil {
+			s.ClientsFile = filepath.Join(l.o.Dirs.State, "clients.json")
+		}
+	}
 	return s, nil
 }
 

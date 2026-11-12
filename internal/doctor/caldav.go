@@ -295,7 +295,7 @@ func (c ClientsCheck) Run(context.Context) Result {
 	switch {
 	case err != nil:
 		r.Status, r.Message = StatusError, err.Error()
-		r.Fix = "check clients.json in " + shellquote.Quote(c.StateDir) + " (valid JSON in the format pcb wrote, mode 0600), or remove it and add the clients again"
+		r.Fix = "fix or restore " + shellquote.Quote(filepath.Join(c.StateDir, "clients.json")) + " (pcb client list shows the error)"
 	case len(list) == 0:
 		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", noClientFix(loggedIn(c.StateDir))
 	case len(list) == 1:

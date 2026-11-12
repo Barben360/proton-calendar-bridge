@@ -18,6 +18,7 @@ const (
 	CodeSyncStalled        = "sync-stalled"
 	CodeCalendarKeysFailed = "calendar-keys-failed"
 	CodeWriteGateUndecided = "write-gate-undecided"
+	CodeClientsUnreadable  = "clients-file-unreadable"
 	CodeTLSExpiring        = "tls-certificate-expiring"
 	CodeTLSExpired         = "tls-certificate-expired"
 
@@ -64,6 +65,10 @@ func Alerts(in AlertInput) []Alert {
 	case "needs-captcha":
 		add(CodeNeedsCaptcha, SeverityError, "Proton asks for a CAPTCHA: solve it at "+in.Login.CaptchaURL,
 			"pcb login resume --captcha-token TOKEN (the token parameter of that URL)", "")
+	}
+	if f := in.Login.ClientsFile; f != "" {
+		add(CodeClientsUnreadable, SeverityError, "the CalDAV clients file cannot be loaded: every CalDAV request answers 503",
+			"fix or restore "+f+" (pcb client list shows the error)", "")
 	}
 	if h := in.Health; h != nil {
 		healthAlerts(h, in.Now, add)

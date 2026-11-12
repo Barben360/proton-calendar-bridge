@@ -223,6 +223,9 @@ type Status struct {
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
 	// Sync is the event cache's state; nil while there is no cache.
 	Sync *SyncStatus `json:"sync,omitempty"`
+	// ClientsFile is the path of clients.json when it exists but cannot be
+	// loaded (corrupt, unreadable): every CalDAV request then answers 503.
+	ClientsFile string `json:"clients_file,omitempty"`
 }
 
 // SyncStatus is what the event cache holds, per calendar.

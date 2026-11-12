@@ -806,3 +806,33 @@ func TestCorruptClientsFileAnswersARetryLogsOnceAndChargesNoLimiter(t *testing.T
 		t.Errorf("%d error lines after a second distinct failure, want 2", n)
 	}
 }
+
+// A clients.json that cannot be loaded shows in the login status, which
+// feeds the clients-file-unreadable alert of pcb status and the daemon's
+// health (A12); a good or missing file shows nothing.
+func TestStatusNamesAClientsFileThatCannotBeLoaded(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	st, err := svc.Status(t.Context())
+	if err != nil || st.ClientsFile != "" {
+		t.Fatalf("no clients file: %+v, %v", st, err)
+	}
+	file := filepath.Join(dirs.State, "clients.json")
+	if err := os.MkdirAll(dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(`{bad`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = svc.Status(t.Context()); err != nil || st.ClientsFile != file {
+		t.Fatalf("corrupt clients file: ClientsFile %q, %v, want %q", st.ClientsFile, err, file)
+	}
+}

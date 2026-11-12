@@ -213,8 +213,9 @@ func TestClientsCheck(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(state, "clients.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := (doctor.ClientsCheck{StateDir: state}).Run(ctx); got.Status != doctor.StatusError {
-		t.Errorf("unreadable list: %+v", got)
+	got = doctor.ClientsCheck{StateDir: state}.Run(ctx)
+	if want := "fix or restore " + filepath.Join(state, "clients.json") + " (pcb client list shows the error)"; got.Status != doctor.StatusError || got.Fix != want {
+		t.Errorf("unreadable list: %+v, want fix %q", got, want)
 	}
 }
 

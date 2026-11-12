@@ -93,7 +93,7 @@ After each sync pass, while an event is served as a placeholder (it could not be
 master is left out or a calendar's keys fail, it logs a `render counters` line (counts and calendar IDs), and once
 more when they change, and `pcb status` shows them from the running daemon (`dropped_alarms` counts a malformed reminder left out of an event that is still served; a deleted event stops counting at once), with a calendar's write gate and its reason and the alerts
 (`needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `calendar-keys-failed`, `write-gate-undecided`,
-`tls-certificate-expiring`, `tls-certificate-expired`), each with the fix; `pcb status` exits 0 whatever the alerts.
+`clients-file-unreadable`, `tls-certificate-expiring`, `tls-certificate-expired`), each with the fix; `pcb status` exits 0 whatever the alerts.
 
 ## Install as a service
 

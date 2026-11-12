@@ -1020,7 +1020,7 @@ environment, never argv; tokens are printed once.
 Initial-version audit behaviour (`spec/audits/2026-11-12-initial-version.md`; `internal/cli`, `internal/service`, `internal/doctor`):
 - Exit codes, one per failure in every command (`2` usage, `10` the user must act, `20` transient or no daemon): a key file that is
   missing, of the wrong size, refused for its mode or unreadable by this user, a `secrets.sealed` that does not open or that a newer pcb wrote
-  (§7.3), an unreadable or newer `state.json`, the root guard (§7.1) and a unit-unsafe path under `pcb install` (also under `--plan`) are all `10`;
+  (§7.3), an unreadable (`the login state file <path> cannot be read by this user`, naming owner and mode, hint `make it readable by <user> (or run pcb as its owner)`; only malformed JSON hints `pcb logout`), malformed or newer `state.json`, the root guard (§7.1) and a unit-unsafe path under `pcb install` (also under `--plan`) are all `10`;
   another cause of a store failure (a full disk) stays `20`. `pcb status` is the exception: it reports a key fault (`secrets: unreadable`) and exits 0,
   since it is the diagnosis command (an unreadable `state.json` still fails it, 10); `pcb logout` of a store it cannot read is the way out
   [verified: `TestKeyAndStateFaultsAreExit10InEveryCommand`, `TestInstallPlanRefusesAPathAUnitCannotHoldWithExit10`].
@@ -1229,8 +1229,8 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   (stable): `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
   Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
-  and why: closes the M4-R39 note), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
-  [verified: `TestAlerts`, `TestAlertsAreOrdered`].
+  and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. Testing
