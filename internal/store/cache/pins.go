@@ -81,6 +81,28 @@ func (w *writer) pinAs(id string, p Pin) error {
 	return err
 }
 
+// PinRows pins the rows of pins (row ID to packets) that have no pin yet,
+// whether or not they are stored: a create's row, by the ID Proton
+// answered, with the packets pcb sent, before its read-back (ruling
+// M4-R37).
+func (c *Cache) PinRows(ctx context.Context, calID string, pins map[string]Pin) error {
+	if len(pins) == 0 {
+		return nil
+	}
+	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
+		w, err := c.begin(ctx, tx, calID)
+		if err != nil {
+			return err
+		}
+		for id, p := range pins {
+			if err := w.pinAs(id, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
 // hasTable reports whether the file has table name.
 func (c *Cache) hasTable(ctx context.Context, name string) (bool, error) {
 	var n int

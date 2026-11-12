@@ -758,6 +758,9 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		return protonRefused(ae.Status, ae.Code)
 	}
 	refused := entry != nil || ae != nil
+	if err := l.pinAnswered(ctx, w, p.Ops, res); err != nil {
+		return err
+	}
 
 	// The read-back runs even when the caller hung up meanwhile.
 	backCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBackTimeout)
@@ -802,10 +805,27 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 	return notConfirmed()
 }
 
+// pinAnswered pins each row Proton answered as created with the packets
+// sent (ruling M4-R37), before the read-back: a read-back that fails then
+// leaves the next sync pass a pin to check, not a first sight to take.
+func (l *Local) pinAnswered(ctx context.Context, w *write, ops []events.Op, res []events.Result) error {
+	pins := map[string]cache.Pin{}
+	for i, r := range res {
+		if r.Err == nil && r.Row != nil && r.Row.ID != "" && i < len(ops) && ops[i].Create != nil {
+			pins[r.Row.ID] = cache.Pin{Shared: ops[i].Create.SharedKeyPacket, Calendar: ops[i].Create.CalendarKeyPacket}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBackTimeout)
+	defer cancel()
+	return l.onWriter(func(db *cache.Cache, _ *served) error {
+		return l.cacheFail(db.PinRows(ctx, w.calID, pins))
+	})
+}
+
 // changedSince reports whether uid's rows read back show a change the
 // write does not explain (ruling M4-R34): a row of before that no applied
-// operation touched is gone or edited, or more rows appeared than the
-// applied creates made.
+// operation touched is gone or has another ETag, or more rows appeared than
+// the applied creates made.
 func changedSince(before cache.Group, ops []events.Op, applied []bool, rows []events.Row) bool {
 	touched := map[string]bool{}
 	creates := 0
@@ -831,7 +851,12 @@ func changedSince(before cache.Group, ops []events.Op, applied []bool, rows []ev
 			continue
 		}
 		r, ok := now[b.ID]
-		if !ok || r.LastEditTime != b.LastEdit || !bytes.Equal(r.Raw, b.Raw) {
+		if !ok {
+			return true
+		}
+		// By meaning, as the precondition compares: the cache keeps the
+		// first spelling of a row whose ETag did not change.
+		if tag, err := cache.ETag(r.Raw); err != nil || tag != b.ETag {
 			return true
 		}
 	}
@@ -1041,8 +1066,12 @@ func confirm(ops []events.Op, before cache.Group, rows []events.Row, pins map[st
 				v.ok = false
 			}
 		case op.Create != nil:
+			// The row is the create's by its signed content alone (ruling
+			// M4-R37): its unsigned fields decide only whether the write
+			// is confirmed, so a server changing one cannot make the row
+			// a stranger, pinned from its echo.
 			sent := cache.Pin{Shared: op.Create.SharedKeyPacket, Calendar: op.Create.CalendarKeyPacket}
-			i := slices.IndexFunc(rows, func(r events.Row) bool { return !old[r.ID] && !used[r.ID] && holds(r, *op.Create, sent, k) })
+			i := slices.IndexFunc(rows, func(r events.Row) bool { return !old[r.ID] && !used[r.ID] && partsHold(r, *op.Create, sent, k) })
 			if i < 0 {
 				v.ok = false
 				continue
@@ -1051,6 +1080,9 @@ func confirm(ops []events.Op, before cache.Group, rows []events.Row, pins map[st
 			used[r.ID] = true
 			v.sent[r.ID] = sent
 			packets(r.ID, sent, r)
+			if !fieldsHold(r.Raw, *op.Create) {
+				v.ok = false
+			}
 		}
 	}
 	if whole && len(rows) > 0 {

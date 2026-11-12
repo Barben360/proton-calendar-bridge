@@ -737,6 +737,33 @@ func TestEntryRefusalIsReadBack(t *testing.T) {
 			t.Error("the refused write changed the cache")
 		}
 	})
+	t.Run("CreateBesideARefusalIs403", func(t *testing.T) {
+		// One call: the edit of an exception whose colour is off the
+		// palette (refused, 2011) and the create of another exception
+		// (applied). The new row is the create's, and the rows read back,
+		// spelled otherwise, are the same by meaning: no race, a 403.
+		rid1, rid2 := base+day, base+2*day
+		r.f.AddEvent(r.cal, protontest.Event{UID: "mixed@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Color: green,
+			Card: card("mixed@x", "Standup", base, "RRULE:FREQ=DAILY")})
+		r.f.AddEvent(r.cal, protontest.Event{UID: "mixed@x", Start: rid1 + 1800, End: rid1 + 5400, RecurrenceID: &rid1, Color: "#123456",
+			Card: card("mixed@x", "Moved", rid1+1800, "RECURRENCE-ID:"+stamp(rid1))})
+		r.s.next(t, false)
+		obj := r.object(t, "mixed@x")
+		later := []string{"UID:mixed@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID:" + stamp(rid2),
+			"DTSTART:" + stamp(rid2+1800), "DTEND:" + stamp(rid2+5400), "SUMMARY:Standup later"}
+		body := edit(t, edit(t, obj.Data, "SUMMARY:Moved", "SUMMARY:Moved again"),
+			"END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(later, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
+		r.respellReadBack(t)
+		defer r.tr.set(nil)
+		_, err := r.put(t, "mixed@x.ics", body, service.Precondition{IfMatch: obj.ETag})
+		wantRefused(t, err, service.RefuseProtonRefused)
+		if n := len(r.proton(t, "mixed@x")); n != 3 {
+			t.Errorf("Proton holds %d rows of mixed@x, want 3: the create applied", n)
+		}
+		data := r.object(t, "mixed@x").Data
+		contains(t, "the refreshed object", data, "SUMMARY:Standup later", "SUMMARY:Moved")
+		lacks(t, "the refreshed object", data, "SUMMARY:Moved again")
+	})
 	t.Run("CreateOfAnEventProtonHasIsNoDuplicate", func(t *testing.T) {
 		// Created in the web app after the last pass: the refresh finds it.
 		r.f.AddEvent(r.cal, protontest.Event{UID: "late@x", Start: base, End: base + 3600, Color: green, Card: card("late@x", "Late", base)})
@@ -1333,6 +1360,19 @@ func (r *rig) rewriteRefresh(t *testing.T, fn func(row map[string]any)) {
 // it.
 func (r *rig) rewriteUIDPages(t *testing.T, readBack bool, fn func(page map[string]any)) {
 	t.Helper()
+	r.rewriteUIDPagesAs(t, readBack, fn, json.Marshal)
+}
+
+// respellReadBack makes the rig's transport serve every read-back indented:
+// each row the same by meaning (and ETag), in other bytes.
+func (r *rig) respellReadBack(t *testing.T) {
+	t.Helper()
+	r.rewriteUIDPagesAs(t, true, func(map[string]any) {}, func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") })
+}
+
+// rewriteUIDPagesAs is rewriteUIDPages with the page encoded by marshal.
+func (r *rig) rewriteUIDPagesAs(t *testing.T, readBack bool, fn func(page map[string]any), marshal func(any) ([]byte, error)) {
+	t.Helper()
 	var mu sync.Mutex
 	sent := false
 	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
@@ -1359,7 +1399,7 @@ func (r *rig) rewriteUIDPages(t *testing.T, readBack bool, fn func(page map[stri
 			return nil, err
 		}
 		fn(page)
-		out, err := json.Marshal(page)
+		out, err := marshal(page)
 		if err != nil {
 			return nil, err
 		}
@@ -1601,7 +1641,12 @@ func TestCreatePinsTheSentPackets(t *testing.T) {
 	})
 	t.Run("ReKeyedIsNotConfirmed", func(t *testing.T) {
 		var swapped string
-		r.rewriteReadBack(t, func(row map[string]any) { swapped = rekey(t, row) })
+		// The server also changes an unsigned field: the row is still the
+		// create's, by its signed content (ruling M4-R37).
+		r.rewriteReadBack(t, func(row map[string]any) {
+			swapped = rekey(t, row)
+			row["Notifications"] = []any{map[string]any{"Type": 1, "Trigger": "-PT9M"}}
+		})
 		_, err := r.put(t, "rk@x.ics", newEvent("rk@x", "Rekeyed"), service.Precondition{IfNoneMatchAny: true})
 		r.tr.set(nil)
 		wantUnconfirmed(t, err)
@@ -1623,6 +1668,59 @@ func TestCreatePinsTheSentPackets(t *testing.T) {
 			t.Fatalf("a write of the event as Proton holds it: %v", err)
 		}
 		contains(t, "the object", r.object(t, "rk@x").Data, "SUMMARY:Renamed")
+	})
+	t.Run("OtherFieldsAreNotConfirmed", func(t *testing.T) {
+		// The create's own row, under the packets sent, with other alarms:
+		// not what was asked (503), yet pinned as the create's.
+		defer r.tr.set(nil)
+		r.rewriteReadBack(t, func(row map[string]any) {
+			row["Notifications"] = []any{map[string]any{"Type": 1, "Trigger": "-PT9M"}}
+		})
+		_, err := r.put(t, "nf@x.ics", newEvent("nf@x", "Fields"), service.Precondition{IfNoneMatchAny: true})
+		wantUnconfirmed(t, err)
+		id := r.proton(t, "nf@x")[0].ID
+		if got, want := r.pins(t, id)[id], sentPin(t); got != want {
+			t.Errorf("pin %+v, want the packets as sent %+v", got, want)
+		}
+	})
+	t.Run("ReadBackFailedIsPinnedByTheAnswer", func(t *testing.T) {
+		// The read-back fails: the row Proton answered is pinned with the
+		// packets sent all the same (ruling M4-R37), so a pass that then
+		// first stores it under the server's packets does not move the
+		// pin, and the next write is refused.
+		var mu sync.Mutex
+		sent := false
+		r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if r.isSync(req) {
+				sent = true
+			} else if sent && r.isReadBack(req) {
+				return nil, errReset
+			}
+			return send()
+		})
+		_, err := r.put(t, "rb@x.ics", newEvent("rb@x", "Lost"), service.Precondition{IfNoneMatchAny: true})
+		r.tr.set(nil)
+		wantUnconfirmed(t, err)
+		want := sentPin(t)
+		rows := r.proton(t, "rb@x")
+		if len(rows) != 1 {
+			t.Fatalf("Proton holds %d rows of rb@x", len(rows))
+		}
+		id := rows[0].ID
+		if got := r.pins(t, id)[id]; got != want {
+			t.Errorf("pin after a failed read-back %+v, want the packets as sent %+v", got, want)
+		}
+		r.f.UpdateEvent(r.cal, id, protontest.Event{UID: "rb@x", Start: base, End: base + 3600, Card: card("rb@x", "Lost", base)})
+		if p := r.s.next(t, false); calSync(t, p.Result, r.cal).Added != 1 {
+			t.Fatalf("the pass did not store the row: %+v", calSync(t, p.Result, r.cal))
+		}
+		if got := r.pins(t, id)[id]; got != want {
+			t.Errorf("pin after the pass %+v, want the packets as sent %+v", got, want)
+		}
+		_, err = r.put(t, "rb@x.ics", newEvent("rb@x", "Found"), service.Precondition{})
+		wantRefused(t, err, service.RefuseUntrustedKey)
 	})
 }
 

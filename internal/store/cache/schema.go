@@ -57,9 +57,10 @@ CREATE INDEX IF NOT EXISTS tombstones_seq ON tombstones (calendar_id, seq);
 
 // schemaV2 remembers the hrefs clients chose (ruling M4-R6): one name per
 // UID of a calendar. Aliases outlive the UID's deletion (ruling M4-R22).
-// pins holds each row's key packets as first stored (ruling M4-R30): a
-// write refuses a row whose packets differ, whatever a later pass stored.
-// A pin lives as long as its row.
+// pins holds each row's key packets as first stored, or as pcb sent them
+// for a row it created (rulings M4-R30, M4-R36): a write refuses a row whose
+// packets differ, whatever a later pass stored. A pin outlives its row and
+// its calendar, and dies only with the epoch (ruling M4-R35).
 const schemaV2 = `
 CREATE TABLE IF NOT EXISTS aliases (
 	calendar_id TEXT NOT NULL CHECK (calendar_id <> ''),
