@@ -23,9 +23,8 @@ Success means:
 1. Thunderbird shows every calendar of the account, and two-way edits
    (create, move, edit one occurrence, delete) show up in the Proton web app
    within the sync interval, and back [decided 0004].
-2. It runs the same way on a desktop (blackwater) and as a headless
-   container on a server (morpheus), like the author's Proton Mail Bridge
-   setup today [decided 0009]; where it is exposed is a network
+2. It runs the same way on a desktop and as a headless container on a
+   server, like the author's Proton Mail Bridge setup today [decided 0009]; where it is exposed is a network
    configuration, not a code path.
 3. Everything, install to uninstall, is done from a terminal [decided 0001].
 4. An expired session repairs itself with no human, unless Proton demands a
@@ -1267,7 +1266,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity (M4) | `E12-recurrence-forms.md`: write each RRULE form and series operation through pcb, read back, compare in the web app and Thunderbird (HUMAN-CHECKS §6) |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
 | E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
-| E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on morpheus-like Debian 13 |
+| E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on a headless Debian 13 server |
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
 | E18 | (dropped: no REST API planned) | – | – |

@@ -3,4 +3,4 @@
 - **Date**: 2026-11-10
 - **Decided by**: author
 
-Same binary on a desktop (blackwater, next to Thunderbird) and as a headless container on a server (morpheus), like the author's Proton Mail Bridge today (official client locally, headless Docker image on morpheus). Where it is exposed is configuration (bind address, TLS), not a code path.
+Same binary on a desktop (next to Thunderbird) and as a headless container on a server, like the author's Proton Mail Bridge today (official client on the desktop, headless Docker image on the server). Where it is exposed is configuration (bind address, TLS), not a code path.

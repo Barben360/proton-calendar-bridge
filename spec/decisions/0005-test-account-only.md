@@ -1,7 +1,7 @@
 # 0005 — Live tests only on a dedicated test account
 
 - **Date**: 2026-11-10
-- **Decided by**: author (account created 2026-11-10, Proton Pass personal vault item proton-calendar-bridge-test: login, password, TOTP)
+- **Decided by**: author (account created 2026-11-10; its username, password and TOTP are kept in the author's password manager)
 
 Every experiment and automated live test runs against the dedicated free test account, never the author's real account.
 

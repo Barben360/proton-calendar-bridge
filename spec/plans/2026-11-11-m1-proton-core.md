@@ -273,7 +273,7 @@ The fake generalises the M0 lab front (`internal/lab/session/session_test.go`) i
   - `readPasswordFD(fd int) (string, error)`: up to 4096 bytes to EOF; strips exactly one trailing `\n` or `\r\n`; empty → Usage.
   - `pcb login [--username U] [--password-fd N] [--unattended-relogin]`; `pcb login resume --captcha-token T` (same flags; `--captcha-token` required; the token is a challenge, not an account secret). On `needs-captcha`: interactive → print URL, "press Enter once solved", retry with the token, at most 3 rounds; else exit 10, message has the URL, hint `pcb login resume --captcha-token <T>`, JSON `data` = the `LoginResult` alongside `error`.
   - `pcb logout`; `pcb status` (text: one `key: value` line per field; exit 0, 20 only if local files are unreadable); `pcb calendar list` (text columns `NAME  TYPE  ACCESS  DEFAULT  KEYS  ID`, ACCESS `rw`/`ro`, DEFAULT `*`; JSON `data.calendars` = `[]service.Calendar`).
-  - `scripts/pcb.env.example`: `PCB_USERNAME=pass://pcb-dev/proton-calendar-bridge-test/email`, `PCB_PASSWORD=…/password`, `PCB_TOTP=…/totp?totp=uri` [verified: M0 ruling R9].
+  - `scripts/pcb.env.example`: `PCB_USERNAME=pass://<vault>/<item>/<username field>`, `PCB_PASSWORD=…/<password field>`, `PCB_TOTP=…/<totp field>?totp=uri` [verified: M0 ruling R9].
 - [ ] **Step 1: Failing tests**:
   - `TestNoFlagTakesASecret` (`pcb login --password x` and `--totp 1` → exit 2).
   - `TestPasswordFDStripsOneNewline` (pipe `"pa ss\n"` → `pa ss`; `"pass\r\n"` → `pass`; `"pass\n\n"` → `pass\n`; `""` → exit 2 and zero fake calls).

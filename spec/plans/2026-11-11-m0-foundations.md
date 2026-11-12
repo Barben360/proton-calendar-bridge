@@ -4,7 +4,7 @@
 
 **Goal:** A buildable `pcb` skeleton (`version`, `doctor`), CI, repo conventions, a throwaway-safe experiment harness (`pcb-lab`), the M0 experiments written up (E03 as go/no-go gate, then E01, E02, E15), and a synthetic data set on the test account.
 
-**Architecture:** One Go module. Product code under `cmd/pcb` + `internal/{cli,output,exitcode,doctor,otp}`; experiment code under `cmd/pcb-lab` + `internal/lab` (never shipped in a release or image). Live calls go only to the test account, with credentials injected by `pass-cli run` from vault `pcb-dev`.
+**Architecture:** One Go module. Product code under `cmd/pcb` + `internal/{cli,output,exitcode,doctor,otp}`; experiment code under `cmd/pcb-lab` + `internal/lab` (never shipped in a release or image). Live calls go only to the test account, with credentials injected by `pass-cli run` from the author's password manager.
 
 **Tech Stack:** Go 1.27, cobra v1.10.2, go-proton-api `v0.0.0-20261022084531-3f8fbebac58d` (+ resty replace), golangci-lint v2, GitHub Actions, pass-cli 2.7.0, proton-cal fork binary (seeding tool only).
 
@@ -15,7 +15,7 @@
 - Module `github.com/Barben360/proton-calendar-bridge`, `go 1.27`; binary `pcb` (§4).
 - CLI conventions (§13): every command has `--json` printing one envelope `{schema_version, command, ok, data | error}`; exit codes `0` done, `2` bad invocation, `10` you must act, `20` blocked by the machine, `30` failed and rolled back, `40` partly done and resumable.
 - Secrets only from a terminal prompt, a file descriptor or the environment, never argv; never in logs, errors or recorded files (§5.2, §19).
-- Live Proton calls only against the test account, vault `pcb-dev`, item `proton-calendar-bridge-test` (decision 0005). Never the author's own account.
+- Live Proton calls only against the test account, its credentials from the author's password manager (decision 0005). Never the author's own account.
 - Good citizen (§2): at most one login per lab run, a 60 s minimum between lab logins (enforced), honour `Retry-After`.
 - Logic reused from other projects is audited, rewritten with our own tests, and credited in `README.md` (decision 0002). Never copy from ProtonMail/WebClients (GPL-3.0).
 - Tests must fail when the behaviour they guard breaks; reviews check this by sabotage (§16).
@@ -72,7 +72,7 @@
 - [ ] **Step 1: Failing tests**: `TestDirModeCheckFlagsGroupReadable` (dir 0750 → error, Fix contains `chmod 700`), `TestDirModeCheckSkipsMissing`, `TestDirModeCheckOK` (0700), `TestPlatformCheck` (inject GOOS/GOARCH: windows/amd64 → warn), `TestDoctorExitCode` (`pcb doctor` with an error result → exit 20, JSON data lists every result in order), `TestResolveXDG` (env set vs unset).
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Implement**; `pcb doctor` prints one line per check as it completes (`✓/!/✗/–  name: message`, then `   fix: …`), exit 20 if any error, else 0.
-- [ ] **Step 4: Run** `make test` → PASS; `go run ./cmd/pcb doctor` on blackwater shows platform ok, dirs skipped.
+- [ ] **Step 4: Run** `make test` → PASS; `go run ./cmd/pcb doctor` on the workstation shows platform ok, dirs skipped.
 - [ ] **Step 5: Commit** (`🩺 Add pcb doctor with platform and directory checks`).
 
 ### Task 3: TOTP (RFC 6238) in `internal/otp`
@@ -110,9 +110,9 @@ Fresh implementation (inspired by the fork's `pkg/auth/totp.go`; credit it).
   - `session.Login(ctx, session.Options{BaseURL, AppVersion string; Creds session.Creds; CaptchaToken string; Recorder *record.Recorder; StateDir string}) (*session.Session, error)`; on CAPTCHA returns `*exitcode.Error{Code: MustAct}` whose message holds the verify URL and whose hint is `pcb-lab login --captcha-token <token>`, and writes `StateDir/hv.json` `{token, url, at}`.
   - `session.Session{UID, Scopes []string; Client *proton.Client}` persisted to `StateDir/session.json` (0600; test account only) and reloadable with `session.Resume(ctx, opts)`.
   - Guard: `StateDir/last-login` timestamp; `session.Login` returns `*exitcode.Error{Code: Blocked}` if the previous login is < 60 s old.
-  - `scripts/lab.env.example`: `PCB_LAB_USERNAME=pass://pcb-dev/proton-calendar-bridge-test/<field>` etc.; field names confirmed in Step 1.
+  - `scripts/lab.env.example`: `PCB_LAB_USERNAME=pass://<vault>/<item>/<field>` etc.; field names confirmed in Step 1.
   - `pcb-lab` commands: `login [--captcha-token T]`, `whoami` (scopes, user ID redacted).
-- [ ] **Step 1: Confirm the item's field names** with values never shown: `PROTON_PASS_PERSONAL_ACCESS_TOKEN=$(cat ~/.config/pcb-dev/pass-pat) pass-cli login </dev/null`, then `pass-cli item view --vault-name pcb-dev --item-title proton-calendar-bridge-test --output json | <print keys and types only>`; write the three references into `scripts/lab.env.example`.
+- [ ] **Step 1: Confirm the item's field names** with values never shown: `PROTON_PASS_PERSONAL_ACCESS_TOKEN=<the personal access token, from a file outside the repository> pass-cli login </dev/null`, then `pass-cli item view --vault-name <vault> --item-title <item> --output json | <print keys and types only>`; write the three references into `scripts/lab.env.example`.
 - [ ] **Step 2: Failing tests** against an `httptest` front of go-proton-api's in-memory `server` (pattern from proton-cal `pkg/auth/hv_test.go`, rewritten): `TestLoginGuardRefusesWithin60s`; `TestLoginHVStopsWithResumeInfo` (front answers 9001 with token `T1` → exit code 10, hint contains `--captcha-token T1`, `hv.json` written, exactly one `/auth/v4` call); `TestLoginWithCaptchaTokenSendsIt` (header `x-pm-human-verification-token: T1` on the first attempt); `TestLoginTOTPFromURI` (front fakes `2FA.Enabled=1`, receives the code for the injected clock); `TestSessionFileMode0600`.
 - [ ] **Step 3: Run** → FAIL. **Step 4: Implement.** **Step 5: Run** → PASS.
 - [ ] **Step 6: Live smoke** (one login): `pass-cli run --env-file scripts/lab.env -- go run ./cmd/pcb-lab login` then `pcb-lab whoami`; record nothing yet.
@@ -152,8 +152,8 @@ Fresh implementation (inspired by the fork's `pkg/auth/totp.go`; credit it).
 
 **Files:** Create `spec/experiments/E15-secret-sealing.md`
 
-- [ ] **Step 1: blackwater** (CachyOS, desktop): `systemd --version`, `systemd-creds has-tpm2`, `systemd-creds encrypt --user` round-trip of a dummy value (systemd ≥ 256), Secret Service on the session bus (`busctl --user list | grep org.freedesktop.secrets`).
-- [ ] **Step 2: morpheus** (Debian 13, headless; read-only commands over `ssh -o RemoteCommand=none`): same checks, as `jduff` and as root (`systemd-creds encrypt` system scope with a dummy value in a temp dir, then removed).
+- [ ] **Step 1: the desktop** (Arch Linux based): `systemd --version`, `systemd-creds has-tpm2`, `systemd-creds encrypt --user` round-trip of a dummy value (systemd ≥ 256), Secret Service on the session bus (`busctl --user list | grep org.freedesktop.secrets`).
+- [ ] **Step 2: the server** (Debian 13, headless; read-only commands over SSH): same checks, as a normal user and as root (`systemd-creds encrypt` system scope with a dummy value in a temp dir, then removed).
 - [ ] **Step 3: Write E15**: what is available where, the resulting order for §7.3, and what the container image can use (no systemd → key file + optional docker secret). Update SPEC §7.3 markers. Commit (`🧪 E15: secret sealing`).
 
 ### Task 10: Synthetic data set on the test account
