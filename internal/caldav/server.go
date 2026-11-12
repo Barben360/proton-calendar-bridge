@@ -19,8 +19,8 @@
 // MKCALENDAR are 405.
 //
 // Every method but OPTIONS needs a client's app password (Basic, any
-// username). A service that cannot answer (logged out, no cache, Proton or
-// session failure) is a 503 with Retry-After: 30, never a 4xx (ruling
+// username). A service that cannot answer (logged out, waiting for a login,
+// no cache, Proton or session failure) is a 503 with Retry-After: 30, never a 4xx (ruling
 // M3-R22: a 4xx disables the calendar in Thunderbird, a 5xx is temporary).
 // No body carries error text.
 package caldav
@@ -131,8 +131,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // fail answers a service error: ErrInvalidSyncToken is 403 valid-sync-token,
 // ErrNoSuchCalendar 404, anything else 503 with Retry-After (ruling M3-R22),
-// with a warning unless the calendar is pending (ruling M3-R25) or the
-// request's context ended (its client is gone, or the server is stopping:
+// with a warning unless the calendar is pending (ruling M3-R25), pcb serve
+// waits for a login (ruling M5-P8) or the request's context ended (its client is gone, or the server is stopping:
 // still a 503, never an empty 200).
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
@@ -147,10 +147,10 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 
 // unavailable answers err, a failure of the service, 503 with Retry-After:
 // Proton's own wait when it asked for one (a 429), else unavailableRetry;
-// with a warning unless the calendar is pending or the request's context
-// ended.
+// with a warning unless it is expected (the calendar is pending, or pcb
+// serve waits for a login: ruling M5-P8) or the request's context ended.
 func (s *server) unavailable(w http.ResponseWriter, r *http.Request, err error) {
-	if r.Context().Err() == nil && !errors.Is(err, service.ErrCalendarPending) {
+	if r.Context().Err() == nil && !errors.Is(err, service.ErrCalendarPending) && !errors.Is(err, service.ErrWaitingForLogin) {
 		// The service's errors are secret-free by contract (service.API).
 		s.log.Warn("caldav: the service could not answer", "method", r.Method, "error", err.Error())
 	}

@@ -124,11 +124,15 @@ func liveStatusText(s ctl.Status) string {
 }
 
 // daemonState is "serving since T (pid N, version V)": since Serve began
-// serving, else since the daemon started.
+// serving, else since the daemon started; or "waiting for a login since T"
+// while Serve waits for one.
 func daemonState(s ctl.Status) string {
 	since := s.Daemon.StartedAt
 	if s.Health != nil && s.Health.Since != nil {
 		since = *s.Health.Since
+	}
+	if s.Health != nil && s.Health.Serve == service.ServeWaitingForLogin {
+		return "waiting for a login since " + since.Format(time.RFC3339)
 	}
 	return fmt.Sprintf("serving since %s (pid %d, version %s)", since.Format(time.RFC3339), s.Daemon.PID, s.Daemon.Version)
 }

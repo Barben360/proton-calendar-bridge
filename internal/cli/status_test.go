@@ -215,6 +215,28 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 	}
 }
 
+// A daemon waiting for a login (pcb serve --wait-for-login) says so, in
+// status and doctor, with the needs-login alert.
+func TestStatusShowsADaemonWaitingForALogin(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{statusPhase: "ready"})
+	since := daemonNow.Add(-time.Minute)
+	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "logged-out"},
+		health: service.Health{Serve: service.ServeWaitingForLogin, Since: &since, Calendars: []service.CalendarHealth{}}}, nil)
+	r.want(exitcode.OK, "status")
+	for _, want := range []string{
+		"daemon: waiting for a login since 2026-11-12T11:59:00Z\n",
+		"alert: error needs-login: not logged in to Proton (fix: run pcb login)",
+	} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("status lacks %q:\n%s", want, r.out.String())
+		}
+	}
+	if strings.Contains(r.out.String(), "serving since") {
+		t.Errorf("status says serving while waiting:\n%s", r.out.String())
+	}
+}
+
 // Ruling M5-P5: --daemon needs an answering daemon (the HEALTHCHECK's).
 func TestStatusDaemonFlagNeedsADaemon(t *testing.T) {
 	t.Parallel()

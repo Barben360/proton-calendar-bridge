@@ -713,6 +713,9 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	if l.closed.Load() {
 		return PutResult{}, errClosed()
 	}
+	if err := l.waitingErr(); err != nil {
+		return PutResult{}, err
+	}
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return PutResult{}, err
 	}
@@ -893,6 +896,9 @@ func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in i
 func (l *Local) DeleteObject(ctx context.Context, calID, name string, cond Precondition) error {
 	if l.closed.Load() {
 		return errClosed()
+	}
+	if err := l.waitingErr(); err != nil {
+		return err
 	}
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return err

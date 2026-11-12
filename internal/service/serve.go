@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -36,14 +37,31 @@ type ServeOptions struct {
 	OnPass   func(WatchPass)
 	Ready    func()
 	Logger   *slog.Logger
+	// WaitForLogin keeps Serve running while it has no ready login (logged
+	// out, or the session ended): it waits for one, checking every
+	// LoginPoll (0: DefaultLoginPoll) and at once when a login completes in
+	// this process.
+	WaitForLogin bool
+	LoginPoll    time.Duration
+	// OnState, when set, gets each state Serve enters (serving, or
+	// waiting-for-login), from Serve's goroutine.
+	OnState func(ServeState)
 }
+
+// DefaultLoginPoll is how often a Serve waiting for a login reads
+// state.json again (ruling M5-P9): a login by another pcb process.
+const DefaultLoginPoll = 5 * time.Second
 
 // Serve runs the sync loop of serve mode until ctx ends (nil) or a person
 // is needed (that error), as WatchSync does: it holds the sync lock, opens
 // the cache once as its writer and syncs on that handle; meanwhile the read
 // API reads the same handle (ruling M3-R6). After a pass that got through,
-// it refreshes the calendars' settings when settingsRefresh has passed. It
-// needs a ready login.
+// it refreshes the calendars' settings when settingsRefresh has passed.
+//
+// Without WaitForLogin it needs a ready login (M3). With it, Serve is ready
+// once it holds the sync lock and waits for a login (awaitLogin); a stop
+// that needs a person (MustAct: the session ended, a logout) closes the
+// cache and waits again, so only ctx (nil) or another stop error ends it.
 func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	if l.closed.Load() {
 		return errClosed()
@@ -57,24 +75,83 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		return err
 	}
 	defer unlock()
-	_, acc, err := l.stored()
-	if err != nil {
-		return err
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
+	if !o.WaitForLogin {
+		_, acc, err := l.stored()
+		if err != nil {
+			return err
+		}
+		return l.serveOn(ctx, o, interval, acc)
+	}
+	defer l.leaveWaiting()
+	if o.Ready != nil {
+		o.Ready()
+	}
+	var stopped error // the stop the loop waits after, nil at the start
+	for {
+		acc, err := l.awaitLogin(ctx, o, stopped)
+		if err != nil {
+			return nil // ctx ended
+		}
+		err = l.serveOn(ctx, o, interval, acc)
+		if err == nil || exitcode.From(err) != exitcode.MustAct {
+			return err
+		}
+		stopped = err
+	}
+}
+
+// errLoggedOut ends a serving phase that a Logout stops (ruling M5-P10).
+var errLoggedOut = errors.New("logged out during serve")
+
+func loggedOut() error { return mustAct("not logged in to Proton", "run pcb login") }
+
+// servePhase is Serve serving on a cache handle: cancel stops it, done is
+// closed once its handle is closed.
+type servePhase struct {
+	cancel context.CancelCauseFunc
+	done   chan struct{}
+}
+
+// serveOn serves acc: it opens the cache, runs the sync loop on it until
+// ctx ends (nil), a pass needs a person (that error) or a Logout stops it
+// (loggedOut), then closes the cache. Ready is called once the cache is
+// open, unless WaitForLogin called it already. With WaitForLogin, a stop
+// that needs a person leaves Serve waiting before its handle is reported
+// closed, so a Logout returns with Health already waiting.
+func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Duration, acc store.Account) (err error) {
+	pctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	ph := &servePhase{cancel: cancel, done: make(chan struct{})}
+	l.gmu.Lock()
+	if l.halts > 0 { // a logout is wiping
+		l.gmu.Unlock()
+		return loggedOut()
+	}
+	l.phase = ph
+	l.waitSince = nil
+	l.gmu.Unlock()
+	defer func() {
+		if o.WaitForLogin && ctx.Err() == nil && exitcode.From(err) == exitcode.MustAct {
+			l.enterWaiting(o) // Serve waits next: say so before done
+		}
+		l.gmu.Lock()
+		l.phase = nil
+		l.gmu.Unlock()
+		close(ph.done)
+	}()
 	db, err := cache.Open(cache.Path(l.o.Dirs.State), acc.ID)
 	if err != nil {
 		return l.fail(cacheError(err))
-	}
-	log := o.Logger
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
 	}
 	v := newLive(l.o.Now(), interval)
 	l.hmu.Lock()
 	l.human = nil
 	l.hmu.Unlock()
 	l.smu.Lock()
-	l.served = &served{db: db, account: acc.ID, log: log}
+	l.served = &served{db: db, account: acc.ID, log: o.Logger}
 	l.smu.Unlock()
 	l.lmu.Lock()
 	l.live = v
@@ -88,8 +165,11 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		l.smu.Unlock()
 		_ = db.Close()
 	}()
-	if o.Ready != nil {
+	if o.Ready != nil && !o.WaitForLogin {
 		o.Ready()
+	}
+	if o.OnState != nil {
+		o.OnState(ServeServing)
 	}
 	onPass := func(p WatchPass) {
 		v.notePass(l.o.Now(), p) // before the callback: Health reads it there
@@ -100,7 +180,7 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		}
 	}
 	pace := watchPacing{next: func() time.Duration { return v.next(l.o.Now()) }, wake: v.wake}
-	return l.watch(ctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	err = l.watch(pctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
 			if cals, cerr := db.Calendars(ctx); cerr == nil {
@@ -113,6 +193,134 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		}
 		return res, err
 	}, pace)
+	if err == nil && ctx.Err() == nil && errors.Is(context.Cause(pctx), errLoggedOut) {
+		return loggedOut()
+	}
+	return err
+}
+
+// awaitLogin returns the ready login Serve can serve, checking at once
+// (after a stop: at the next poll or wake, so a failure a login does not
+// cure is not retried in a tight loop), then every o.LoginPoll and at once
+// when a login completes in this process. While no login is ready, and no
+// logout is wiping, Serve waits: Health says so, the reads answer
+// ErrWaitingForLogin, and the wait is logged once with its reason. It
+// returns an error only when ctx ends.
+func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (store.Account, error) {
+	poll := o.LoginPoll
+	if poll <= 0 {
+		poll = DefaultLoginPoll
+	}
+	logged := false
+	wait := stopped != nil
+	if stopped != nil {
+		o.Logger.Warn("waiting for a login", "reason", stopped.Error(), "hint", exitcode.HintOf(stopped))
+		logged = true
+	}
+	for {
+		if wait {
+			t := time.NewTimer(poll)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return store.Account{}, ctx.Err()
+			case <-l.loginWake:
+			case <-t.C:
+			}
+			t.Stop()
+		}
+		wait = true
+		if l.checkHook != nil {
+			l.checkHook()
+		}
+		l.gmu.Lock()
+		halted := l.halts > 0
+		l.gmu.Unlock()
+		var err error
+		if !halted {
+			var acc store.Account
+			if _, acc, err = l.stored(); err == nil {
+				return acc, nil
+			}
+		}
+		l.enterWaiting(o)
+		if !logged && err != nil {
+			o.Logger.Warn("waiting for a login", "reason", err.Error(), "hint", exitcode.HintOf(err))
+			logged = true
+		}
+	}
+}
+
+// enterWaiting marks Serve waiting for a login, reporting it to OnState
+// when it was not already.
+func (l *Local) enterWaiting(o ServeOptions) {
+	l.gmu.Lock()
+	entered := l.waitSince == nil
+	if entered {
+		now := l.o.Now()
+		l.waitSince = &now
+	}
+	l.gmu.Unlock()
+	if entered && o.OnState != nil {
+		o.OnState(ServeWaitingForLogin)
+	}
+}
+
+// leaveWaiting ends the wait when Serve returns.
+func (l *Local) leaveWaiting() {
+	l.gmu.Lock()
+	l.waitSince = nil
+	l.gmu.Unlock()
+}
+
+// waitingSince is when Serve began waiting for a login, nil when it does
+// not wait.
+func (l *Local) waitingSince() *time.Time {
+	l.gmu.Lock()
+	defer l.gmu.Unlock()
+	if l.waitSince == nil {
+		return nil
+	}
+	t := *l.waitSince
+	return &t
+}
+
+// waitingErr is ErrWaitingForLogin while Serve waits for a login, else nil.
+func (l *Local) waitingErr() error {
+	if l.waitingSince() == nil {
+		return nil
+	}
+	return &exitcode.Error{Code: exitcode.Blocked, Err: ErrWaitingForLogin, Hint: "run pcb login"}
+}
+
+// wakeLogin tells a Serve waiting for a login that one completed in this
+// process.
+func (l *Local) wakeLogin() {
+	select {
+	case l.loginWake <- struct{}{}:
+	default: // a wake is already waiting
+	}
+}
+
+// haltServe stops Serve's serving phase, if any, and waits until its cache
+// handle is closed; until release, Serve does not serve again (ruling
+// M5-P10: a logout wipes nothing a pass still writes). It holds no lock
+// while it waits: a pass may need mu (a relogin) to end.
+func (l *Local) haltServe() (release func()) {
+	l.gmu.Lock()
+	l.halts++
+	ph := l.phase
+	l.gmu.Unlock()
+	if ph != nil {
+		ph.cancel(errLoggedOut)
+		<-ph.done
+	}
+	return func() {
+		l.gmu.Lock()
+		l.halts--
+		l.gmu.Unlock()
+		l.wakeLogin()
+	}
 }
 
 // refreshSettings reads again the bootstrap of every calendar whose keys

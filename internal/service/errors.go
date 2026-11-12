@@ -99,6 +99,11 @@ var ErrNoSuchCalendar = errors.New("no such calendar in the event cache")
 // the calendar in Thunderbird).
 var ErrCalendarPending = errors.New("the calendar is not synced yet")
 
+// ErrWaitingForLogin is the cause of the error a read or a write returns
+// while Serve waits for a login (ServeOptions.WaitForLogin): it answers once
+// a login is ready (CalDAV: 503, never a 4xx).
+var ErrWaitingForLogin = errors.New("pcb serve is waiting for a login")
+
 func invalidSyncToken() *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.Usage, Err: ErrInvalidSyncToken, Hint: "list the calendar in full (an empty sync token)"}
 }

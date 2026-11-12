@@ -252,6 +252,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	if l.closed.Load() {
 		return nil, errClosed()
 	}
+	if err := l.waitingErr(); err != nil {
+		return nil, err
+	}
 	var known []cache.Calendar
 	ids := map[string]calendar.Type{}
 	err := l.withCache(func(db *cache.Cache) error {
@@ -326,6 +329,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.Cache, *calKeys) error) error {
 	if l.closed.Load() {
 		return errClosed()
+	}
+	if err := l.waitingErr(); err != nil {
+		return err
 	}
 	var typ calendar.Type
 	err := l.withCache(func(db *cache.Cache) error {

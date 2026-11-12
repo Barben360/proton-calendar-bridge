@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -46,14 +47,17 @@ const (
 
 func (a *app) newServe() *cobra.Command {
 	var listen, logLevel string
+	var waitForLogin bool
 	c := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the calendars over CalDAV and keep them in sync",
-		Long: "Run the sync loop and the CalDAV listener in one process until Ctrl-C (SIGINT or SIGTERM: exit 0) or " +
-			"until you must log in again. The first lines name the URL to enter in Thunderbird and, over TLS, the " +
-			"certificate fingerprint to check in its exception dialog. A loopback address serves plain HTTP; any other " +
-			"serves TLS, with [caldav] tls_cert and tls_key or a self-signed certificate kept in the state directory. " +
-			"Logs go to stderr.",
+		Long: "Run the sync loop and the CalDAV listener in one process until Ctrl-C (SIGINT or SIGTERM: exit 0; a " +
+			"second one while it stops: exit 20) or until you must log in again. With --wait-for-login it keeps " +
+			"running instead, logged out or after the session ends: CalDAV answers 503 until a login completes " +
+			"(pcb login, from any process), then serves again. The first lines name the URL to enter in Thunderbird " +
+			"and, over TLS, the certificate fingerprint to check in its exception dialog. A loopback address serves " +
+			"plain HTTP; any other serves TLS, with [caldav] tls_cert and tls_key or a self-signed certificate kept " +
+			"in the state directory. Logs go to stderr.",
 		Args: NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if JSONMode(cmd) {
@@ -87,23 +91,115 @@ func (a *app) newServe() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer a.closeService(svc)
-			return a.serve(cmd, svc, dirs, cfg.CalDAV, cfg.Log.Level)
+			err = a.serve(cmd, svc, dirs, cfg.CalDAV, cfg.Log.Level, waitForLogin)
+			if !errors.Is(err, errStopCut) { // cut: the process ends with the loop still running
+				a.closeService(svc)
+			}
+			return err
 		},
 	}
 	c.Flags().StringVar(&listen, "listen", "", "HOST:PORT to listen on, over [caldav] listen (default "+config.DefaultListen+")")
 	c.Flags().StringVar(&logLevel, "log-level", "", "debug, info, warn or error, over [log] level (default info)")
+	c.Flags().BoolVar(&waitForLogin, "wait-for-login", false, "keep serving (CalDAV answers 503) while logged out or after the session ends, until a login")
 	return c
 }
 
+// waitingLine is what pcb serve --wait-for-login prints while it waits.
+const waitingLine = "Waiting for a login: run pcb login"
+
+// errStopCut is the cause of the error pcb serve ends with when a second
+// signal cuts its stop (ruling M5-P22).
+var errStopCut = errors.New("a second signal cut the stop of pcb serve")
+
+func stopCut() error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: errStopCut, Hint: "the sync loop was cut; run pcb serve again"}
+}
+
+// stopSignals watches sigs: stop is closed on the first signal or the end
+// of ctx (Execute turns the first signal into that end too), cut on the
+// second signal. end stops the watch.
+func stopSignals(ctx context.Context, sigs <-chan os.Signal) (stop, cut <-chan struct{}, end func()) {
+	stopC, cutC, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		var once sync.Once
+		stopping := func() { once.Do(func() { close(stopC) }) }
+		ctxDone := ctx.Done()
+		for n := 0; ; {
+			select {
+			case <-done:
+				return
+			case <-ctxDone:
+				stopping()
+				ctxDone = nil
+			case <-sigs:
+				stopping()
+				if n++; n == 2 {
+					close(cutC)
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return stopC, cutC, func() { once.Do(func() { close(done) }) }
+}
+
+// unlessCut runs stop and returns its error, unless cut closes first: then
+// it returns at once (stop goes on in the background, the process ends).
+func unlessCut(log *slog.Logger, cut <-chan struct{}, stop func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- stop() }()
+	select {
+	case err := <-done:
+		return err
+	case <-cut:
+		log.Warn("a second signal cut the stop: the sync loop did not end")
+		return stopCut()
+	}
+}
+
+// waitNotice prints waitingLine each time Serve begins waiting for a
+// login, never before the intro: a wait reported earlier is printed right
+// after it.
+type waitNotice struct {
+	mu        sync.Mutex
+	w         io.Writer
+	introDone bool
+	waiting   bool
+}
+
+func (n *waitNotice) state(s service.ServeState) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.waiting = s == service.ServeWaitingForLogin
+	if n.waiting && n.introDone {
+		fmt.Fprintln(n.w, waitingLine)
+	}
+}
+
+func (n *waitNotice) intro() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.introDone = true
+	if n.waiting {
+		fmt.Fprintln(n.w, waitingLine)
+	}
+}
+
 // serve runs the sync loop and, once it holds the sync lock and a ready
-// login, the control socket then the listener (a refused start binds
-// neither). A signal (the end of cmd's context) drains the listener and
-// ends with exit 0; the sync loop stopping on an error drains it and ends
-// with that error. The control socket closes, and is removed, before the
-// sync loop releases the sync lock.
-func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc config.CalDAV, level string) error {
+// login (with waitForLogin: the sync lock only), the control socket then
+// the listener (a refused start binds neither). A signal (the end of cmd's
+// context, or the first of a.Signals) drains the listener and ends with
+// exit 0; a second signal meanwhile ends at once with exit 20 (ruling
+// M5-P22). The sync loop stopping on an error drains it and ends with that
+// error. The control socket closes, and is removed, before the sync loop
+// releases the sync lock.
+func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc config.CalDAV, level string, waitForLogin bool) error {
 	ctx := cmd.Context()
+	sigs, unsubscribe := a.Signals()
+	defer unsubscribe()
+	stopping, cut, endSignals := stopSignals(ctx, sigs)
+	defer endSignals()
 	started := time.Now()
 	tlsDir := filepath.Join(dirs.State, "tls")
 	lvl, err := config.ParseLevel(level)
@@ -117,10 +213,13 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	defer stopSync()
 	ready, synced := make(chan struct{}), make(chan error, 1)
 	var counters renderLog
+	notice := &waitNotice{w: cmd.OutOrStdout()}
 	go func() {
 		synced <- svc.Serve(syncCtx, service.ServeOptions{
-			Ready:  func() { close(ready) },
-			Logger: log,
+			Ready:        func() { close(ready) },
+			Logger:       log,
+			WaitForLogin: waitForLogin,
+			OnState:      notice.state,
 			OnPass: func(p service.WatchPass) {
 				logPass(log, p)
 				counters.log(log, p.Render)
@@ -129,18 +228,21 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}()
 	// finish stops the sync loop and returns its error over err: a person
 	// is needed, which matters more than a listener that failed meanwhile.
+	// A second signal cuts the wait for the loop.
 	finish := func(err error) error {
-		stopSync()
-		if serr := <-synced; serr != nil {
-			return serr
-		}
-		return err
+		return unlessCut(log, cut, func() error {
+			stopSync()
+			if serr := <-synced; serr != nil {
+				return serr
+			}
+			return err
+		})
 	}
 	select {
 	case <-ready:
 	case err := <-synced:
 		return err
-	case <-ctx.Done():
+	case <-stopping:
 		return finish(nil)
 	}
 
@@ -151,7 +253,9 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}
 	syncFinish := finish
 	finish = func(err error) error {
-		stopControl()
+		if err := unlessCut(log, cut, func() error { stopControl(); return nil }); err != nil {
+			return err
+		}
 		return syncFinish(err)
 	}
 
@@ -168,6 +272,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}
 	url := thunderbirdURL(cc, ip, ln.Addr(), tlsConf != nil)
 	a.printIntro(cmd, svc, log, url, tlsConf != nil, fingerprint)
+	notice.intro()
 	published.Store(&ctl.Listener{Addr: ln.Addr().String(), URL: url, TLS: tlsConf != nil, Fingerprint: fingerprint,
 		CertNotAfter: certNotAfter(tlsConf)})
 
@@ -192,7 +297,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 
 	var result error
 	select {
-	case <-ctx.Done(): // SIGINT or SIGTERM
+	case <-stopping: // SIGINT or SIGTERM
 	case result = <-synced:
 		// The sync loop ended on its own: a person is needed. It is drained
 		// below, then finish waits on a loop that has already returned.
@@ -201,7 +306,9 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		result = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("the CalDAV listener failed: %w", err),
 			Hint: "run pcb serve again"}
 	}
-	stopListener(srv, log, drainTimeout)
+	if err := unlessCut(log, cut, func() error { stopListener(srv, log, drainTimeout); return nil }); err != nil {
+		return err
+	}
 	return finish(result)
 }
 

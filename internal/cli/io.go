@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -37,12 +39,23 @@ type IO struct {
 	// on (install.OSHost). One with Run set is used as it is; a nil Env
 	// takes IO's Env.
 	Host install.Host
+	// Signals subscribes to SIGINT and SIGTERM (signal.Notify) and returns
+	// the function that unsubscribes: pcb serve exits at once on a second
+	// one while it stops (ruling M5-P22).
+	Signals func() (<-chan os.Signal, func())
+}
+
+// osSignals is IO.Signals on the operating system's signals.
+func osSignals() (<-chan os.Signal, func()) {
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	return c, func() { signal.Stop(c) }
 }
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
 	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen,
-		DialDaemon: ctl.Dial, Host: install.OSHost()}
+		DialDaemon: ctl.Dial, Host: install.OSHost(), Signals: osSignals}
 }
 
 // withDefaults fills the nil fields with the operating system's values.
@@ -67,6 +80,9 @@ func (o IO) withDefaults() IO {
 	}
 	if o.DialDaemon == nil {
 		o.DialDaemon = ctl.Dial
+	}
+	if o.Signals == nil {
+		o.Signals = osSignals
 	}
 	if o.Host.Run == nil {
 		o.Host = install.OSHost()

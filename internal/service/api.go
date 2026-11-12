@@ -16,7 +16,8 @@ type API interface {
 	Login(ctx context.Context, req LoginRequest) (LoginResult, error)
 	// SubmitTOTP finishes a login that answered needs-totp.
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
-	// Logout revokes the session and forgets the account.
+	// Logout revokes the session and forgets the account. During Serve it
+	// first stops the sync loop and closes its cache handle (ruling M5-P10).
 	Logout(ctx context.Context) (LogoutResult, error)
 	// Status describes the login without any network call.
 	Status(ctx context.Context) (Status, error)
@@ -32,12 +33,16 @@ type API interface {
 	// Serve runs serve mode's sync loop until ctx ends (nil) or a person is
 	// needed (that error): the sync lock held throughout, and the read
 	// methods below answered from its own cache handle (ruling M3-R6). It
-	// needs a ready login; a start it refuses never calls o.Ready.
+	// needs a ready login; a start it refuses never calls o.Ready. With
+	// o.WaitForLogin it is ready once it holds the sync lock and waits for
+	// a login instead (logged out, the session ended, a Logout meanwhile):
+	// the reads and writes then answer ErrWaitingForLogin.
 	Serve(ctx context.Context, o ServeOptions) error
 	// Health is Serve's live state: the cadence, the last pass, each
 	// calendar's sync, error class and write gate with its reason, the
 	// render counters and the human verifications Proton asked for. It
-	// calls no network. Outside Serve it is {Serve: "stopped"}.
+	// calls no network. Outside Serve it is {Serve: "stopped"}; while Serve
+	// waits for a login, {Serve: "waiting-for-login"}.
 	Health(ctx context.Context) (Health, error)
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
@@ -45,7 +50,8 @@ type API interface {
 	// The read methods below read the event cache: during Serve, Serve's
 	// own handle; otherwise a read-only handle opened for each call. They
 	// call Proton only to unlock a calendar's keys and read its settings,
-	// the first time the process reads that calendar.
+	// the first time the process reads that calendar. While Serve waits for
+	// a login they answer ErrWaitingForLogin.
 
 	// Collections lists the calendars of the event cache with their CTag
 	// and sync token, and those not synced yet as Pending; no cache is a
@@ -77,7 +83,7 @@ type API interface {
 	// ErrNotWritable (403 need-privileges: the gate decided read only;
 	// undecided is ErrGateUndecided, unavailable, ruling M4-R39), *WriteRefusal (403 with its
 	// pcb precondition), ErrNoSuchObject and ErrNoSuchCalendar (404);
-	// ErrWriteNotConfirmed, ErrCalendarPending, ErrNotServing and every
+	// ErrWriteNotConfirmed, ErrCalendarPending, ErrWaitingForLogin, ErrNotServing and every
 	// other error are unavailable (503, ProtonRetryAfter says how long
 	// Proton asked to wait).
 

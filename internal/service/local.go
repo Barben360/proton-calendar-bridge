@@ -75,6 +75,12 @@ type Local struct {
 	lmu  sync.Mutex // guards live
 	live *live      // Serve's live state, nil outside Serve (Health)
 
+	gmu       sync.Mutex    // guards waitSince, halts and phase
+	waitSince *time.Time    // when Serve began waiting for a login, nil when it does not wait
+	halts     int           // logouts in progress: Serve does not start serving meanwhile
+	phase     *servePhase   // Serve's serving phase, nil when it does not serve
+	loginWake chan struct{} // a login completed in this process (capacity 1)
+
 	hmu   sync.Mutex           // guards human
 	human map[string]time.Time // unanswered human verifications by source, since when
 
@@ -86,6 +92,8 @@ type Local struct {
 	writeFault   func(stage string) error
 	humanHook    func()        // runs once a needs-login mark is decided, before its write
 	stateTimeout time.Duration // bounds humanNeeded's wait for state.lock when set
+	checkHook    func()        // runs at each login check of a Serve waiting for a login
+	wipeHook     func()        // runs in Logout just before the wipe
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -129,6 +137,7 @@ func NewLocal(o Options) (*Local, error) {
 
 		touching:     map[string]bool{},
 		touchTimeout: defaultTouchTimeout,
+		loginWake:    make(chan struct{}, 1),
 	}
 	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
@@ -203,7 +212,12 @@ func (l *Local) revoke(ctx context.Context, acc store.Account) bool {
 // Logout implements API. The local wipe runs even when ctx is cancelled, so
 // a cancelled caller cannot leave secrets behind; only the revocation (best
 // effort) follows ctx.
+//
+// During Serve, the sync loop is stopped and its cache handle closed first
+// (ruling M5-P10), before mu is taken: a pass may need mu to end.
 func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
+	release := l.haltServe()
+	defer release()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed.Load() {
@@ -215,6 +229,9 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		l.revokeHeld()
 	}
 	l.dropClient()
+	if l.wipeHook != nil {
+		l.wipeHook()
+	}
 	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
 	defer cancel()
 	var res LogoutResult

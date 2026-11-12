@@ -2,11 +2,14 @@ package service_test
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
 // Ready tells pcb serve when to bind its listener: never when Serve cannot
@@ -399,4 +403,331 @@ func TestWakeDuringBackOffDoesNotShortenIt(t *testing.T) {
 	if p3 := r.waitPass(t); p3.Next < 108*time.Second || p3.Next > 132*time.Second {
 		t.Errorf("pass 3 waits %v, want the back-off to go on doubling (120 s ±10%%)", p3.Next)
 	}
+}
+
+// waitRig is a service whose sync loop sleeps until tick or its context
+// ends, so a test runs one pass at a time; it counts the login checks of a
+// Serve waiting for a login (polls).
+type waitRig struct {
+	*env
+	tick   chan struct{}
+	states chan service.ServeState
+	passes chan service.WatchPass
+	polls  atomic.Int64
+}
+
+func newWaitRig(t *testing.T) *waitRig {
+	t.Helper()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	r := &waitRig{env: e, tick: make(chan struct{}), states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16)}
+	e.svc = r.openTicked(t)
+	e.svc.OnLoginCheck(func() { r.polls.Add(1) })
+	return r
+}
+
+// openTicked opens a service on the rig's directories whose sleeps last
+// until tick or their context ends.
+func (r *waitRig) openTicked(t *testing.T) *service.Local {
+	t.Helper()
+	svc, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: r.cfg, Now: r.clk.Now, Sleep: func(ctx context.Context, _ time.Duration) error {
+		select {
+		case <-r.tick:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	return svc
+}
+
+// serve runs Serve in the background with o, its states and passes sent to
+// the rig's channels; stop ends it and returns what it returned.
+func (r *waitRig) serve(t *testing.T, o service.ServeOptions) (done chan error, stop func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done = make(chan error, 1)
+	o.OnState = func(s service.ServeState) { r.states <- s }
+	o.OnPass = func(p service.WatchPass) { r.passes <- p }
+	go func() { done <- r.svc.Serve(ctx, o) }()
+	var once sync.Once
+	var err error
+	stop = func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case err = <-done:
+			case <-time.After(waitLimit):
+				t.Error("Serve did not return after its context ended")
+			}
+		})
+		return err
+	}
+	t.Cleanup(func() { _ = stop() })
+	return done, stop
+}
+
+// wantState waits for Serve to report want.
+func (r *waitRig) wantState(t *testing.T, want service.ServeState) {
+	t.Helper()
+	select {
+	case s := <-r.states:
+		if s != want {
+			t.Fatalf("Serve reported %q, want %q", s, want)
+		}
+	case <-time.After(waitLimit):
+		t.Fatalf("Serve never reported %q", want)
+	}
+}
+
+// wantPass waits for the next pass and fails the test if it failed.
+func (r *waitRig) wantPass(t *testing.T) service.WatchPass {
+	t.Helper()
+	select {
+	case p := <-r.passes:
+		return p
+	case <-time.After(waitLimit):
+		t.Fatal("no pass ran")
+	}
+	return service.WatchPass{}
+}
+
+// running fails the test if Serve returned.
+func running(t *testing.T, done chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		done <- err
+		t.Fatalf("Serve returned %v, want it still waiting", err)
+	default:
+	}
+}
+
+// Logged out with WaitForLogin, Serve is ready at once and waits: the reads
+// answer ErrWaitingForLogin, and an in-process login starts serving with
+// no poll (the poll interval is an hour).
+func TestServeWaitsForALogin(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	var readies atomic.Int32
+	done, stop := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour, Ready: func() { readies.Add(1) }})
+	r.wantState(t, service.ServeWaitingForLogin)
+	if n := readies.Load(); n != 1 {
+		t.Fatalf("Ready called %d times while waiting, want 1", n)
+	}
+	if h := r.health(t); h.Serve != service.ServeWaitingForLogin || h.Since == nil {
+		t.Errorf("Health while waiting: %+v", h)
+	}
+	_, err := r.svc.Collections(t.Context())
+	if ee := wantExit(t, err, exitcode.Blocked); !errors.Is(err, service.ErrWaitingForLogin) || ee.Hint != "run pcb login" {
+		t.Errorf("Collections while waiting = %v (hint %q), want ErrWaitingForLogin, hint run pcb login", err, ee.Hint)
+	}
+	checks := r.polls.Load()
+
+	r.login(t, r.req())
+	r.wantState(t, service.ServeServing)
+	if p := r.wantPass(t); p.Err != nil || len(p.Result.Calendars) != 1 {
+		t.Fatalf("first pass after the login: %+v", p)
+	}
+	if n := r.polls.Load() - checks; n != 1 {
+		t.Errorf("%d login checks after the login, want the 1 its wake started", n)
+	}
+	if h := r.health(t); h.Serve != service.ServeServing || len(h.Calendars) != 1 {
+		t.Errorf("Health once serving: %+v", h)
+	}
+	if colls, err := r.svc.Collections(t.Context()); err != nil || len(colls) != 1 {
+		t.Errorf("Collections once serving = %v, %v", colls, err)
+	}
+	running(t, done)
+	if err := stop(); err != nil {
+		t.Errorf("Serve after its context ended = %v, want nil", err)
+	}
+	if h := r.health(t); h.Serve != service.ServeStopped {
+		t.Errorf("Health after Serve = %q, want stopped", h.Serve)
+	}
+}
+
+// Every read and write answers ErrWaitingForLogin while Serve waits.
+func TestEveryReadAndWriteWaitsForTheLogin(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+	r.wantState(t, service.ServeWaitingForLogin)
+	ctx := t.Context()
+	for name, call := range map[string]func() error{
+		"Objects":       func() error { _, _, err := r.svc.Objects(ctx, "cal"); return err },
+		"ObjectsByUID":  func() error { _, err := r.svc.ObjectsByUID(ctx, "cal", []string{"a"}); return err },
+		"ObjectsByName": func() error { _, err := r.svc.ObjectsByName(ctx, "cal", []string{"a.ics"}); return err },
+		"Changes":       func() error { _, err := r.svc.Changes(ctx, "cal", ""); return err },
+		"PutObject": func() error {
+			_, err := r.svc.PutObject(ctx, "cal", "a.ics", []byte("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"), service.Precondition{})
+			return err
+		},
+		"DeleteObject": func() error { return r.svc.DeleteObject(ctx, "cal", "a.ics", service.Precondition{}) },
+	} {
+		if err := call(); !errors.Is(err, service.ErrWaitingForLogin) || exitcode.From(err) != exitcode.Blocked {
+			t.Errorf("%s while waiting = %v, want ErrWaitingForLogin (exit 20)", name, err)
+		}
+	}
+}
+
+// Another process's login (a second Local on the same directories) is
+// noticed by the poll: serving starts at the first check after it.
+func TestServeNoticesALoginFromAnotherProcess(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: 10 * time.Millisecond})
+	r.wantState(t, service.ServeWaitingForLogin)
+	other := r.open(t)
+	if _, err := other.Login(t.Context(), r.req()); err != nil {
+		t.Fatal(err)
+	}
+	checks := r.polls.Load()
+	r.wantState(t, service.ServeServing)
+	if n := r.polls.Load() - checks; n > 1 {
+		t.Errorf("serving started %d checks after the login, want within one poll", n)
+	}
+	if p := r.wantPass(t); p.Err != nil {
+		t.Errorf("first pass: %v", p.Err)
+	}
+}
+
+// Proton ends the session and no unattended relogin is set: with
+// WaitForLogin, Serve marks the login needs-login and waits instead of
+// returning.
+func TestSessionEndWaitsInsteadOfExiting(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+	r.wantState(t, service.ServeServing)
+	r.wantPass(t)
+	r.f.RevokeSessions()
+	r.tick <- struct{}{}
+	if p := r.wantPass(t); exitcode.From(p.Err) != exitcode.MustAct {
+		t.Fatalf("pass after the revocation: %v, want a MustAct", p.Err)
+	}
+	r.wantState(t, service.ServeWaitingForLogin)
+	if h := r.health(t); h.Serve != service.ServeWaitingForLogin {
+		t.Errorf("Health.Serve = %q, want waiting", h.Serve)
+	}
+	if got := r.phase(t); got != "needs-login" {
+		t.Errorf("phase = %q, want needs-login", got)
+	}
+	running(t, done)
+	if _, err := r.svc.Collections(t.Context()); !errors.Is(err, service.ErrWaitingForLogin) {
+		t.Errorf("Collections after the session end = %v, want ErrWaitingForLogin", err)
+	}
+}
+
+// Without WaitForLogin, M3 stays: logged out is exit 10 with Ready never
+// called, and a session end returns its MustAct.
+func TestServeWithoutTheFlagKeepsM3(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	var readies atomic.Int32
+	err := r.svc.Serve(t.Context(), service.ServeOptions{Ready: func() { readies.Add(1) }})
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "run pcb login" {
+		t.Errorf("logged out: %v, hint %q", err, ee.Hint)
+	}
+	if n := readies.Load(); n != 0 {
+		t.Fatalf("Ready called %d times while logged out", n)
+	}
+
+	r.login(t, r.req())
+	done, _ := r.serve(t, service.ServeOptions{})
+	r.wantState(t, service.ServeServing)
+	r.wantPass(t)
+	r.f.RevokeSessions()
+	r.tick <- struct{}{}
+	r.wantPass(t)
+	select {
+	case err := <-done:
+		done <- err // for the cleanup's stop
+		if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "run pcb login" {
+			t.Errorf("session end: %v, hint %q", err, ee.Hint)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("Serve without WaitForLogin did not return at the session end")
+	}
+	select {
+	case s := <-r.states:
+		t.Errorf("Serve without WaitForLogin reported %q after the session end", s)
+	default:
+	}
+}
+
+// Ruling M5-P10: Logout during Serve stops the loop and closes the cache
+// before it wipes; Serve then waits (WaitForLogin) or returns MustAct.
+func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
+	t.Parallel()
+	t.Run("waits", func(t *testing.T) {
+		t.Parallel()
+		r := newWaitRig(t)
+		r.login(t, r.req())
+		done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+		r.wantState(t, service.ServeServing)
+		r.wantPass(t)
+		var atWipe service.ServeState
+		var dbAtWipe error
+		r.svc.OnWipe(func() {
+			h, err := r.svc.Health(context.Background())
+			if err != nil {
+				t.Errorf("Health at the wipe: %v", err)
+			}
+			atWipe = h.Serve
+			_, dbAtWipe = os.Stat(cache.Path(r.dirs.State))
+		})
+		if _, err := r.svc.Logout(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if atWipe != service.ServeWaitingForLogin || dbAtWipe != nil {
+			t.Errorf("at the wipe: Serve %q, pcb.db %v; want the loop stopped and the cache still there to wipe", atWipe, dbAtWipe)
+		}
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if _, err := os.Stat(cache.Path(r.dirs.State) + suffix); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("pcb.db%s after Logout: %v, want absent", suffix, err)
+			}
+		}
+		if h := r.health(t); h.Serve != service.ServeWaitingForLogin {
+			t.Errorf("Health.Serve after Logout = %q, want waiting", h.Serve)
+		}
+		r.wantState(t, service.ServeWaitingForLogin)
+		running(t, done)
+
+		// The next login serves again.
+		r.clk.advance(time.Minute)
+		r.login(t, r.req())
+		r.wantState(t, service.ServeServing)
+		if p := r.wantPass(t); p.Err != nil {
+			t.Errorf("pass after the new login: %v", p.Err)
+		}
+	})
+	t.Run("returns without the flag", func(t *testing.T) {
+		t.Parallel()
+		r := newWaitRig(t)
+		r.login(t, r.req())
+		done, _ := r.serve(t, service.ServeOptions{})
+		r.wantState(t, service.ServeServing)
+		r.wantPass(t)
+		if _, err := r.svc.Logout(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			done <- err // for the cleanup's stop
+			if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "not logged in to Proton" {
+				t.Errorf("Serve after Logout = %v", err)
+			}
+		case <-time.After(waitLimit):
+			t.Fatal("Serve did not return after Logout")
+		}
+		if _, err := os.Stat(cache.Path(r.dirs.State)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("pcb.db after Logout: %v", err)
+		}
+	})
 }

@@ -28,13 +28,17 @@ const (
 	IdleAfter      = 35 * time.Minute
 )
 
-// ServeState is whether Serve is running.
+// ServeState is whether Serve is running, and whether it serves or waits
+// for a login.
 type ServeState string
 
 // The serve states.
 const (
 	ServeStopped ServeState = "stopped"
 	ServeServing ServeState = "serving"
+	// ServeWaitingForLogin: Serve runs with WaitForLogin and waits for a
+	// ready login (logged out, or the session ended).
+	ServeWaitingForLogin ServeState = "waiting-for-login"
 )
 
 // The error classes (errorClass).
@@ -57,7 +61,8 @@ const (
 
 // Health is Serve's live state, in memory only: what pcb status shows over
 // the control socket. Outside Serve it is {Serve: "stopped"} and no
-// calendars.
+// calendars; while Serve waits for a login, {Serve: "waiting-for-login"},
+// since when, and no calendars (pcb status lists the cached ones).
 type Health struct {
 	Serve ServeState `json:"serve"`
 	// Since is when Serve entered this state (nil when stopped).
@@ -314,6 +319,13 @@ func (l *Local) clearHuman(source string) {
 func (l *Local) Health(ctx context.Context) (Health, error) {
 	if l.closed.Load() {
 		return Health{}, errClosed()
+	}
+	if since := l.waitingSince(); since != nil {
+		h := Health{Serve: ServeWaitingForLogin, Since: since, Calendars: []CalendarHealth{}, Render: l.RenderCounts()}
+		if h.Render.KeysErrors == nil {
+			h.Render.KeysErrors = []string{}
+		}
+		return h, nil
 	}
 	v := l.liveState()
 	if v == nil {

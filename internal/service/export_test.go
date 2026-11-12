@@ -95,3 +95,10 @@ func (l *Local) OnHumanNeeded(f func()) { l.humanHook = f }
 
 // SetStateTimeout bounds humanNeeded's wait for state.lock.
 func (l *Local) SetStateTimeout(d time.Duration) { l.stateTimeout = d }
+
+// OnLoginCheck makes f run at each login check of a Serve waiting for a
+// login (the first one, each poll and each wake). Set it before Serve.
+func (l *Local) OnLoginCheck(f func()) { l.checkHook = f }
+
+// OnWipe makes f run in Logout just before the local wipe.
+func (l *Local) OnWipe(f func()) { l.wipeHook = f }
