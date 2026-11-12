@@ -230,6 +230,8 @@ func TestStaleIfMatchIs412AndWritesNothing(t *testing.T) {
 	}{
 		{"PUT If-Match stale", r.put(href, thunderbird("stale@x", "Third"), "If-Match", first)},
 		{"PUT If-None-Match on an object", r.put(href, thunderbird("stale@x", "Third"), "If-None-Match", "*")},
+		{"PUT If-None-Match * twice", r.put(href, thunderbird("stale@x", "Third"), "If-None-Match", "*, *")},
+		{"PUT If-None-Match * beside an ETag", r.put(href, thunderbird("stale@x", "Third"), "If-None-Match", `"nope", *`)},
 		{"DELETE If-Match stale", r.do(http.MethodDelete, href, "", "If-Match", first)},
 	} {
 		wantStatus(t, tc.rec, http.StatusPreconditionFailed)

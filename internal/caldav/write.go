@@ -104,17 +104,21 @@ func calendarBody(contentType string) bool {
 func precondition(r *http.Request) (service.Precondition, bool) {
 	cond := service.Precondition{IfMatch: strings.TrimSpace(r.Header.Get("If-Match"))}
 	inm := strings.TrimSpace(strings.Join(r.Header.Values("If-None-Match"), ","))
-	if inm == "*" {
-		cond.IfNoneMatchAny = true
-		return cond, true
-	}
 	if inm == "" {
 		return cond, true
 	}
 	for _, e := range strings.Split(inm, ",") {
-		if e = strings.TrimSpace(e); e != "" {
+		switch e = strings.TrimSpace(e); e {
+		case "":
+		case "*": // anywhere in the list, repeated or beside ETags: the object must not exist
+			cond.IfNoneMatchAny = true
+		default:
 			cond.IfNoneMatch = append(cond.IfNoneMatch, e)
 		}
+	}
+	if cond.IfNoneMatchAny {
+		cond.IfNoneMatch = nil
+		return cond, true
 	}
 	return cond, len(cond.IfNoneMatch) > 0
 }
