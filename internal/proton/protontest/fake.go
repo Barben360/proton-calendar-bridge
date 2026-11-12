@@ -11,6 +11,7 @@ package protontest
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/go-proton-api/server"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
@@ -110,6 +112,7 @@ type Fake struct {
 	captcha   string                     // Options.Captcha, changed by SetCaptcha
 	codes     []string                   // 2FA codes received, in order
 	sessions  map[string]sessionRec      // access token minted by Session → session
+	logins    map[string]loginRec        // UID → session handed out by Login, not spent
 
 	cal calendars
 }
@@ -163,12 +166,14 @@ func New(t TB, o Options) *Fake {
 		users:     map[string]string{},
 		passwords: map[string]string{},
 		sessions:  map[string]sessionRec{},
+		logins:    map[string]loginRec{},
 		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)
 	}
 	f.captcha = o.Captcha
+	t.Cleanup(f.giveBackLogins) // before borrow's: the backend comes back with them
 	f.proxy.ModifyResponse = f.fixResponse
 	f.AddUser(f.Username, f.Password)
 	ts := httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
@@ -303,13 +308,15 @@ func (f *Fake) ExpireAccessTokens() {
 func (f *Fake) RevokeSessions() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, id := range f.users {
+	for name, id := range f.users {
 		if err := f.backend.RevokeUser(id); err != nil {
 			f.t.Errorf("protontest: revoke sessions: %v", err)
 		}
+		f.pool.dropSessions(name) // the idle ones died too
 	}
 	clear(f.unlocked)
 	clear(f.sessions)
+	clear(f.logins)
 }
 
 // Session returns live tokens for username's account without an SRP login:
@@ -337,6 +344,78 @@ func (f *Fake) Session(t TB, username string) api.Tokens {
 	return tk
 }
 
+type loginRec struct {
+	user string
+	tok  api.Tokens
+}
+
+// Login returns live tokens of username's account, as a successful SRP login
+// would, without its cost (about 1.5 s of CPU under -race) on every test: the
+// session is opened by SRP against the backend directly, so this fake's
+// Calls do not count it, and kept with the pooled backend once the test ends,
+// for a later test to take. A session the test spent (any /auth/ call on it:
+// refresh, logout, 2FA; RevokeSessions) is not kept. The tokens expire
+// (ExpireAccessTokens) like issued ones. A test of the login itself logs in.
+func (f *Fake) Login(t TB, username string) api.Tokens {
+	t.Helper()
+	f.mu.Lock()
+	password, ok := f.passwords[username]
+	f.mu.Unlock()
+	if !ok {
+		t.Fatalf("protontest: unknown user %q", username)
+	}
+	tok, ok := f.pool.takeSession(username)
+	if !ok {
+		m := gpa.New(gpa.WithHostURL(f.backend.GetHostURL()), gpa.WithAppVersion(appVersion), gpa.WithRetryCount(0))
+		defer m.Close()
+		// TB has no Context (a Process holds the fake too): the login is bounded instead.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		c, a, err := m.NewClientWithLogin(ctx, username, []byte(password))
+		if err != nil {
+			t.Fatalf("protontest: login %q: %v", username, err)
+		}
+		c.Close()
+		tok = api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logins[tok.UID] = loginRec{username, tok}
+	f.issued[tok.AccessToken] = true
+	f.minted = append(f.minted, tok.AccessToken)
+	return tok
+}
+
+// spend forgets the Login session an /auth/ call names (refreshed, revoked
+// or 2FA'd: not to be handed out again): in x-pm-uid, or in the body's UID
+// as go-proton-api's refresh sends it. The body is put back for the route.
+func (f *Fake) spend(r *http.Request) {
+	uids := []string{r.Header.Get("x-pm-uid")}
+	if body, err := io.ReadAll(r.Body); err == nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var named struct{ UID string }
+		if json.Unmarshal(body, &named) == nil {
+			uids = append(uids, named.UID)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, uid := range uids {
+		delete(f.logins, uid)
+	}
+}
+
+// giveBackLogins keeps the sessions Login handed out and the test did not
+// spend with the pooled backend.
+func (f *Fake) giveBackLogins() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, l := range f.logins {
+		f.pool.putSession(l.user, l.tok)
+	}
+	clear(f.logins)
+}
+
 // sessionUser returns the user of a token minted by Session. The token must
 // not have expired (serve answers 401 before a route sees an expired one).
 func (f *Fake) sessionUser(r *http.Request) (string, bool) {
@@ -350,6 +429,9 @@ type sessionRec struct{ user, uid string }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + r.URL.Path
+	if strings.HasPrefix(r.URL.Path, "/auth/") {
+		f.spend(r)
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, call{r.Method, r.URL.Path})
 	stall := f.popStall(route)

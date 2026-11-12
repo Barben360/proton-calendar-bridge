@@ -44,7 +44,7 @@ func TestLoginOther422IsNotWrongPassword(t *testing.T) {
 func TestLoginCaptchaWhileReadyKeepsState(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	before := e.loadState(t)
 	e.f.SetCaptcha("chal-ready")
 	e.clk.advance(61 * time.Second)
@@ -85,7 +85,7 @@ func TestLoginZeroesTheKeyPassphrase(t *testing.T) {
 func TestReadHumanVerificationIsTyped(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.f.FailNext(http.MethodGet, "/calendar/v1", http.StatusUnprocessableEntity, api.CodeHumanVerification, 0)
 	_, err := e.svc.Calendars(t.Context())
 	ee := wantExit(t, err, exitcode.Blocked)

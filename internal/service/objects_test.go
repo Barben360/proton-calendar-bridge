@@ -147,7 +147,7 @@ func TestObjectReads(t *testing.T) {
 		Card: card("mixed@x", "Mixed", base, "RRULE:FREQ=DAILY")})
 	e.f.AddEvent(hol, protontest.Event{UID: "mixed@x", Start: rid, End: rid + 3600, RecurrenceID: &rid, ForeignKey: true,
 		Card: card("mixed@x", "Mixed moved", rid, "RECURRENCE-ID:"+stamp(rid))})
-	e.login(t, e.req())
+	e.signIn(t)
 
 	t.Run("NeverSyncedIsMustAct", func(t *testing.T) {
 		calls := e.f.Calls("", "/")
@@ -442,7 +442,7 @@ func TestServeReadsOnItsOwnHandle(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	if p := s.next(t, true); calSync(t, p.Result, work).Mode != "initial" {
 		t.Errorf("first pass = %+v", p.Result)
@@ -500,7 +500,7 @@ func TestServePassesCarryTheRenderCounters(t *testing.T) {
 	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60})
 	e.f.AddEvent(work, protontest.Event{UID: "dup@x", Start: base, End: base + 60})
 	e.f.AddEvent(locked, protontest.Event{UID: "l@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	if p := s.next(t, true); p.Render == nil || !p.Render.Zero() {
 		t.Fatalf("first pass Render = %+v, want zero counters (nothing rendered yet)", p.Render)
@@ -529,7 +529,7 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 	e.f.AddEvent(work, protontest.Event{UID: "b@x", Start: base, End: base + 60})
 	c := e.f.AddEvent(work, protontest.Event{UID: "c@x", Start: base, End: base + 60})
 	e.f.AddEvent(other, protontest.Event{UID: "o@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	s.next(t, true)
 	e.f.FailNext("GET", "/calendar/v2/"+other+"/bootstrap", 422, 2501, 0) // Other's keys fail at first
@@ -627,7 +627,7 @@ func TestServeStopsWhileAReadUnlocksKeys(t *testing.T) {
 	e.svc = svc
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(work, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	s.next(t, true)
 	read := make(chan error, 1)
@@ -669,7 +669,7 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
 		odd := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Odd", Type: 7})
 		locked := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Locked", BrokenPassphrase: true})
-		e.login(t, e.req())
+		e.signIn(t)
 		e.sync(t, false)
 		for id, want := range map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true} {
 			c := e.collection(t, id)
@@ -699,7 +699,7 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 		e := newEnv(t, protontest.Options{BadPassphraseSignature: true})
 		id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 		e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-		e.login(t, e.req())
+		e.signIn(t)
 		e.sync(t, false)
 		if !e.collection(t, id).ReadOnly {
 			t.Error("a calendar whose passphrase signature fails is writable")
@@ -717,7 +717,7 @@ func TestWritabilityChangeIsSeenByClients(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	s := e.serve(t)
 	s.next(t, true)
 	before := e.collection(t, id)
@@ -745,7 +745,7 @@ func TestWritabilityChangeIsSeenByClients(t *testing.T) {
 func TestAddressKeyTagsOfTheFakesKeysAreUnlocked(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	c, err := e.svc.SessionClient(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -781,7 +781,7 @@ func TestCachedTypeFeedsTheGateOnEveryKeyLoad(t *testing.T) {
 		e := newEnv(t, protontest.Options{})
 		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
 		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-		e.login(t, e.req())
+		e.signIn(t)
 		e.sync(t, false)
 		e.objects(t, sub, "a@x") // calendarRead unlocks: no Collections call before
 		if !e.collection(t, sub).ReadOnly {
@@ -793,7 +793,7 @@ func TestCachedTypeFeedsTheGateOnEveryKeyLoad(t *testing.T) {
 		e := newEnv(t, protontest.Options{})
 		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
 		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
-		e.login(t, e.req())
+		e.signIn(t)
 		s := e.serve(t)
 		s.next(t, true)
 		if !e.collection(t, sub).ReadOnly {

@@ -137,7 +137,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 	}
 	defer release()
 
-	p, err := auth.Begin(ctx, l.mgr, req.Username, []byte(req.Password), req.CaptchaToken)
+	p, err := l.begin(ctx, req)
 	if err != nil {
 		var ce *auth.CaptchaError
 		switch {
@@ -165,6 +165,14 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{State: StateNeedsTOTP, Username: req.Username, AccountID: p.UserID, LoginExpires: &exp}, nil
 	}
 	return l.finish(ctx, pl, totp, now)
+}
+
+// begin runs Login's SRP step, unless a test replaced it (skipSRP).
+func (l *Local) begin(ctx context.Context, req LoginRequest) (*auth.Pending, error) {
+	if l.skipSRP != nil {
+		return l.skipSRP(req.Username), nil
+	}
+	return auth.Begin(ctx, l.mgr, req.Username, []byte(req.Password), req.CaptchaToken)
 }
 
 // SubmitTOTP implements API. The code is a 6-8 digit code or an otpauth://

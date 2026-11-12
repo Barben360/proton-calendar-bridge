@@ -387,7 +387,7 @@ func TestDefaultIsNotRecreatedOnceAnyClientExists(t *testing.T) {
 	if _, err := e.svc.AddClient(t.Context(), "Phone"); err != nil {
 		t.Fatal(err)
 	}
-	if res := e.login(t, e.req()); res.DefaultClientCreated {
+	if res := e.signIn(t); res.DefaultClientCreated {
 		t.Error("the login reported a default client with Phone there")
 	}
 	if list, _ := e.svc.Clients(t.Context()); len(list) != 1 || list[0].Name != "Phone" {
@@ -399,12 +399,12 @@ func TestDefaultIsNotRecreatedOnceAnyClientExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.clk.advance(61 * time.Second)
-	if res := e.login(t, e.req()); !res.DefaultClientCreated {
+	if res := e.signIn(t); !res.DefaultClientCreated {
 		t.Fatal("a login with no client left did not create default")
 	}
 	first := e.show(t, "default")
 	e.clk.advance(61 * time.Second)
-	if res := e.login(t, e.req()); res.DefaultClientCreated {
+	if res := e.signIn(t); res.DefaultClientCreated {
 		t.Error("a second login created default again")
 	}
 	if again := e.show(t, "default"); again.ID != first.ID || again.Password != first.Password {
@@ -418,7 +418,7 @@ func TestDefaultIsNotRecreatedOnceAnyClientExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.clk.advance(61 * time.Second)
-	e.login(t, e.req())
+	e.signIn(t)
 	if list, _ := e.svc.Clients(t.Context()); len(list) != 1 || list[0].Name != "Laptop" {
 		t.Errorf("clients = %+v, want Laptop only", list)
 	}
@@ -429,7 +429,7 @@ func TestDefaultIsNotRecreatedOnceAnyClientExists(t *testing.T) {
 func TestPasswordStaysRecoverableAcrossLogout(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	before := e.show(t, "")
 	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
@@ -438,7 +438,7 @@ func TestPasswordStaysRecoverableAcrossLogout(t *testing.T) {
 		t.Fatalf("after logout: recoverable %v, same password %v", after.Recoverable, after.Password == before.Password)
 	}
 	e.clk.advance(61 * time.Second)
-	e.login(t, e.req())
+	e.signIn(t)
 	if after := e.show(t, ""); !after.Recoverable || after.Password != before.Password || after.ID != before.ID {
 		t.Fatalf("after a new login: recoverable %v, same password %v, same client %v", after.Recoverable, after.Password == before.Password, after.ID == before.ID)
 	}
@@ -578,7 +578,7 @@ func TestClientCredentialsRedactThemselves(t *testing.T) {
 func TestNoPasswordInLogs(t *testing.T) {
 	t.Parallel()
 	e, logs := loggedEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	var passwords []string
 	passwords = append(passwords, e.show(t, "default").Password)
 	sec, err := e.svc.AddClient(t.Context(), "Phone")
@@ -610,7 +610,7 @@ func TestNoPasswordInLogs(t *testing.T) {
 func TestClientsRefuseToMintAKeyWhileTheSessionsKeyIsMissing(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	before, err := os.ReadFile(filepath.Join(e.dirs.State, "clients.json"))
 	if err != nil {
 		t.Fatal(err)

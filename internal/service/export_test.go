@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 )
 
@@ -116,6 +117,20 @@ func (l *Local) ServingHandle() bool {
 	l.smu.RLock()
 	defer l.smu.RUnlock()
 	return l.served != nil
+}
+
+// SkipSRP makes Login take its session from session (tokens and user ID of
+// the username's account) instead of SRP; all that follows SRP runs as usual.
+// The password and any CAPTCHA are not checked. nil restores SRP.
+func (l *Local) SkipSRP(session func(username string) (api.Tokens, string)) {
+	if session == nil {
+		l.skipSRP = nil
+		return
+	}
+	l.skipSRP = func(username string) *auth.Pending {
+		tok, id := session(username)
+		return auth.Resume(l.mgr, tok, id)
+	}
 }
 
 // SetKeyPassHook makes fn see the key passphrase a login derives, before it
