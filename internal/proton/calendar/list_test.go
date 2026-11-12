@@ -8,7 +8,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
-	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/calendar"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -25,14 +24,7 @@ func session(t *testing.T) (*protontest.Fake, *api.Client, *keys.Unlocked) {
 func sessionWith(t *testing.T, o protontest.Options) (*protontest.Fake, *api.Client, *keys.Unlocked) {
 	t.Helper()
 	f := protontest.New(t, o)
-	m := auth.NewManager(f.URL, "Other")
-	t.Cleanup(m.Close)
-	p, err := auth.Begin(t.Context(), m, f.Username, []byte(f.Password), "")
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	t.Cleanup(p.Close)
-	c := api.New(p.Tokens, api.Options{
+	c := api.New(f.Login(t, f.Username), api.Options{
 		BaseURL: f.URL,
 		Limiter: rate.NewLimiter(rate.Inf, 1),
 		HTTP:    &http.Client{Timeout: 5 * time.Second},
