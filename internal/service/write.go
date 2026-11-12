@@ -520,6 +520,7 @@ func (l *Local) listRows(ctx context.Context, w *write, uid string) ([]events.Ro
 		return err
 	})
 	if verify {
+		l.noteHuman(hvWrite)
 		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
 		return nil, humanVerification()
 	}
@@ -999,6 +1000,7 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 	case humanVerificationAsked(syncErr):
 		// Asked before the call is processed, as a 429 is (ruling M4-R44):
 		// nothing applied, and never a refusal.
+		l.noteHuman(hvWrite)
 		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
 		return humanVerification()
 	case errors.As(syncErr, &ae) && !api.SessionWide(ctx, syncErr):
@@ -1065,6 +1067,7 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		w.log.Warn("a write is not confirmed: a row came back under other key packets than pcb sent or pinned", "calendar", w.calID, "row", v.packetRow, "field", v.packetField)
 		return notConfirmed()
 	case v.ok:
+		l.clearHuman(hvWrite)
 		if stored != nil {
 			// Proton holds the write: the answer says so (ruling M4-R43),
 			// and the next sync pass stores the rows (and pins a row the

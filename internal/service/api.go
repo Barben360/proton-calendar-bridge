@@ -34,6 +34,11 @@ type API interface {
 	// methods below answered from its own cache handle (ruling M3-R6). It
 	// needs a ready login; a start it refuses never calls o.Ready.
 	Serve(ctx context.Context, o ServeOptions) error
+	// Health is Serve's live state: the cadence, the last pass, each
+	// calendar's sync, error class and write gate with its reason, the
+	// render counters and the human verifications Proton asked for. It
+	// calls no network. Outside Serve it is {Serve: "stopped"}.
+	Health(ctx context.Context) (Health, error)
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
@@ -224,10 +229,10 @@ type WatchPass struct {
 // did not unlock (every event of them is a placeholder), sorted, nil if
 // none.
 type RenderCounts struct {
-	Undecryptable    int
-	Unverified       int
-	DuplicateMasters int
-	KeysErrors       []string
+	Undecryptable    int      `json:"undecryptable"`
+	Unverified       int      `json:"unverified"`
+	DuplicateMasters int      `json:"duplicate_masters"`
+	KeysErrors       []string `json:"keys_errors"`
 }
 
 // Zero reports whether every counter is zero.
@@ -247,6 +252,9 @@ type CalendarSync struct {
 	Deleted int    `json:"deleted"`
 	Events  int    `json:"events"`
 	Error   string `json:"error,omitempty"`
+	// ErrorClass sorts Error for Health (errorClass): rate-limited,
+	// proton-unavailable, network, session, refused, deferred, cache or other.
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 // EventsRequest selects cached events: Calendar is an ID or an exact name;

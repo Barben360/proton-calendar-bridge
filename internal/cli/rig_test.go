@@ -107,6 +107,8 @@ func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, f
 
 func (*stubAPI) Serve(context.Context, service.ServeOptions) error { return nil }
 
+func (*stubAPI) Health(context.Context) (service.Health, error) { return service.Health{}, nil }
+
 func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event, error) {
 	return nil, nil
 }

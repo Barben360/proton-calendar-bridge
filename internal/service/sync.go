@@ -77,7 +77,7 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 		return err
 	}
 	defer unlock()
-	return l.watch(ctx, req, interval, onPass, l.syncPass)
+	return l.watch(ctx, req, interval, onPass, l.syncPass, watchPacing{})
 }
 
 // watchInterval is interval with its default, or a Usage error below the
@@ -92,10 +92,17 @@ func watchInterval(interval time.Duration) (time.Duration, error) {
 	return interval, nil
 }
 
+// watchPacing is what Serve adds to the pace of a watch: the wait after a
+// pass that got through, and a channel that cuts it short.
+type watchPacing struct {
+	next func() time.Duration
+	wake <-chan struct{}
+}
+
 // watch runs pass every interval until ctx ends (nil) or a pass needs a
 // person (that error); the caller holds the sync lock.
 func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass),
-	pass func(context.Context, SyncRequest) (SyncResult, error)) error {
+	pass func(context.Context, SyncRequest) (SyncResult, error), pace watchPacing) error {
 	var (
 		last    SyncResult
 		lastErr error
@@ -111,8 +118,10 @@ func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Durati
 		}
 		return syncer.Report{}, lastErr
 	}, syncer.WatchOptions{
-		Interval: interval,
-		Sleep:    l.o.Sleep,
+		Interval:     interval,
+		NextInterval: pace.next,
+		Wake:         pace.wake,
+		Sleep:        l.o.Sleep,
 		OnPass: func(_ syncer.Report, _ error, next time.Duration) {
 			if onPass != nil {
 				onPass(WatchPass{Result: last, Err: watchError(lastErr), Next: next})
@@ -166,6 +175,7 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 		describe := func(err error) string { return calendarError(ctx, err) }
 		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe,
 			Lock: func(ctx context.Context, calID string) (func(), error) { return l.cals.lock(ctx, calID, nil) }})
+		l.noteSyncHuman(rep, err)
 		if err != nil {
 			return err
 		}
@@ -188,6 +198,22 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 	return res, nil
 }
 
+// noteSyncHuman records, for Health, that a call of the pass was answered
+// with a human verification (9001), and clears the note when a pass gets
+// through without one.
+func (l *Local) noteSyncHuman(rep syncer.Report, err error) {
+	asked := humanVerificationAsked(err)
+	for _, c := range rep.Calendars {
+		asked = asked || humanVerificationAsked(c.Err)
+	}
+	switch {
+	case asked:
+		l.noteHuman(hvSync)
+	case err == nil:
+		l.clearHuman(hvSync)
+	}
+}
+
 // syncResult is the pass's report, each calendar's failure described as
 // the cache stored it.
 func syncResult(rep syncer.Report, describe func(error) string) SyncResult {
@@ -198,7 +224,7 @@ func syncResult(rep syncer.Report, describe func(error) string) SyncResult {
 			Added: r.Changes.Added, Updated: r.Changes.Updated, Deleted: r.Changes.Deleted,
 		}
 		if r.Err != nil {
-			cs.Error = describe(r.Err)
+			cs.Error, cs.ErrorClass = describe(r.Err), errorClass(r.Err)
 		}
 		res.Calendars = append(res.Calendars, cs)
 	}

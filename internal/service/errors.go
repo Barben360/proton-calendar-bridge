@@ -36,9 +36,27 @@ type detail struct {
 	limited    bool          // Proton is rate limiting (a 429): the hint is a one-shot "retry in X"
 	retryAfter time.Duration // Proton's Retry-After, 0 if none
 	final      bool          // a retry cannot help: a person must change something
+	class      string        // the error class Health reports (errorClass), "" when the code says enough
 }
 
 func (d *detail) Error() string { return d.msg }
+
+// classed is a Blocked error of a known error class (errorClass).
+func classed(class, msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: msg, class: class}, Hint: hint}
+}
+
+// withClass is ee marked with class, its code, message, hint and
+// finality kept.
+func withClass(ee *exitcode.Error, class string) *exitcode.Error {
+	d := detail{msg: ee.Err.Error()}
+	var old *detail
+	if errors.As(ee.Err, &old) {
+		d = *old
+	}
+	d.class = class
+	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
 
 // final is a Blocked error that no retry can fix.
 func final(msg, hint string) *exitcode.Error {
@@ -120,7 +138,7 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	case cf != nil:
-		return cf
+		return withClass(cf, classCache)
 	case errors.Is(err, auth.ErrBadCredentials):
 		return mustAct("wrong Proton username or password", "check them, then run pcb login again (Proton allows one attempt per minute)")
 	case errors.Is(err, auth.ErrTOTPRejected):
@@ -152,7 +170,7 @@ func mapError(err error, keyFile string) error {
 	case errors.As(err, &ae):
 		return protonDown(ae)
 	case errors.As(err, &ne), errors.As(err, &ue):
-		return blocked("cannot reach Proton", "check the network connection, then retry")
+		return classed(classNetwork, "cannot reach Proton", "check the network connection, then retry")
 	}
 	return blocked("unexpected error", "run pcb doctor; if it persists, report it without any secret")
 }
@@ -166,12 +184,12 @@ func protonDown(e *api.Error) error {
 		if e.RetryAfter > 0 {
 			wait = e.RetryAfter.Round(time.Second).String()
 		}
-		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter},
+		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter, class: classRateLimited},
 			Hint: "retry in " + wait}
 	case e.Status >= 500:
-		return blocked("Proton is unavailable", "try again later")
+		return classed(classProtonUnavailable, "Proton is unavailable", "try again later")
 	}
-	return blocked(fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
+	return classed(classRefused, fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
 }
 
 // storeError maps a failure of the sealed store: a lost or foreign key names

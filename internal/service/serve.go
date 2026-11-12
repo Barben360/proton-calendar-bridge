@@ -21,8 +21,9 @@ import (
 // restart.
 const settingsRefresh = 10 * time.Minute
 
-// ServeOptions tune Serve: the interval between sync passes (0:
-// DefaultWatchInterval) and a callback after each pass, as WatchSync, with
+// ServeOptions tune Serve: the interval between sync passes while a client
+// is about (0: ActiveInterval; see IdleAfter for the slower idle cadence,
+// the longer of IdleInterval and Interval) and a callback after each pass, as WatchSync, with
 // the render counters (WatchPass.Render).
 // Ready, when set, is called once Serve holds the sync lock, a ready login
 // and its cache handle, before the first pass: pcb serve binds its listener
@@ -68,10 +69,20 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	v := newLive(l.o.Now(), interval)
+	l.hmu.Lock()
+	l.human = nil
+	l.hmu.Unlock()
 	l.smu.Lock()
 	l.served = &served{db: db, account: acc.ID, log: log}
 	l.smu.Unlock()
+	l.lmu.Lock()
+	l.live = v
+	l.lmu.Unlock()
 	defer func() {
+		l.lmu.Lock()
+		l.live = nil
+		l.lmu.Unlock()
 		l.smu.Lock()
 		l.served = nil
 		l.smu.Unlock()
@@ -80,14 +91,15 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	if o.Ready != nil {
 		o.Ready()
 	}
-	var onPass func(WatchPass)
-	if o.OnPass != nil {
-		onPass = func(p WatchPass) {
+	onPass := func(p WatchPass) {
+		v.notePass(l.o.Now(), p) // before the callback: Health reads it there
+		if o.OnPass != nil {
 			counts := l.RenderCounts()
 			p.Render = &counts
 			o.OnPass(p)
 		}
 	}
+	pace := watchPacing{next: func() time.Duration { return v.next(l.o.Now()) }, wake: v.wake}
 	return l.watch(ctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
@@ -100,7 +112,7 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 			}
 		}
 		return res, err
-	})
+	}, pace)
 }
 
 // refreshSettings reads again the bootstrap of every calendar whose keys

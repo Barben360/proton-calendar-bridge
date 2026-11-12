@@ -121,6 +121,7 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 		return false, 0
 	}
 	l.touch(c.ID)
+	l.noteActivity()
 	return true, 0
 }
 

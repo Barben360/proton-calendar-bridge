@@ -65,3 +65,18 @@ func (l *Local) SetPreSendBudget(d time.Duration) { l.preSend = d }
 // Proton answered as created, before the read-back) and "store" (the rows
 // read back); a nil return lets the step run. Set it before Serve.
 func (l *Local) SetWriteFault(fn func(stage string) error) { l.writeFault = fn }
+
+// ErrorClass exposes errorClass.
+func ErrorClass(err error) string { return errorClass(err) }
+
+// MapError exposes mapError with no key file named: the mapped error carries
+// its class, as a pass's failure does.
+func MapError(err error) error { return mapError(err, "") }
+
+// WakesSent counts the wakes Serve's loop was sent (a request that found it idle).
+func (l *Local) WakesSent() int64 {
+	if v := l.liveState(); v != nil {
+		return v.wakes.Load()
+	}
+	return 0
+}

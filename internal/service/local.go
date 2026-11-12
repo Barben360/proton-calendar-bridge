@@ -72,6 +72,12 @@ type Local struct {
 	smu    sync.RWMutex // guards served; held for reading while a read uses it
 	served *served      // Serve's cache handle, nil outside Serve
 
+	lmu  sync.Mutex // guards live
+	live *live      // Serve's live state, nil outside Serve (Health)
+
+	hmu   sync.Mutex           // guards human
+	human map[string]time.Time // unanswered human verifications by source, since when
+
 	cals calLocks // one per calendar: a write and the syncer's pass of it run one at a time
 
 	// Tests only: a write's pre-send budget when set (preSendBudget
