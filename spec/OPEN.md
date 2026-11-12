@@ -1,6 +1,6 @@
 # Open questions and pending items
 
-State at the close of M5 (2026-11-12), updated after the initial-version audit fixes (2026-11-12, `spec/audits/2026-11-12-initial-version.md`).
+State at the close of M6 (2026-11-12; M5 closed earlier the same day), updated after the initial-version audit fixes (`spec/audits/2026-11-12-initial-version.md`).
 
 ## Answered
 
@@ -14,6 +14,7 @@ State at the close of M5 (2026-11-12), updated after the initial-version audit f
 - Does decryption need a sealed decrypted cache (E09): no, offline 0.2 to 0.4 ms per event; the live cold-start figure is still pending.
 - Where pcb runs and how it is looked after: built in M5 (SPEC §13, §15): `pcb install`, `uninstall` and `service`, the control socket behind `pcb status` and `pcb doctor`, `pcb serve --wait-for-login`, the container image; smoke-tested in CI, the live run is `spec/HUMAN-CHECKS.md` step 7.
 - Can CalDAV credentials be looked up again: yes, decision 0013 (2026-11-12), `pcb client show`.
+- Several Proton accounts in one process: built in M6 (SPEC §4.1, §7.1, §9, §13; decision 0014), contract-tested against the fake Proton with two or more users; the live checks (the upgrade of the test account's M5 state, one account, Thunderbird on the per-account URL) are `spec/HUMAN-CHECKS.md` step 8.
 - How CalDAV writes reach Proton, and what is refused: built in M4 (SPEC §8.1, §8.4, §9; `spec/mapping.md`), contract-tested against the fake Proton; the live confirmations are listed below.
 
 ## Still open for the author
@@ -24,6 +25,8 @@ State at the close of M5 (2026-11-12), updated after the initial-version audit f
 4. Process incident during M4 (Task 4, third re-review): a reviewer agent fetched ProtonMail/WebClients `constants.ts` (GPL) to confirm the routing table. Nothing from it was copied into the repository (checked); the hard rule "never read or fetch WebClients" is now in the reviewer and re-reviewer instructions.
 5. The M4 live session needs one author sitting in Thunderbird and the web app (`spec/HUMAN-CHECKS.md` step 6.3), after the M1 and M2 live sessions.
 6. The M5 live session (`spec/HUMAN-CHECKS.md` step 7): a fresh Debian host or VM, the container, a revoked session, an idle Thunderbird, `uninstall --delete-data` (the author revokes and reads the web app's session list, and sits in Thunderbird for 7.4 and 7.7); and the GHCR package's visibility (7.8: done, the author confirmed Private on 2026-11-12; the unauthenticated and the logged-in `docker pull` are not recorded yet).
+
+7. The M6 live session (`spec/HUMAN-CHECKS.md` step 8): after step 7, one author sitting in Thunderbird (a new calendar on the per-account URL beside the old one, the saved-password and rotate observations of 8.3) and the web app's session list (8.4). Also: whether the author wants a second Proton test account later; without one, several accounts stay proven on the fake only.
 
 ## Still open, run by the agent (deferred live runs, `spec/HUMAN-CHECKS.md` steps 2 to 4)
 
@@ -37,6 +40,8 @@ State at the close of M5 (2026-11-12), updated after the initial-version audit f
 
 - The live Thunderbird and M4 session (`spec/HUMAN-CHECKS.md` step 6, test account only): E08 and E11 live confirmation, E09 live half, and the M4 checks: E10 (signatures, R17), E12 (recurrence forms, DTSTART as first occurrence, DAILY BYDAY, BYDAY=2TU), E13 (unknown properties), E14 (the Write bit is 8), research L.4 #1 to #12, the UID-escaping question, the ListByUID row equal to the feed row, `?UID=` matching exactly, X-PM-TOKEN and attendee statuses reused on a new exception row (Task 7a M6), whether Proton ever rewrites a row's key packets (R30, R35), whether it echoes part `Data` verbatim (R32), whether an unbumped text edit is dropped (R4), the personal part on update (L.4 #10), 429 behaviour if one is met.
 - TPM2 sealing is untested everywhere (morpheus lacks libtss2; installing was out of scope), as is system-scope `systemd-creds` on blackwater (sudo is interactive, ruling R18), and a sealed session inside a systemd service or a container (M5's smoke tests never log in; step 7; E15). Secret Service and `systemd-creds` sealing are not built: the key file is the only sealer.
+- Thunderbird's HTTP auth cache with two accounts on one host (M6, SPEC §9 `[assumed → step 8]`): per-account URLs carry the realm `pcb <local-id>` and a distinct path so Thunderbird should keep the two passwords apart; the live check is step 8.3.5 (one real account, a second Thunderbird calendar on the old URL and one on the new). A shared cache would mean one password prompt serving both realms; nothing breaks either way (a wrong password is a 401), so it only changes how the README describes the setup.
+- Several accounts are fake-only by the author's choice (2026-11-12: no second Proton test account): two users on `protontest` prove the routing, isolation, side-by-side serving and one account's CAPTCHA not stalling another; nothing live exercises two real sessions (Proton's per-session rate limits and the shared login guard under real latency are assumed).
 - M2 live session (E04, E05, E07): `pcb-lab probe feed` is built; the experiments are source-based until the run (`spec/HUMAN-CHECKS.md`, "M2 live session"). Markers on the feed, cursors, ETag stay `[assumed]` until then.
 - E06, E16 are not started (SPEC §17). E12 to E14 are written up, live pending (step 6).
 - Fresh session keys on every update (rulings M4-R17, M4-R19): once live check L.4 #3 (research L.4) shows Proton accepts new key packets on an update, mint new keys and send their packets on every update instead of reusing the row's. That removes the reuse and the residual risks 1 to 5 of SPEC §5.3; pinning (and residuals 6 to 8) can then go. Until then key-packet pinning is the primary defence and the signature proof (`ical.ProvesKey`) the secondary one. L.4 #3 is not reachable with M4's tools (pcb never sends a key packet on an update): it needs a `pcb-lab` probe that does, run on the test account only.
@@ -117,6 +122,15 @@ For the final audit (parked minors; the code is read-only until then):
 - `pcb doctor` could flag a generation mirror at its bound (rollback detection off for that install; Task 6).
 - `sunpath_other.go`'s comment names only macOS and the BSDs though it also covers Solaris, illumos and AIX, where 103 is cautious (Task 3 re-review).
 - The user scope does not restart on a rebuilt binary at the same path: `install` prints a restart hint instead (Task 7).
+
+## Parked by M6
+
+Minors deferred by the M6 reviews (the ledger `.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`; the final review triages them):
+- Store and Hub: `TestMigrateSyncsTheDirectories` does not assert that staging and root fsync happen before the rename; stale root `state.lock`/`secrets.lock`/`clients.lock` an old binary recreates are never cleaned (harmless, SPEC §7.1); an account with an unreadable `state.json` reads as address-less and could be adopted by an unrelated first login (addressless inspect); a 2FA add of an existing user is refused only after the code is given; a relogin rewrites the address casing; `Hub.Close` racing an add returns an error but keeps the directory; `Local.Logout` reads `state.json` outside `state.lock` before saving.
+- Serve: a Restart after the park is published triggers one extra change notification; the residual Restart window (R25) is accepted; `SetCalDAV` during a 2FA wait, `SubmitTOTP` with an empty code and `Remove` of a pending account are untested.
+- CalDAV: response timing reveals whether a local ID exists (an unknown ID skips the hashing); each compatibility request reads every account's `state.json`; the limiter's per-IP key is shared by all accounts (SPEC §9; see "Still open, later").
+- CLI and CTL: `serve --wait-for-login` prints no waiting line when only pending or CalDAV-off accounts exist; `account remove --help` does not mention `pcb logout --yes` for a store pcb cannot read; an account whose status fails derives alerts from an empty login (it may show `needs-login` beside `account-unreadable`).
+- Tests: the fake's per-user injection lacks tests for the user-then-"" fallback order and `FailNextFor` on a body user; `TestStallNextForHitsOnlyThatUser` has a 200 ms wall-clock bound that may flake under load; the multi-account daemon test's bogus-token check uses an unparsable token (use a well-formed foreign-epoch one) and does not check calendar isolation both ways.
 
 ## Parked by the initial-version audit (2026-11-12)
 
