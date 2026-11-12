@@ -48,7 +48,8 @@ func HoldsEncryptedOnly(text []byte) bool {
 // M4-R14, M4-R19). Only a shared or calendar encrypted part can prove: an
 // attendees part's plaintext (UID, DTSTAMP, ATTENDEE with tokens) is known to
 // the server. The text must be in Proton's fragment form (one VCALENDAR
-// holding exactly one VEVENT and nothing else, no property of its own), the
+// holding exactly one VEVENT, and no property of its own but VERSION, PRODID
+// or CALSCALE, which carbonate and caloxide write, M4-R20), the
 // VEVENT must have exactly one UID, equal to the row's uid byte for byte (so
 // a proof made for another event cannot serve), and hold an EncryptedOnly
 // property of its own that the routing table puts in k itself (so an
@@ -57,7 +58,7 @@ func HoldsEncryptedOnly(text []byte) bool {
 // It is a secondary defence: what it rules out is a text the server holds
 // with our signature and can replay under a key it chose, and the forms it
 // refuses (cleartext signed parts, which never hold such a property; an .ics
-// a mail client signed, with METHOD or VERSION; another UID's parts) are the
+// a mail client signed, which always carries METHOD; another UID's parts) are the
 // ones it knows. It cannot rule out a plaintext the server guesses or learnt
 // for the same UID; key-packet pinning is the primary defence (SPEC §5.3).
 func ProvesKey(text []byte, uid string, k PartKind) bool {

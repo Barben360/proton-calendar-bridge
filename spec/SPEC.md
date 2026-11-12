@@ -197,7 +197,7 @@ dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
 if Proton signs a part of ours with another key than its author address's,
 the event shows as unverified.
 
-Session-key reuse on write [call] (research G, rulings M4-R14 to M4-R19).
+Session-key reuse on write [call] (research G, rulings M4-R14 to M4-R20).
 An update reuses a row's session keys (Proton keeps a row's key packets on
 update, research B.5). The threat: the server substitutes a key packet, a
 key it chose wrapped to our calendar key, and reads our update. Two
@@ -210,7 +210,8 @@ defences:
   reused only when every part encrypted under it verifies as ours and one of
   its shared or calendar encrypted parts (never the attendees part) proves
   it (`ical.ProvesKey`): Proton's fragment form (one VCALENDAR holding one
-  VEVENT and nothing else), the row's UID, and an encrypted-only property
+  VEVENT, and no VCALENDAR-level property but VERSION, PRODID or CALSCALE,
+  M4-R20), the row's UID, and an encrypted-only property
   that the routing table puts in that very part. Otherwise
   `ErrUntrustedSessionKey`, and Task 7 refuses the write. The proof rules
   out the texts the server holds with our signature [verified:
@@ -226,7 +227,7 @@ defences:
   - attendees parts, whose plaintext (UID, DTSTAMP, ATTENDEE with tokens)
     the server knows, in their slot or replayed into another;
   - an `.ics` our address key signed outside the bridge (a Proton Mail
-    invitation or RSVP: METHOD, VERSION, PRODID at VCALENDAR level);
+    invitation or RSVP, which always carries METHOD at VCALENDAR level);
   - another event's parts (the UID must be the row's).
 - Task 7 also refuses a write to a group with any part of ours that is not
   `Verified`, unsigned parts of every kind included (M4-R18, M4-R19; not the
@@ -240,7 +241,16 @@ defences:
   our public key against the part's clear detached signature; and content
   the server learnt elsewhere for the same UID (an invitation sent to an
   external address in clear, signed by our address key) in the fragment
-  form. Proton's own clients reuse keys under the same trust model.
+  form; and another client of the same account that signs an encrypted-only
+  line in clear for that UID (a same-UID proof). Proton's own clients reuse
+  keys under the same trust model.
+- Rows an update refuses rather than risk a substituted key (fail closed,
+  403, M4-R19/R20): a shared encrypted part holding only UID and DTSTAMP
+  (an untitled event), a calendar encrypted part holding only lines routed
+  elsewhere, a fragment carrying a VCALENDAR-level line other than VERSION,
+  PRODID or CALSCALE, a misrouted line stored in a signed part, and (to be
+  confirmed live) a UID containing `,`, `;` or `\` if Proton's column holds
+  it unescaped.
 - The fix (`OPEN.md`): fresh session keys on every update, once live check
   L.4 #3 shows Proton accepts new key packets on update; that removes the
   reuse, and these residual risks with it.
