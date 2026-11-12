@@ -520,6 +520,20 @@ func TestAmbiguousFailureReadsBack(t *testing.T) {
 			t.Errorf("the cache changed:\n%s", got.Data)
 		}
 	})
+	t.Run("CreateNotAppliedIs503", func(t *testing.T) {
+		r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+			if r.isSync(req) {
+				return nil, errReset
+			}
+			return send()
+		})
+		defer r.tr.set(nil)
+		_, err := r.put(t, "c@x.ics", newEvent("c@x", "Lost"), service.Precondition{IfNoneMatchAny: true})
+		wantUnconfirmed(t, err)
+		if !r.object(t, "c@x").Missing || len(r.proton(t, "c@x")) != 0 {
+			t.Error("c@x exists")
+		}
+	})
 	t.Run("NoReadBackIs503", func(t *testing.T) {
 		obj := r.object(t, "a@x")
 		var sent sync.Once
@@ -712,6 +726,9 @@ func TestWritesSerialiseWithTheSyncer(t *testing.T) {
 		mu.Unlock()
 		return send()
 	})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)         // a failure below must not leave the pass held
 	r.s.resume <- struct{}{} // the second pass starts and is held in the calendar
 	<-inPass
 
@@ -731,7 +748,7 @@ func TestWritesSerialiseWithTheSyncer(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("the write ended (%v) while the pass held the calendar", err)
 	}
-	close(release)
+	letGo()
 	r.tr.set(nil)
 	select {
 	case p := <-r.s.passes:
@@ -753,23 +770,31 @@ func TestWritesSerialiseWithTheSyncer(t *testing.T) {
 // that bumps it is stored and confirmed.
 func TestDroppedEditIsNeverASuccess(t *testing.T) {
 	t.Parallel()
-	r := newRig(t, protontest.Options{Write: protontest.WriteOptions{DropUnbumpedSequence: true}}, func(f *protontest.Fake, cal string) {
-		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
-	}).start(t)
+	r := newRig(t, protontest.Options{Write: protontest.WriteOptions{DropUnbumpedSequence: true}}, nil).start(t)
+	// Written by pcb (a create is never dropped): a title edit then changes
+	// only the shared encrypted part, an alarm edit only Notifications.
+	alarmed := vcal([]string{"UID:a@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600), "SUMMARY:Lunch",
+		"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT1H", "DESCRIPTION:Reminder", "END:VALARM"})
+	if _, err := r.put(t, "a@x.ics", alarmed, service.Precondition{IfNoneMatchAny: true}); err != nil {
+		t.Fatal(err)
+	}
 	before := raws(r.proton(t, "a@x"))
 	obj := r.object(t, "a@x")
 	_, tok := r.listing(t, r.cal)
-	for name, body := range map[string][]byte{
-		"title": edit(t, obj.Data, "SUMMARY:Lunch", "SUMMARY:Dinner"),
-		"alarm": edit(t, obj.Data, "TRIGGER:-PT1H", "TRIGGER:-PT10M"),
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"title", edit(t, obj.Data, "SUMMARY:Lunch", "SUMMARY:Dinner")},
+		{"alarm", edit(t, obj.Data, "TRIGGER:-PT1H", "TRIGGER:-PT10M")},
 	} {
-		_, err := r.put(t, "a@x.ics", body, service.Precondition{IfMatch: obj.ETag})
+		_, err := r.put(t, "a@x.ics", c.body, service.Precondition{IfMatch: obj.ETag})
 		if !errors.Is(err, service.ErrWriteNotConfirmed) {
-			t.Errorf("%s edit dropped by Proton: %v, want ErrWriteNotConfirmed", name, err)
+			t.Errorf("%s edit dropped by Proton: %v, want ErrWriteNotConfirmed", c.name, err)
 		}
 	}
-	if n := len(r.f.SyncCalls()); n != 2 {
-		t.Fatalf("%d sync calls, want 2", n)
+	if n := len(r.f.SyncCalls()); n != 3 {
+		t.Fatalf("%d sync calls, want 3", n)
 	}
 	if after := raws(r.proton(t, "a@x")); !slices.Equal(after, before) {
 		t.Error("Proton's row changed: the switch did not drop the edits")
@@ -959,8 +984,16 @@ func TestAliasesAndNames(t *testing.T) {
 		// A UID that lives at its canonical name, sent to another name.
 		_, err = r.put(t, "elsewhere.ics", newEvent("a@x", "Moved"), service.Precondition{})
 		conflict(t, err, "a@x.ics")
+		// Both: the UID lives elsewhere and the name holds another UID; the
+		// answer names where the UID lives.
+		_, err = r.put(t, "1234-abcd.ics", newEvent("a@x", "Moved"), service.Precondition{})
+		conflict(t, err, "a@x.ics")
+		reads := r.f.Calls(http.MethodGet, "/calendar/v1/"+r.cal+"/events")
 		if err := r.svc.DeleteObject(t.Context(), r.cal, "u1@x.ics", service.Precondition{}); !errors.Is(err, service.ErrNoSuchObject) {
 			t.Errorf("DeleteObject at the aliased UID's canonical name = %v, want ErrNoSuchObject", err)
+		}
+		if n := r.f.Calls(http.MethodGet, "/calendar/v1/"+r.cal+"/events") - reads; n != 0 {
+			t.Errorf("a name serving nothing was looked up in Proton (%d requests)", n)
 		}
 		if n := len(r.f.SyncCalls()) - calls; n != 0 {
 			t.Errorf("%d sync calls", n)
