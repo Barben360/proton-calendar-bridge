@@ -27,40 +27,55 @@ const maxResponse = 16 << 20
 // Client talks to pcb serve over its control socket.
 type Client struct {
 	hc *http.Client
+
+	mu    sync.Mutex
+	first net.Conn // the connection Dial made, until a request or Close takes it
 }
 
 // Dial connects to the daemon at path: ErrNoDaemon when none answers there
-// (no socket, or a stale one), and always off Unix.
+// (no socket, or a stale one, or a path too long to bind), and always off
+// Unix. Before it dials, the path must be a socket owned by this process's
+// effective UID (ruling M5-R2): anything else is refused, blocked (20).
 func Dial(ctx context.Context, path string) (*Client, error) {
 	first, err := dialSocket(ctx, path)
 	if err != nil {
-		if errors.Is(err, ErrNoDaemon) {
+		var ee *exitcode.Error
+		if errors.Is(err, ErrNoDaemon) || errors.As(err, &ee) {
 			return nil, err
 		}
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot reach the pcb daemon on %s: %w", path, err),
 			Hint: "check that you run pcb as the user that runs pcb serve"}
 	}
-	var mu sync.Mutex
+	c := &Client{first: first}
 	tr := &http.Transport{
 		// The first request reuses the connection Dial made.
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			mu.Lock()
-			c := first
-			first = nil
-			mu.Unlock()
-			if c != nil {
-				return c, nil
+			if conn := c.takeFirst(); conn != nil {
+				return conn, nil
 			}
 			return dialSocket(ctx, path)
 		},
 		MaxIdleConns:       1,
 		DisableCompression: true,
 	}
-	return &Client{hc: &http.Client{Transport: tr}}, nil
+	c.hc = &http.Client{Transport: tr}
+	return c, nil
 }
 
-// Close releases the client's connections.
+func (c *Client) takeFirst() net.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn := c.first
+	c.first = nil
+	return conn
+}
+
+// Close releases the client's connections, the one Dial made included when
+// no request used it.
 func (c *Client) Close() error {
+	if conn := c.takeFirst(); conn != nil {
+		_ = conn.Close()
+	}
 	c.hc.CloseIdleConnections()
 	return nil
 }

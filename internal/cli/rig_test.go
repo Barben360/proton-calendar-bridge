@@ -13,6 +13,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -166,6 +167,8 @@ type rig struct {
 	term *fakeTerm
 	svc  service.API // injected service, or nil for the default one
 	mk   func() (service.API, error)
+	// dial, when set, replaces ctl.Dial (IO.DialDaemon).
+	dial func(ctx context.Context, path string) (*ctl.Client, error)
 	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
 	ctrlC bool
 	// cancelled is when ctrlC fired during the last run; zero if it did not.
@@ -247,6 +250,7 @@ func (r *rig) run(args ...string) exitcode.Code {
 	case r.mk != nil:
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
 	}
+	io.DialDaemon = r.dial
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()
 	if r.ctrlC {

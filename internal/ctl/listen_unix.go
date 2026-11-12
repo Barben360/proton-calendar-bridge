@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
 
 // Listen opens the control socket at path: refused when the path is too
@@ -55,10 +57,22 @@ func Listen(path string) (net.Listener, error) {
 }
 
 // dialSocket connects to the socket at path: ErrNoDaemon when nothing can
-// listen there (too long a path) or nothing does (missing, or refused).
+// listen there (too long a path) or nothing does (missing, or refused). A
+// path that is not a socket owned by this process's effective UID is
+// refused before any dial (ruling M5-R2).
 func dialSocket(ctx context.Context, path string) (net.Conn, error) {
 	if len(path) > maxPath {
 		return nil, ErrNoDaemon
+	}
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, ErrNoDaemon
+	case err != nil:
+		return nil, err
+	}
+	if err := checkSocket(path, fi, os.Geteuid()); err != nil {
+		return nil, err
 	}
 	d := net.Dialer{Timeout: dialTimeout}
 	c, err := d.DialContext(ctx, "unix", path)
@@ -69,4 +83,24 @@ func dialSocket(ctx context.Context, path string) (net.Conn, error) {
 		return nil, ErrNoDaemon
 	}
 	return nil, err
+}
+
+// checkSocket refuses a path (lstat'ed as fi) that is not a socket owned by
+// euid: a symlink, a file, or another user's socket is never dialled.
+func checkSocket(path string, fi fs.FileInfo, euid int) error {
+	if fi.Mode().Type() != fs.ModeSocket {
+		return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("%s is not a socket: pcb refuses to use it as the control socket", path),
+			Hint: "move " + path + " away: pcb serve keeps its control socket there"}
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != euid {
+		owner := -1
+		if ok {
+			owner = int(st.Uid)
+		}
+		return &exitcode.Error{Code: exitcode.Blocked,
+			Err:  fmt.Errorf("the control socket %s belongs to another user (uid %d): pcb refuses to use it", path, owner),
+			Hint: "run pcb as the user that runs pcb serve, or point PCB_STATE_DIR at your own state directory"}
+	}
+	return nil
 }

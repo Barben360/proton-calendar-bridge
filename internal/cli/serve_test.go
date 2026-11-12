@@ -911,3 +911,69 @@ func TestServeRefusesAnOpenStateDir(t *testing.T) {
 	}
 	s.neverListened()
 }
+
+// A state directory too long for a socket path: exit 20 with the
+// constraint's hint, before CalDAV binds.
+func TestServeRefusesATooLongSocketPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	base := filepath.Dir(r.dirs.State)
+	long := filepath.Join(base, strings.Repeat("s", 120-len(base)))
+	r.env["XDG_STATE_HOME"], r.dirs.State = long, filepath.Join(long, "pcb")
+	s := startServe(t, r, nil)
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if want := "Hint: set PCB_STATE_DIR to a shorter path"; !strings.Contains(s.errb.String(), want) {
+		t.Errorf("stderr = %q, want %q", s.errb.String(), want)
+	}
+	s.neverListened()
+}
+
+// The socket is removed on every exit after Ready, not only on a signal:
+// the sync loop stopping on an error, and the CalDAV listener failing.
+func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	t.Run("sync error", func(t *testing.T) {
+		t.Parallel()
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, nil)
+		s.listening()
+		if _, err := os.Lstat(r.dirs.Socket()); err != nil {
+			t.Fatalf("no socket while serving: %v", err)
+		}
+		stub.stopWith <- &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("Proton ended the session"), Hint: "run pcb login"}
+		if code := s.exit(); code != exitcode.MustAct {
+			t.Fatalf("exit %d, want 10\nstderr: %s", code, s.errb.String())
+		}
+		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the socket outlives a sync error: %v", err)
+		}
+	})
+	t.Run("listener failure", func(t *testing.T) {
+		t.Parallel()
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, func(ln net.Listener) net.Listener { return failingListener{ln} })
+		if code := s.exit(); code != exitcode.Blocked {
+			t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+		}
+		if !strings.Contains(s.errb.String(), "control socket started") {
+			t.Fatalf("the control socket never started:\n%s", s.errb.String())
+		}
+		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the socket outlives a listener failure: %v", err)
+		}
+	})
+}

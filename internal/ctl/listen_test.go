@@ -2,12 +2,17 @@ package ctl
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
 
 // sockDir is a private directory for a socket. Not t.TempDir: its path can
@@ -113,24 +118,104 @@ func TestNonSocketFileIsRefused(t *testing.T) {
 	}
 }
 
-// sun_path holds 108 bytes with its NUL: 107 is the longest path.
+// sun_path holds 108 bytes with its NUL on Linux (104 on macOS and the
+// BSDs): 107 is the longest path there. Listen and Dial share the limit.
 func TestLongSocketPathIsRefused(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "linux" && maxPath != 107 {
+		t.Fatalf("maxPath = %d on Linux, want 107", maxPath)
+	}
 	dir := sockDir(t)
 	pad := func(n int) string { // a path of n bytes in dir
 		name := strings.Repeat("s", n-len(dir)-1)
 		return filepath.Join(dir, name)
 	}
-	if p := pad(108); len(p) != 108 {
+	if p := pad(maxPath + 1); len(p) != maxPath+1 {
 		t.Fatalf("len = %d", len(p))
 	}
-	if _, err := Listen(pad(108)); !errors.Is(err, ErrPathTooLong) {
-		t.Errorf("Listen(108 bytes): %v, want ErrPathTooLong", err)
+	if _, err := Listen(pad(maxPath + 1)); !errors.Is(err, ErrPathTooLong) {
+		t.Errorf("Listen(%d bytes): %v, want ErrPathTooLong", maxPath+1, err)
 	}
-	if _, err := Dial(t.Context(), pad(108)); !errors.Is(err, ErrNoDaemon) {
-		t.Errorf("Dial(108 bytes): %v, want ErrNoDaemon", err)
+	if !strings.Contains(ErrPathTooLong.Error(), strconv.Itoa(maxPath)) {
+		t.Errorf("ErrPathTooLong = %q, want the limit %d", ErrPathTooLong, maxPath)
 	}
-	listen(t, pad(107))
+	if _, err := Dial(t.Context(), pad(maxPath+1)); !errors.Is(err, ErrNoDaemon) {
+		t.Errorf("Dial(%d bytes): %v, want ErrNoDaemon", maxPath+1, err)
+	}
+	listen(t, pad(maxPath))
+	c, err := Dial(t.Context(), pad(maxPath))
+	if err != nil {
+		t.Fatalf("Dial(%d bytes): %v", maxPath, err)
+	}
+	_ = c.Close()
+}
+
+// A symlink at the socket path is refused, never followed, even to a live
+// socket: by Listen (it stays) and by Dial (nothing is dialled).
+func TestSymlinkAtTheSocketPathIsRefused(t *testing.T) {
+	t.Parallel()
+	dir := sockDir(t)
+	target, path := filepath.Join(dir, "target.sock"), filepath.Join(dir, "pcb.sock")
+	listen(t, target)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := Listen(path)
+	if !errors.Is(err, ErrNotASocket) {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		t.Errorf("Listen over a symlink: %v, want ErrNotASocket", err)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode().Type() != os.ModeSymlink {
+		t.Errorf("the symlink was touched: %v, %v", fi, err)
+	}
+	if fi, err := os.Lstat(target); err != nil || fi.Mode().Type() != os.ModeSocket {
+		t.Errorf("the symlink's target was touched: %v, %v", fi, err)
+	}
+	c, err := Dial(t.Context(), path)
+	if err == nil {
+		_ = c.Close()
+	}
+	if errors.Is(err, ErrNoDaemon) || exitcode.From(err) != exitcode.Blocked || !strings.Contains(err.Error(), "is not a socket") {
+		t.Errorf("Dial through a symlink: %v (exit %d), want a blocked refusal", err, exitcode.From(err))
+	}
+}
+
+// The connection Dial makes in advance is closed by Close when no request
+// used it.
+func TestCloseReleasesTheUnusedConnection(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(sockDir(t), "pcb.sock")
+	ln := listen(t, path)
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- c
+	}()
+	c, err := Dial(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, ok := <-accepted
+	if !ok {
+		t.Fatal("accept failed")
+	}
+	defer func() { _ = server.Close() }()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A bound on a broken Close, not a synchronisation: EOF comes at once.
+	if err := server.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := server.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("Read on the server side after Close = %d, %v; want EOF (the connection leaked)", n, err)
+	}
 }
 
 func TestDialWithoutADaemon(t *testing.T) {
@@ -172,8 +257,8 @@ func TestDefaultPeerUID(t *testing.T) {
 		}
 		return
 	}
-	if !checked || uid != os.Getuid() {
-		t.Errorf("defaultPeerUID = %d, %v; want %d, true", uid, checked, os.Getuid())
+	if !checked || uid != os.Geteuid() {
+		t.Errorf("defaultPeerUID = %d, %v; want %d, true", uid, checked, os.Geteuid())
 	}
 	// A connection that is not a socket is checked and refused (-1), never
 	// let through unchecked.

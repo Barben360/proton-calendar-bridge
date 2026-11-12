@@ -229,3 +229,49 @@ func TestStatusDaemonFlagNeedsADaemon(t *testing.T) {
 		t.Errorf("stderr = %q", r.errb.String())
 	}
 }
+
+// Only "no daemon" falls back offline: any other dial failure exits 20,
+// in status and in doctor (a daemon ✗).
+func TestOnlyNoDaemonFallsBackOffline(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{statusPhase: "ready"})
+	r.dial = func(context.Context, string) (*ctl.Client, error) {
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the control socket answers garbage"), Hint: "restart pcb serve"}
+	}
+	r.want(exitcode.Blocked, "status")
+	if strings.Contains(r.out.String(), "offline") || !strings.Contains(r.errb.String(), "the control socket answers garbage") ||
+		!strings.Contains(r.errb.String(), "Hint: restart pcb serve") {
+		t.Errorf("stdout %q, stderr %q; want the dial error, not the offline view", r.out.String(), r.errb.String())
+	}
+	r.want(exitcode.Blocked, "doctor")
+	if want := "✗  daemon: the control socket answers garbage\n   fix: restart pcb serve\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+
+	// The same rig with no daemon at all: offline, exit 0.
+	r.dial = func(context.Context, string) (*ctl.Client, error) { return nil, ctl.ErrNoDaemon }
+	r.want(exitcode.OK, "status")
+	if !strings.Contains(r.out.String(), "daemon: not running (offline view)") {
+		t.Errorf("status = %q, want the offline view", r.out.String())
+	}
+}
+
+// Ruling M5-R2: a file that is not our socket at the socket path is
+// refused (exit 20), never taken for "no daemon".
+func TestStatusRefusesAForeignSocketPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := stubRig(t, &stubAPI{statusPhase: "ready"})
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.dirs.Socket(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.want(exitcode.Blocked, "status", "--json")
+	if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, "is not a socket") || e.Hint == "" {
+		t.Errorf("error = %+v", e)
+	}
+}

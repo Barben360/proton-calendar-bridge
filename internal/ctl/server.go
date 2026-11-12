@@ -146,7 +146,8 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request, rt route, known 
 }
 
 // refusedPeer reports whether r's peer is of another UID than this
-// process; a request whose connection is unknown is refused.
+// process's effective one (SO_PEERCRED reports the peer's effective UID);
+// a request whose connection is unknown is refused.
 func (s *Server) refusedPeer(r *http.Request) (int, bool) {
 	c, ok := r.Context().Value(connKey{}).(net.Conn)
 	if !ok {
@@ -157,7 +158,7 @@ func (s *Server) refusedPeer(r *http.Request) (int, bool) {
 		peer = defaultPeerUID
 	}
 	uid, checked := peer(c)
-	return uid, checked && uid != os.Getuid()
+	return uid, checked && uid != os.Geteuid()
 }
 
 // transport answers a transport error: blocked (20), with a hint.

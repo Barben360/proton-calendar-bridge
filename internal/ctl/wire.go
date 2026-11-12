@@ -8,6 +8,7 @@ package ctl
 import (
 	"errors"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
@@ -61,8 +62,9 @@ type Alert struct {
 
 // The socket's errors.
 var (
-	// ErrPathTooLong: the path does not fit sun_path (107 bytes and a NUL).
-	ErrPathTooLong = errors.New("the control socket path is longer than 107 bytes")
+	// ErrPathTooLong: the path does not fit sun_path with its NUL (107
+	// bytes on Linux, 103 on macOS and the BSDs).
+	ErrPathTooLong = errors.New("the control socket path is longer than " + strconv.Itoa(maxPath) + " bytes")
 	// ErrUnsafeDir: the socket's directory grants its group or others access.
 	ErrUnsafeDir = errors.New("the control socket's directory is open to other users")
 	// ErrNotASocket: a file that is not a socket holds the path.
@@ -73,8 +75,9 @@ var (
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 )
 
-// maxPath is the longest socket path: sun_path holds 108 bytes with its NUL.
-const maxPath = 107
+// maxPath is the longest socket path: sun_path with its NUL. Listen and
+// Dial share it, so pcb serve's hint and pcb status's offline fallback agree.
+const maxPath = sunPathLen - 1
 
 // maxBody is the largest request body.
 const maxBody = 64 << 10

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -196,17 +197,34 @@ func TestStatusBeforeTheListener(t *testing.T) {
 func TestOtherUIDIsRefused(t *testing.T) {
 	t.Parallel()
 	api := &fakeAPI{status: service.Status{Phase: "ready", Username: "alice"}}
-	uid := os.Getuid()
-	s := serve(t, &ctl.Server{API: api, Daemon: daemon(), PeerUID: func(net.Conn) (int, bool) { return uid + 1, true }})
-	resp, env := raw(t, s.path, http.MethodGet, "/v1/status", nil)
-	if resp.StatusCode != http.StatusForbidden || env["ok"] != false {
-		t.Fatalf("HTTP %d, envelope %v; want 403", resp.StatusCode, env)
+	uid := os.Geteuid()
+	refused := []int{uid + 1}
+	if uid != 0 {
+		refused = append(refused, 0) // root too (M5-P3)
 	}
-	if _, has := env["data"]; has {
-		t.Errorf("a refused peer got data: %v", env)
+	for _, peer := range refused {
+		s := serve(t, &ctl.Server{API: api, Daemon: daemon(), PeerUID: func(net.Conn) (int, bool) { return peer, true }})
+		resp, env := raw(t, s.path, http.MethodGet, "/v1/status", nil)
+		if resp.StatusCode != http.StatusForbidden || env["ok"] != false {
+			t.Fatalf("peer %d: HTTP %d, envelope %v; want 403", peer, resp.StatusCode, env)
+		}
+		if _, has := env["data"]; has {
+			t.Errorf("peer %d got data: %v", peer, env)
+		}
+		if logs := s.logs.String(); !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "peer_uid="+strconv.Itoa(peer)) {
+			t.Errorf("logs lack the warning naming the peer UID %d:\n%s", peer, logs)
+		}
 	}
-	if logs := s.logs.String(); !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "peer_uid="+strconv.Itoa(uid+1)) {
-		t.Errorf("logs lack the warning naming the peer UID:\n%s", logs)
+
+	// Handler mounted without ConnContext: no connection to check, refused.
+	rec := httptest.NewRecorder()
+	(&ctl.Server{API: api, Daemon: daemon()}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
+	var env map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || rec.Code != http.StatusForbidden || env["ok"] != false {
+		t.Errorf("no recorded connection: HTTP %d, %s (%v); want 403", rec.Code, rec.Body.Bytes(), err)
+	}
+	if _, has := env["data"]; has || strings.Contains(rec.Body.String(), "alice") {
+		t.Errorf("no recorded connection got data: %s", rec.Body.Bytes())
 	}
 
 	// The same UID, or an unchecked peer, is served.
@@ -284,7 +302,7 @@ func TestErrorsCrossTheSocket(t *testing.T) {
 	}
 
 	// A transport error is blocked (20), never mistaken for the command's.
-	s = serve(t, &ctl.Server{API: api, Daemon: daemon(), PeerUID: func(net.Conn) (int, bool) { return os.Getuid() + 1, true }})
+	s = serve(t, &ctl.Server{API: api, Daemon: daemon(), PeerUID: func(net.Conn) (int, bool) { return os.Geteuid() + 1, true }})
 	c, err = ctl.Dial(t.Context(), s.path)
 	if err != nil {
 		t.Fatal(err)
