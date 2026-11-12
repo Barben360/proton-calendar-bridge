@@ -324,7 +324,7 @@ func ParseRetryAfter(h http.Header, now time.Time) time.Duration {
 	secs, err := strconv.ParseInt(v, 10, 64)
 	var ne *strconv.NumError
 	switch {
-	case errors.As(err, &ne) && errors.Is(ne.Err, strconv.ErrRange):
+	case errors.As(err, &ne) && errors.Is(ne.Err, strconv.ErrRange) && !strings.HasPrefix(v, "-"):
 		return maxRetryAfterHeader
 	case err == nil && secs > 0:
 		return min(time.Duration(min(secs, 3600))*time.Second, maxRetryAfterHeader)

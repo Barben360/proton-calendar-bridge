@@ -8,6 +8,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -91,5 +92,25 @@ func TestReadHumanVerificationIsTyped(t *testing.T) {
 	if ee.Err.Error() != "Proton asks for a human verification (code 9001)" ||
 		ee.Hint != "open the Proton web app from this machine's network and complete the verification" {
 		t.Fatalf("message %q, hint %q", ee.Err, ee.Hint)
+	}
+}
+
+// A login whose call hits its deadline (Proton accepts the connection and
+// never answers) is Blocked, exit 20: never a wrong password (proton-I1).
+// Not parallel: it shortens auth.CallTimeout.
+func TestLoginDeadlineIsBlocked(t *testing.T) {
+	old := auth.CallTimeout
+	auth.CallTimeout = time.Second
+	t.Cleanup(func() { auth.CallTimeout = old })
+	e := newEnv(t, protontest.Options{})
+	// Answered after 3 s: without the deadline the login succeeds.
+	e.f.StallNext(http.MethodPost, "/auth/v4/info", 3*time.Second)
+	_, err := e.svc.Login(t.Context(), e.req())
+	if err == nil {
+		t.Fatal("a stalled login succeeded: no deadline")
+	}
+	ee := wantExit(t, err, exitcode.Blocked)
+	if ee.Err.Error() != "the operation was cancelled or timed out" || ee.Hint != "run the command again" {
+		t.Fatalf("message %q, hint %q; want the timeout", ee.Err, ee.Hint)
 	}
 }

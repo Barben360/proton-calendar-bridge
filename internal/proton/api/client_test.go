@@ -759,6 +759,7 @@ func TestParseRetryAfter(t *testing.T) {
 		{date(90 * time.Second), 90 * time.Second},
 		{date(48 * time.Hour), time.Hour},
 		{"99999999999999999999999", time.Hour},
+		{"-99999999999999999999999", 0},
 		{date(-time.Minute), 0},
 		{"-5", 0},
 		{"soon", 0},

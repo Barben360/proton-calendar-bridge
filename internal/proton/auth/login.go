@@ -31,21 +31,22 @@ const (
 	cleanupTimeout = 10 * time.Second
 )
 
-// callTimeout bounds each login call: Begin, SubmitTOTP and Scope.Unlock's
+// CallTimeout bounds each login call: Begin, SubmitTOTP and Scope.Unlock's
 // two calls (ruling A1). A Proton that accepts the connection and never
 // answers must not hold the login lock; go-proton-api's client has no
-// timeout of its own. A variable for the tests.
-var callTimeout = 30 * time.Second
+// timeout of its own. Tests shorten it; it must not change while a call
+// runs.
+var CallTimeout = 30 * time.Second
 
 // retryKey keys the Retry-After a login call's answers carried: the
 // transport records it (go-proton-api's errors drop the headers) and
 // protonError puts it in the *api.Error.
 type retryKey struct{}
 
-// callContext bounds one login call by callTimeout and records the
+// callContext bounds one login call by CallTimeout and records the
 // Retry-After of its answers.
 func callContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	ctx, cancel := context.WithTimeout(ctx, CallTimeout)
 	return context.WithValue(ctx, retryKey{}, new(atomic.Int64)), cancel
 }
 
@@ -178,7 +179,7 @@ func (Pending) LogValue() slog.Value { return slog.StringValue(redacted) }
 // challenge. Errors: *CaptchaError, *UnsupportedVerificationError,
 // ErrCaptchaRejected, ErrBadCredentials, ErrServerProof, and ErrTwoPassword or
 // ErrFIDO2 once the session they opened is revoked. Begin sends one
-// POST /auth/v4, within callTimeout.
+// POST /auth/v4, within CallTimeout.
 func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte, captchaToken string) (*Pending, error) {
 	var hv *gpa.APIHVDetails
 	if captchaToken != "" {
@@ -260,7 +261,7 @@ func loginError(ctx context.Context, err error) error {
 	return fmt.Errorf("proton login: %w", perr)
 }
 
-// SubmitTOTP sends the 2FA code, within callTimeout. A refused code (HTTP
+// SubmitTOTP sends the 2FA code, within CallTimeout. A refused code (HTTP
 // 422) is ErrTOTPRejected; a session that ended meanwhile (401, or a refused
 // refresh) wraps api.ErrSessionEnded; anything else is a plain error.
 func (p *Pending) SubmitTOTP(ctx context.Context, code string) error {

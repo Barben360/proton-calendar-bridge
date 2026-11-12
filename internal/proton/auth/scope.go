@@ -36,7 +36,7 @@ func (Scope) GoString() string { return redactedScope }
 func (Scope) LogValue() slog.Value { return slog.StringValue(redactedScope) }
 
 // Unlock sends an SRP proof to PUT /core/v4/users/unlock and checks the
-// server's proof; each of its two calls has callTimeout. A wrong password
+// server's proof; each of its two calls has CallTimeout. A wrong password
 // (422, code 8002) is ErrBadCredentials; a mismatching, empty or absent proof
 // is ErrServerProof, after a Lock whose failure is joined to it.
 func (s Scope) Unlock(ctx context.Context) error {

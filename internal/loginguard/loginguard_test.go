@@ -192,14 +192,35 @@ func TestFutureStampIsStale(t *testing.T) {
 	}
 }
 
-// Within the skew, a stamp just ahead still counts as a recent attempt.
-func TestStampWithinSkewStillCounts(t *testing.T) {
-	dir, stamp := setup(t, 0)
-	if err := os.WriteFile(stamp, []byte(t0.Add(4*time.Minute).Format(time.RFC3339Nano)), 0o600); err != nil {
-		t.Fatal(err)
+// The skew boundary: a stamp up to 5 min ahead (included) still counts as
+// a recent attempt, waited out in full; just past it, the stamp is stale.
+func TestStampSkewBoundary(t *testing.T) {
+	cases := []struct {
+		ahead time.Duration
+		wait  time.Duration // 0: the login goes ahead
+	}{
+		{4 * time.Minute, 5 * time.Minute},
+		{5 * time.Minute, 6 * time.Minute},
+		{5*time.Minute + time.Second, 0},
+		{6 * time.Minute, 0},
 	}
-	_, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
-	if wait, ok := loginguard.WaitFor(err); !ok || wait != 5*time.Minute {
-		t.Fatalf("WaitFor = %v, %v; want 5m0s, true", wait, ok)
+	for _, c := range cases {
+		t.Run(c.ahead.String(), func(t *testing.T) {
+			dir, stamp := setup(t, 0)
+			if err := os.WriteFile(stamp, []byte(t0.Add(c.ahead).Format(time.RFC3339Nano)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+			if c.wait == 0 {
+				if err != nil {
+					t.Fatalf("a stamp %v ahead blocked the login: %v", c.ahead, err)
+				}
+				release()
+				return
+			}
+			if wait, ok := loginguard.WaitFor(err); !ok || wait != c.wait {
+				t.Fatalf("a stamp %v ahead: WaitFor = %v, %v; want %v, true", c.ahead, wait, ok, c.wait)
+			}
+		})
 	}
 }

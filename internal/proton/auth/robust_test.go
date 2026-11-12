@@ -65,7 +65,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			run := tc.call(t) // the setup logs in with the normal deadline
-			auth.SetCallTimeout(t, time.Second)
+			setCallTimeout(t, time.Second)
 			err := run()
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("%s %s stalled: error = %v, want the call's deadline exceeded", tc.method, tc.path, err)
@@ -109,4 +109,13 @@ func TestBeginKeepsRetryAfter(t *testing.T) {
 	if got := retryAfter(); got < 290*time.Second || got > 300*time.Second {
 		t.Errorf("Retry-After as a date 300 s ahead gave %v", got)
 	}
+}
+
+// setCallTimeout shortens auth.CallTimeout for t. t must not run in
+// parallel.
+func setCallTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := auth.CallTimeout
+	auth.CallTimeout = d
+	t.Cleanup(func() { auth.CallTimeout = old })
 }
