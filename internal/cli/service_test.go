@@ -42,23 +42,60 @@ func TestServiceDetectsTheScope(t *testing.T) {
 	}
 }
 
-// M5-R7: the system service as non-root is refused before anything runs.
+// M5-R7: changing the system service as non-root is refused before
+// anything runs; reading it (status, logs) is not.
 func TestServiceSystemNeedsRoot(t *testing.T) {
 	t.Parallel()
 	s := newSysRig(t)
 	s.write(install.SystemUnitPath, "[Unit]\n", 0o644)
-	for _, verb := range []string{"start", "stop", "restart", "status"} {
+	for _, verb := range []string{"start", "stop", "restart"} {
 		s.want(exitcode.MustAct, "service", verb, "--json")
 		if _, msg, hint := s.failure(); msg != "needs root: sudo pcb service "+verb || hint != "sudo pcb service "+verb {
 			t.Errorf("%s: %q, hint %q", verb, msg, hint)
 		}
 	}
-	s.want(exitcode.MustAct, "service", "logs")
-	if want := "Error: needs root: sudo pcb service logs\n"; !strings.HasPrefix(s.errb.String(), want) {
-		t.Errorf("logs stderr = %q, want %q", s.errb.String(), want)
-	}
 	if e := s.takeEvents(); len(e) != 0 {
 		t.Errorf("ran %q as non-root on the system scope", e)
+	}
+	const show = "systemctl show pcb.service --property=ActiveState,SubState,UnitFileState,MainPID"
+	s.out[show] = "ActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=7\n"
+	s.want(exitcode.OK, "service", "status")
+	if want := "pcb.service (system): active (running), enabled, PID 7\n"; s.stdout.String() != want {
+		t.Errorf("status = %q, want %q", s.stdout.String(), want)
+	}
+	if got := s.takeEvents(); !slices.Equal(got, []string{show}) {
+		t.Errorf("status ran %q", got)
+	}
+}
+
+// Non-root system logs: the journal may show nothing without the
+// systemd-journal group, and pcb then says so; with entries it does not.
+func TestServiceSystemLogsWithoutRoot(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.write(install.SystemUnitPath, "[Unit]\n", 0o644)
+	const logs = "journalctl -u pcb.service --no-pager -n 200"
+	const hint = "Hint: system logs need root or the systemd-journal group: sudo pcb service logs\n"
+	for _, out := range []string{"", "-- No entries --\n"} {
+		s.out[logs] = out
+		s.want(exitcode.OK, "service", "logs")
+		if s.errb.String() != hint {
+			t.Errorf("journal %q: stderr = %q, want %q", out, s.errb.String(), hint)
+		}
+	}
+	s.out[logs] = "nov. 12 pcb[7]: serving\n"
+	s.want(exitcode.OK, "service", "logs")
+	if s.errb.Len() != 0 || s.stdout.String() != "nov. 12 pcb[7]: serving\n" {
+		t.Errorf("with entries: stdout %q, stderr %q", s.stdout.String(), s.errb.String())
+	}
+	s.euid = 0
+	s.out[logs] = ""
+	s.want(exitcode.OK, "service", "logs")
+	if s.errb.Len() != 0 {
+		t.Errorf("root got the hint: %q", s.errb.String())
+	}
+	if got := s.takeEvents(); len(got) != 4 || got[0] != logs {
+		t.Errorf("ran %q", got)
 	}
 }
 

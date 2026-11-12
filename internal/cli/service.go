@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -51,15 +52,16 @@ func (a *app) newService() *cobra.Command {
 
 const notInstalledHint = "pcb install"
 
-// serviceScope is the scope a pcb service command acts on. The system one
-// needs root (M5-R7): refused before anything runs, as systemctl run
-// without a terminal cannot ask for a password.
-func (a *app) serviceScope(scope scopeFlags, verb string) (install.Scope, error) {
+// serviceScope is the scope a pcb service command acts on. Changing the
+// system service (start, stop, restart: changes) needs root (M5-R7):
+// refused before anything runs, as systemctl run without a terminal cannot
+// ask for a password. Reading it (status, logs) does not.
+func (a *app) serviceScope(scope scopeFlags, verb string, changes bool) (install.Scope, error) {
 	s, err := scope.detectScope(a.Host, notInstalledHint)
 	if err != nil {
 		return "", err
 	}
-	if s == install.ScopeSystem && a.Host.Euid() != 0 {
+	if changes && s == install.ScopeSystem && a.Host.Euid() != 0 {
 		return "", &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("needs root: sudo pcb service " + verb),
 			Hint: "sudo pcb service " + verb}
 	}
@@ -68,7 +70,7 @@ func (a *app) serviceScope(scope scopeFlags, verb string) (install.Scope, error)
 
 func (a *app) serviceVerb(cmd *cobra.Command, scope scopeFlags, verb, done string) error {
 	h := a.Host
-	s, err := a.serviceScope(scope, verb)
+	s, err := a.serviceScope(scope, verb, true)
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
@@ -91,7 +93,7 @@ func (a *app) serviceVerb(cmd *cobra.Command, scope scopeFlags, verb, done strin
 
 func (a *app) serviceStatus(cmd *cobra.Command, scope scopeFlags) error {
 	h := a.Host
-	s, err := a.serviceScope(scope, "status")
+	s, err := a.serviceScope(scope, "status", false)
 	if err != nil {
 		return Finish(cmd, nil, "", err)
 	}
@@ -111,22 +113,50 @@ func (a *app) serviceLogs(cmd *cobra.Command, scope scopeFlags, follow bool) err
 		return UsageError(errors.New("pcb service logs streams the journal: --json is not supported"))
 	}
 	h := a.Host
-	s, err := a.serviceScope(scope, "logs")
+	s, err := a.serviceScope(scope, "logs", false)
 	if err != nil {
 		return err
 	}
+	// Without root or the systemd-journal (or adm) group, journalctl shows
+	// a system unit's lines as nothing: say why.
+	hint := ""
+	if s == install.ScopeSystem && h.Euid() != 0 {
+		hint = journalHint
+	}
 	ctx := cmd.Context()
 	argv := install.Journalctl(s, follow)
-	code, err := h.Run.Stream(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), argv[0], argv[1:]...)
+	out := &journalWriter{w: cmd.OutOrStdout()}
+	code, err := h.Run.Stream(ctx, out, cmd.ErrOrStderr(), argv[0], argv[1:]...)
 	switch {
 	case ctx.Err() != nil: // Ctrl-C ends a follow
 		return nil
 	case err != nil:
-		return &exitcode.Error{Code: exitcode.Blocked, Err: err}
+		return &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: hint}
 	case code != 0:
-		return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("journalctl exited with %d", code)}
+		return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("journalctl exited with %d", code), Hint: hint}
+	}
+	if hint != "" && !out.entries {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Hint: %s\n", hint)
 	}
 	return nil
+}
+
+const journalHint = "system logs need root or the systemd-journal group: sudo pcb service logs"
+
+// journalWriter passes journalctl's output on and notes whether it held
+// any entry (anything but "-- No entries --").
+type journalWriter struct {
+	w       io.Writer
+	entries bool
+}
+
+func (j *journalWriter) Write(p []byte) (int, error) {
+	for _, l := range strings.Split(string(p), "\n") {
+		if l = strings.TrimSpace(l); l != "" && l != "-- No entries --" {
+			j.entries = true
+		}
+	}
+	return j.w.Write(p)
 }
 
 // serviceResult is doctor's "service" result: the scope and ActiveState,
