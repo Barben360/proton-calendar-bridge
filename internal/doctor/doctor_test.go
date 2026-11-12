@@ -412,3 +412,39 @@ func TestSecretsCheckSaysUpgradeForANewerState(t *testing.T) {
 		t.Errorf("newer secrets.sealed: got %+v", got)
 	}
 }
+
+// A state.json this user cannot read gets the permission text; malformed JSON
+// keeps the reset hint; a newer file keeps "upgrade pcb" (A12 I1).
+func TestSecretsCheckSplitsUnreadableMalformedAndNewerState(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs chmod 000 to be enforced")
+	}
+	state := t.TempDir()
+	path := filepath.Join(state, "state.json")
+	run := func(body string, mode os.FileMode) doctor.Result {
+		t.Helper()
+		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(state, "k")}.Run(context.Background())
+	}
+	got := run(`{"phase":"ready"}`, 0o000)
+	if got.Status != doctor.StatusError || !strings.HasPrefix(got.Message, "the login state file "+path+" cannot be read by this user (owner ") ||
+		got.Fix != "make it readable by "+store.CurrentUser()+" (or run pcb as its owner)" {
+		t.Errorf("unreadable: %+v", got)
+	}
+	got = run(`{not json`, 0o600)
+	if got.Status != doctor.StatusError || got.Fix != "remove the damaged state.json, then log in again" {
+		t.Errorf("malformed: %+v", got)
+	}
+	got = run(`{"phase":"ready","field_from_the_future":1}`, 0o600)
+	if got.Status != doctor.StatusError || got.Fix != "upgrade pcb" {
+		t.Errorf("newer: %+v", got)
+	}
+}

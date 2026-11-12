@@ -371,6 +371,9 @@ func stateError(err error) error {
 	case errors.Is(err, store.ErrGenerationOutOfRange):
 		return mustAct("the login state file holds a secrets generation out of range: it was edited or damaged", "run pcb logout, then pcb login")
 	}
+	if path, ok := store.StateUnreadable(err); ok {
+		return mustAct(store.UnreadableStateMessage(path), store.UnreadableStateFix())
+	}
 	return mustAct("the login state file cannot be read", "run pcb logout to reset it")
 }
 

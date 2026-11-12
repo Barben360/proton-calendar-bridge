@@ -40,6 +40,11 @@ func (c SecretsCheck) Run(context.Context) Result {
 		r.Status, r.Message, r.Fix = StatusError, store.ErrNewerState.Error(), "upgrade pcb"
 		return r
 	case err != nil:
+		if path, ok := store.StateUnreadable(err); ok {
+			r.Status, r.Message = StatusError, store.UnreadableStateMessage(path)
+			r.Fix = store.UnreadableStateFix()
+			return r
+		}
 		r.Status, r.Message = StatusError, err.Error()
 		r.Fix = "remove the damaged state.json, then log in again"
 		return r

@@ -20,3 +20,6 @@ func DirOwner(dir string) (uid int, ok bool) {
 	}
 	return int(st.Uid), true
 }
+
+// fileOwner is the UID owning path.
+func fileOwner(path string) (uid int, ok bool) { return DirOwner(path) }
