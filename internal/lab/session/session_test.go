@@ -196,8 +196,12 @@ func TestLoginMissingCredsIsUsageAndKeepsGuardFree(t *testing.T) {
 	o := opts(t, f)
 	o.Creds.Password = ""
 	_, err := session.Login(t.Context(), o)
-	if e := exitErr(t, err); e.Code != exitcode.Usage {
+	e := exitErr(t, err)
+	if e.Code != exitcode.Usage {
 		t.Fatalf("code = %d, want %d", e.Code, exitcode.Usage)
+	}
+	if !strings.Contains(e.Hint, "--env-file ~/.config/pcb-live/lab.env ") {
+		t.Errorf("hint %q: want the filled local copy ~/.config/pcb-live/lab.env, not the placeholder example", e.Hint)
 	}
 	if _, err := os.Stat(filepath.Join(o.StateDir, "last-login")); err == nil {
 		t.Error("a usage error consumed the login window")
@@ -607,4 +611,49 @@ func TestSuccessfulLoginLeavesTheHVLog(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(o.StateDir, "hv-log.jsonl")); err != nil || strings.Count(string(b), "\n") != 1 {
 		t.Fatalf("hv-log.jsonl = %q, %v; the event history must survive a solved challenge", b, err)
 	}
+}
+
+// API is pcb's transport on the saved session: it identifies as pcb-lab, and
+// a rejected access token is refreshed once and the rotated pair saved, so a
+// later Resume still works.
+func TestAPIRefreshesAndSavesTheRotation(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{})
+	o := opts(t, f)
+	s, err := session.Login(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = session.Resume(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c, err := s.API(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+	f.Backend.ExpireAccessTokens()
+	var u struct{ User struct{ Name string } }
+	if err := c.Get(t.Context(), "/core/v4/users", nil, &u); err != nil || u.User.Name != labtest.User {
+		t.Fatalf("GET after expiry: %v, user %q", err, u.User.Name)
+	}
+	after, _ := os.ReadFile(filepath.Join(o.StateDir, "session.json"))
+	if bytes.Equal(before, after) {
+		t.Error("the refresh's rotated tokens were not saved")
+	}
+	f.Mu.Lock()
+	for _, seen := range f.Log {
+		if seen.Path == "/core/v4/users" && !strings.HasPrefix(seen.UserAgent, "pcb-lab/") {
+			t.Errorf("API sent User-Agent %q, want pcb-lab/<version>", seen.UserAgent)
+		}
+	}
+	f.Mu.Unlock()
+	again, err := session.Resume(t.Context(), o)
+	if err != nil {
+		t.Fatalf("Resume after the API's refresh: %v", err)
+	}
+	again.Close()
 }

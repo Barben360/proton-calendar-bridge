@@ -140,7 +140,7 @@ func TestSeedCommandsCarryNoSecrets(t *testing.T) {
 }
 
 func TestLoadRefusesSecretLookingValues(t *testing.T) {
-	for _, bad := range []string{"pass://pcb-dev/x/password", "PCB_LAB_PASSWORD=abc"} {
+	for _, bad := range []string{"pass://vault/item/password", "PCB_LAB_PASSWORD=abc"} {
 		_, err := loadInline(t, `
 seed: 1
 range: {from: "2021-01-01", to: "2021-12-31"}

@@ -2,7 +2,8 @@
 // httptest front over go-proton-api's in-memory server that adds what the
 // server lacks (Proton's envelope and error codes, CAPTCHA, TOTP, two-password
 // and FIDO2 accounts, the locked scope, token expiry, revocation and injected
-// failures). It never contacts Proton. Test use only.
+// failures). It never contacts Proton. Test use only, and the developer-only
+// rehearsal fake cmd/pcb-fake (through Process); pcb itself never links it.
 //
 // Backends and their accounts are pooled per test binary (see pool), so a
 // fake is cheap while its crypto stays real.
@@ -10,6 +11,7 @@ package protontest
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
@@ -17,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -24,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -72,6 +74,16 @@ type Options struct {
 	// Write selects the other reading of each unsettled write behaviour
 	// (see WriteOptions).
 	Write WriteOptions
+	// TOTPSecret is the base32 TOTP secret of the first account (Fake.TOTPURI
+	// carries it); empty: a random one.
+	TOTPSecret string
+	// Listener is where the fake serves; nil: a new loopback port. The fake
+	// closes it with the rest.
+	Listener net.Listener
+	// UIDMatch, when set, decides which rows a listing's ?UID= returns
+	// (rowUID, query); nil: equal UIDs only. Whether Proton matches exactly
+	// is open (HUMAN-CHECKS W3).
+	UIDMatch func(rowUID, query string) bool
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the
@@ -79,7 +91,7 @@ type Options struct {
 type Fake struct {
 	URL, Username, Password, TOTPURI string
 
-	t       testing.TB
+	t       TB
 	o       Options
 	backend *server.Server
 	pool    *pooled // where backend comes from
@@ -125,8 +137,8 @@ type failure struct {
 }
 
 // New starts a fake with one user (Options.Username and Password, or
-// throwaway values). It is closed when the test ends.
-func New(t testing.TB, o Options) *Fake {
+// throwaway values). It is closed when the test ends (t's cleanups run).
+func New(t TB, o Options) *Fake {
 	t.Helper()
 	if len(o.CaptchaMethods) == 0 {
 		o.CaptchaMethods = []string{"captcha"}
@@ -145,10 +157,13 @@ func New(t testing.TB, o Options) *Fake {
 	if o.Password == "" {
 		o.Password = defaultPassword()
 	}
+	if o.TOTPSecret == "" {
+		o.TOTPSecret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20))
+	}
 	f := &Fake{
 		Username:  o.Username,
 		Password:  o.Password,
-		TOTPURI:   "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
+		TOTPURI:   "otpauth://totp/pcbfake?secret=" + o.TOTPSecret,
 		t:         t,
 		o:         o,
 		backend:   p.srv,
@@ -175,13 +190,18 @@ func New(t testing.TB, o Options) *Fake {
 	t.Cleanup(f.giveBackLogins) // before borrow's: the backend comes back with them
 	f.proxy.ModifyResponse = f.fixResponse
 	f.AddUser(f.Username, f.Password)
-	ts := httptest.NewServer(http.HandlerFunc(f.serve))
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	if o.Listener != nil {
+		_ = ts.Listener.Close()
+		ts.Listener = o.Listener
+	}
+	ts.Start()
 	t.Cleanup(ts.Close)
 	f.URL = ts.URL
 	return f
 }
 
-func random(t testing.TB, n int) []byte {
+func random(t TB, n int) []byte {
 	t.Helper()
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -361,7 +381,7 @@ func (f *Fake) RevokeSessions() {
 // so every other route (calendar list and bootstrap, keys, addresses) answers
 // 401 and a refresh fails: a test needing those logs in. The tokens expire
 // (ExpireAccessTokens) and die (RevokeSessions) like issued ones.
-func (f *Fake) Session(t testing.TB, username string) api.Tokens {
+func (f *Fake) Session(t TB, username string) api.Tokens {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -391,7 +411,7 @@ type loginRec struct {
 // for a later test to take. A session the test spent (any /auth/ call on it:
 // refresh, logout, 2FA; RevokeSessions) is not kept. The tokens expire
 // (ExpireAccessTokens) like issued ones. A test of the login itself logs in.
-func (f *Fake) Login(t testing.TB, username string) api.Tokens {
+func (f *Fake) Login(t TB, username string) api.Tokens {
 	t.Helper()
 	f.mu.Lock()
 	password, ok := f.passwords[username]
@@ -403,7 +423,10 @@ func (f *Fake) Login(t testing.TB, username string) api.Tokens {
 	if !ok {
 		m := gpa.New(gpa.WithHostURL(f.backend.GetHostURL()), gpa.WithAppVersion(appVersion), gpa.WithRetryCount(0))
 		defer m.Close()
-		c, a, err := m.NewClientWithLogin(t.Context(), username, []byte(password))
+		// TB has no Context (a Process holds the fake too): the login is bounded instead.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		c, a, err := m.NewClientWithLogin(ctx, username, []byte(password))
 		if err != nil {
 			t.Fatalf("protontest: login %q: %v", username, err)
 		}

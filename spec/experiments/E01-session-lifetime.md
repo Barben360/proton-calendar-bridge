@@ -27,9 +27,11 @@ No live measurement yet (the test account's CAPTCHA is pending, HUMAN-CHECKS ste
 
 ## Pending live run (HUMAN-CHECKS steps 2 and 3)
 
-Two steps inside the sequence of `E03-client-identity.md` (build once: `cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m0 && go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`).
+Two steps inside the sequence of `E03-client-identity.md` (build once, from a checkout of this repository: `go build -o ~/.local/bin/pcb-lab ./cmd/pcb-lab`).
 
 **Immediate results, once, right after login #1 (disposable session) and its E03 probe.** Stop on a non-zero exit (refresh refused: the session is gone): stop the sequence and resume from the next step only after a fresh guarded login (E02 protocol):
+
+**Not to be pasted as is: run through `scripts/live/run.sh` (`live`), as HUMAN-CHECKS step 2 (2a, the single `probe refresh`) and step 3 (the dedicated login and timer) spell it, with the run-root dirs and binary. The block below only shows the shape of the commands.**
 
 ```
 pcb-lab probe refresh --record-dir spec/experiments/raw/E01 --json
@@ -39,8 +41,10 @@ It runs once on this session and never again; the next login in the sequence rep
 
 **Long probe, as its own login step** (the login of HUMAN-CHECKS step 3; the seeder's proton-cal login (step 4) follows it; at least 60 s after the previous login: the guard is per state dir, so the agent keeps the time of the last login by hand):
 
+**Not to be pasted as is: run through `scripts/live/run.sh` (`live`), as HUMAN-CHECKS step 2 (2a, the single `probe refresh`) and step 3 (the dedicated login and timer) spell it, with the run-root dirs and binary. The block below only shows the shape of the commands.**
+
 ```
-ENV='pass-cli run --env-file scripts/lab.env.example --'
+ENV='pass-cli run --env-file ~/.config/pcb-live/lab.env --'
 $ENV pcb-lab login --state-dir ~/.local/state/pcb-lab-e01
 pcb-lab probe alive --state-dir ~/.local/state/pcb-lab-e01      # first sample, checks the wiring
 install -Dm644 scripts/e01-timer/pcb-lab-e01.service ~/.config/systemd/user/pcb-lab-e01.service

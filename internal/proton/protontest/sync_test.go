@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -1208,5 +1209,85 @@ func TestSyncBatchAtomicity(t *testing.T) {
 				t.Errorf("AllOrNothing: %d of a@ and gone@ stored, feed %+v; want gone@ only and no entry", stored, entries.CalendarEvents)
 			}
 		})
+	}
+}
+
+// The lab hook (WriteOptions.Lab) stands in for each answer Proton may give
+// to what the research cannot predict: a chosen refusal code, a lenient
+// store of what the fake would refuse, and a rewrite of the stored row.
+func TestSyncLabAnswers(t *testing.T) {
+	t.Parallel()
+	var seen []string
+	answers := map[string]protontest.LabAnswer{
+		"refused@pcb.test": {Code: 2222},
+		"lenient@pcb.test": {Lenient: true},
+		"edited@pcb.test":  {Lenient: true, Edit: func(row map[string]any) { row["RRule"] = "FREQ=WEEKLY;COUNT=49" }},
+	}
+	w := newWriter(t, protontest.Options{Write: protontest.WriteOptions{Lab: func(uid string, update bool) protontest.LabAnswer {
+		seen = append(seen, fmt.Sprintf("%s %v", uid, update))
+		return answers[uid]
+	}}})
+	k := newKeys(t)
+
+	if code := w.entryCode(t, map[string]any{"Event": w.create(t, simple("refused@pcb.test", "0", "x"), k)}); code != 2222 {
+		t.Errorf("Lab Code: entry code %d, want 2222", code)
+	}
+	if n := len(w.byUID(t, "refused@pcb.test")); n != 0 {
+		t.Errorf("a refused create stored %d rows", n)
+	}
+
+	// Lenient: what the fake refuses on its own is stored as sent.
+	odd := card{
+		uid:          "lenient@pcb.test",
+		sharedSigned: []string{"DTSTART;TZID=Mars/Olympus:20270310T100000", "DURATION:PT45M", "SEQUENCE:0"},
+		sharedEnc:    []string{"SUMMARY:odd"},
+		calSigned:    []string{"STATUS:TENTATIVE"},
+	}
+	strict := newWriter(t, protontest.Options{})
+	if code := strict.entryCode(t, map[string]any{"Event": strict.create(t, odd, k)}); code == 1000 {
+		t.Fatal("the strict fake must refuse an unknown TZID, DURATION and TENTATIVE")
+	}
+	ev := w.create(t, odd, k)
+	personal := fragment(odd.uid, "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT10M", "END:VALARM")
+	ev["PersonalEventContent"] = signedPart(t, w.signer, personal)
+	id := w.mustCreate(t, ev)
+	row := w.row(t, id)
+	if row["StartTimezone"] != "Mars/Olympus" || partData(row, "CalendarEvents", 0) != fragment(odd.uid, odd.calSigned...) {
+		t.Errorf("lenient row: StartTimezone %v, calendar signed part %q; want both as sent", row["StartTimezone"], partData(row, "CalendarEvents", 0))
+	}
+	if p, _ := row["PersonalEvents"].([]any); len(p) != 1 || partData(row, "PersonalEvents", 0) != personal {
+		t.Errorf("lenient row: PersonalEvents %v, want the one part sent", row["PersonalEvents"])
+	}
+	if code := strict.entryCode(t, map[string]any{"Event": func() map[string]any {
+		e := strict.create(t, simple("p@pcb.test", "0", "x"), k)
+		e["PersonalEventContent"] = signedPart(t, strict.signer, fragment("p@pcb.test"))
+		return e
+	}()}); code != 2001 {
+		t.Errorf("strict fake, PersonalEventContent: code %d, want 2001", code)
+	}
+
+	// Lenient update with a fresh key packet: taken, the parts under it read.
+	fresh := newKeys(t)
+	odd.sharedEnc = []string{"SUMMARY:odd renamed"}
+	upd := w.update(t, odd, fresh)
+	upd["SharedKeyPacket"] = wrap(t, w.calKey, fresh.shared)
+	if code := w.entryCode(t, map[string]any{"ID": id, "Event": upd}); code != 1000 {
+		t.Fatalf("lenient update with a new key packet: code %d", code)
+	}
+	row = w.row(t, id)
+	if row["SharedKeyPacket"] != upd["SharedKeyPacket"] || !strings.Contains(open(t, fresh.shared, partData(row, "SharedEvents", 1)), "renamed") {
+		t.Error("a lenient update must take the new key packet and store the parts under it")
+	}
+	if p, _ := row["PersonalEvents"].([]any); len(p) != 1 {
+		t.Errorf("an update leaving the personal part out: %v, want the row's kept", row["PersonalEvents"])
+	}
+
+	// Edit: the row as stored and served is changed.
+	id = w.mustCreate(t, w.create(t, card{uid: "edited@pcb.test", sharedSigned: []string{"DTSTART:20270301T090000Z", "DTEND:20270301T100000Z", "RRULE:FREQ=WEEKLY;COUNT=50", "SEQUENCE:0"}, sharedEnc: []string{"SUMMARY:e"}, calSigned: []string{}}, k))
+	if got := w.row(t, id)["RRule"]; got != "FREQ=WEEKLY;COUNT=49" {
+		t.Errorf("edited row: RRule %v, want the Edit's", got)
+	}
+	if want := []string{"refused@pcb.test false", "lenient@pcb.test false", "lenient@pcb.test true", "edited@pcb.test false"}; !slices.Equal(seen, want) {
+		t.Errorf("Lab saw %q, want %q", seen, want)
 	}
 }
