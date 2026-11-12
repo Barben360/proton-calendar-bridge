@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,5 +84,45 @@ func TestCacheCheckUnknownSchema(t *testing.T) {
 	_ = raw.Close()
 	if r := runCache(dir); r.Status != doctor.StatusError || !strings.Contains(r.Message, "42") || !strings.Contains(r.Fix, "upgrade pcb") {
 		t.Errorf("schema: %+v", r)
+	}
+}
+
+func setVersion(t *testing.T, path string, v int) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`PRAGMA user_version = ` + strconv.Itoa(v)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCacheCheckAcceptsAnM3File(t *testing.T) {
+	dir := t.TempDir()
+	path := cache.Path(dir)
+	c, err := cache.Open(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	setVersion(t, path, 1)
+	if r := runCache(dir); r.Status != doctor.StatusOK || !strings.Contains(r.Message, "schema 1") {
+		t.Errorf("version 1: %+v", r)
+	}
+}
+
+func TestCacheCheckRefusesAVersionZeroFile(t *testing.T) {
+	dir := t.TempDir()
+	path := cache.Path(dir)
+	c, err := cache.Open(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	setVersion(t, path, 0)
+	if r := runCache(dir); r.Status != doctor.StatusError || !strings.Contains(r.Message, "unknown schema version 0") {
+		t.Errorf("version 0: %+v", r)
 	}
 }

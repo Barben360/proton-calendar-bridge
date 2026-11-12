@@ -254,6 +254,8 @@ func (v *view) ChangedSince(since int64) ([]Listed, []string, error) {
 	return changed, deleted, v.c.classify(rows.Err())
 }
 
+// The ended checks matter on a version 1 file read-only: there no query runs
+// that would fail on the closed transaction.
 func (v *view) AliasOf(name string) (string, bool, error) {
 	if v.ended {
 		return "", false, errEnded

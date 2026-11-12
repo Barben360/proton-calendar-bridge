@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -284,7 +285,6 @@ func TestAliasesDieWithARemovedFile(t *testing.T) {
 }
 
 // buildM3File leaves a file as an M3 build did: version 1, no aliases table.
-// way an M3 build left it, with no aliases table.
 func buildM3File(t *testing.T, path string) {
 	t.Helper()
 	c := openAt(t, path, "acct-1")
@@ -371,5 +371,90 @@ func TestAliasReadsRefuseAnEndedView(t *testing.T) {
 	}
 	if _, err := kept.AliasesFor(); err == nil {
 		t.Error("AliasesFor worked after the snapshot ended")
+	}
+
+	// On a version 1 file a read-only handle answers without querying, so
+	// only the explicit guard refuses an ended view.
+	path := Path(t.TempDir())
+	buildM3File(t, path)
+	ro, err := OpenReadOnly(path, "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ro.Close() }()
+	if err := ro.Snapshot(bg, "cal", func(v View) error { kept = v; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kept.AliasOf("n1.ics"); err == nil {
+		t.Error("AliasOf on a v1 read-only view worked after the snapshot ended")
+	}
+	if _, err := kept.AliasesFor(); err == nil {
+		t.Error("AliasesFor on a v1 read-only view worked after the snapshot ended")
+	}
+}
+
+// Writes and feed passes interleave on one calendar (as the service and the
+// syncer do): every change gets its own counter value and none is lost.
+func TestConcurrentApplyWriteAndApplyDelta(t *testing.T) {
+	c, _ := openNew(t)
+	if _, err := c.ReplaceCalendar(bg, "cal", "c0", []Row{wrow("seed", "useed", 1)}, time.Unix(100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	start := seq(t, c)
+	const workers, rounds = 4, 15
+	counts := make(chan int, workers*2)
+	errs := make(chan error, workers*2)
+	for w := 0; w < workers; w++ {
+		uid := "w" + strconv.Itoa(w)
+		go func() {
+			n := 0
+			for i := 1; i <= rounds; i++ {
+				ch, err := c.ApplyWrite(bg, "cal", uid, []Row{wrow(uid+"a", uid, i), wrow(uid+"b", uid, i)}, time.Unix(200, 0))
+				n += ch.Added + ch.Updated + ch.Deleted
+				if err != nil {
+					errs <- err
+					break
+				}
+			}
+			counts <- n
+			errs <- nil
+		}()
+		go func() {
+			n := 0
+			for i := 1; i <= rounds; i++ {
+				id := "f" + strconv.Itoa(w)
+				ch, err := c.ApplyDelta(bg, "cal", "c"+strconv.Itoa(i), []Row{wrow(id, id, i)}, nil, time.Unix(300, 0))
+				n += ch.Added + ch.Updated + ch.Deleted
+				if err != nil {
+					errs <- err
+					break
+				}
+			}
+			counts <- n
+			errs <- nil
+		}()
+	}
+	total := 0
+	for i := 0; i < workers*2; i++ {
+		total += <-counts
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	if total != workers*rounds*3 {
+		t.Errorf("changes = %d, want %d", total, workers*rounds*3)
+	}
+	if got := seq(t, c); got != start+int64(total) {
+		t.Errorf("seq = %d, want %d + %d: a counter value was lost or reused", got, start, total)
+	}
+	seen := map[int64]string{}
+	for id, e := range ids(t, c, "cal") {
+		if id == "seed" {
+			continue
+		}
+		if prev, dup := seen[e.Seq]; dup {
+			t.Errorf("rows %s and %s share seq %d", prev, id, e.Seq)
+		}
+		seen[e.Seq] = id
 	}
 }
