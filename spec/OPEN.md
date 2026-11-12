@@ -34,7 +34,7 @@ State at the close of M3 (2026-11-11).
 - E10 (signature verification of calendar key parts) must be settled before M4 encrypts to a calendar key (ruling R17).
 - M2 live session (E04, E05, E07): `pcb-lab probe feed` is built; the experiments are source-based until the run (`spec/HUMAN-CHECKS.md`, "M2 live session"). Markers on the feed, cursors, ETag stay `[assumed]` until then.
 - E06, E12 to E14, E16 are not started (SPEC §17).
-- Fresh session keys on every update (ruling M4-R17): once live check L.4 #3 (research L.4) shows Proton accepts new key packets on an update, mint new keys and send their packets on every update instead of reusing the row's. That removes the residual risk of SPEC §5.3: a server confirming a guess of a low-entropy encrypted plaintext offline with its clear signature and replaying it as proof of a key it chose. Until then key-packet pinning (Task 7) is the mitigation.
+- Fresh session keys on every update (rulings M4-R17, M4-R19): once live check L.4 #3 (research L.4) shows Proton accepts new key packets on an update, mint new keys and send their packets on every update instead of reusing the row's. That removes the residual risks of SPEC §5.3 (a row already substituted when first read; an encrypted plaintext the server guesses, or learnt elsewhere for the same UID, confirmed with its clear signature and replayed as proof of a key it chose). Until then key-packet pinning (Task 7) is the primary defence and the signature proof (`ical.ProvesKey`) the secondary one.
 
 ## Parked by M3
 

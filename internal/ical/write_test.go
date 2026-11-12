@@ -211,35 +211,32 @@ func TestPatchLineIdentity(t *testing.T) {
 }
 
 func TestPatchMovesNothingAcrossParts(t *testing.T) {
-	// Lines where the routing table would not put them: LOCATION in the
-	// calendar encrypted part, EXDATE in the calendar signed part only, an
-	// X- property in the shared signed part. Only the last moves (ruling
-	// M4-R16: no encrypted-only property in a signed part, see
-	// TestPatchMovesEncryptedOnlyOutOfSignedParts).
+	// Lines where the routing table would not put them: LOCATION and an X-
+	// property in the calendar encrypted part, EXDATE in the calendar signed
+	// part only. Each stays where it is, edited or not. (An encrypted-only
+	// property stored in a signed part is refused instead, ruling M4-R19:
+	// TestPatchRefusesMisroutedStoredLines.)
 	cur := map[PartKind][]byte{
-		SharedSigned:      frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY", "X-ODD:1"),
+		SharedSigned:      frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY"),
 		SharedEncrypted:   frag(uidLine, stampLine, "SUMMARY:Title"),
 		CalendarSigned:    frag(uidLine, stampLine, "EXDATE:20261106T100000Z"),
-		CalendarEncrypted: frag(uidLine, stampLine, "LOCATION:Room 1"),
+		CalendarEncrypted: frag(uidLine, stampLine, "LOCATION:Room 1", "X-ODD:1"),
 	}
 	in := served(t, cur)
 	got, changed := mustPatch(t, cur, in)
-	want := maps.Clone(cur)
-	want[SharedSigned] = frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY")
-	want[SharedEncrypted] = frag(uidLine, stampLine, "SUMMARY:Title", "X-ODD:1")
-	expectParts(t, got, changed, want, SharedSigned, SharedEncrypted)
+	expectParts(t, got, changed, cur)
 
 	in = set(t, in, "LOCATION", "LOCATION:Room 2")
 	in = set(t, in, "CATEGORIES", "CATEGORIES:new")
 	in = without(in, named("X-ODD"))
 	got, changed = mustPatch(t, cur, in)
-	want = map[PartKind][]byte{
-		SharedSigned:      frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY"),
+	want := map[PartKind][]byte{
+		SharedSigned:      cur[SharedSigned],
 		SharedEncrypted:   frag(uidLine, stampLine, "SUMMARY:Title", "CATEGORIES:new"),
 		CalendarSigned:    cur[CalendarSigned],
 		CalendarEncrypted: frag(uidLine, stampLine, "LOCATION:Room 2"),
 	}
-	expectParts(t, got, changed, want, SharedSigned, SharedEncrypted, CalendarEncrypted)
+	expectParts(t, got, changed, want, SharedEncrypted, CalendarEncrypted)
 }
 
 func TestPatchMultiValuedAsMultiset(t *testing.T) {

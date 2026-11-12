@@ -25,9 +25,10 @@ import (
 )
 
 // ErrUntrustedSessionKey means a row's session key is not proven ours: a
-// part encrypted under it is not signed by one of our addresses, or none of
-// them holds what only an encrypted part of ours holds. Reusing it could
-// encrypt an update to a key the server chose (research G, ruling M4-R14).
+// part encrypted under it is not signed by one of our addresses, or no
+// shared or calendar encrypted part under it proves it (ical.ProvesKey).
+// Reusing it could encrypt an update to a key the server chose (research G,
+// rulings M4-R14, M4-R19).
 var ErrUntrustedSessionKey = errors.New("session key not proven ours")
 
 // ErrNeedsNewSessionKey means an update would encrypt a part under a session
@@ -43,36 +44,42 @@ var ErrNeedsNewSessionKey = errors.New("the update needs a session key the row l
 var ErrMisroutedProperty = errors.New("a signed part holds an encrypted-only property")
 
 // SessionKeys returns the row's session keys for an update to reuse (see
-// Seal). A key is returned only when (ruling M4-R14):
+// Seal). A key is returned only when (rulings M4-R14, M4-R19):
 //   - every encrypted part under it (shared: the shared encrypted and
 //     attendees parts; calendar: the calendar encrypted part) is Verified,
 //     so ours; and
-//   - at least one of them holds a property the routing table never puts in
-//     a signed part (ical.HoldsEncryptedOnly).
+//   - one of its shared or calendar encrypted parts (never the attendees
+//     part) proves it: ical.ProvesKey, which asks for Proton's fragment
+//     form, the row's UID and an encrypted-only property routed to that
+//     part.
 //
-// The second condition defeats a replay: the server holds our cleartext
-// signed parts with our signatures, and could re-encrypt one under a key it
-// chose and wrap that key to our calendar key; Seal never signs such a
-// property in clear (ErrMisroutedProperty, ruling M4-R16), so the replay
-// proves nothing. A guessed low-entropy encrypted plaintext still can
-// (ruling M4-R17, SPEC §5.3): Task 7 pins the row's key packets. Otherwise the key is
-// nil and err wraps ErrUntrustedSessionKey, naming the key. Each key is
-// judged alone, so a trusted one is returned beside an error about the
-// other. A row with no key packet for a key gives nil and no error for it:
-// there is nothing to reuse (and Seal refuses an update that needs one).
+// A key that fails either test is nil and err wraps ErrUntrustedSessionKey,
+// naming the key. Each key is judged alone, so a trusted one is returned
+// beside an error about the other. A row with no key packet for a key gives
+// nil and no error for it: there is nothing to reuse (and Seal refuses an
+// update that needs one).
+//
+// This is a secondary defence against a server that substitutes a key
+// packet; Task 7's key-packet pinning is the primary one (SPEC §5.3). The
+// proof rules out the texts the server holds with our signature: our
+// cleartext signed parts (Seal never signs an encrypted-only property in
+// clear, ErrMisroutedProperty), attendees parts, mail-signed .ics files and
+// another event's parts. It cannot rule out a plaintext the server guesses,
+// or learnt elsewhere, for the same UID.
 func (e Event) SessionKeys() (shared, calendar *crypto.SessionKey, err error) {
-	shared, errShared := e.shared.trustedKey("shared")
-	calendar, errCal := e.calendar.trustedKey("calendar")
+	shared, errShared := e.shared.trustedKey("shared", e.uid)
+	calendar, errCal := e.calendar.trustedKey("calendar", e.uid)
 	return shared, calendar, errors.Join(errShared, errCal)
 }
 
-// trustedKey applies SessionKeys' rule. With no encrypted part, texts is
+// trustedKey applies SessionKeys' rule. With no encrypted part, proofs is
 // empty and nothing proves the key.
-func (u keyUse) trustedKey(name string) (*crypto.SessionKey, error) {
+func (u keyUse) trustedKey(name, uid string) (*crypto.SessionKey, error) {
+	proven := slices.ContainsFunc(u.proofs, func(p proof) bool { return ical.ProvesKey(p.text, uid, ical.PartKind(p.kind)) })
 	switch {
 	case !u.packet:
 		return nil, nil
-	case u.verified != len(u.texts) || !slices.ContainsFunc(u.texts, ical.HoldsEncryptedOnly):
+	case u.verified != u.parts || !proven:
 		return nil, fmt.Errorf("the %s session key: %w", name, ErrUntrustedSessionKey)
 	}
 	return u.key, nil

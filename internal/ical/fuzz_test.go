@@ -3,6 +3,7 @@ package ical
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -240,6 +241,20 @@ func FuzzPatchRoundTrip(f *testing.F) {
 				t.Fatalf("%s changed by an identical event", k)
 			}
 		}
+		// Stored parts with a misrouted line (ruling M4-R19): an
+		// encrypted-only property of x copied into a signed part, as another
+		// client or the server could store it. Patching with x (which still
+		// carries it) refuses, or leaves every signed part clean.
+		if misrouted, ok := misroute(created, x, data); ok {
+			out, _, err := Patch(misrouted, x)
+			var r *Refusal
+			switch {
+			case err == nil:
+				signedClean(t, out)
+			case !errors.As(err, &r) || r.Code != MisroutedStoredLine:
+				t.Fatalf("a misrouted stored line: %v", err)
+			}
+		}
 		updated, _, err := Patch(created, y)
 		if err != nil {
 			t.Fatal(err)
@@ -262,4 +277,31 @@ func FuzzPatchRoundTrip(f *testing.F) {
 			}
 		}
 	})
+}
+
+// misroute returns parts with one encrypted-only property of x (chosen by
+// data) appended to a signed part, and false when x has none.
+func misroute(parts map[PartKind][]byte, x Component, data []byte) (map[PartKind][]byte, bool) {
+	var props []Property
+	for _, p := range x.Props() {
+		if EncryptedOnly(p.Name) {
+			props = append(props, p)
+		}
+	}
+	if len(props) == 0 || len(data) == 0 {
+		return nil, false
+	}
+	p := props[int(data[0])%len(props)]
+	k := SharedSigned
+	if data[len(data)-1]%2 == 1 {
+		k = CalendarSigned
+	}
+	out := maps.Clone(parts)
+	b := string(parts[k])
+	i := strings.LastIndex(b, "\r\nEND:VEVENT")
+	if i < 0 {
+		return nil, false
+	}
+	out[k] = []byte(b[:i] + "\r\n" + folded(p.Line()) + b[i:])
+	return out, true
 }

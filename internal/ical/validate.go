@@ -21,7 +21,7 @@ import (
 // with Reason, in a pcb precondition element (constraints, Refusals).
 type RefusalCode string
 
-// The refusal codes of ParseWrite.
+// The refusal codes of ParseWrite (and Patch's MisroutedStoredLine).
 const (
 	NotOneUID             RefusalCode = "not-one-uid"            // VEVENTs of several UIDs
 	TooMany               RefusalCode = "too-many-events"        // more than MaxEvents VEVENTs
@@ -32,6 +32,9 @@ const (
 	RDate                 RefusalCode = "rdate"                  // RDATE
 	ExRule                RefusalCode = "exrule"                 // EXRULE
 	BadData               RefusalCode = "bad-data"               // anything else malformed
+	// MisroutedStoredLine is Patch's: a stored signed part holds an
+	// encrypted-only property (ruling M4-R19).
+	MisroutedStoredLine RefusalCode = "misrouted-stored-line"
 )
 
 // Refusal is ParseWrite's error. Reason is short and fixed: it never quotes
