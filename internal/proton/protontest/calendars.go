@@ -269,6 +269,40 @@ func (f *Fake) SetPermissions(id string, perms int) {
 	rec.def.Permissions = perms
 }
 
+// PassphraseSignature is how the fake signs our member's passphrase of a
+// calendar (SetPassphraseSignature).
+type PassphraseSignature int
+
+// The passphrase signatures: ours over the passphrase, an unrelated key's
+// (BadPassphraseSignature), none at all (EmptyPassphraseSignature).
+const (
+	PassphraseSignedByUs PassphraseSignature = iota
+	PassphraseSignedByStranger
+	PassphraseUnsigned
+)
+
+// SetPassphraseSignature changes how our member passphrase of calendar id is
+// signed, as a later bootstrap serves it. The calendar must have been served
+// once (its member is set up on the user's first request).
+func (f *Fake) SetPassphraseSignature(id string, sig PassphraseSignature) {
+	f.t.Helper()
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	rec := f.cal.byID[id]
+	if rec == nil || !rec.ready {
+		f.t.Fatalf("protontest: calendar %q unknown or not served yet", id)
+	}
+	if sig == PassphraseUnsigned {
+		rec.passSig = ""
+		return
+	}
+	s, err := signPassphrase(rec, []byte(rec.passphrase), sig == PassphraseSignedByStranger)
+	if err != nil {
+		f.t.Fatalf("protontest: sign passphrase: %v", err)
+	}
+	rec.passSig = s
+}
+
 // EncryptToCalendar encrypts plaintext to the calendar's primary key and
 // returns the armored message.
 func (f *Fake) EncryptToCalendar(id string, plaintext []byte) string {

@@ -2226,3 +2226,42 @@ func TestUIDListingKeepsOnlyThatUID(t *testing.T) {
 		t.Errorf("the log carries event content:\n%s", log)
 	}
 }
+
+// The settings refresh picks up a gate that moves between undecided and
+// closed although the settings stay the same (both render read only): a
+// passphrase signature now served and bad closes the calendar (writes
+// 403), and one that cannot be checked any more makes it undecided again
+// (writes 503, ruling M4-R39).
+func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{EmptyPassphraseSignature: true})
+	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	wantGate := func(step string, cause error, code exitcode.Code) {
+		t.Helper()
+		c := e.collection(t, id)
+		if undecided := errors.Is(cause, service.ErrGateUndecided); !c.ReadOnly || c.WriteGateUndecided != undecided {
+			t.Fatalf("%s: ReadOnly %v, WriteGateUndecided %v; want read only, undecided %v", step, c.ReadOnly, c.WriteGateUndecided, undecided)
+		}
+		_, err := e.svc.PutObject(t.Context(), id, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+		_ = wantExit(t, err, code)
+		wantIs(t, err, cause)
+	}
+	wantGate("no signature to check", service.ErrGateUndecided, exitcode.Blocked)
+
+	e.f.SetPassphraseSignature(id, protontest.PassphraseSignedByStranger)
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	wantGate("a bad signature after the refresh", service.ErrNotWritable, exitcode.Usage)
+
+	e.f.SetPassphraseSignature(id, protontest.PassphraseUnsigned)
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	wantGate("no signature again after the refresh", service.ErrGateUndecided, exitcode.Blocked)
+	if n := e.f.Calls(http.MethodPut, "/calendar/v1/"+id+"/events/sync"); n != 0 {
+		t.Errorf("%d requests reached the sync endpoint", n)
+	}
+	s.stop(t)
+}

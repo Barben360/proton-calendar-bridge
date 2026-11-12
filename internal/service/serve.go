@@ -106,8 +106,8 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 // refreshSettings reads again the bootstrap of every calendar whose keys
 // are held and that the cache still has (live), once settingsRefresh has
 // passed since they were last read (one Proton call per calendar); the keys
-// of a calendar the cache no longer has are dropped. A calendar whose settings or key IDs changed,
-// or whose keys failed and now unlock, gets its new keys: its ETags, CTag
+// of a calendar the cache no longer has are dropped. A calendar whose settings, key IDs or write
+// gate changed, or whose keys failed and now unlock, gets its new keys: its ETags, CTag
 // and token generation change, so clients fetch its objects again. A
 // failure keeps what is held (a transient one is tried at the next pass).
 func (l *Local) refreshSettings(ctx context.Context, live map[string]calendar.Type) {
@@ -143,7 +143,10 @@ func (l *Local) refreshSettings(ctx context.Context, live map[string]calendar.Ty
 			switch {
 			case err == nil:
 				ck := newCalKeys(id, a, ks.addrTags)
-				if old := ks.cals[id]; old.access != nil && bytes.Equal(old.settings, ck.settings) {
+				// The gate too: undecided and closed both render read only
+				// (same settings), yet answer a write differently (ruling
+				// M4-R39).
+				if old := ks.cals[id]; old.access != nil && bytes.Equal(old.settings, ck.settings) && old.gate == ck.gate {
 					a.Close()
 					continue
 				}
