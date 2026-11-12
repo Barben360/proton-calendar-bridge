@@ -60,6 +60,12 @@ func (a *app) newLogin() *cobra.Command {
 				return UsageError(fmt.Errorf("pass exactly one of --captcha-token TOKEN and --totp"))
 			}
 			if totp {
+				// The daemon holds the login these flags made (ruling M5-R12).
+				for _, name := range []string{"username", "password-fd", "unattended-relogin"} {
+					if cmd.Flags().Changed(name) {
+						return UsageError(fmt.Errorf("--%s does not apply to --totp: the daemon holds the login it made", name))
+					}
+				}
 				return a.resumeTOTP(cmd)
 			}
 			return a.login(cmd, rf, token)
@@ -115,13 +121,13 @@ func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error
 		defer func() { _ = c.Close() }()
 		svc = daemonLogin{c}
 	} else {
-		a.noDaemonNote(cmd)
 		// The service first: a bad config.toml fails before any prompt.
 		local, err := a.service(cmd)
 		if err != nil {
 			return Finish(cmd, nil, "", err)
 		}
 		defer a.closeService(local)
+		a.noDaemonNote(cmd)
 		svc = local
 	}
 	creds, err := a.credentials(ctx, credentialSource{

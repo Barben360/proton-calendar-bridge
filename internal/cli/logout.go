@@ -39,11 +39,11 @@ func (a *app) logout(cmd *cobra.Command) (service.LogoutResult, error) {
 		defer func() { _ = c.Close() }()
 		return c.Logout(cmd.Context())
 	}
-	a.noDaemonNote(cmd)
 	svc, err := a.service(cmd)
 	if err != nil {
 		return service.LogoutResult{}, err
 	}
 	defer a.closeService(svc)
+	a.noDaemonNote(cmd)
 	return svc.Logout(cmd.Context())
 }

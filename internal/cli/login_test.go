@@ -696,3 +696,46 @@ func TestNoDaemonLoginSaysSo(t *testing.T) {
 		t.Errorf("login --json: stdout %q, stderr %q; want no note", r.out.String(), r.errb.String())
 	}
 }
+
+// Ruling M5-R12 (6): the credentials' flags do not apply to resume --totp
+// (the daemon holds the login they made); they are refused, not ignored.
+func TestResumeTOTPRefusesCredentialFlags(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		flag string
+		args []string
+	}{
+		{"--username", []string{"--username", "alice"}},
+		{"--password-fd", []string{"--password-fd", "3"}},
+		{"--unattended-relogin", []string{"--unattended-relogin"}},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			t.Parallel()
+			s := &stubAPI{}
+			r := stubRig(t, s)
+			r.env["PCB_TOTP"] = "123456"
+			r.want(exitcode.Usage, append([]string{"login", "resume", "--totp", "--json"}, tc.args...)...)
+			if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, tc.flag) || !strings.Contains(e.Message, "--totp") {
+				t.Errorf("error = %+v; want it to name %s and --totp", e, tc.flag)
+			}
+			if len(s.totps)+len(s.logins) != 0 {
+				t.Error("the command reached the service")
+			}
+		})
+	}
+}
+
+// The no-daemon note follows the in-process service's opening: a directory
+// error is not preceded by it.
+func TestNoDaemonNoteNotBeforeADirectoryError(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.mk = nil // the default service, which resolves the directories
+	r.env["PCB_STATE_DIR"] = "relative/state"
+	for _, args := range [][]string{{"login", "--non-interactive"}, {"logout"}} {
+		r.want(exitcode.Blocked, args...)
+		if strings.Contains(r.errb.String(), "Note:") || !strings.Contains(r.errb.String(), "PCB_STATE_DIR") {
+			t.Errorf("pcb %s: stderr %q; want the directory error without the no-daemon note", strings.Join(args, " "), r.errb.String())
+		}
+	}
+}

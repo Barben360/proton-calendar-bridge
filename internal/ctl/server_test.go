@@ -610,3 +610,45 @@ func TestStaleFirstConnectionIsRedialled(t *testing.T) {
 		}
 	}
 }
+
+// Ruling M5-R12 (5): the redial that replaces a stale first connection
+// checks its server's UID too, before anything is sent.
+func TestRedialChecksTheServersUID(t *testing.T) {
+	t.Parallel()
+	api := &loginAPI{}
+	s := serve(t, &ctl.Server{API: api, Daemon: daemon()})
+	var mu sync.Mutex
+	dials := 0
+	peer := func(net.Conn) (int, bool) { // the first server is ours, the redial reaches another UID's
+		mu.Lock()
+		defer mu.Unlock()
+		dials++
+		if dials == 1 {
+			return os.Geteuid(), true
+		}
+		return os.Geteuid() + 1, true
+	}
+	clock := time.Now()
+	c, err := ctl.DialForTest(t.Context(), s.path, func() time.Time { return clock }, peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	clock = clock.Add(3 * time.Second) // the first connection is stale: the login redials
+	_, err = c.Login(t.Context(), service.LoginRequest{Username: "alice", Password: "pw"})
+	if exitcode.From(err) != exitcode.Blocked || !strings.Contains(err.Error(), "uid "+strconv.Itoa(os.Geteuid()+1)) {
+		t.Fatalf("Login over a redial to another UID: %v (exit %d); want blocked naming its UID", err, exitcode.From(err))
+	}
+	mu.Lock()
+	n := dials
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("%d peer checks, want 2 (the dial and the redial)", n)
+	}
+	if l, _ := api.calls(); l != 0 {
+		t.Errorf("the service got %d logins", l)
+	}
+	if logs := s.logs.String(); strings.Contains(logs, "control request") {
+		t.Errorf("a request reached the server:\n%s", logs)
+	}
+}

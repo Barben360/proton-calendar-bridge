@@ -161,7 +161,8 @@ func (a *app) daemon(cmd *cobra.Command) (*ctl.Client, error) {
 	return a.dialDaemon(cmd.Context(), dirs.Socket())
 }
 
-// noDaemonNote tells, in text mode, that the command runs without a daemon.
+// noDaemonNote tells, in text mode, that the command runs without a daemon:
+// once the in-process service opened, so an error opening it stands alone.
 func (a *app) noDaemonNote(cmd *cobra.Command) {
 	if !JSONMode(cmd) {
 		fmt.Fprintln(a.Stderr, "Note: no pcb daemon is running; this command runs on its own.")
