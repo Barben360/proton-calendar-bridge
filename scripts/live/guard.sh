@@ -123,13 +123,13 @@ live_login() {
     live_ledger_check "$PCB_LIVE_RUN/logins.tsv" "$budget" "$now" "$extra" || exit
     live_ledger_check "$base/.ledger" "$gbudget" "$now" "$extra" || exit
     if [[ -n $extra ]]; then
-      purpose="$purpose [EXTRA LOGIN: $extra]"
+      what="$purpose [EXTRA LOGIN: $extra]"
       printf 'live: EXTRA LOGIN by the author, past the budgets if need be (%s)\n' "$extra" >&2
     fi
-    row=$(printf '%s\t%s\t%s\t%s\t%s' "$now" "$(date -u -d "@$now" +%FT%TZ)" "$step" "$purpose" "${PCB_LIVE_RUN##*/}")
+    row=$(printf '%s\t%s\t%s\t%s\t%s' "$now" "$(date -u -d "@$now" +%FT%TZ)" "$step" "${what:-$purpose}" "${PCB_LIVE_RUN##*/}")
     printf '%s\n' "${row%$'\t'*}" >> "$PCB_LIVE_RUN/logins.tsv"
     printf '%s\n' "$row" >> "$base/.ledger"
-    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "$purpose"
+    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "${what:-$purpose}"
   )
   rc=$?
   return "$rc"

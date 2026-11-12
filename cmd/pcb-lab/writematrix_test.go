@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -169,5 +171,66 @@ func TestLoopbackOnlyForLocalFakes(t *testing.T) {
 		if got := loopback(base); got != want {
 			t.Errorf("loopback(%q) = %v, want %v", base, got, want)
 		}
+	}
+}
+
+// readBackJQ is the 6.7 read-back filter of spec/HUMAN-CHECKS.md, which must
+// survive every envelope write-matrix prints: with data, with data and an
+// error, and with an error only (exits 2, 10, 20 carry no data).
+const readBackJQ = `.data.key_salts // empty, (.data.cases[]?.line), (.data.cleanup // empty), (.error // empty | .message, .hint)`
+
+func TestReadBackSnippetSurvivesEveryEnvelope(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is not installed")
+	}
+	doc, err := os.ReadFile("../../spec/HUMAN-CHECKS.md")
+	if err != nil || !strings.Contains(string(doc), "jq -r '"+readBackJQ+"'") {
+		t.Fatalf("spec/HUMAN-CHECKS.md 6.7 does not carry this exact jq filter (read error %v)", err)
+	}
+	f, dir, cal := matrixEnv(t)
+	read := func(args ...string) (exitcode.Code, string) {
+		var out, errb bytes.Buffer
+		code := execute(append([]string{"probe", "write-matrix", "--state-dir", dir, "--calendar", cal, "--interval", "0s"}, append(args, "--json")...), &out, &errb)
+		cmd := exec.Command(jq, "-r", readBackJQ)
+		cmd.Stdin = bytes.NewReader(out.Bytes())
+		got, jerr := cmd.CombinedOutput()
+		if jerr != nil {
+			t.Errorf("jq on the exit-%d envelope failed: %v\n%s\nenvelope: %s", code, jerr, got, out.String())
+		}
+		return code, string(got)
+	}
+	// Data only: one line per case and the cleanup.
+	code, got := read()
+	if code != exitcode.OK || strings.Count(got, "read-back: ") != len(matrixCaseNames) || !strings.Contains(got, "left 0") {
+		t.Errorf("success: code %d, jq printed:\n%s", code, got)
+	}
+	// Error only (no data): the message must come out.
+	t.Setenv("PCB_LAB_PASSWORD", "not-the-password")
+	code, got = read()
+	if code != exitcode.MustAct || strings.TrimSpace(got) == "" || strings.Contains(got, "null") {
+		t.Errorf("must-act without data: code %d, jq printed %q; want the error message", code, got)
+	}
+	t.Setenv("PCB_LAB_PASSWORD", labtest.Pass)
+	// Data and an error (a failed cleanup): both shown.
+	f.Mu.Lock()
+	f.Intercept = func(method, path string, body []byte) (labtest.Reply, bool) {
+		var req struct {
+			Events []struct{ Event json.RawMessage }
+		}
+		if method != "PUT" || !strings.HasSuffix(path, "/events/sync") || json.Unmarshal(body, &req) != nil {
+			return labtest.Reply{}, false
+		}
+		for _, e := range req.Events {
+			if len(e.Event) > 0 {
+				return labtest.Reply{}, false
+			}
+		}
+		return labtest.R(500, `{"Code":0,"Error":"injected"}`), true
+	}
+	f.Mu.Unlock()
+	code, got = read()
+	if code != exitcode.Partial || !strings.Contains(got, "HTTP 500") || !strings.Contains(got, "pcb-lab-wm-") {
+		t.Errorf("partial: code %d, jq printed:\n%s", code, got)
 	}
 }

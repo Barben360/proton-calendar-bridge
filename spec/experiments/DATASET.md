@@ -74,7 +74,7 @@ Edit `testdata/seed/dataset.yaml` (or its `seed:`), wipe, rerun `seed apply`. Wi
 
 ## Wipe
 
-Delete every event whose summary starts with `pcb-seed` (it is the whole data set, nothing else). One guarded call, so the config dir is the run root's (`$R/seed`, never `~/.config/proton-cal`); the loop runs in a `bash -c` of that call:
+Delete every event whose summary starts with `pcb-seed` (it is the whole data set, nothing else). One guarded call, so the config dir is the run root's (`$R/seed`, never `~/.config/proton-cal`); the loop runs in a `bash -c` of that call. `run.sh` cannot see inside that string, but `--proton-cal` makes it refuse unless `$R/bin/proton-cal` exists, and `$R/bin` comes first on the `PATH` the `bash -c` inherits:
 
 ```
 live --proton-cal -- bash -c '

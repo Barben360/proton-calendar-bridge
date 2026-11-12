@@ -514,3 +514,24 @@ func TestFakeRoutesLikeProtonsWriters(t *testing.T) {
 		t.Errorf("PersonalAlarms: %d personal parts, want 1", len(withAlarms.PersonalEvents))
 	}
 }
+
+// The default ?UID= match is exact: a UID that merely shares a prefix (or has
+// the wanted one as a prefix) is not returned. The live write matrix reads its
+// rows back by UID, so a prefix match would show rows of another case.
+func TestFakeListByUIDMatchesExactly(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	tk := f.Session(t, f.Username)
+	cal := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	want := f.AddEvent(cal, protontest.Event{UID: "pcb-lab-wm-1-x", Start: 1, End: 2})
+	f.AddEvent(cal, protontest.Event{UID: "pcb-lab-wm-1-x-longer", Start: 1, End: 2})
+	f.AddEvent(cal, protontest.Event{UID: "pcb-lab-wm-1", Start: 1, End: 2})
+	f.AddEvent(cal, protontest.Event{UID: "PCB-LAB-WM-1-X", Start: 1, End: 2})
+	var out struct{ Events []struct{ ID string } }
+	if st, _ := rawGet(t, f, tk, "/calendar/v1/"+cal+"/events?Page=0&PageSize=100&UID=pcb-lab-wm-1-x", &out); st != 200 {
+		t.Fatalf("list: HTTP %d", st)
+	}
+	if len(out.Events) != 1 || out.Events[0].ID != want {
+		t.Errorf("UID=pcb-lab-wm-1-x returned %+v, want only %s", out.Events, want)
+	}
+}
