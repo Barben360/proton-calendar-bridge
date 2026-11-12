@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
 
 // noteHandler is the logger of the commands other than pcb serve (ruling
@@ -43,6 +46,8 @@ func (h *noteHandler) Handle(_ context.Context, r slog.Record) error {
 		switch {
 		case a.Key == "hint":
 			hint = v.String()
+		case v.Kind() == slog.KindAny && isError(v.Any()):
+			fields = append(fields, a.Key+": "+errorText(v.Any().(error)))
 		case v.Kind() == slog.KindTime:
 			fields = append(fields, a.Key+": "+v.Time().UTC().Format(time.RFC3339))
 		case a.Key != "":
@@ -65,6 +70,34 @@ func (h *noteHandler) Handle(_ context.Context, r slog.Record) error {
 	defer h.mu.Unlock()
 	_, err := fmt.Fprintln(h.w, line)
 	return err
+}
+
+func isError(v any) bool { _, ok := v.(error); return ok }
+
+// errorText is an error attribute as pcb words it, never a Go chain (ruling
+// A11): the message of an *exitcode.Error, which pcb wrote (as Run prints
+// it), else only the innermost cause, the operating system's reason
+// (permission denied) rather than every operation and path above it.
+func errorText(err error) string {
+	var ee *exitcode.Error
+	if errors.As(err, &ee) {
+		return ee.Error()
+	}
+	for {
+		var next error
+		switch u := err.(type) { //nolint:errorlint // walking the chain by hand
+		case interface{ Unwrap() error }:
+			next = u.Unwrap()
+		case interface{ Unwrap() []error }:
+			if errs := u.Unwrap(); len(errs) > 0 {
+				next = errs[0]
+			}
+		}
+		if next == nil {
+			return err.Error()
+		}
+		err = next
+	}
 }
 
 // WithAttrs implements slog.Handler.

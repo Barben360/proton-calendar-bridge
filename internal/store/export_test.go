@@ -25,3 +25,6 @@ func OnSyncDir(f func(dir string)) (restore func()) {
 	syncDir = func(dir string) { f(dir); old(dir) }
 	return func() { syncDir = old }
 }
+
+// StateWriteCause exposes stateWriteCause.
+func StateWriteCause(err error) string { return stateWriteCause(err) }

@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -632,6 +634,10 @@ func TestFailedMirrorWriteIsLogged(t *testing.T) {
 	if !strings.Contains(out, `"level":"WARN"`) || !strings.Contains(out, `"generation":2`) || !strings.Contains(out, "could not be recorded in state.json") {
 		t.Fatalf("log = %s", out)
 	}
+	// Ruling A11: the cause in pcb's words, never the Go chain (op, path).
+	if !strings.Contains(out, `"cause":"state.json or its lock cannot be used: is a directory"`) || strings.Contains(out, statePath) {
+		t.Errorf("log = %s, want the pcb-worded cause and no path chain", out)
+	}
 	for _, secret := range []string{a.Username, a.UID, a.AccessToken, a.RefreshToken, string(a.KeyPass), a.Relogin.Password, "TOTPSECRET"} {
 		if strings.Contains(out, secret) {
 			t.Fatalf("the log holds %q", secret)
@@ -755,5 +761,25 @@ func TestWipeSyncsTheDirectory(t *testing.T) {
 	}
 	if !slices.Contains(synced, f.state) {
 		t.Errorf("directories synced after an emptying update = %q, want %s", synced, f.state)
+	}
+}
+
+// Ruling A11: each cause of a failed state.json update is said in pcb's
+// words; the wrapped Go chain never shows.
+func TestStateWriteCauseHidesTheGoChain(t *testing.T) {
+	pe := &fs.PathError{Op: "rename", Path: "/s/.state-123", Err: syscall.ENOSPC}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("%w: %w", store.ErrStateLock, context.DeadlineExceeded), "another pcb process held the state-file lock (state.lock) too long"},
+		{fmt.Errorf("x: %w", store.ErrNewerState), "state.json was written by a newer pcb"},
+		{fmt.Errorf("x: %w", store.ErrGenerationOutOfRange), "state.json holds a secrets generation out of range"},
+		{fmt.Errorf("writing state: %w", pe), "state.json or its lock cannot be used: no space left on device"},
+		{errors.New("json: cannot unmarshal hunter2"), "state.json cannot be read or written"},
+	} {
+		if got := store.StateWriteCause(c.err); got != c.want {
+			t.Errorf("StateWriteCause(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }

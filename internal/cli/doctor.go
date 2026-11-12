@@ -103,7 +103,8 @@ func (d doctorDaemon) live() *doctor.Live {
 // result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
 // a warning warns). needs-login while the daemon waits for a login is the
 // normal state of a fresh install: a warning (ux-I2). A daemon that does
-// not answer cleanly is a transient error. With no daemon, "daemon" is
+// not answer cleanly is a transient error, a control socket pcb refuses
+// is not. With no daemon, "daemon" is
 // skipped: offline checks only.
 func (d doctorDaemon) results() []doctor.Result {
 	const name = "daemon"
@@ -112,7 +113,10 @@ func (d doctorDaemon) results() []doctor.Result {
 	case d.unplaced:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
 	case d.err != nil:
-		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: d.err.Error(), Fix: exitcode.HintOf(d.err), Transient: true}}
+		// A dial or status that failed may pass; a socket pcb refuses
+		// (ctl.ErrRefused) needs a person (ruling A11).
+		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: d.err.Error(), Fix: exitcode.HintOf(d.err),
+			Transient: !errors.Is(d.err, ctl.ErrRefused)}}
 	case !d.ok:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}

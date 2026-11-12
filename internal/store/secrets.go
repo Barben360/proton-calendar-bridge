@@ -294,8 +294,27 @@ func (s *Secrets) setMirror(ctx context.Context, gen uint64) {
 	})
 	if err != nil && s.Log != nil {
 		s.Log().Warn("the secrets generation could not be recorded in state.json; a restored secrets.sealed goes unnoticed until the next write",
-			"generation", gen, "error", err.Error())
+			"generation", gen, "cause", stateWriteCause(err))
 	}
+}
+
+// stateWriteCause is why state.json could not be updated, in pcb's words
+// and secret-free: the lock held too long, a newer or damaged file, or the
+// operating system's reason (permission denied, no space left on device),
+// never the Go error chain (ruling A11).
+func stateWriteCause(err error) string {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, ErrStateLock) && errors.Is(err, context.DeadlineExceeded):
+		return "another pcb process held the state-file lock (state.lock) too long"
+	case errors.Is(err, ErrNewerState):
+		return ErrNewerState.Error()
+	case errors.Is(err, ErrGenerationOutOfRange):
+		return "state.json holds a secrets generation out of range"
+	case errors.As(err, &pe):
+		return "state.json or its lock cannot be used: " + pe.Err.Error()
+	}
+	return "state.json cannot be read or written"
 }
 
 // Wipe removes the sealed file under the store lock (a logout, or a store

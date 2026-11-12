@@ -297,3 +297,26 @@ func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 }
+
+// Ruling A11: a control socket pcb refuses (here a file that is not a
+// socket) needs a person: exit 10, with ctl's own message and fix.
+func TestDoctorRefusedControlSocketIsExit10(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := stubRig(t, &stubAPI{})
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := r.dirs.Socket()
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.want(exitcode.MustAct, "doctor")
+	want := "✗  daemon: " + sock + " is not a socket: pcb refuses to use it as the control socket\n" +
+		"   fix: move " + sock + " away: pcb serve keeps its control socket there\n"
+	if !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+}

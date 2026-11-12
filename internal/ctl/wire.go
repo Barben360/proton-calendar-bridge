@@ -91,7 +91,20 @@ var (
 	ErrUnsupported = errors.New("no control socket on this system")
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
+	// ErrRefused: Dial refuses the control socket: not a socket, another
+	// user's, or answered by another user's process. A person must act; no
+	// retry helps (the doctor's exit 10). The error's text says which.
+	ErrRefused = errors.New("pcb refuses this control socket")
 )
+
+// refusal is a refused control socket: its text is msg, and
+// errors.Is(err, ErrRefused) holds.
+type refusal struct{ msg string }
+
+func refused(msg string) error { return &refusal{msg: msg} }
+
+func (r *refusal) Error() string        { return r.msg }
+func (r *refusal) Is(target error) bool { return target == ErrRefused }
 
 // maxPath is the longest socket path: sun_path with its NUL. Listen and
 // Dial share it, so pcb serve's hint and pcb status's offline fallback agree.

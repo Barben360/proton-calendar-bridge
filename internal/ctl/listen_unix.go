@@ -88,7 +88,7 @@ func dialSocket(ctx context.Context, path string, peer func(net.Conn) (int, bool
 	if uid, checked := peer(c); checked && uid != euid {
 		_ = c.Close()
 		return nil, &exitcode.Error{Code: exitcode.Blocked,
-			Err:  fmt.Errorf("the process answering on the control socket %s runs as another user (uid %d): pcb refuses to talk to it", path, uid),
+			Err:  refused(fmt.Sprintf("the process answering on the control socket %s runs as another user (uid %d): pcb refuses to talk to it", path, uid)),
 			Hint: "run pcb as the user that runs pcb serve, and check who replaced " + path}
 	}
 	return c, nil
@@ -98,7 +98,7 @@ func dialSocket(ctx context.Context, path string, peer func(net.Conn) (int, bool
 // euid: a symlink, a file, or another user's socket is never dialled.
 func checkSocket(path string, fi fs.FileInfo, euid int) error {
 	if fi.Mode().Type() != fs.ModeSocket {
-		return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("%s is not a socket: pcb refuses to use it as the control socket", path),
+		return &exitcode.Error{Code: exitcode.Blocked, Err: refused(path + " is not a socket: pcb refuses to use it as the control socket"),
 			Hint: "move " + path + " away: pcb serve keeps its control socket there"}
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
@@ -108,7 +108,7 @@ func checkSocket(path string, fi fs.FileInfo, euid int) error {
 			owner = int(st.Uid)
 		}
 		return &exitcode.Error{Code: exitcode.Blocked,
-			Err:  fmt.Errorf("the control socket %s belongs to another user (uid %d): pcb refuses to use it", path, owner),
+			Err:  refused(fmt.Sprintf("the control socket %s belongs to another user (uid %d): pcb refuses to use it", path, owner)),
 			Hint: "run pcb as the user that runs pcb serve, or point PCB_STATE_DIR at your own state directory"}
 	}
 	return nil
