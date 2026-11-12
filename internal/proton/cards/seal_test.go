@@ -155,11 +155,17 @@ func TestPartKindsMatchCardKinds(t *testing.T) {
 	}
 }
 
+// Random line names: encrypted-only ones for encrypted parts, signed-routed
+// ones for signed parts (Seal refuses the others there, ruling M4-R16).
+var (
+	encryptedNames = []string{"SUMMARY", "DESCRIPTION", "LOCATION", "X-MOZ-GENERATION", "COMMENT", "ATTENDEE;CN=A;X-PM-TOKEN=t"}
+	signedNames    = []string{"DTSTART;TZID=Europe/Paris", "DTEND", "RRULE", "EXDATE", "SEQUENCE", "ORGANIZER;CN=A", "X-PM-CONFERENCE-ID", "STATUS", "TRANSP"}
+)
+
 // randomFragment is a fragment in Proton's form holding up to six random
-// lines, folded at 75 octets on rune boundaries, with multi-byte UTF-8,
-// escapes, tabs and trailing spaces.
-func randomFragment(rng *rand.Rand, uid string) []byte {
-	names := []string{"SUMMARY", "DESCRIPTION", "LOCATION", "X-MOZ-GENERATION", "COMMENT", "ATTENDEE;CN=A;X-PM-TOKEN=t"}
+// lines named from names, folded at 75 octets on rune boundaries, with
+// multi-byte UTF-8, escapes, tabs and trailing spaces.
+func randomFragment(rng *rand.Rand, uid string, names []string) []byte {
 	alphabet := []string{"a", "Z", "0", " ", `\n`, `\,`, ";", ":", "=", "\t", "é", "日", "\U0001F600"}
 	var lines []string
 	for range rng.IntN(7) {
@@ -205,12 +211,16 @@ func TestOpenSealRoundTrip(t *testing.T) {
 		uid := fmt.Sprintf("rt%d@pcb.test", i)
 		parts := map[ical.PartKind][]byte{}
 		for _, k := range writeKinds {
+			names := encryptedNames
+			if k == ical.SharedSigned || k == ical.CalendarSigned {
+				names = signedNames
+			}
 			if rng.IntN(4) != 0 {
-				parts[k] = randomFragment(rng, uid)
+				parts[k] = randomFragment(rng, uid, names)
 			}
 		}
 		if len(parts) == 0 {
-			parts[ical.SharedSigned] = randomFragment(rng, uid)
+			parts[ical.SharedSigned] = randomFragment(rng, uid, signedNames)
 		}
 		_, usesShared := parts[ical.SharedEncrypted]
 		if _, ok := parts[ical.Attendees]; ok {
@@ -874,5 +884,96 @@ func TestFakeSyncAcceptsSealedEvents(t *testing.T) {
 	first := mustSeal(t, parts, cards.SealKeys{Signer: signer, CalendarPrimary: cal2KR})
 	if code, _, _ := syncOne(t, c, f, cal2, map[string]any{"Overwrite": 0, "Event": syncEntryEvent{first, 1, []any{}}}); code != 2001 {
 		t.Errorf("second address's calendar, the first address's key: code %d, want 2001", code)
+	}
+}
+
+// Seal refuses to sign in clear a fragment holding an encrypted-only
+// property (ruling M4-R16): the server could replay that signed text as an
+// encrypted part under a key it chose, and SessionKeys would take it as
+// proof. Group prefixes and case do not hide one.
+func TestSealRefusesEncryptedOnlyInSignedParts(t *testing.T) {
+	t.Parallel()
+	r := newSealRig(t)
+	for _, line := range []string{"X-EVIL:1", "a.DTSTART:20261112T090000Z", "SUMMARY:x", "summary:x", "ATTENDEE:mailto:a@pcb.test", "COMMENT:c"} {
+		for _, k := range []ical.PartKind{ical.SharedSigned, ical.CalendarSigned} {
+			parts := fullParts("mis@pcb.test")
+			parts[k] = frag("mis@pcb.test", line)
+			if we, err := cards.Seal(parts, r.create()); !errors.Is(err, cards.ErrMisroutedProperty) || len(we.SharedEventContent) != 0 {
+				t.Errorf("%s in the %s: error %v, %d shared parts; want ErrMisroutedProperty and nothing", line, k, err, len(we.SharedEventContent))
+			} else if strings.Contains(err.Error(), line) {
+				t.Errorf("%s: the error quotes the fragment: %v", line, err)
+			}
+		}
+	}
+	// Encrypted parts take any property; signed-routed X-PM-CONFERENCE-ID
+	// stays signable.
+	parts := fullParts("ok@pcb.test")
+	parts[ical.SharedSigned] = frag("ok@pcb.test", "DTSTART:20261112T090000Z", "X-PM-CONFERENCE-ID:abc")
+	parts[ical.SharedEncrypted] = frag("ok@pcb.test", "X-EVIL:1", "DTSTART:20261112T090000Z")
+	mustSeal(t, parts, r.create())
+}
+
+// The re-review's chain (N1): the server injects a line holding an
+// encrypted-only property into a stored signed part of ours; the user edits
+// the event; Patch then Seal must not give the server a signed cleartext it
+// can replay as proof of a key it chose. Each variant ends with the replay
+// untrusted, and the edited SUMMARY in no cleartext part.
+func TestPatchSealReplayChain(t *testing.T) {
+	t.Parallel()
+	r := newSealRig(t)
+	const uid = "chain@pcb.test"
+	for _, bait := range []string{"X-EVIL:1", "a.SUMMARY:bait", "SUMMARY:bait"} {
+		stored := map[ical.PartKind][]byte{
+			ical.SharedSigned:    frag(uid, "DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "SEQUENCE:0", bait),
+			ical.SharedEncrypted: frag(uid, "LOCATION:Room 1"),
+			ical.CalendarSigned:  frag(uid, "STATUS:CONFIRMED"),
+		}
+		// Sealed as stored, the bait is refused: never signed in clear.
+		if _, err := cards.Seal(stored, r.create()); !errors.Is(err, cards.ErrMisroutedProperty) {
+			t.Errorf("%s: sealing the stored parts: %v, want ErrMisroutedProperty", bait, err)
+		}
+		// The client sends the bait back (served by the render) with an
+		// edited SUMMARY.
+		comps, err := ical.Parse([]byte(strings.Join([]string{"BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20261111T090000Z",
+			"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "SEQUENCE:0", "LOCATION:Room 1", "STATUS:CONFIRMED",
+			bait, "SUMMARY:secret title", "END:VEVENT"}, "\r\n")))
+		if err != nil || len(comps) != 1 {
+			t.Fatalf("incoming: %v", err)
+		}
+		out, _, err := ical.Patch(stored, comps[0])
+		if err != nil {
+			t.Fatalf("%s: Patch: %v", bait, err)
+		}
+		shared, calSK := newSessionKey(t), newSessionKey(t)
+		we := mustSeal(t, out, cards.SealKeys{Signer: r.addr, Shared: shared, Calendar: calSK, Update: true})
+		for _, l := range []events.PartList{we.SharedEventContent, we.CalendarEventContent} {
+			for _, p := range l {
+				if p.Type == events.PartSigned && (strings.Contains(p.Data, "secret") || ical.HoldsEncryptedOnly([]byte(p.Data))) {
+					t.Errorf("%s: a signed part sent in clear holds an encrypted-only property:\n%q", bait, p.Data)
+				}
+			}
+		}
+		// The server replays each signed part we sent under its own key.
+		evil := newSessionKey(t)
+		for _, signed := range []events.Part{we.SharedEventContent[0], we.CalendarEventContent[0]} {
+			data, err := evil.Encrypt(crypto.NewPlainMessage([]byte(signed.Data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			attack := events.WireEvent{
+				SharedEventContent: events.PartList{we.SharedEventContent[0],
+					{Type: events.PartEncrypted, Data: base64.StdEncoding.EncodeToString(data), Signature: signed.Signature}},
+			}
+			ev, err := cards.Open(rowJSON(t, attack, me, wrap(t, r.calKR, evil), ""), r.calKR, nil, r.own)
+			if err != nil {
+				t.Fatalf("%s: Open the replay: %v", bait, err)
+			}
+			if got := part(t, ev, cards.SharedEncrypted); !got.Verified {
+				t.Fatalf("%s: the replayed part does not verify; the attack needs it to", bait)
+			}
+			if k, _, err := ev.SessionKeys(); k != nil || !errors.Is(err, cards.ErrUntrustedSessionKey) {
+				t.Errorf("%s: the replayed key is trusted (error %v)", bait, err)
+			}
+		}
 	}
 }

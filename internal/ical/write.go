@@ -269,6 +269,7 @@ type entry struct {
 	name, key string
 	keep      bool   // in the output
 	repl      string // the replacing line, folded; "" keeps raw
+	moved     bool   // kept, but in its routed encrypted part (M4-R16)
 }
 
 // Patch writes an incoming VEVENT over the current parts of its row
@@ -281,7 +282,7 @@ type entry struct {
 //     same, every stored copy stays as it is, even one that differs in
 //     another part (DTSTAMP per part); another value replaces the first
 //     copy in place in every part holding one (DTSTAMP everywhere, a
-//     SUMMARY where it is, even off-table), further copies go;
+//     SUMMARY where it is), further copies go;
 //   - a stored line the event no longer carries is removed, from every
 //     part (an EXDATE from both signed parts), except nested components
 //     and COLOR lines, another client's data that an incoming event never
@@ -289,6 +290,14 @@ type entry struct {
 //     always removed (ruling M4-R7);
 //   - a new line goes where Route says, after the part's last property
 //     (before END:VEVENT and any nested component);
+//   - a kept line of a signed part whose property is encrypted-only
+//     (EncryptedOnly: off-table there, from another client or injected by
+//     the server), edited or not, moves to its routed encrypted part, after
+//     that part's own lines, its bytes kept; it is dropped there when the
+//     part keeps its own copy (the same single-valued name, or the same
+//     line). We never sign such a line in clear (ruling M4-R16): the server
+//     could replay it as proof of a key it chose, and an edited SUMMARY would
+//     be sent in clear;
 //   - a part missing UID or DTSTAMP gets the incoming ones first.
 //
 // Never-routed properties and nested components of incoming are ignored.
@@ -375,6 +384,15 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 			}
 		}
 	}
+	moved := map[PartKind][]*entry{} // by destination (M4-R16)
+	for _, k := range []PartKind{SharedSigned, CalendarSigned} {
+		for _, e := range stored[k] {
+			if e.keep && !e.block && EncryptedOnly(e.name) {
+				dest := routeOf(e.name)[0] // encrypted-only: routed, to no signed part
+				moved[dest], e.moved = append(moved[dest], e), true
+			}
+		}
+	}
 	adds := map[PartKind][]string{}
 	var common []Property
 	for i, p := range in {
@@ -391,13 +409,13 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 	for _, k := range partKinds {
 		es, had := stored[k]
 		lines, isBlock, content, hadContent := []string{}, []bool{}, false, false
-		present := map[string]bool{}
+		present, presentKey := map[string]bool{}, map[string]bool{}
 		for _, e := range es {
 			if !e.keep && (e.block || e.name == "COLOR") {
 				e.keep = true
 			}
 			hadContent = hadContent || !everyPart(e.name)
-			if !e.keep {
+			if !e.keep || e.moved {
 				continue
 			}
 			line := e.raw
@@ -405,8 +423,20 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 				line = e.repl
 			}
 			lines, isBlock = append(lines, line), append(isBlock, e.block)
-			present[e.name] = true
+			present[e.name], presentKey[e.key] = true, true
 			content = content || !everyPart(e.name)
+		}
+		var relocated []string
+		for _, e := range moved[k] {
+			if (singleValued[e.name] && present[e.name]) || presentKey[e.key] {
+				continue // the part keeps its own copy
+			}
+			line := e.raw
+			if e.repl != "" {
+				line = e.repl
+			}
+			relocated = append(relocated, line)
+			present[e.name], presentKey[e.key] = true, true
 		}
 		var head []string
 		for _, p := range common {
@@ -418,8 +448,8 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 		for at > 0 && isBlock[at-1] {
 			at--
 		}
-		lines = slices.Concat(head, lines[:at], adds[k], lines[at:])
-		content = content || len(adds[k]) > 0
+		lines = slices.Concat(head, lines[:at], relocated, adds[k], lines[at:])
+		content = content || len(relocated) > 0 || len(adds[k]) > 0
 		switch {
 		case had && !k.required() && hadContent && !content: // emptied
 		case had || k.required() || content:

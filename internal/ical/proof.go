@@ -7,9 +7,18 @@ import (
 
 // EncryptedOnly reports whether the write routing table puts property name
 // (any case) in encrypted parts only: never in a signed part, and neither UID
-// nor DTSTAMP (in every part) nor a property never routed. A cleartext signed
-// part of ours never holds one, so the server holds no signature of ours over
-// such text (ruling M4-R14). It reads routeOf, so it follows the table.
+// nor DTSTAMP (in every part) nor a property never routed. It reads routeOf,
+// so it follows the table.
+//
+// It is the proof SessionKeys asks of a reused key (ruling M4-R14). The
+// premise: the server holds the plaintext of our cleartext signed parts with
+// our signatures, and Patch and Seal keep every such property out of them
+// (ruling M4-R16), so no cleartext pair of ours can serve as proof. It is
+// not airtight (ruling M4-R17): an encrypted part's detached signature is
+// sent in clear, so the server can confirm a guess of a low-entropy
+// plaintext (a default title, attendees it already knows) offline with our
+// public key, and replay it. See SPEC §5.3 and OPEN.md for the mitigation
+// and the fix.
 func EncryptedOnly(name string) bool {
 	r := routeOf(strings.ToUpper(name))
 	return len(r) > 0 && !slices.Contains(r, SharedSigned) && !slices.Contains(r, CalendarSigned)

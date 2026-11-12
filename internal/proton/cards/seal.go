@@ -35,6 +35,13 @@ var ErrUntrustedSessionKey = errors.New("session key not proven ours")
 // does not mint one, and the write is refused.
 var ErrNeedsNewSessionKey = errors.New("the update needs a session key the row lacks")
 
+// ErrMisroutedProperty means a signed part holds a property the routing
+// table puts in encrypted parts only (ical.HoldsEncryptedOnly). Seal never
+// signs one in clear (ruling M4-R16): the text would leak, and the server
+// could replay it with our signature as an encrypted part under a key it
+// chose, which SessionKeys would take as proof.
+var ErrMisroutedProperty = errors.New("a signed part holds an encrypted-only property")
+
 // SessionKeys returns the row's session keys for an update to reuse (see
 // Seal). A key is returned only when (ruling M4-R14):
 //   - every encrypted part under it (shared: the shared encrypted and
@@ -45,8 +52,10 @@ var ErrNeedsNewSessionKey = errors.New("the update needs a session key the row l
 //
 // The second condition defeats a replay: the server holds our cleartext
 // signed parts with our signatures, and could re-encrypt one under a key it
-// chose and wrap that key to our calendar key; a signed part of ours never
-// holds such a property, so the replay proves nothing. Otherwise the key is
+// chose and wrap that key to our calendar key; Seal never signs such a
+// property in clear (ErrMisroutedProperty, ruling M4-R16), so the replay
+// proves nothing. A guessed low-entropy encrypted plaintext still can
+// (ruling M4-R17, SPEC §5.3): Task 7 pins the row's key packets. Otherwise the key is
 // nil and err wraps ErrUntrustedSessionKey, naming the key. Each key is
 // judged alone, so a trusted one is returned beside an error about the
 // other. A row with no key packet for a key gives nil and no error for it:
@@ -97,8 +106,9 @@ const noKind ical.PartKind = -1
 // a fresh AES-256 key only when a part is encrypted under it, wraps it to
 // k.CalendarPrimary into SharedKeyPacket or CalendarKeyPacket, and clears it
 // once used. An update reuses the given key and makes no key packet; a part
-// needing a key not given is ErrNeedsNewSessionKey (ruling M4-R15). Seal
-// refuses a signer or recipient ring that does not hold exactly one key:
+// needing a key not given is ErrNeedsNewSessionKey (ruling M4-R15). A signed
+// fragment holding an encrypted-only property is ErrMisroutedProperty
+// (ruling M4-R16). Seal refuses a signer or recipient ring that does not hold exactly one key:
 // gopenpgp signs with the first key of a ring and wraps to every key of one.
 func Seal(parts map[ical.PartKind][]byte, k SealKeys) (events.WireEvent, error) {
 	for kind, text := range parts {
@@ -107,6 +117,9 @@ func Seal(parts map[ical.PartKind][]byte, k SealKeys) (events.WireEvent, error) 
 		}
 		if len(text) == 0 {
 			return events.WireEvent{}, fmt.Errorf("sealing the %s: empty fragment", kind)
+		}
+		if (kind == ical.SharedSigned || kind == ical.CalendarSigned) && ical.HoldsEncryptedOnly(text) {
+			return events.WireEvent{}, fmt.Errorf("sealing the %s: %w", kind, ErrMisroutedProperty)
 		}
 	}
 	if k.Signer == nil || len(k.Signer.GetKeys()) != 1 {

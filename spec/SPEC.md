@@ -197,18 +197,36 @@ dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
 if Proton signs a part of ours with another key than its author address's,
 the event shows as unverified.
 
-Session-key reuse on write [call] (research G, ruling M4-R14): an update
-reuses a row's session key only when every part encrypted under it verifies
-as ours **and** at least one of them holds a property the write routing
-table never puts in a signed part (SUMMARY, DESCRIPTION, LOCATION, ATTENDEE,
-COMMENT, any other encrypted-routed one; not UID or DTSTAMP). The server
-holds our cleartext signed parts with our signatures, so it could re-encrypt
-one under a key it chose and wrap that key to our calendar key; such a
-replay carries only signed-routed properties and is refused
-(`ErrUntrustedSessionKey`) [verified: `TestUntrustedSessionKeyIsRefused`].
-Residual risk: a third-party client that put encrypted-routed properties
-into a signed part of ours would hand the server a signed text it could
-replay as proof, so that client's rows could still be exploited.
+Session-key reuse on write [call] (research G, rulings M4-R14 to M4-R17):
+an update reuses a row's session key only when every part encrypted under it
+verifies as ours **and** at least one of them holds a property the write
+routing table never puts in a signed part (SUMMARY, DESCRIPTION, LOCATION,
+ATTENDEE, COMMENT, any other encrypted-routed one; not UID or DTSTAMP). The
+threat: the server re-encrypts a text of ours, with our signature, under a
+key it chose and wraps that key to our calendar key; our update would then
+be readable by it.
+- The premise: the server holds the plaintext of our cleartext signed parts
+  with our signatures. We never sign an encrypted-only property in clear:
+  `ical.Patch` moves such a stored line from a signed part to its routed
+  encrypted part, and `cards.Seal` refuses a signed fragment holding one
+  (`ErrMisroutedProperty`, M4-R16). So a replayed cleartext part proves
+  nothing (`ErrUntrustedSessionKey`) [verified:
+  `TestUntrustedSessionKeyIsRefused`, `TestPatchSealReplayChain`].
+- Residual risk (M4-R17, accepted): an encrypted part's detached signature
+  travels in clear, so the server can confirm offline, with our public key,
+  a guess of a low-entropy plaintext (a default title such as `New Event`,
+  an attendees part whose addresses and tokens it already sees) and replay
+  it as proof. A third-party client that put encrypted-routed properties
+  into a signed part hands the server such a text too. Proton's own clients
+  reuse keys under the same trust model.
+- Mitigation (Task 7): key-packet pinning. On the pre-write refresh, a row
+  whose `SharedKeyPacket`, `CalendarKeyPacket` or `AddressKeyPacket` differs
+  from the cached copy is untrusted for reuse (403 `pcb:untrusted-key`,
+  logged): Proton never changes a row's key packets on update (research
+  B.5), so a substitution after our first read is caught.
+- The fix (`OPEN.md`): fresh session keys on every update, once live check
+  L.4 #3 shows Proton accepts new key packets on update; that removes the
+  reuse, and the residual risk with it.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings

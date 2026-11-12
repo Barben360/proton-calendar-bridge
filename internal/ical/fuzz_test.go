@@ -227,6 +227,7 @@ func FuzzPatchRoundTrip(f *testing.F) {
 			t.Fatal(err)
 		}
 		checkFragments(t, created)
+		signedClean(t, created)
 		if got, want := mergedLines(t, created), sortedLines(x); !slices.Equal(got, want) {
 			t.Fatalf("created event merges to\n%q\nwant\n%q", got, want)
 		}
@@ -244,6 +245,7 @@ func FuzzPatchRoundTrip(f *testing.F) {
 			t.Fatal(err)
 		}
 		checkFragments(t, updated)
+		signedClean(t, updated)
 		if got, want := mergedLines(t, updated), sortedLines(y); !slices.Equal(got, want) {
 			t.Fatalf("x patched with y merges to\n%q\nwant\n%q", got, want)
 		}
