@@ -29,6 +29,9 @@ fail() {
 	printf 'FAIL (step %s): %s\n' "$STEP" "$*" >&2
 	exit 1
 }
+for tool in curl jq base32 go; do
+	command -v "$tool" >/dev/null || { printf 'rehearse.sh needs %s on PATH\n' "$tool" >&2; exit 1; }
+done
 step() {
 	STEP=$1
 	shift
@@ -441,7 +444,7 @@ equal "$(jq -r .data.daemon.pid "$RUN/out")" "$PID" "daemon pid after the rotate
 # --------------------------------------------------------------------------
 step 17 "the fake revokes the session: needs-login, CalDAV 503, no restart"
 curl -sS --fail -X POST "$CTL/revoke-sessions" >/dev/null || fail "control: revoke-sessions"
-propfind0 "$DAV/" >/dev/null # one authenticated request, as the live step sends
+propfind0 "$DAV/" >/dev/null || fail "the authenticated request before the revoke check" # one authenticated request, as the live step sends
 waiting() {
 	"$PCB" status --json >"$RUN/st.json" 2>/dev/null && jq -e '.data.health.serve == "waiting-for-login"' "$RUN/st.json"
 }
