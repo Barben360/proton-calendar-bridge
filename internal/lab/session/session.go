@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -135,7 +136,10 @@ func newManager(o Options) *proton.Manager {
 	if app == "" {
 		app = DefaultAppVersion
 	}
-	opts := []proton.Option{proton.WithAppVersion(app), proton.WithLogger(quietLogger{})}
+	// No automatic retry: a 429 or 5xx is reported with its Retry-After at
+	// once, never waited out or resent behind the caller (a resent login
+	// would spend the login budget).
+	opts := []proton.Option{proton.WithAppVersion(app), proton.WithLogger(quietLogger{}), proton.WithRetryCount(0)}
 	if o.BaseURL != "" {
 		opts = append(opts, proton.WithHostURL(o.BaseURL))
 	}
@@ -293,8 +297,10 @@ func apiMessage(err error) error {
 // as saved. On a rejected access token the client refreshes itself
 // (go-proton-api's refresh, which sends the access token Proton requires;
 // live finding 2026-11-12, E01) and the rotated tokens are saved. A refresh
-// per command would rotate the session for nothing. A session that cannot be
-// used is MustAct.
+// per command would rotate the session for nothing. An ended session (its
+// refresh refused) is MustAct, to log in again; any other failure of the
+// check (429, 5xx, network) is Blocked, to retry later: it says nothing about
+// the session and must not cost a login.
 func Resume(ctx context.Context, o Options) (*Session, error) {
 	st, err := load(o.StateDir)
 	if err != nil {
@@ -307,16 +313,33 @@ func Resume(ctx context.Context, o Options) (*Session, error) {
 	m := newManager(o)
 	c := m.NewClient(st.UID, st.AccessToken, st.RefreshToken)
 	c.AddAuthHandler(o.saveRotations(&st))
+	var ended bool // go-proton-api de-auths on a refresh refused with 400 or 422
+	c.AddDeauthHandler(func() { ended = true })
 	if _, err := c.GetUser(ctx); err != nil {
 		c.Close()
 		m.Close()
+		if ended || refused(err) {
+			return nil, &exitcode.Error{
+				Code: exitcode.MustAct,
+				Err:  fmt.Errorf("the saved session has ended: %w", apiMessage(err)),
+				Hint: "pcb-lab login",
+			}
+		}
 		return nil, &exitcode.Error{
-			Code: exitcode.MustAct,
-			Err:  fmt.Errorf("the saved session cannot be resumed: %w", apiMessage(err)),
-			Hint: "pcb-lab login",
+			Code: exitcode.Blocked,
+			Err:  fmt.Errorf("the saved session could not be checked: %w", apiMessage(err)),
+			Hint: "retry later, after any Retry-After; the session may still be good, so do not log in for this",
 		}
 	}
 	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
+}
+
+// refused reports a session Proton ended: an access token still rejected
+// (401) after the refresh, a refresh answered 401, or code 10013 (invalid
+// refresh token). go-proton-api reports 400 and 422 refreshes by de-auth.
+func refused(err error) bool {
+	var apiErr *proton.APIError
+	return errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Code == 10013)
 }
 
 // saveRotations is a client's auth handler: it redacts the rotated tokens

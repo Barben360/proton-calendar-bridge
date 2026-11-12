@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -500,6 +502,73 @@ func TestResumeOfARevokedSessionIsMustAct(t *testing.T) {
 	}
 	if e := exitErr(t, err); e.Code != exitcode.MustAct || !strings.Contains(e.Hint, "pcb-lab login") {
 		t.Fatalf("got %v, want MustAct with a login hint", err)
+	}
+}
+
+// Only an ended session (its refresh refused) is MustAct with the login
+// hint; a busy or unreachable Proton is Blocked (exit 20) and never suggests
+// a login, which the lab's budget does not allow for a transient failure.
+func TestResumeTellsAnEndedSessionFromATransientFailure(t *testing.T) {
+	t.Parallel()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	for _, c := range []struct {
+		name    string
+		expire  bool // the access token is rejected: the client refreshes
+		replies map[string]labtest.Reply
+		base    string // non-empty: Resume talks to this URL instead
+		ended   bool
+	}{
+		{name: "refresh refused 400/10013", expire: true, ended: true,
+			replies: map[string]labtest.Reply{"POST /auth/v4/refresh": labtest.R(400, `{"Code":10013,"Error":"Invalid refresh token"}`)}},
+		{name: "refresh refused 422", expire: true, ended: true,
+			replies: map[string]labtest.Reply{"POST /auth/v4/refresh": labtest.R(422, `{"Code":10013,"Error":"Invalid refresh token"}`)}},
+		{name: "refresh answered 401", expire: true, ended: true,
+			replies: map[string]labtest.Reply{"POST /auth/v4/refresh": labtest.R(401, `{"Code":401,"Error":"Invalid access token"}`)}},
+		{name: "check answered 429",
+			replies: map[string]labtest.Reply{"GET /core/v4/users": labtest.R(429, `{"Code":2028,"Error":"Too many requests"}`)}},
+		{name: "check answered 500",
+			replies: map[string]labtest.Reply{"GET /core/v4/users": labtest.R(500, `{"Code":500,"Error":"Internal error"}`)}},
+		{name: "refresh answered 429", expire: true,
+			replies: map[string]labtest.Reply{"POST /auth/v4/refresh": labtest.R(429, `{"Code":2028,"Error":"Too many requests"}`)}},
+		{name: "network error", base: closed.URL},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f := labtest.NewFront(t, &labtest.Front{})
+			o := opts(t, f)
+			s, err := session.Login(t.Context(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			if c.expire {
+				f.Backend.ExpireAccessTokens()
+			}
+			f.Mu.Lock()
+			f.Replies = c.replies
+			f.Mu.Unlock()
+			if c.base != "" {
+				o.BaseURL = c.base
+			}
+			start := time.Now()
+			r, err := session.Resume(t.Context(), o)
+			if err == nil {
+				r.Close()
+				t.Fatal("Resume succeeded")
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("Resume took %v: a failure is reported, not waited out", d)
+			}
+			e := exitErr(t, err)
+			login := strings.Contains(e.Hint, "login")
+			switch {
+			case c.ended && (e.Code != exitcode.MustAct || !login):
+				t.Errorf("got %v (code %d, hint %q), want MustAct with the login hint", err, e.Code, e.Hint)
+			case !c.ended && (e.Code != exitcode.Blocked || login || !strings.Contains(e.Hint, "retry")):
+				t.Errorf("got %v (code %d, hint %q), want Blocked with a retry hint and no login", err, e.Code, e.Hint)
+			}
+		})
 	}
 }
 
