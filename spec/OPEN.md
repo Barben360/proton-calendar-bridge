@@ -1,6 +1,6 @@
 # Open questions and pending items
 
-State at the close of M5 (2026-11-12).
+State at the close of M5 (2026-11-12), updated after the initial-version audit fixes (2026-11-12, `spec/audits/2026-11-12-initial-version.md`).
 
 ## Answered
 
@@ -23,7 +23,7 @@ State at the close of M5 (2026-11-12).
 3. Solve the test account's CAPTCHA (`spec/HUMAN-CHECKS.md`, step 1): the only author action that unblocks the live runs.
 4. Process incident during M4 (Task 4, third re-review): a reviewer agent fetched ProtonMail/WebClients `constants.ts` (GPL) to confirm the routing table. Nothing from it was copied into the repository (checked); the hard rule "never read or fetch WebClients" is now in the reviewer and re-reviewer instructions.
 5. The M4 live session needs one author sitting in Thunderbird and the web app (`spec/HUMAN-CHECKS.md` step 6.3), after the M1 and M2 live sessions.
-6. The M5 live session (`spec/HUMAN-CHECKS.md` step 7): a fresh Debian host or VM, the container, a revoked session, an idle Thunderbird, `uninstall --delete-data` (the author revokes and reads the web app's session list, and sits in Thunderbird for 7.4 and 7.7); and, after the first push to main, the GHCR package's visibility (7.8).
+6. The M5 live session (`spec/HUMAN-CHECKS.md` step 7): a fresh Debian host or VM, the container, a revoked session, an idle Thunderbird, `uninstall --delete-data` (the author revokes and reads the web app's session list, and sits in Thunderbird for 7.4 and 7.7); and the GHCR package's visibility (7.8: done, the author confirmed Private on 2026-11-12; the unauthenticated and the logged-in `docker pull` are not recorded yet).
 
 ## Still open, run by the agent (deferred live runs, `spec/HUMAN-CHECKS.md` steps 2 to 4)
 
@@ -42,7 +42,7 @@ State at the close of M5 (2026-11-12).
 - Fresh session keys on every update (rulings M4-R17, M4-R19): once live check L.4 #3 (research L.4) shows Proton accepts new key packets on an update, mint new keys and send their packets on every update instead of reusing the row's. That removes the reuse and the residual risks 1 to 5 of SPEC §5.3; pinning (and residuals 6 to 8) can then go. Until then key-packet pinning is the primary defence and the signature proof (`ical.ProvesKey`) the secondary one. L.4 #3 is not reachable with M4's tools (pcb never sends a key packet on an update): it needs a `pcb-lab` probe that does, run on the test account only.
 - Accepted by ruling M5-R16 (final review), documented: a login that completes while no CalDAV client exists creates `default` (decision 0013's rule), also after a person removed every client to cut access (a new random password, shown only by `pcb client show`); gate it on "never created before" (a flag in `state.json`) if that surprises someone.
 - The CalDAV limiter counts wrong passwords per source IP (ruling M5-R16). Behind Docker's port publishing the DNAT path keeps the client's IP; with the userland proxy (rootless Docker, or traffic Docker's `userland-proxy` relays) every client shares one IP, so five typos from one device lock all of them for a minute. Revisit with a per-username counter or a trusted-proxy setting.
-- Not reachable through pcb, which refuses or normalises first (record "not tested" in the live session, or build a lab probe): whether Proton itself enforces the RRULE limits (L.4 #6); whether it drops an unbumped **time** edit (pcb always bumps one, R4); a second master with an existing UID (L.4 #5; pcb refreshes the UID first); STATUS:TENTATIVE's 2000, floating times, non-IANA TZIDs, DURATION (L.4 #8); whether `Notifications` absent on an update keeps the row's (L.4 #10; pcb sends it absent only when the row has none).
+- Not reachable through pcb, which refuses or normalises first (record "not tested" in the live session, or build a lab probe): whether Proton itself enforces the RRULE limits (L.4 #6); whether it drops an unbumped **time** edit (pcb always bumps one, R4); a second master with an existing UID (L.4 #5; pcb refreshes the UID first); STATUS:TENTATIVE's 2000, floating times, non-IANA TZIDs, DURATION (L.4 #8); whether `Notifications` absent on an update keeps the row's, and what Proton does to a personal part an update leaves out (L.4 #10; pcb sends `Notifications` absent only when the row has none, and since the audit fix write-I3 it refuses to update a row that holds a personal part, `pcb:personal-part`, so a `pcb-lab` probe on the test account is the only way to observe it).
 
 ## Parked by M3
 
@@ -79,10 +79,10 @@ For the final audit (parked minors):
 ## Parked by M4
 
 For the live session (step 6), each a code change test first if Proton differs:
-- UID escaping: if Proton's UID column holds `pcb-m4-a,b` for `UID:pcb-m4-a\,b`, compare unescaped UIDs in the write path (`ical.ProvesKey`, the planner's row check, `ListByUID`); until then such an event is not confirmed (503) and not editable through pcb (step 6.2 W10).
+- UID escaping: if Proton's UID column holds `pcb-m4-a,b` for `UID:pcb-m4-a\,b`, compare unescaped UIDs in the write path (`ical.ProvesKey`, the planner's row check, `ListByUID`); until then such an event is not confirmed (503) and not editable through pcb (step 6.2 W10). Since the audit fix write-I2 the conflict check compares unescaped UIDs (an edit at the object's own name is 503 `the event's UID is stored by Proton in another form than its text`, never a 409 naming itself; the same UID at another name is a 409): a stop-gap. The full fix (rewriting such an event) stays here, behind W10, because `ical.ProvesKey` binds the parts' UID text to the column byte for byte.
 - R4: if Proton drops an unbumped text edit, bump SEQUENCE on every edit (every title edit would otherwise answer 503).
 - R5/R12: if the web app shows a rewritten RRULE differently, refuse that form instead (E12).
-- Personal parts (M4-R29): never re-sent on update; what Proton does to one is L.4 #10.
+- Personal parts (M4-R29): never re-sent on update; what Proton does to one is L.4 #10. Since the audit fix write-I3 an update of a row that holds one is refused (403 `pcb:personal-part`) until L.4 #10 is observed (needs a lab probe); then lift `RefusePersonalPart` (`internal/service/writeplan.go`) or re-send the part.
 
 Closed by M5 (the items that were "For M5" here):
 - `pcb status` and `pcb doctor` name a calendar whose write gate stays undecided and why (M4-R39): alert `write-gate-undecided`.
@@ -108,12 +108,44 @@ For the final audit (parked minors):
 ## Parked by M5
 
 For the final audit (parked minors; the code is read-only until then):
-- `pcb doctor` does not check the sealed client copies in `clients.json` (a missing key with only `clients.json` present, a copy that does not open): `pcb client show` names the key file and the fix in that case (Task 7b, M5-R14 (3)).
+- Closed by the initial-version audit: `pcb doctor` now warns per client whose sealed copy the key no longer opens (a lost key beside `clients.json` only, another key): `caldav client NAME: password cannot be shown`, fix `pcb client rotate NAME` (SPEC §13) [verified: `TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens`]. It stays silent when the key file cannot be read or is missing beside `secrets.sealed`: the key file and secrets checks report that. (Was: `pcb doctor` did not check the sealed client copies; Task 7b, M5-R14 (3).)
 - The stat-then-seal window: `pcb client add` and `rotate` refuse when the key file is absent while `secrets.sealed` exists, but a key deleted between that check and the seal is still minted anew (it needs a concurrent manual deletion; Task 7b fix round 1).
 - `pcb uninstall --delete-data` on a symlinked state or config directory removes only the link: plan the link removal and a `keep` step that prints the `rm -r` for the target (Task 7 review).
-- Non-ASCII home directories are refused by `pcb install` (a path with a character outside `[A-Za-z0-9/._-+@,:=~]` would be split or expanded by systemd): documented, kept (Task 7, M5 Minor 10).
+- Non-ASCII home directories are refused by `pcb install` (a path with a character outside `[A-Za-z0-9/._-+@,:=~]` would be split or expanded by systemd): documented, kept (Task 7, M5 Minor 10); since the audit it is exit 10 with the cause, also under `--plan` (`PCB_CONFIG_DIR`/`PCB_STATE_DIR` are the way around, the binary path has none).
 - `Local.Events` returns `ErrWaitingForLogin` in process while a `--wait-for-login` serve waits: only the CLI's in-process read path in the same process sees it (Task 4 re-review).
 - `uninstall --system --delete-data` runs the logout as root on `pcb`-owned files (writes are atomic, no clobber found; Task 7).
 - `pcb doctor` could flag a generation mirror at its bound (rollback detection off for that install; Task 6).
 - `sunpath_other.go`'s comment names only macOS and the BSDs though it also covers Solaris, illumos and AIX, where 103 is cautious (Task 3 re-review).
 - The user scope does not restart on a rebuilt binary at the same path: `install` prints a restart hint instead (Task 7).
+
+## Parked by the initial-version audit (2026-11-12)
+
+Findings of the six read-only auditors (main at 557fe84) that were ruled "park", each with its reason; the fixed and accepted ones are in `spec/audits/2026-11-12-initial-version.md`. Finding IDs are `<area>-<ID>` from the audit reports.
+
+Parked by the plan:
+- proton-M1: a token refresh holds `c.mu` for up to 30 s and `Tokens()` ignores its context, so every request waits behind a slow refresh on an uncancellable mutex. Bounded (the refresh has its own 30 s timeout and runs once at a time); a context-aware wait changes the transport's locking, which wants its own review.
+- proton-M5: the passphrase signature is verified at one time and the cards at time 0. Crypto semantics of an expired or rotated key; needs a live check before any change, so a wrong "fix" cannot make pcb refuse good data.
+- state-M tombstones are never pruned: the sync tokens' monotone sequence relies on it (a pruned tombstone would hide a deletion from an old token). Growth is bounded by the deletions ever seen, and `Changes` scans them by sequence; prune only together with a per-calendar floor, with the pins and aliases items above.
+- state-M a login over a rolled-back or key-unreadable store returns the store error first, forcing an extra `pcb logout` although the login replaces the store. A person has an actionable hint; the daemon's `--wait-for-login` and the CLI could skip the step, which is a UX change for a rare state.
+- surface-M2: the self-signed certificate lists every interface IP as a SAN. LAN peers know the IP anyway, and `hostnames` exists to narrow the names clients use.
+- surface-M3: the certificate is not regenerated when an interface IP appears or changes (a name clients use is covered by `hostnames`); a restart after `hostnames` is edited renews it.
+- surface-M5: no certificate renewal while running; the `tls-certificate-expiring` alert (30 days) says to restart.
+- surface-M6: a local user can lock out the loopback Thunderbird by failing five passwords a minute (the limiter is keyed by source IP). Same shape as the Docker userland-proxy item (see "Still open, later"); revisit both with a trusted-proxy setting or a per-client counter.
+- surface-M9 (second half): no cap on concurrent connections or concurrent PUT bodies (authenticated only; the PROPFIND and REPORT cap went to 1 MiB). Parked with the connection limit: `http.Server` has none, and a listener-level cap needs a design (per-IP versus global).
+- read-M5: every single GET re-reads `state.json` and counts events per calendar (O(N) per read, O(N^2) for a client that GETs every object of a 10 000-event calendar). Measure first; the fix is a `Calendar(id)` lookup without the count and a cached account ID.
+- read-M7: a full listing holds every row's `Raw` in memory, up to three times when the listing is unstable (about 100 MB for 20 000 rows at 5 KB, once per 24 h); stream pages into the transaction if calendars of that size appear.
+- read-M8: the first-wins ATTENDEE dedup can drop the PARTSTAT of the token-carrying copy when the same address sits in two parts; no known Proton shape triggers it. Prefer the line that carries a token if one is seen live.
+- write-M5: an alias stays recorded when a create never reached Proton (it is pruned only with the calendar or a new epoch); growth is bounded by the creates a client attempted. Same family as "Aliases of deleted UIDs are never pruned" above.
+
+Parked by the rulings of the fix rounds:
+- A5 M7 (state, pre-existing): `pcb logout` of a store with no key file or a corrupt `secrets.sealed` wipes it without a confirmation, because there is nothing to revoke with and the wipe is the way out of that state. A typed confirmation there would block the recovery; revisit if someone loses a session by it.
+- A7 (read): the render counters' prune uses a snapshot taken before the render, so a row added and rendered by a concurrent request after the snapshot loses its mark until it is rendered again (a cached object is not re-marked). An undercount of a diagnostic number only, the same class as `keepDuplicates`.
+- A9 M3 (write): the refusal log's `href` is the client-chosen object name (the escaped request path), quoted by slog so it cannot inject a line; authenticated clients only. Parked: say so in the log docs if someone logs it elsewhere.
+- A9 M5 (write): a 413 or 415 answer on a PUT is not logged by `refused a CalDAV write` (that line covers each 403, 409 and 412, as documented).
+- write-I2, the full fix, behind W10: see "Parked by M4", UID escaping. The stop-gap (a conflict check that compares unescaped UIDs, 503 at the object's own name) is built.
+- surface's connection cap: see surface-M9 above.
+
+Closed by the audit fixes (earlier items resolved):
+- The doctor's sealed client copies: see "Parked by M5", first item, now closed.
+- A state this pcb cannot read is no longer a dead end (a newer `secrets.sealed` or `state.json` says `upgrade pcb`; `pcb logout --yes` is the confirmed local wipe), and a crash can no longer leave a half-migrated cache or roll the change counter back (`synchronous=FULL`).
+- The stat-then-seal window for a key deleted between the check and the seal (see "Parked by M5") is unchanged and stays accepted.

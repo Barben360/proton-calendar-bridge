@@ -181,7 +181,7 @@ The executor reads the UID's rows from Proton (`ListByUID`) before planning. The
 | `pcb:unsupported-change` | the change needs a session key the row lacks; two exception rows for one occurrence; two parts of one kind in a row; series cases of §7 | M4-R13, R15 |
 | `pcb:personal-part` | a row holds a personal part (per-user data, such as alarms stored before they moved to `Notifications`): an update never re-sends it (§5), and what Proton does to a part left out is live check L.4 #10; reason `this event has per-user data pcb cannot rewrite yet`. Lifted once L.4 #10 passes | M4-R29, audit write-I3 |
 | `pcb:misrouted-stored-line` | a stored signed part holds a property that belongs in an encrypted part (we would sign it in clear) | M4-R16, R19 |
-| `pcb:proton-refused` | Proton refused the call or one entry, and the read-back shows neither the write nor a concurrent change; the reason gives Proton's code only | M4-R34 |
+| `pcb:proton-refused` | Proton refused the call or one entry, and the read-back shows no concurrent change by someone else and not every operation done; other entries of the same call may have landed, so Proton can hold part of the change (a half-applied series edit is answered 403 and the client's next read shows it); the reason gives Proton's code only (audit write-M3; SPEC §8.1 step 9) | M4-R34 |
 
 A DELETE skips the trust checks (placeholder, undecryptable, not ours, unverified, untrusted key) and `pcb:personal-part`: it re-signs nothing and leaves no part behind, so an event one cannot read or rewrite can still be deleted (M4-R27). Only `pcb:invitation` and the write gate refuse it.
 
@@ -197,5 +197,5 @@ Not a pcb precondition: a read-only calendar is `DAV:need-privileges` (403); an 
 - A single-valued property is compared with the copy pcb served (the first stored one, in part order); edited, it is replaced in place in every part that holds it.
 - A multi-valued line (`ATTENDEE` by address, `EXDATE`, `CATEGORIES`, X- lines…) is kept where stored when the body still has it, as a multiset; a new one goes where §3 routes it.
 - A stored line the body no longer carries is removed from every part, except nested components and `COLOR` lines (another client's data, kept).
-- A part whose bytes do not change is re-sent with its stored signature.
+- A part whose lines do not change keeps its stored bytes, but it is not re-sent as stored: when any line changed (or the reminders), every part of the update is sealed again (`cards.Seal`: signed with our key and encrypted with the row's session key). An update that changes no line and no reminder sends no call at all (204) (audit write-M1) [source: `Plan.update`, `internal/service/writeplan.go`; the no-call case: `TestAttendeeParameterEditsAreIgnored`].
 - Part order and VCALENDAR wrapper are rewritten in Proton's fragment form: `BEGIN:VCALENDAR`, `BEGIN:VEVENT` … `END:VEVENT`, `END:VCALENDAR`, CRLF, folded at 75 octets, no VERSION or PRODID, no final CRLF (research B.4).
