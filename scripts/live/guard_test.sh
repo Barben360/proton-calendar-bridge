@@ -11,9 +11,12 @@ export HOME=$tmp/home
 mkdir -p "$HOME"
 R=$HOME/pcb-live-run/t1
 failures=0
+# The hosts file (PCB_LIVE_HOSTS): one production and one workstation host, generic names.
+hosts=$tmp/hosts
+printf '# hosts live commands refuse\nproduction prod-host\nworkstation ws-host   # the session machine\n' > "$hosts"
 
 # envi VAR=VALUE... CMD...: a clean environment in test mode, the throwaway home as the account home.
-envi() { env -i HOME="$HOME" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$HOME" "$@"; }
+envi() { env -i HOME="$HOME" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$HOME" PCB_LIVE_HOSTS="$hosts" "$@"; }
 
 # check LABEL ACTUAL WANT: equal strings or a failure.
 check() {
@@ -161,15 +164,17 @@ vmhome=$tmp/vmhome; mkdir -p "$vmhome"
 echo throwaway > "$tmp/marker"; echo nope > "$tmp/badmarker"
 vm() { # HOSTNAME VIRT MARKER NOW RUN [run.sh args after --run RUN]
   local host=$1 virt=$2 marker=$3 now=$4 run=$5; shift 5
-  env -i HOME="$vmhome" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$vmhome" PCB_LIVE_HOSTNAME="$host" PCB_LIVE_VIRT="$virt" \
+  env -i HOME="$vmhome" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$vmhome" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_HOSTNAME="$host" PCB_LIVE_VIRT="$virt" \
     PCB_LIVE_VM_MARKER="$marker" PCB_LIVE_NOW="$now" "$here/run.sh" --vm --run "$run" "$@" 2>&1
 }
-out=$(vm blackwater kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
-check "run.sh --vm refuses blackwater" "$rc" 1
-out=$(vm MORPHEUS kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
-check "run.sh --vm refuses morpheus in any case" "$rc" 1
-out=$(vm Blackwater.lan kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
-check "run.sh --vm refuses a capitalised blackwater FQDN" "$rc" 1
+out=$(vm ws-host kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
+check "run.sh --vm refuses the workstation" "$rc $(grep -c 'workstation' <<<"$out")" "1 1"
+out=$(vm PROD-HOST kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
+check "run.sh --vm refuses the production host in any case" "$rc $(grep -c 'production' <<<"$out")" "1 1"
+out=$(vm WS-Host.lan kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
+check "run.sh --vm refuses a capitalised workstation FQDN" "$rc $(grep -c 'workstation' <<<"$out")" "1 1"
+out=$(vm prod-host.example.org kvm "$tmp/marker" 1 v1 -- pcb status); rc=$?
+check "run.sh --vm refuses a production FQDN" "$rc $(grep -c 'production' <<<"$out")" "1 1"
 out=$(vm deb13-vm kvm "$tmp/nomarker" 1 v1 -- true); rc=$?
 check "run.sh --vm refuses a missing marker" "$rc" 1
 out=$(vm deb13-vm kvm "$tmp/badmarker" 1 v1 -- true); rc=$?
@@ -179,8 +184,10 @@ check "run.sh --vm refuses systemd-detect-virt none" "$rc" 1
 out=$(vm deb13-vm kvm "$tmp/marker" 1 v1 -- env); rc=$?
 check "run.sh --vm on a marked VM exports no pcb dir" "$rc $(grep -cE '^(PCB_CONFIG_DIR|PCB_STATE_DIR|PCB_LAB_DIR)=' <<<"$out")" "0 0"
 # Without PCB_LIVE_TEST the hooks are ignored: the real marker is absent here, so a VM claim is refused.
+# The hosts file is then $HOME's (the throwaway one, empty here), so the refusal is the marker's.
+mkdir -p "$vmhome/.config/pcb-live"; : > "$vmhome/.config/pcb-live/hosts"
 out=$(env -i HOME="$vmhome" PATH="$PATH" PCB_LIVE_HOSTNAME=deb13-vm PCB_LIVE_VIRT=kvm PCB_LIVE_VM_MARKER="$tmp/marker" "$here/run.sh" --vm --run v1 -- true 2>&1); rc=$?
-check "test hooks are ignored without PCB_LIVE_TEST=1 (marker override)" "$rc" 1
+check "test hooks are ignored without PCB_LIVE_TEST=1 (marker override)" "$rc $(grep -c '/etc/pcb-live-vm missing' <<<"$out")" "1 1"
 # shellcheck disable=SC2016 # $1 is for the inner bash
 out=$(env -i HOME="$vmhome" PATH="$PATH" PCB_LIVE_HOME="$vmhome" PCB_LIVE_NOW=1 bash -c '. "$1"; echo "$(live_home) $(live_hook PCB_LIVE_NOW x)"' _ "$here/common.sh")
 check "PCB_LIVE_HOME and PCB_LIVE_NOW are ignored without PCB_LIVE_TEST=1" "$(if [[ $out == "$vmhome "* || $out == *" 1" ]]; then echo leaked; else echo ignored; fi)" ignored
@@ -191,31 +198,96 @@ out=$(vm deb13-vm kvm "$tmp/marker" 6000 v2 --login 7.4 'a fourth' -- true); rc=
 check "run.sh --vm budget is 3 (the fourth login is refused)" "$rc" 20
 check "run.sh --vm ledger holds three logins" "$(grep -c . "$vmhome/pcb-live-run/v2/logins.tsv")" 3
 
-# M7: morpheus is refused without --vm too (any case); blackwater is the normal host; a missing tool burns no ledger slot.
+# M7: the production host is refused without --vm too (any case, FQDN); the workstation is the normal host; a missing tool burns no ledger slot.
 mh=$tmp/mhome; mkdir -p "$mh/pcb-live-run/m1/bin"
 cp "$HOME/pcb-live-run/t3/bin/pcb" "$mh/pcb-live-run/m1/bin/pcb"
-mrun() { # HOSTNAME NOW [run.sh args before --]  (command: pcb status unless given after --)
-  local host=$1 now=$2; shift 2
-  env -i HOME="$mh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTNAME="$host" PCB_LIVE_NOW="$now" "$here/run.sh" --run m1 "$@" 2>&1
+hrun() { # HOSTS_FILE HOSTNAME NOW [run.sh args before --]  (command after --)
+  local file=$1 host=$2 now=$3; shift 3
+  env -i HOME="$mh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTS="$file" PCB_LIVE_HOSTNAME="$host" PCB_LIVE_NOW="$now" "$here/run.sh" --run m1 "$@" 2>&1
 }
-out=$(mrun MorPheus.lan 1 -- pcb status); rc=$?
-check "run.sh refuses morpheus without --vm, in any case" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
-out=$(mrun blackwater 1 -- pcb status); rc=$?
-check "run.sh runs on blackwater (the author's own machine)" "$rc" 0
-out=$(mrun blackwater 1 --login 1 'typo' -- no-such-tool-xyz status); rc=$?
+mrun() { hrun "$hosts" "$@"; } # HOSTNAME NOW [run.sh args before --]
+out=$(mrun prod-host 1 -- pcb status); rc=$?
+check "run.sh refuses the production host without --vm" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'production' <<<"$out")" "1 0 1"
+out=$(mrun PROD-HOST 1 -- pcb status); rc=$?
+check "run.sh refuses the production host without --vm, upper case" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+out=$(mrun Prod-Host.lan 1 -- pcb status); rc=$?
+check "run.sh refuses the production host without --vm, as an FQDN" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+out=$(mrun ws-host 1 -- pcb status); rc=$?
+check "run.sh runs on the workstation without --vm" "$rc $(grep -c 'pcb sees' <<<"$out")" "0 1"
+out=$(mrun prod-host-vm 1 -- pcb status); rc=$?
+check "run.sh runs on a host whose name only starts with the production one" "$rc" 0
+out=$(mrun .lan 1 -- pcb status); rc=$?
+check "run.sh refuses a host name with an empty first label" "$rc $(grep -c "cannot read this host's name" <<<"$out")" "1 1"
+out=$(mrun ws-host 1 --login 1 'typo' -- no-such-tool-xyz status); rc=$?
 check "run.sh --login: an unknown command is refused before the ledger" "$rc $(test -e "$mh/pcb-live-run/m1/logins.tsv" && echo ledger)" "1 "
 nopass=$tmp/nopass; mkdir -p "$nopass"
 for t in bash env getent id cut grep tail date flock realpath mkdir hostname dirname cat sed; do ln -sf "$(command -v "$t")" "$nopass/$t"; done
-out=$(env -i HOME="$mh" PATH="$nopass" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTNAME=blackwater PCB_LIVE_NOW=1 "$nopass/bash" "$here/run.sh" --run m1 --login 1 'no pass-cli' -- env pass-cli run -- pcb status 2>&1); rc=$?
+out=$(env -i HOME="$mh" PATH="$nopass" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$mh" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_HOSTNAME=ws-host PCB_LIVE_NOW=1 "$nopass/bash" "$here/run.sh" --run m1 --login 1 'no pass-cli' -- env pass-cli run -- pcb status 2>&1); rc=$?
 check "run.sh --login: pass-cli missing is refused before the ledger" "$rc $(grep -c 'pass-cli not found' <<<"$out") $(test -e "$mh/pcb-live-run/m1/logins.tsv" && echo ledger)" "1 1 "
 # M9: --proton-cal needs the run root's proton-cal.
-out=$(mrun blackwater 1 --proton-cal -- pcb status); rc=$?
+out=$(mrun ws-host 1 --proton-cal -- pcb status); rc=$?
 check "run.sh --proton-cal refuses a proton-cal missing from the run root" "$rc $(grep -c 'proton-cal' <<<"$out") $(grep -c 'pcb sees' <<<"$out")" "1 1 0"
+
+# The hosts file itself: fail closed when missing; empty means no such hosts; comments ignored.
+out=$(hrun "$tmp/no-hosts" ws-host 1 -- pcb status); rc=$?
+check "run.sh refuses a missing hosts file, nothing run" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+check "run.sh prints how to create the hosts file" "$(grep -cF "mkdir -p ~/.config/pcb-live && printf 'production <name>\nworkstation <name>\n' > ~/.config/pcb-live/hosts" <<<"$out")" 1
+mkdir -p "$tmp/hosts-dir"
+out=$(hrun "$tmp/hosts-dir" ws-host 1 -- pcb status); rc=$?
+check "run.sh refuses a hosts file that is a directory" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+if (( $(id -u) != 0 )); then
+  printf 'production prod-host\n' > "$tmp/hosts-unreadable"; chmod 000 "$tmp/hosts-unreadable"
+  out=$(hrun "$tmp/hosts-unreadable" ws-host 1 -- pcb status); rc=$?
+  check "run.sh refuses an unreadable hosts file" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+fi
+: > "$tmp/hosts-empty"
+out=$(hrun "$tmp/hosts-empty" prod-host 1 -- pcb status); rc=$?
+check "an empty hosts file is accepted (no such hosts)" "$rc $(grep -c 'pcb sees' <<<"$out")" "0 1"
+out=$(hrun "$tmp/hosts-empty" ws-host 1 --vm -- true); rc=$?
+check "an empty hosts file still leaves the --vm fence (no marker here)" "$rc $(grep -c 'pcb-live-vm' <<<"$out")" "1 1"
+printf '# production c-host\n   # workstation c-host\n\nproduction prod-host # the server\n' > "$tmp/hosts-comments"
+out=$(hrun "$tmp/hosts-comments" c-host 1 -- pcb status); rc=$?
+check "commented-out lines are ignored" "$rc $(grep -c 'pcb sees' <<<"$out")" "0 1"
+out=$(hrun "$tmp/hosts-comments" prod-host 1 -- pcb status); rc=$?
+check "a line with a trailing comment still counts" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+printf 'server prod-host\n' > "$tmp/hosts-bad"
+out=$(hrun "$tmp/hosts-bad" ws-host 1 -- pcb status); rc=$?
+check "a malformed hosts line is refused (fail closed)" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'line 1' <<<"$out")" "1 0 1"
+# Without PCB_LIVE_TEST=1, PCB_LIVE_HOSTS is ignored: $HOME's file (empty, throwaway) is read, not the hook's (missing).
+hh=$tmp/hhome; mkdir -p "$hh/.config/pcb-live"; : > "$hh/.config/pcb-live/hosts"
+# shellcheck disable=SC2016 # $1 is for the inner bash
+out=$(env -i HOME="$hh" PATH="$PATH" PCB_LIVE_HOSTS="$tmp/no-hosts" bash -c '. "$1"; live_host_check all && echo accepted' _ "$here/common.sh" 2>&1)
+check "PCB_LIVE_HOSTS is ignored without PCB_LIVE_TEST=1" "$out" accepted
+rm "$hh/.config/pcb-live/hosts"
+# shellcheck disable=SC2016 # $1 is for the inner bash
+out=$(env -i HOME="$hh" PATH="$PATH" PCB_LIVE_HOSTS="$hosts" bash -c '. "$1"; live_host_check all && echo accepted' _ "$here/common.sh" 2>&1)
+check "without PCB_LIVE_TEST=1, a missing \$HOME/.config/pcb-live/hosts is refused" "$(grep -c "$hh/.config/pcb-live/hosts" <<<"$out") $(grep -c accepted <<<"$out")" "1 0"
+
+# preflight.sh: the same hosts file; the workstation is warned about, refused for step 7.
+pfh=$tmp/pfhome; mkdir -p "$pfh/pcb-live-run/pf"
+pf() { # HOSTS_FILE HOSTNAME [--step7]
+  env -i HOME="$pfh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$pfh" PCB_LIVE_HOSTS="$1" PCB_LIVE_HOSTNAME="$2" \
+    PCB_LIVE_VIRT=kvm PCB_LIVE_VM_MARKER="$tmp/marker" "$here/preflight.sh" "$pfh/pcb-live-run/pf" "${@:3}" 2>&1
+}
+out=$(pf "$hosts" prod-host); rc=$?
+check "preflight fails the production host" "$rc $(grep -c '^FAIL  host prod-host' <<<"$out")" "1 1"
+out=$(pf "$hosts" PROD-HOST.lan --step7); rc=$?
+check "preflight --step7 fails the production host (upper case, FQDN)" "$rc $(grep -c '^FAIL  host prod-host' <<<"$out")" "1 1"
+out=$(pf "$hosts" ws-host)
+check "preflight warns about the workstation for steps 1-6" "$(grep -c '^WARN  host ws-host' <<<"$out") $(grep -c '^FAIL  host' <<<"$out")" "1 0"
+out=$(pf "$hosts" WS-Host.lan --step7)
+check "preflight --step7 fails the workstation" "$(grep -c '^FAIL  host ws-host' <<<"$out")" 1
+out=$(pf "$hosts" other-host)
+check "preflight accepts an unlisted host" "$(grep -c '^ok    host other-host' <<<"$out")" 1
+out=$(pf "$tmp/hosts-empty" prod-host)
+check "preflight accepts an empty hosts file" "$(grep -c '^ok    host prod-host' <<<"$out")" 1
+out=$(pf "$tmp/no-hosts" other-host); rc=$?
+check "preflight refuses a missing hosts file before any check" "$rc $(grep -c '^ok' <<<"$out") $(grep -cF 'mkdir -p ~/.config/pcb-live' <<<"$out")" "1 0 1"
 
 # The global ledger above the run roots: spacing and budget hold across runs.
 gh=$tmp/ghome; mkdir -p "$gh"
 glogin() { # NOW RUN [BUDGET]
-  env -i HOME="$gh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$gh" PCB_LIVE_NOW="$1" PCB_LIVE_GLOBAL_BUDGET="${3:-14}" \
+  env -i HOME="$gh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$gh" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_NOW="$1" PCB_LIVE_GLOBAL_BUDGET="${3:-14}" \
     "$here/run.sh" --run "$2" --login G 'global' -- true 2>&1
 }
 glogin 100 g1 >/dev/null
@@ -230,7 +302,7 @@ check "global ledger holds two logins" "$(grep -c . "$gh/pcb-live-run/.ledger")"
 eh=$tmp/ehome; mkdir -p "$eh"
 elogin() { # NOW RUN BUDGET GBUDGET [run.sh args before --]
   local now=$1 run=$2 b=$3 gb=$4; shift 4
-  env -i HOME="$eh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$eh" PCB_LIVE_NOW="$now" PCB_LIVE_LOGIN_BUDGET="$b" PCB_LIVE_GLOBAL_BUDGET="$gb" \
+  env -i HOME="$eh" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$eh" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_NOW="$now" PCB_LIVE_LOGIN_BUDGET="$b" PCB_LIVE_GLOBAL_BUDGET="$gb" \
     "$here/run.sh" --run "$run" "$@" -- true 2>&1
 }
 elogin 100 e1 1 14 --login 1 'first' >/dev/null
@@ -255,7 +327,7 @@ check "extra: the next login without the override is refused again (global)" "$r
 for round in 1 2 3; do
   ph=$tmp/par$round; mkdir -p "$ph"
   for i in 1 2 3 4 5 6; do
-    env -i HOME="$ph" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$ph" PCB_LIVE_NOW=100 \
+    env -i HOME="$ph" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$ph" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_NOW=100 \
       "$here/run.sh" --run p --login "P$i" 'parallel' -- true >"$tmp/par$round.$i.out" 2>&1 &
     pids[i]=$!
   done
