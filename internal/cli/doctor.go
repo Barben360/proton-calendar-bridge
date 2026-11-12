@@ -1,16 +1,17 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -20,7 +21,7 @@ type doctorData struct {
 	Results []doctor.Result `json:"results"`
 }
 
-func newDoctor() *cobra.Command {
+func (a *app) newDoctor() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that this machine can run pcb",
@@ -30,7 +31,13 @@ func newDoctor() *cobra.Command {
 			if !JSONMode(cmd) {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
-			results := doctor.Run(cmd.Context(), doctorChecks(), stream)
+			results := doctor.Run(cmd.Context(), doctorChecks(a.Env), stream)
+			for _, r := range a.daemonResults(cmd.Context()) {
+				if stream != nil {
+					stream(r)
+				}
+				results = append(results, r)
+			}
 			var failure error
 			if doctor.Worst(results) == doctor.StatusError {
 				failure = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("doctor found errors")}
@@ -40,11 +47,43 @@ func newDoctor() *cobra.Command {
 	}
 }
 
+// daemonResults are what a running pcb serve reports: "daemon", then one
+// result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
+// a warning warns). With no daemon, "daemon" is skipped: offline checks
+// only.
+func (a *app) daemonResults(ctx context.Context) []doctor.Result {
+	const name = "daemon"
+	dirs, err := paths.Resolve(a.Env)
+	if err != nil { // the directory checks report it
+		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
+	}
+	st, ok, err := a.daemonStatus(ctx, dirs.Socket())
+	switch {
+	case err != nil:
+		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: err.Error(), Fix: exitcode.HintOf(err)}}
+	case !ok:
+		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
+	}
+	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonState(st)}}
+	for _, al := range st.Alerts {
+		r := doctor.Result{Name: "alert " + al.Code, Status: doctor.StatusWarn, Message: al.Message, Fix: al.Fix}
+		if al.Calendar != "" {
+			r.Name += " " + al.Calendar
+		}
+		if al.Severity == ctl.SeverityError {
+			r.Status = doctor.StatusError
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
 // doctorChecks lists the checks, with one failing check per directory when
-// the user directories cannot be located.
-func doctorChecks() []doctor.Check {
+// the user directories cannot be located. env looks up an environment
+// variable.
+func doctorChecks(env func(string) string) []doctor.Check {
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
-	dirs, err := paths.Resolve(os.Getenv)
+	dirs, err := paths.Resolve(env)
 	if err != nil {
 		fix := func(override, xdg string) string {
 			return "set HOME, " + override + " or " + xdg + " to an absolute path"

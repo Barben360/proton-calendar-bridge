@@ -193,7 +193,13 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 		f = protontest.New(t, *o)
 		user, password, baseURL = f.Username, f.Password, f.URL
 	}
-	root := t.TempDir()
+	// Not t.TempDir: the control socket's path must fit the 108 bytes of
+	// sun_path.
+	root, err := os.MkdirTemp("", "pcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	dirs := paths.Dirs{Config: filepath.Join(root, "cfg", "pcb"), State: filepath.Join(root, "state", "pcb")}
 	if err := os.MkdirAll(dirs.Config, 0o700); err != nil {
 		t.Fatal(err)

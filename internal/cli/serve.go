@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -10,13 +11,17 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
@@ -83,7 +88,7 @@ func (a *app) newServe() *cobra.Command {
 				return err
 			}
 			defer a.closeService(svc)
-			return a.serve(cmd, svc, filepath.Join(dirs.State, "tls"), cfg.CalDAV, cfg.Log.Level)
+			return a.serve(cmd, svc, dirs, cfg.CalDAV, cfg.Log.Level)
 		},
 	}
 	c.Flags().StringVar(&listen, "listen", "", "HOST:PORT to listen on, over [caldav] listen (default "+config.DefaultListen+")")
@@ -92,11 +97,15 @@ func (a *app) newServe() *cobra.Command {
 }
 
 // serve runs the sync loop and, once it holds the sync lock and a ready
-// login, the listener (a refused start never binds). A signal (the end of
-// cmd's context) drains the listener and ends with exit 0; the sync loop
-// stopping on an error drains it and ends with that error.
-func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc config.CalDAV, level string) error {
+// login, the control socket then the listener (a refused start binds
+// neither). A signal (the end of cmd's context) drains the listener and
+// ends with exit 0; the sync loop stopping on an error drains it and ends
+// with that error. The control socket closes, and is removed, before the
+// sync loop releases the sync lock.
+func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc config.CalDAV, level string) error {
 	ctx := cmd.Context()
+	started := time.Now()
+	tlsDir := filepath.Join(dirs.State, "tls")
 	lvl, err := config.ParseLevel(level)
 	if err != nil { // Load validated it; this is for a caller that did not
 		return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("log level %w", err), Hint: "use debug, info, warn or error"}
@@ -135,6 +144,17 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 		return finish(nil)
 	}
 
+	var published atomic.Pointer[ctl.Listener]
+	stopControl, err := startControl(log, svc, ctl.NewDaemon(dirs.Socket(), level, started), published.Load)
+	if err != nil {
+		return finish(err)
+	}
+	syncFinish := finish
+	finish = func(err error) error {
+		stopControl()
+		return syncFinish(err)
+	}
+
 	ln, err := a.Listen("tcp", cc.Listen)
 	if err != nil {
 		return finish(&exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot listen on %s: %w", cc.Listen, err),
@@ -146,7 +166,10 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 		_ = ln.Close()
 		return finish(err)
 	}
-	a.printIntro(cmd, svc, log, cc, ip, ln.Addr(), tlsConf != nil, fingerprint)
+	url := thunderbirdURL(cc, ip, ln.Addr(), tlsConf != nil)
+	a.printIntro(cmd, svc, log, url, tlsConf != nil, fingerprint)
+	published.Store(&ctl.Listener{Addr: ln.Addr().String(), URL: url, TLS: tlsConf != nil, Fingerprint: fingerprint,
+		CertNotAfter: certNotAfter(tlsConf)})
 
 	srv := &http.Server{
 		Handler:           caldav.Handler(svc, caldav.Options{Logger: log}),
@@ -180,6 +203,71 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 	}
 	stopListener(srv, log, drainTimeout)
 	return finish(result)
+}
+
+// startControl serves the control socket of d (d.Socket) on svc and
+// returns what stops it: it closes the socket, which removes it. Off Unix
+// there is no control socket (ruling M5-P3); any other failure to open it
+// is exit 20 with a hint for its cause.
+func startControl(log *slog.Logger, svc service.API, d ctl.Daemon, listener func() *ctl.Listener) (stop func(), err error) {
+	ln, err := ctl.Listen(d.Socket)
+	switch {
+	case errors.Is(err, ctl.ErrUnsupported):
+		log.Debug("no control socket on this system")
+		return func() {}, nil
+	case err != nil:
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
+			Hint: controlHint(err, d.Socket)}
+	}
+	srv := &ctl.Server{API: svc, Daemon: d, Listener: listener, Now: time.Now, Logger: log}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+			log.Warn("the control socket failed: pcb status shows the offline view", "error", err.Error())
+		}
+	}()
+	log.Info("control socket started", "path", d.Socket)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			_ = srv.Shutdown(ctx)
+			<-done
+			log.Info("control socket stopped")
+		})
+	}, nil
+}
+
+// controlHint is what to do about a control socket that cannot be opened.
+func controlHint(err error, socket string) string {
+	dir := filepath.Dir(socket)
+	switch {
+	case errors.Is(err, ctl.ErrPathTooLong):
+		return "set " + paths.EnvStateDir + " to a shorter path"
+	case errors.Is(err, ctl.ErrUnsafeDir):
+		return "chmod 700 " + dir
+	case errors.Is(err, ctl.ErrNotASocket):
+		return "move " + socket + " away: pcb serve keeps its control socket there"
+	}
+	return "make sure " + dir + " is writable by this user"
+}
+
+// certNotAfter is the end of the listener's certificate, nil without TLS.
+func certNotAfter(conf *tls.Config) *time.Time {
+	if conf == nil || len(conf.Certificates) == 0 || len(conf.Certificates[0].Certificate) == 0 {
+		return nil
+	}
+	leaf := conf.Certificates[0].Leaf
+	if leaf == nil {
+		var err error
+		if leaf, err = x509.ParseCertificate(conf.Certificates[0].Certificate[0]); err != nil {
+			return nil
+		}
+	}
+	t := leaf.NotAfter.UTC()
+	return &t
 }
 
 // stopListener stops accepting, waits up to timeout for the requests in
@@ -256,10 +344,9 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, fingerprint, nil
 }
 
-// printIntro writes what to enter in Thunderbird: the URL, the
-// fingerprint over TLS, and how to get a password when no client exists.
-func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, cc config.CalDAV, ip net.IP, addr net.Addr, useTLS bool, fingerprint string) {
-	w := cmd.OutOrStdout()
+// thunderbirdURL is the URL to enter in Thunderbird for the listener at
+// addr, bound to ip.
+func thunderbirdURL(cc config.CalDAV, ip net.IP, addr net.Addr, useTLS bool) string {
 	scheme := "http"
 	if useTLS {
 		scheme = "https"
@@ -268,7 +355,14 @@ func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, 
 	if t, ok := addr.(*net.TCPAddr); ok {
 		port = fmt.Sprint(t.Port)
 	}
-	fmt.Fprintf(w, "Thunderbird URL: %s://%s/\n", scheme, net.JoinHostPort(urlHost(cc, ip), port))
+	return scheme + "://" + net.JoinHostPort(urlHost(cc, ip), port) + "/"
+}
+
+// printIntro writes what to enter in Thunderbird: the URL, the
+// fingerprint over TLS, and how to get a password when no client exists.
+func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, url string, useTLS bool, fingerprint string) {
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "Thunderbird URL: %s\n", url)
 	if useTLS {
 		fmt.Fprintf(w, "TLS certificate SHA-256 fingerprint: %s (check it in Thunderbird's certificate exception dialog)\n", fingerprint)
 	}

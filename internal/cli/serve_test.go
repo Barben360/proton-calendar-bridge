@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -61,6 +63,11 @@ type serveRun struct {
 
 func startServe(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, args ...string) *serveRun {
 	t.Helper()
+	// The state directory pcb serve binds its control socket in (a real
+	// service makes it before it is ready).
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s := &serveRun{t: t, requested: make(chan string, 1), addr: make(chan net.Addr, 1), code: make(chan exitcode.Code, 1),
 		out: &syncBuffer{}, errb: &syncBuffer{}}
 	io := cli.IO{Stdout: s.out, Stderr: s.errb, Term: r.term, Env: func(k string) string { return r.env[k] },
@@ -830,4 +837,77 @@ func TestServeRefusesABadLogLevel(t *testing.T) {
 		default:
 		}
 	}
+}
+
+// pcb serve answers on its control socket while it serves, publishes its
+// CalDAV listener there, and removes the socket when it stops.
+func TestServeServesTheControlSocket(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	stub.statusPhase = "ready"
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, nil, "--log-level", "debug")
+	addr := s.listening()
+
+	c, err := ctl.Dial(t.Context(), r.dirs.Socket())
+	if err != nil {
+		t.Fatalf("Dial while serving: %v", err)
+	}
+	st, err := c.Status(t.Context())
+	_ = c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(addr)
+	if st.Phase != "ready" || st.Daemon == nil || st.Daemon.PID != os.Getpid() || st.Daemon.LogLevel != "debug" ||
+		st.Daemon.Socket != r.dirs.Socket() || st.Daemon.Version == "" {
+		t.Errorf("status = %+v, daemon %+v", st, st.Daemon)
+	}
+	if st.Listener == nil || st.Listener.URL != "http://localhost:"+port+"/" || st.Listener.TLS || !strings.HasSuffix(st.Listener.Addr, ":"+port) {
+		t.Errorf("listener = %+v, want the CalDAV one on port %s", st.Listener, port)
+	}
+	if fi, err := os.Lstat(r.dirs.Socket()); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("socket: %v, %v; want mode 0600", fi, err)
+	}
+
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+	}
+	if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the socket is still there after the stop: %v", err)
+	}
+	if _, err := ctl.Dial(t.Context(), r.dirs.Socket()); !errors.Is(err, ctl.ErrNoDaemon) {
+		t.Errorf("Dial after the stop: %v, want ErrNoDaemon", err)
+	}
+}
+
+// The socket's directory must grant group and others nothing: pcb serve
+// exits 20 before it binds CalDAV.
+func TestServeRefusesAnOpenStateDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(r.dirs.State, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	s := startServe(t, r, nil)
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if want := "Hint: chmod 700 " + r.dirs.State; !strings.Contains(s.errb.String(), want) {
+		t.Errorf("stderr = %q, want %q", s.errb.String(), want)
+	}
+	s.neverListened()
 }

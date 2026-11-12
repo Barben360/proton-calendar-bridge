@@ -1,33 +1,158 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 func (a *app) newStatus() *cobra.Command {
-	return &cobra.Command{
+	var daemonOnly bool
+	c := &cobra.Command{
 		Use:   "status",
-		Short: "Show the login state (no network call)",
-		Args:  NoArgs,
+		Short: "Show the login and, from a running pcb serve, its live state",
+		Long: "Show the login and, when pcb serve runs, its live state over the control socket: the listener, each " +
+			"calendar's sync and write gate, the render counters and the alerts. Without a daemon, the login as the " +
+			"files describe it (the offline view, no network call). Exit 0 whatever the alerts.",
+		Args: NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := a.service(cmd)
+			st, err := a.status(cmd, daemonOnly)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer a.closeService(svc)
-			st, err := svc.Status(cmd.Context())
-			if err != nil {
-				return Finish(cmd, nil, "", err)
-			}
-			return Finish(cmd, st, statusText(st), nil)
+			return Finish(cmd, st, liveStatusText(st), nil)
 		},
 	}
+	c.Flags().BoolVar(&daemonOnly, "daemon", false, "exit 20 when no pcb daemon answers, instead of the offline view")
+	return c
+}
+
+// status is the daemon's status, else (unless daemonOnly) the offline view:
+// the login as the files describe it and its alerts.
+func (a *app) status(cmd *cobra.Command, daemonOnly bool) (ctl.Status, error) {
+	ctx := cmd.Context()
+	dirs, err := resolveDirs(a.Env)
+	if err != nil && daemonOnly {
+		return ctl.Status{}, err
+	}
+	if err == nil {
+		st, ok, err := a.daemonStatus(ctx, dirs.Socket())
+		switch {
+		case err != nil:
+			return ctl.Status{}, err
+		case ok:
+			return st, nil
+		case daemonOnly:
+			return ctl.Status{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
+				Hint: "start it: pcb service start, or pcb serve"}
+		}
+	}
+	svc, err := a.service(cmd)
+	if err != nil {
+		return ctl.Status{}, err
+	}
+	defer a.closeService(svc)
+	local, err := svc.Status(ctx)
+	if err != nil {
+		return ctl.Status{}, err
+	}
+	return ctl.Status{Status: local, Alerts: ctl.Alerts(ctl.AlertInput{Login: local, Now: time.Now()})}, nil
+}
+
+// daemonStatus asks the daemon on socket for its status; ok is false when
+// none answers there.
+func (a *app) daemonStatus(ctx context.Context, socket string) (st ctl.Status, ok bool, err error) {
+	c, err := a.DialDaemon(ctx, socket)
+	if errors.Is(err, ctl.ErrNoDaemon) {
+		return ctl.Status{}, false, nil
+	}
+	if err != nil {
+		return ctl.Status{}, false, err
+	}
+	defer func() { _ = c.Close() }()
+	st, err = c.Status(ctx)
+	if err != nil {
+		return ctl.Status{}, false, err
+	}
+	return st, true, nil
+}
+
+// liveStatusText is statusText, then the daemon, its listener, each
+// calendar's live state, the render counters and one line per alert.
+func liveStatusText(s ctl.Status) string {
+	var b strings.Builder
+	b.WriteString(statusText(s.Status))
+	line := func(format string, args ...any) { fmt.Fprintf(&b, "\n"+format, args...) }
+	if s.Daemon == nil {
+		line("daemon: not running (offline view)")
+	} else {
+		line("daemon: %s", daemonState(s))
+	}
+	if l := s.Listener; l != nil {
+		var tls []string
+		if l.TLS {
+			tls = append(tls, "TLS")
+			if l.CertNotAfter != nil {
+				tls = append(tls, "certificate until "+l.CertNotAfter.Format(time.DateOnly))
+			}
+			if l.Fingerprint != "" {
+				tls = append(tls, "fingerprint "+l.Fingerprint)
+			}
+		} else {
+			tls = append(tls, "plain HTTP")
+		}
+		line("listener: %s (%s)", l.URL, strings.Join(tls, ", "))
+	}
+	if h := s.Health; h != nil {
+		for _, c := range h.Calendars {
+			line("calendar: %s", calendarHealthText(c))
+		}
+		line("render: undecryptable %d, unverified %d, duplicate masters %d", h.Render.Undecryptable, h.Render.Unverified, h.Render.DuplicateMasters)
+	}
+	for _, al := range s.Alerts {
+		line("alert: %s %s: %s (fix: %s)", al.Severity, al.Code, al.Message, al.Fix)
+	}
+	return b.String()
+}
+
+// daemonState is "serving since T (pid N, version V)": since Serve began
+// serving, else since the daemon started.
+func daemonState(s ctl.Status) string {
+	since := s.Daemon.StartedAt
+	if s.Health != nil && s.Health.Since != nil {
+		since = *s.Health.Since
+	}
+	return fmt.Sprintf("serving since %s (pid %d, version %s)", since.Format(time.RFC3339), s.Daemon.PID, s.Daemon.Version)
+}
+
+// calendarHealthText is one calendar's live state; a calendar never synced
+// has no lag.
+func calendarHealthText(c service.CalendarHealth) string {
+	v := fmt.Sprintf("%s (%s): synced ", c.Name, c.ID)
+	if c.SyncedAt == nil {
+		v += "never"
+	} else {
+		v += c.SyncedAt.Format(time.RFC3339)
+		if c.LagSeconds != nil {
+			v += ", lag " + (time.Duration(*c.LagSeconds) * time.Second).String()
+		}
+	}
+	v += ", write gate " + c.Gate
+	if c.GateReason != "" {
+		v += " (" + c.GateReason + ")"
+	}
+	if c.Error != "" {
+		v += ", last error " + c.ErrorClass + ": " + c.Error
+	}
+	return v
 }
 
 // statusText is one "key: value" line per field; optional fields are left

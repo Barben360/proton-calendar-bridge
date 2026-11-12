@@ -2,10 +2,16 @@ package cli_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -83,5 +89,143 @@ func TestStatusNeverSynced(t *testing.T) {
 	r.want(exitcode.OK, "status")
 	if strings.Contains(r.out.String(), "sync:") {
 		t.Errorf("logged-out status shows a sync line: %q", r.out.String())
+	}
+}
+
+// daemonAPI is the service a test daemon answers from.
+type daemonAPI struct {
+	stubAPI
+	status service.Status
+	health service.Health
+}
+
+func (d *daemonAPI) Status(context.Context) (service.Status, error) { return d.status, nil }
+func (d *daemonAPI) Health(context.Context) (service.Health, error) { return d.health, nil }
+
+// daemonNow is the clock of the test daemons.
+var daemonNow = time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+
+// startDaemon serves a control socket on api at the rig's socket path, as
+// pcb serve does, until the test ends.
+func startDaemon(t *testing.T, r *rig, api service.API, ln *ctl.Listener) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sl, err := ctl.Listen(r.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &ctl.Server{API: api, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
+		Daemon: ctl.Daemon{PID: 4242, Version: "v1.2.3", StartedAt: daemonNow.Add(-2 * time.Hour), LogLevel: "info", Socket: r.dirs.Socket()}}
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(sl) }()
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("the daemon's Serve returned %v", err)
+		}
+	})
+}
+
+func TestStatusFallsBackOffline(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})
+	r.want(exitcode.OK, "status", "--json")
+	var data map[string]json.RawMessage
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if d, ok := data["daemon"]; !ok || string(d) != "null" {
+		t.Errorf("daemon = %s (present %v), want null", d, ok)
+	}
+	if string(data["phase"]) != `"logged-out"` {
+		t.Errorf("phase = %s, want the flat login field", data["phase"])
+	}
+	var alerts []ctl.Alert
+	mustUnmarshal(t, data["alerts"], &alerts)
+	if len(alerts) != 1 || alerts[0].Code != "needs-login" {
+		t.Errorf("alerts = %+v, want the login's", alerts)
+	}
+	for _, absent := range []string{"health", "listener"} {
+		if _, has := data[absent]; has {
+			t.Errorf("the offline view has %s: %s", absent, data[absent])
+		}
+	}
+
+	r.want(exitcode.OK, "status")
+	for _, want := range []string{
+		"phase: logged-out\n",
+		"daemon: not running (offline view)\n",
+		"alert: error needs-login: not logged in to Proton (fix: run pcb login)",
+	} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("status lacks %q:\n%s", want, r.out.String())
+		}
+	}
+}
+
+func TestStatusShowsTheDaemon(t *testing.T) {
+	t.Parallel()
+	// The offline service says logged out: what status shows must come
+	// from the daemon.
+	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})
+	since, synced, notAfter := daemonNow.Add(-time.Hour), daemonNow.Add(-time.Minute), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	lag := 60
+	api := &daemonAPI{
+		status: service.Status{Phase: "ready", Username: "alice", Secrets: "sealed"},
+		health: service.Health{Serve: service.ServeServing, Since: &since, IntervalSeconds: 30,
+			Calendars: []service.CalendarHealth{
+				{ID: "cal-1", Name: "Work", SyncedAt: &synced, LagSeconds: &lag, Gate: "closed", GateReason: "our member lacks the Write permission"},
+				{ID: "cal-2", Name: "Home", Gate: "undecided", GateReason: "the keys were not loaded yet", ErrorClass: "network", Error: "dial tcp: refused"},
+			},
+			Render: service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3}},
+	}
+	startDaemon(t, r, api, &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
+
+	r.want(exitcode.OK, "status")
+	got := r.out.String()
+	for _, want := range []string{
+		"phase: ready\n",
+		"daemon: serving since 2026-11-12T11:00:00Z (pid 4242, version v1.2.3)\n",
+		"listener: https://pcb.lan:8443/ (TLS, certificate until 2027-01-01, fingerprint AB:CD)\n",
+		"calendar: Work (cal-1): synced 2026-11-12T11:59:00Z, lag 1m0s, write gate closed (our member lacks the Write permission)\n",
+		"calendar: Home (cal-2): synced never, write gate undecided (the keys were not loaded yet), last error network: dial tcp: refused\n",
+		"render: undecryptable 1, unverified 2, duplicate masters 3\n",
+		"alert: warning sync-stalled: no successful sync of Home for 1h0m0s (fix: see last_pass and the logs (pcb service logs))\n",
+		"alert: warning write-gate-undecided: writes to Home answer 503: the keys were not loaded yet (fix: check the calendar's keys in the Proton web app, then pcb service restart)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "offline") || strings.Contains(got, "needs-login") {
+		t.Errorf("status used the offline service:\n%s", got)
+	}
+	if i, j := strings.Index(got, "sync-stalled"), strings.Index(got, "write-gate-undecided"); i < 0 || j < i {
+		t.Errorf("alerts out of order:\n%s", got)
+	}
+
+	r.want(exitcode.OK, "status", "--json", "--daemon")
+	var st ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &st)
+	if st.Daemon == nil || st.Daemon.PID != 4242 || st.Username != "alice" || st.Health == nil || len(st.Alerts) != 2 {
+		t.Errorf("status = %+v", st)
+	}
+}
+
+// Ruling M5-P5: --daemon needs an answering daemon (the HEALTHCHECK's).
+func TestStatusDaemonFlagNeedsADaemon(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{statusPhase: "ready"})
+	r.want(exitcode.Blocked, "status", "--daemon", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Message != "no pcb daemon answers on "+r.dirs.Socket() || e.Error.Hint != "start it: pcb service start, or pcb serve" {
+		t.Errorf("error = %+v", e.Error)
+	}
+	r.want(exitcode.Blocked, "status", "--daemon")
+	if !strings.Contains(r.errb.String(), "no pcb daemon answers on "+r.dirs.Socket()) {
+		t.Errorf("stderr = %q", r.errb.String())
 	}
 }

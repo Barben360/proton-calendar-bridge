@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -28,11 +29,15 @@ type IO struct {
 	NewService func(ctx context.Context, env func(string) string) (service.API, error)
 	// Listen opens pcb serve's listener (net.Listen).
 	Listen func(network, address string) (net.Listener, error)
+	// DialDaemon connects to pcb serve's control socket at path (ctl.Dial):
+	// ctl.ErrNoDaemon when none answers.
+	DialDaemon func(ctx context.Context, path string) (*ctl.Client, error)
 }
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
-	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen}
+	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen,
+		DialDaemon: ctl.Dial}
 }
 
 // withDefaults fills the nil fields with the operating system's values.
@@ -55,15 +60,27 @@ func (o IO) withDefaults() IO {
 	if o.Listen == nil {
 		o.Listen = net.Listen
 	}
+	if o.DialDaemon == nil {
+		o.DialDaemon = ctl.Dial
+	}
 	return o
+}
+
+// resolveDirs resolves the config and state directories.
+func resolveDirs(env func(string) string) (paths.Dirs, error) {
+	dirs, err := paths.Resolve(env)
+	if err != nil {
+		return paths.Dirs{}, &exitcode.Error{Code: exitcode.Blocked, Err: err,
+			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
+	}
+	return dirs, nil
 }
 
 // loadConfig resolves the directories and loads config.toml.
 func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
-	dirs, err := paths.Resolve(env)
+	dirs, err := resolveDirs(env)
 	if err != nil {
-		return paths.Dirs{}, config.Config{}, &exitcode.Error{Code: exitcode.Blocked, Err: err,
-			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
+		return paths.Dirs{}, config.Config{}, err
 	}
 	cfg, err := config.Load(config.Path(dirs), dirs)
 	if err != nil {

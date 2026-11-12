@@ -7,8 +7,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // isolate points the XDG dirs at a temp tree and returns the config dir.
@@ -58,12 +60,12 @@ func TestDoctorExitCode(t *testing.T) {
 		names = append(names, r.Name)
 		statuses = append(statuses, r.Status)
 	}
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients"; got != want {
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn") {
+		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -80,8 +82,11 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 12 { // 11 checks, the clients warning with its fix line
-		t.Fatalf("stdout = %q, want 12 lines", out)
+	if len(lines) != 13 { // 11 checks, the clients warning with its fix line, the daemon
+		t.Fatalf("stdout = %q, want 13 lines", out)
+	}
+	if want := "–  daemon: not running: offline checks only"; lines[12] != want {
+		t.Errorf("line 12 = %q, want %q", lines[12], want)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)
@@ -152,5 +157,48 @@ func TestDoctorFlagsBadConfigFile(t *testing.T) {
 	code, out, _ := run("doctor")
 	if code != exitcode.Blocked || !strings.Contains(out, "✗  config file: unknown key proton.appversion") || !strings.Contains(out, "   fix: edit "+p) {
 		t.Fatalf("code=%d stdout=%q", code, out)
+	}
+}
+
+// With a daemon, doctor lists its alerts: an error is ✗ with its fix and
+// exit 20; a warning is ! and leaves the exit code alone.
+func TestDoctorListsAlerts(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	since := daemonNow.Add(-time.Hour)
+	api := &daemonAPI{status: service.Status{Phase: "ready"}, health: service.Health{Serve: service.ServeServing, Since: &since, IntervalSeconds: 30,
+		Calendars: []service.CalendarHealth{{ID: "cal-2", Name: "Home", SyncedAt: &daemonNow, Gate: "undecided", GateReason: "the keys were not loaded yet"}}}}
+	startDaemon(t, r, api, nil)
+
+	r.want(exitcode.OK, "doctor")
+	for _, want := range []string{
+		"✓  daemon: serving since 2026-11-12T11:00:00Z (pid 4242, version v1.2.3)\n",
+		"!  alert write-gate-undecided cal-2: writes to Home answer 503: the keys were not loaded yet\n" +
+			"   fix: check the calendar's keys in the Proton web app, then pcb service restart\n",
+	} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+		}
+	}
+
+	api.status = service.Status{Phase: "needs-login", Reason: "Proton ended the session"}
+	r.want(exitcode.Blocked, "doctor")
+	if want := "✗  alert needs-login: Proton ended the session\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+
+	r.want(exitcode.Blocked, "doctor", "--json")
+	var data struct {
+		Results []struct{ Name, Status, Message, Fix string } `json:"results"`
+	}
+	mustUnmarshal(t, r.envelope().Data, &data)
+	var found bool
+	for _, res := range data.Results {
+		if res.Name == "alert needs-login" && res.Status == "error" && res.Fix == "run pcb login" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("results lack the needs-login alert: %+v", data.Results)
 	}
 }
