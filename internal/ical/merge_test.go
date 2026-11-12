@@ -2,6 +2,7 @@ package ical
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -384,6 +385,40 @@ func TestMergeEventDropsControls(t *testing.T) {
 	ApplyRow(&c, "#a\x01bc", nil)
 	if v := values(c, "COLOR"); len(v) != 1 || v[0] != ":#abc" {
 		t.Errorf("color = %v", v)
+	}
+}
+
+// Inside a nested component, a property or component whose name holds a
+// control is dropped, as at the event level: stripping would make another
+// name of it (an empty one, END, BEGIN) and break the output (fuzz
+// FuzzMergeEvent/5d598abd8dfe09e1).
+func TestMergeEventDropsNestedControlNames(t *testing.T) {
+	ev := mustMerge(t, []byte("BEGIN:VEVENT\nUID:u\nX-\x01Y:1\nBEGIN:VALARM\n\x00:x\nEN\x01D:VALARM\nBEG\x00IN:VTODO\nACTION:DISPLAY\nBEGIN:X-\x01A\nX-B:1\nEND:X-\x01A\nEND:VALARM\nBEGIN:VAL\x7fARM\nACTION:AUDIO\nEND:VAL\x7fARM\nEND:VEVENT"))
+	out := string(ev.Bytes())
+	comps, err := Parse([]byte(out))
+	if err != nil {
+		t.Fatalf("output does not parse: %v\n%q", err, out)
+	}
+	alarms := comps[0].Subs("VALARM")
+	if len(alarms) != 1 {
+		t.Fatalf("want one VALARM, got %d in\n%q", len(alarms), out)
+	}
+	var lines []string
+	for _, it := range alarms[0].Items {
+		if it.Comp != nil {
+			t.Errorf("component %q with a control in its name was kept", it.Comp.Name)
+			continue
+		}
+		lines = append(lines, it.Prop.Line())
+	}
+	if !slices.Equal(lines, []string{"ACTION:DISPLAY"}) {
+		t.Errorf("VALARM lines = %q, want only ACTION:DISPLAY", lines)
+	}
+	if strings.Contains(out, "X-Y") || values(comps[0], "UID") == nil {
+		t.Errorf("event-level property with a control in its name kept, or UID lost:\n%q", out)
+	}
+	if i := controlIn(out); i >= 0 {
+		t.Errorf("control at %d in %q", i, out)
 	}
 }
 
