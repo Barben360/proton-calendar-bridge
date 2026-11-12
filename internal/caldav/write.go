@@ -124,10 +124,15 @@ func calendarBody(contentType string) bool {
 // precondition reads If-Match (the service compares its list of ETags
 // strongly, or "*"), from one header or several, and If-None-Match: "*", or
 // the ETags it names (the service compares them weakly with the object's,
-// and a missing object passes, RFC 9110 §13.1.2). An If-None-Match with no
-// ETag in it is false: the request is answered 412 without being tried.
+// and a missing object passes, RFC 9110 §13.1.2). An If-Match or an
+// If-None-Match present with no ETag in it (empty, blank or only commas:
+// RFC 9110 makes each a non-empty list) is false: the request is answered
+// 412 without being tried, never written unconditionally.
 func precondition(r *http.Request) (service.Precondition, bool) {
 	cond := service.Precondition{IfMatch: strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))}
+	if _, present := r.Header["If-Match"]; present && strings.Trim(cond.IfMatch, ", \t") == "" {
+		return cond, false
+	}
 	inm := strings.TrimSpace(strings.Join(r.Header.Values("If-None-Match"), ","))
 	if inm == "" {
 		return cond, true

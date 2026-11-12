@@ -1345,8 +1345,8 @@ func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
 }
 
 // The adapter's own refusals, before the service: a PUT body that is not
-// text/calendar is 415, over 8 MiB 413, an If-None-Match that names no
-// ETag 412; PUT or DELETE on a
+// text/calendar is 415, over 8 MiB 413, an If-None-Match or an If-Match
+// that names no ETag 412; PUT or DELETE on a
 // collection 405, on no resource 404. None reaches the service.
 func TestPutRequestChecksComeFirst(t *testing.T) {
 	t.Parallel()
@@ -1365,6 +1365,10 @@ func TestPutRequestChecksComeFirst(t *testing.T) {
 		{"over 8 MiB", http.MethodPut, obj, strings.Repeat("x", 8<<20+1), []string{"Content-Type", "text/calendar"}, http.StatusRequestEntityTooLarge},
 		{"If-None-Match without an ETag", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-None-Match", ","}, http.StatusPreconditionFailed},
 		{"DELETE If-None-Match without an ETag", http.MethodDelete, obj, "", []string{"If-None-Match", " , "}, http.StatusPreconditionFailed},
+		// A blank If-Match fails closed (ruling A9): never an unconditional write.
+		{"empty If-Match", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-Match", ""}, http.StatusPreconditionFailed},
+		{"blank If-Match", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-Match", " \t "}, http.StatusPreconditionFailed},
+		{"DELETE If-Match of commas", http.MethodDelete, obj, "", []string{"If-Match", " , ,"}, http.StatusPreconditionFailed},
 		{"PUT a calendar", http.MethodPut, calPath(workID), "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
 		{"DELETE a calendar", http.MethodDelete, calPath(workID), "", nil, http.StatusMethodNotAllowed},
 		{"PUT the home set", http.MethodPut, home, "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},

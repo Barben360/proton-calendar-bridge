@@ -30,7 +30,7 @@ Part names: **SS** shared signed (clear text, detached signature), **SE** shared
 | Resource name: empty, `.`, `..`, a `/`, a control character, invalid UTF-8; or over 255 bytes when it is about to become an alias | refused `pcb:bad-resource-name` |
 | Resource name that is another UID's alternative name (`~~<base64url>.ics`, M4-R38) | refused `pcb:bad-resource-name` |
 | `If-None-Match` naming ETags | evaluated (weak comparison; a missing object passes); an empty list is 412 |
-| `If-Match` | `*`: the object must exist; else a comma-separated list (several headers are one list), one of which must be the object's ETag by strong comparison: a weak `W/"…"` tag never matches (RFC 9110 §13.1.1); otherwise 412 |
+| `If-Match` | `*`: the object must exist; else a comma-separated list (several headers are one list), one of which must be the object's ETag by strong comparison: a weak `W/"…"` tag never matches (RFC 9110 §13.1.1); otherwise 412; a present but blank `If-Match` (empty, spaces or commas only) is 412 too, never an unconditional write |
 
 ## 2. VCALENDAR level
 

@@ -723,15 +723,12 @@ func checkPrecondition(cond Precondition, exists bool, etag string) error {
 
 // ifMatch reports whether an If-Match value holds on an existing object
 // whose ETag is etag (RFC 9110 §13.1.1): "*", or a comma-separated list of
-// entity tags one of which is etag by strong comparison, so a weak tag
-// (W/"…") never holds.
+// entity tags one of which is etag by strong comparison. The object's ETag
+// is strong (objectETag), so a weak tag (W/"…") never equals it and never
+// holds.
 func ifMatch(value, etag string) bool {
 	for _, e := range strings.Split(value, ",") {
-		switch e = strings.TrimSpace(e); {
-		case e == "*":
-			return true
-		case strings.HasPrefix(e, "W/"):
-		case e == etag:
+		if e = strings.TrimSpace(e); e == "*" || e == etag {
 			return true
 		}
 	}

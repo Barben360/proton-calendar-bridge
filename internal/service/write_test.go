@@ -2272,13 +2272,24 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 // text, never a 409 naming its own name. pcb cannot rewrite it while the
 // two forms diverge, so its edit is unavailable (503), nothing sent; the
 // same UID at another name is a 409 naming the object's name, as for any
-// UID.
+// UID. The other direction too (ruling A9): a column holding the escaped
+// text (`pcb-c\,d`) and a client sending the UID unescaped (`UID:pcb-c,d`).
 func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
 	t.Parallel()
 	const column, text = "pcb-a,b", `pcb-a\,b`
+	const escapedColumn = `pcb-c\,d`
 	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
 		f.AddEvent(cal, protontest.Event{UID: column, Start: base, End: base + 3600, Color: green, Card: card(text, "Escaped", base)})
+		f.AddEvent(cal, protontest.Event{UID: escapedColumn, Start: base, End: base + 3600, Color: green, Card: card(escapedColumn, "Kept", base)})
 	}).start(t)
+	t.Run("StoredEscapedSentUnescaped", func(t *testing.T) {
+		obj := r.object(t, escapedColumn)
+		body := edit(t, edit(t, obj.Data, "UID:"+escapedColumn+"\r\n", "UID:pcb-c,d\r\n"), "SUMMARY:Kept", "SUMMARY:Edited")
+		_, err := r.put(t, service.ObjectName(escapedColumn), body, service.Precondition{IfMatch: obj.ETag})
+		_ = wantExit(t, err, exitcode.Blocked)
+		wantIs(t, err, service.ErrUIDStoredOtherwise)
+		contains(t, "the object after the refusal", r.object(t, escapedColumn).Data, "SUMMARY:Kept")
+	})
 	obj := r.object(t, column)
 	name := service.ObjectName(column)
 	contains(t, "the object", obj.Data, "UID:"+text+"\r\n")
