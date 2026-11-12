@@ -266,6 +266,7 @@
   - Errors: `ErrPreconditionFailed`, `*UIDConflictError{Href}`, `ErrNotWritable`, `*WriteRefusal`, plus the existing unavailable errors (503).
   - Only during Serve (writer handle); otherwise `ErrNotServing`.
 - **Obligations added during execution (rulings in the SDD ledger; binding):**
+  - From the Task 5 review (M4-R23/R24): Color `Null` on create; ListByUID read-back after deletes too; never key packets on an Update; Attendees filled from the stored row (never a zero `[]` that wipes RSVPs); a 2001 is a 403 after a refresh (SEQUENCE checked before sending).
   - M4-R17 key-packet pinning: on the pre-write refresh, a row whose `SharedKeyPacket`, `CalendarKeyPacket` or `AddressKeyPacket` differs from the cached copy is untrusted for reuse → 403 `pcb:untrusted-key`, logged; test it.
   - M4-R18/R19: refuse (403) a group with any part not authored by us, or any part of ours that is not `Verified` (unsigned parts of every kind included; do not reuse render's `unverifiedParts`), or any undecryptable part — before planning.
   - 403 mappings with a pcb precondition: `ical.Refusal` codes (incl. `MisroutedStoredLine`), `cards.ErrMisroutedProperty`, `cards.ErrUntrustedSessionKey`, `cards.ErrNeedsNewSessionKey` (M4-R13/R15: `pcb:unsupported-change`).
