@@ -257,7 +257,8 @@ calendar key, and reads our update. Defences:
   - attendees parts, whose plaintext (UID, DTSTAMP, ATTENDEE with tokens)
     the server knows, in their slot or replayed into another;
   - an `.ics` our address key signed outside the bridge (a Proton Mail
-    invitation or RSVP, which always carries METHOD at VCALENDAR level);
+    invitation or RSVP, which carries METHOD at VCALENDAR level as iTIP
+    requires, RFC 5546; a proof may not carry it);
   - another event's parts (the UID must be the row's).
 - **Group checks:** a write to a group with any part of ours that is not
   `Verified`, unsigned parts of every kind included, or any part authored by

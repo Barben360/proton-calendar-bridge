@@ -91,5 +91,6 @@ For the final audit (parked minors):
 - `canonParams` (line identity in `ical.Patch`) can make two differently quoted parameter lists look equal (`X-FOO;A="B;C=d":v` ≡ `X-FOO;A=B;C=d:v`); contrived, Thunderbird does not write it (Task 3 M3).
 - Memory hygiene: the address-key copy and the passphrase clone made for verification are not zeroed (Task 2 M6); zeroing of minted session keys is untested (Task 4 M5).
 - `TestSecond401GivesNoThirdRequest` fails by hanging, not by a clean assertion, when its guard is sabotaged: give it a bounded client timeout (Task 5).
+- The fake parses an unfolded UID line over 75 octets differently from a folded one: a row seeded with one gets 2001 on update (403 `pcb:proton-refused`), the folded form 204 (Task 8 re-review). Matters only if real stored rows carry unfolded long lines (look for one in the live data).
 - The fake's `nullLists` check is case-sensitive while the typed decode is not (errs toward refusal; Task 1).
 - A `ListByUID` answer holding rows of another UID makes the write fail with 503 and the warning "the event cache cannot be opened", which names the wrong cause (found while writing the M4 live checklist).

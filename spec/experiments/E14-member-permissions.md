@@ -25,7 +25,7 @@ The fake Proton serves 127 for our member and 1 for a foreign one, so the offlin
 
 `spec/HUMAN-CHECKS.md` §6, step 6.1.4:
 1. `bin/pcb calendar list --json`: the owned default calendar shows `read_only` false (the Write bit is set **and** E10's signature verifies); holidays and subscribed calendars `read_only` true.
-2. Only if 1 fails, and only if the lab session of step 2a is still alive (no new login): `bin/pcb-lab probe calendar-access --record-dir …` records the calendar list (redacted; `Permissions` is kept) and the first calendar's v1 bootstrap; `jq` prints each calendar's type and member `Permissions`.
+2. Only if 1 fails, and only if the lab session of step 2a is still alive (no new login): `~/.local/bin/pcb-lab probe calendar-access --state-dir ~/.local/state/pcb-lab --record-dir …` (the lab binary of HUMAN-CHECKS step 2) records the calendar list (redacted; `Permissions` is kept) and the first calendar's v1 bootstrap; `jq` prints each calendar's type and member `Permissions`.
 3. Shares: skipped (needs a second account).
 
 Results: not run yet. Record the value of `Permissions` per calendar type when step 2 runs, else "owned calendar writable: [verified: live]".

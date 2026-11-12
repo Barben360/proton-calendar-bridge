@@ -78,7 +78,7 @@ Order, chosen so the author acts once:
    ```sh
    cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m4 && make build
    export XDG_CONFIG_HOME=$HOME/.local/share/pcb-m1-live/config XDG_STATE_HOME=$HOME/.local/share/pcb-m1-live/state
-   DB=$XDG_STATE_HOME/pcb/pcb.db LIVE=$HOME/.local/share/pcb-m4-live
+   export DB=$XDG_STATE_HOME/pcb/pcb.db LIVE=$HOME/.local/share/pcb-m4-live
    (umask 077; mkdir -p "$LIVE")
    bin/pcb status --json | jq '.data | {phase, username, unattended}'   # phase "ready"; username: the test account
    bin/pcb sync --json | jq '.data.calendars[] | {name, mode, error}'   # exit 0, no error
@@ -88,10 +88,16 @@ Order, chosen so the author acts once:
    bin/pcb client add Thunderbird        # prints the password once: hand it to the author out of band
    (umask 077; bin/pcb client add m4-curl --json | jq -r '"machine localhost login me password " + .data.password' > "$LIVE/netrc")
    ```
-3. Start the bridge in a second terminal (same exports), logs kept: `bin/pcb serve 2> >(tee "$LIVE/serve.log" >&2)`. Expect on stdout `Thunderbird URL: http://localhost:1080/`; it refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20).
+3. Start the bridge in a second terminal, in bash, from the same worktree, with the same variables, logs kept:
+   ```sh
+   export XDG_CONFIG_HOME=$HOME/.local/share/pcb-m1-live/config XDG_STATE_HOME=$HOME/.local/share/pcb-m1-live/state
+   export DB=$XDG_STATE_HOME/pcb/pcb.db LIVE=$HOME/.local/share/pcb-m4-live
+   bin/pcb serve 2> >(tee "$LIVE/serve.log" >&2)
+   ```
+   Expect on stdout `Thunderbird URL: http://localhost:1080/`; it refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20).
 4. The write gate (E14, R17/E10). `bin/pcb calendar list --json > "$LIVE/calendars.json"; jq '.data.calendars[] | {name, type, default, read_only, keys}' "$LIVE/calendars.json"`. Expect the default calendar `type` `normal`, `read_only` **false**, `keys` `ok`; holidays and subscribed calendars `read_only` true. If the default calendar is `read_only` true, diagnose before stopping (only if the lab session of step 2a is still alive; never log in for it):
    ```sh
-   bin/pcb-lab probe calendar-access --state-dir ~/.local/state/pcb-lab --record-dir "$LIVE/lab"
+   ~/.local/bin/pcb-lab probe calendar-access --state-dir ~/.local/state/pcb-lab --record-dir "$LIVE/lab"   # the lab binary of step 2
    jq '.body.Calendars[] | {Type, Permissions: [.Members[].Permissions]}' "$LIVE"/lab/*calendar-list.json
    jq '[.body.Passphrase.MemberPassphrases[].Signature]' "$LIVE"/lab/*calendar-bootstrap.json   # first calendar only; the probe reads the v1 bootstrap, assumed to carry the same field as the v2 one pcb reads
    ```
@@ -132,7 +138,7 @@ raw pcb-m4-basic | jq -r '[(.SharedEvents // [])[], (.CalendarEvents // [])[]] |
 ```
 A 201 also proves `?UID=` filters exactly: had Proton ignored it, the refresh would have returned other UIDs' rows and the PUT would answer 503 with the warning `the event cache cannot be opened` and send nothing. A confirmed write also proves the signed parts came back byte for byte (their signatures verify over exact bytes); an encrypted `Data` other than one line of standard base64 means Proton re-encoded it (harmless, R32: the confirmation compares plaintext).
 
-*W2. The ListByUID row equals the feed row* [Task 6 live check, L.4 #11]: note `rows pcb-m4-basic` (etag, seq), wait 70 s (two `pcb serve` passes, no edit), `rows pcb-m4-basic` again: **same etag and seq**. A new seq with no edit means the row Proton lists by UID differs from the one it serves by ID: every write would then churn a second change (record which fields differ: `raw` before and after, `jq -S . | diff`). Optional: run `bin/pcb-lab probe feed --calendar "$CAL_ID" --wait 2m` during W1 to time the feed entry (L.4 #11, E04).
+*W2. The ListByUID row equals the feed row* [Task 6 live check, L.4 #11]: note `rows pcb-m4-basic` (etag, seq), wait 70 s (two `pcb serve` passes, no edit), `rows pcb-m4-basic` again: **same etag and seq**. A new seq with no edit means the row Proton lists by UID differs from the one it serves by ID: every write would then churn a second change (record which fields differ: `raw` before and after, `jq -S . | diff`). Optional: run `~/.local/bin/pcb-lab probe feed --calendar "$CAL_ID" --wait 2m` (the lab binary of step 2) during W1 to time the feed entry (L.4 #11, E04).
 
 *W3. Exact UID match* [`?UID=`]: `ev basic2.ics pcb-m4-basic-2 'pcb-m4 basic 2' 'DTSTART;TZID=Europe/Paris:20270105T100000' 'DTEND;TZID=Europe/Paris:20270105T110000'; put pcb-m4-basic-2.ics basic2.ics -H 'If-None-Match: *'` → 201; then W4 edits `pcb-m4-basic`: a 204 there shows Proton does not match `pcb-m4-basic` as a prefix of `pcb-m4-basic-2` (a prefix match gives 503, as in W1).
 
@@ -175,7 +181,7 @@ raw pcb-m4-props | jq -r '.SharedEvents[] | select(.Type==2) | .Data'         # 
 
 e.g. `ev weekdays.ics pcb-m4-weekdays 'pcb-m4 weekdays' 'DTSTART;TZID=Europe/Paris:20270104T090000' 'DTEND;TZID=Europe/Paris:20270104T093000' 'RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;COUNT=10'; put pcb-m4-weekdays.ics weekdays.ics -H 'If-None-Match: *'`.
 
-Refused by pcb, no write reaches Proton. Make each with `ev refused.ics pcb-m4-refused 'pcb-m4 refused' <DTSTART line> <DTEND line> <the line>` and `put pcb-m4-refused.ics refused.ics -H 'If-None-Match: *'`; each answers 403 with its body, and `rows pcb-m4-refused` stays empty. `RRULE:FREQ=WEEKLY;COUNT=50` → `<D:error xmlns:D="DAV:"><pcb:unsupported-recurrence xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">RRULE COUNT above 49</pcb:reason></D:error>`; `RRULE:FREQ=HOURLY` → `unsupported-recurrence`; `RRULE:FREQ=MONTHLY;BYDAY=TU;BYSETPOS=5` → `unsupported-recurrence`; an `RDATE;TZID=Europe/Paris:20270110T100000` line → `pcb:rdate`; DTSTART `DTSTART:20270104T100000` (floating) → `pcb:floating-time`; `DTSTART;TZID=Mars/Olympus:20270104T100000` → `pcb:unknown-tzid`; an `ATTENDEE:mailto:pcb-m4-attendee@example.org` line → `pcb:attendee-change` (refused after the refresh, a GET; the body-level ones above are refused before any request). Whether **Proton** enforces these limits itself (COUNT 50, UNTIL 2038, BYSETPOS 5, HOURLY, INTERVAL bounds) is not reachable through pcb, which refuses first: record "not tested (the bridge gatekeeps)".
+Refused by pcb, no write reaches Proton. Make each with `ev refused.ics pcb-m4-refused 'pcb-m4 refused' 'DTSTART;TZID=Europe/Paris:20270104T100000' 'DTEND;TZID=Europe/Paris:20270104T110000' '<the line>'` (the floating and unknown-TZID cases replace the DTSTART line instead and add no line) and `put pcb-m4-refused.ics refused.ics -H 'If-None-Match: *'`; each answers 403 with its body, and `rows pcb-m4-refused` stays empty. `RRULE:FREQ=WEEKLY;COUNT=50` → `<D:error xmlns:D="DAV:"><pcb:unsupported-recurrence xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">RRULE COUNT above 49</pcb:reason></D:error>`; `RRULE:FREQ=HOURLY` → `unsupported-recurrence`; `RRULE:FREQ=MONTHLY;BYDAY=TU;BYSETPOS=5` → `unsupported-recurrence`; an `RDATE;TZID=Europe/Paris:20270110T100000` line → `pcb:rdate`; DTSTART `DTSTART:20270104T100000` (floating) → `pcb:floating-time`; `DTSTART;TZID=Mars/Olympus:20270104T100000` → `pcb:unknown-tzid`; an `ATTENDEE:mailto:pcb-m4-attendee@example.org` line → `pcb:attendee-change` (refused after the refresh, a GET; the body-level ones above are refused before any request). Whether **Proton** enforces these limits itself (COUNT 50, UNTIL 2038, BYSETPOS 5, HOURLY, INTERVAL bounds) is not reachable through pcb, which refuses first: record "not tested (the bridge gatekeeps)".
 
 *W9. A series with exceptions, mixed batches* [L.4 #4, E12, research E.2]. Write `series.ics` with the master only:
 ```sh
@@ -218,6 +224,8 @@ del pcb-m4-nothing.ics                                             # 404
 ```
 
 *W12. Delete* [L.4 #1]: `del pcb-m4-basic-2.ics -H "If-Match: $(etag pcb-m4-basic-2.ics)"` → 204; `rows pcb-m4-basic-2` empty; `get pcb-m4-basic-2.ics` empty (404).
+
+*Not reachable here* (pcb never sends these; record "not tested", see `OPEN.md`, "Still open, later"): L.4 #3 (new key packets on an update), L.4 #5 (a second master with an existing UID), and the server-side halves of L.4 #6 (does Proton itself enforce the RRULE limits) and #8 (STATUS:TENTATIVE's 2000, floating times, non-IANA TZIDs, DURATION as sent).
 
 *W13. 429* [E06]: do not provoke one. If any 429 shows anywhere in the session, record the request, Proton's `Retry-After`, and what pcb answered (a write: 503 with Proton's `Retry-After`, never retried; a sync pass: its backoff).
 
@@ -287,6 +295,7 @@ The agent then runs, after one `pcb serve` pass (30 s): Thunderbird right-click 
 - in `E13-unknown-properties.md`: W7, 6.4.1;
 - in `E14-member-permissions.md`: 6.1.4;
 - in `E07-row-changes.md` and research L.4: W2, W4, W5, W10, C4/D4 (`PersonalEvents`), D9, 6.4.2, 6.4.3;
+- as "not tested (not reachable with M4's tools, `OPEN.md`)": L.4 #3, #5, and the server-side halves of #6 and #8;
 - then turn the matching markers of SPEC §5.3, §5.4, §8.1, §9 and §17, `mapping.md` and `OPEN.md`; any Proton behaviour that differs from what the code assumes is fixed test first, in its own commit, before the write-up commit `🧪 M4 live session against the test account`.
 
 **6.6 Clean up (agent).** Delete what is left of 6.2 with `del NAME -H "If-Match: $(etag NAME)"` (`pcb-m4-basic.ics`, `pcb-m4-props.ics`, `pcb-m4-weekdays.ics`, `pcb-m4-2tu.ics`, `pcb-m4-notfirst.ics`, `pcb-m4-count49.ics`, `pcb-m4-until.ics`, `pcb-m4-duration.ics`, `pcb-m4-series.ics`, `pcb-m4-alias_example.org.ics`, `pcb-m4-escaped.ics`), each 204; the author deletes in the web app anything titled `pcb-m4` still there (search "pcb-m4"). `bin/pcb client remove m4-curl`; `rm -rf "$LIVE"`. Keep the M1/M2 dirs if more live work follows, else `bin/pcb logout --json` and `rm -rf ~/.local/share/pcb-m1-live`.

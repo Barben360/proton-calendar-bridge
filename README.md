@@ -72,7 +72,7 @@ more when they change; `pcb status` does not show these counts, since only the s
 
 ## Writes from Thunderbird
 
-Creating, editing, moving and deleting events, single occurrences included, go to Proton while `pcb serve` runs: each change is one Proton write call, read back before Thunderbird gets its answer, never retried. Thunderbird shows what Proton stored, which can differ from what it sent (the full table: `spec/mapping.md`):
+Creating, editing, moving and deleting events, single occurrences included, go to Proton while `pcb serve` runs: each change is one Proton write call, read back before Thunderbird gets its answer, and never retried once it may have reached Proton (the one exception: it is resent once when Proton answers 401 for an expired token before processing it, which refreshes the session, M4-R23). Thunderbird shows what Proton stored, which can differ from what it sent (the full table: `spec/mapping.md`):
 
 - alarms become Proton notifications (email or device, before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost;
 - `STATUS:TENTATIVE` is dropped (Proton refuses it), your colour choice is ignored (Proton's colour stays), `DURATION` becomes an end time, a "monthly on the 2nd Tuesday" or "every weekday" rule is written in Proton's equivalent form;
