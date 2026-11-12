@@ -60,9 +60,10 @@ type renderer struct {
 	beforeLoad func()
 
 	smu           sync.Mutex
-	undecryptable map[string]bool // row IDs served as placeholders
-	unverified    map[string]bool // row IDs rendered with X-PCB-INTEGRITY:unverified (M3-R33)
-	duplicates    map[string]int  // masters left out (M3-R3) by calendar ID and UID, as last rendered
+	undecryptable map[string]string     // row IDs served as placeholders, to their calendar ID
+	unverified    map[string]string     // row IDs rendered with X-PCB-INTEGRITY:unverified (M3-R33), to their calendar ID
+	alarms        map[string]droppedRow // row IDs whose malformed reminders were left out, as last rendered
+	duplicates    map[string]int        // rows left out (M3-R3, M1) by calendar ID and UID, as last rendered
 }
 
 // keyState is the unlocked keys of one account: its address keys and each
@@ -295,29 +296,65 @@ func (r *renderer) drop() {
 	r.kmu.Unlock()
 	r.lru.clear()
 	r.smu.Lock()
-	r.undecryptable, r.unverified, r.duplicates = nil, nil, nil
+	r.undecryptable, r.unverified, r.alarms, r.duplicates = nil, nil, nil, nil
 	r.smu.Unlock()
 }
 
-// noteRow records whether row id rendered as a placeholder, and whether it
-// rendered as unverified.
-func (r *renderer) noteRow(id string, placeholder, unverified bool) {
-	r.smu.Lock()
-	defer r.smu.Unlock()
-	mark(&r.undecryptable, id, placeholder)
-	mark(&r.unverified, id, unverified)
+// droppedRow is the number of malformed reminders left out of a row's last
+// render, and its calendar.
+type droppedRow struct {
+	cal string
+	n   int
 }
 
-// mark adds id to the set *m when on, else removes it.
-func mark(m *map[string]bool, id string, on bool) {
+// noteRow records whether row id of calendar calID rendered as a
+// placeholder, whether it rendered as unverified, and how many malformed
+// reminders it left out.
+func (r *renderer) noteRow(calID, id string, placeholder, unverified bool, dropped int) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	mark(&r.undecryptable, calID, id, placeholder)
+	mark(&r.unverified, calID, id, unverified)
+	if dropped == 0 {
+		delete(r.alarms, id)
+		return
+	}
+	if r.alarms == nil {
+		r.alarms = map[string]droppedRow{}
+	}
+	r.alarms[id] = droppedRow{calID, dropped}
+}
+
+// mark adds id (of calendar calID) to the set *m when on, else removes it.
+func mark(m *map[string]string, calID, id string, on bool) {
 	if !on {
 		delete(*m, id)
 		return
 	}
 	if *m == nil {
-		*m = map[string]bool{}
+		*m = map[string]string{}
 	}
-	(*m)[id] = true
+	(*m)[id] = calID
+}
+
+// keepRows forgets the row marks of calendar calID's rows that live does not
+// hold: a row deleted renders no more, so only a read that sees it gone can
+// uncount it.
+func (r *renderer) keepRows(calID string, live func(id string) bool) {
+	r.smu.Lock()
+	defer r.smu.Unlock()
+	for _, set := range []map[string]string{r.undecryptable, r.unverified} {
+		for id, cal := range set {
+			if cal == calID && !live(id) {
+				delete(set, id)
+			}
+		}
+	}
+	for id, d := range r.alarms {
+		if d.cal == calID && !live(id) {
+			delete(r.alarms, id)
+		}
+	}
 }
 
 // noteDuplicates records how many masters the last render of a UID left
@@ -370,6 +407,9 @@ func (l *Local) RenderCounts() RenderCounts {
 	for _, n := range l.r.duplicates {
 		out.DuplicateMasters += n
 	}
+	for _, d := range l.r.alarms {
+		out.DroppedAlarms += d.n
+	}
 	out.Undecryptable, out.Unverified = len(l.r.undecryptable), len(l.r.unverified)
 	return out
 }
@@ -406,10 +446,26 @@ func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) [
 	var master *cache.StoredRow
 	var exceptions []ical.Exception
 	masters := 0
+	// Two exceptions of one RECURRENCE-ID: the most recently edited stays
+	// (on a tie, the later ID, as rows come in ID order) and the others
+	// count with the duplicate masters (ruling M3-R3, audit read-M1).
+	keep := map[int64]*cache.StoredRow{}
+	for i := range g.Rows {
+		if row := &g.Rows[i]; row.RecurrenceID != nil {
+			if k := keep[*row.RecurrenceID]; k == nil || row.LastEdit >= k.LastEdit {
+				keep[*row.RecurrenceID] = row
+			}
+		}
+	}
+	dupExceptions := 0
 	for i := range g.Rows {
 		row := &g.Rows[i]
 		if row.RecurrenceID != nil {
-			exceptions = append(exceptions, ical.Exception{Comp: l.renderRow(row, ks, ck), RecurrenceID: *row.RecurrenceID})
+			if keep[*row.RecurrenceID] != row {
+				dupExceptions++
+				continue
+			}
+			exceptions = append(exceptions, ical.Exception{Comp: l.renderRow(calID, row, ks, ck), RecurrenceID: *row.RecurrenceID})
 			continue
 		}
 		masters++
@@ -418,10 +474,10 @@ func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) [
 			master = row
 		}
 	}
-	l.r.noteDuplicates(calID, g.UID, max(masters-1, 0))
+	l.r.noteDuplicates(calID, g.UID, max(masters-1, 0)+dupExceptions)
 	var m *ical.Component
 	if master != nil {
-		c := l.renderRow(master, ks, ck)
+		c := l.renderRow(calID, master, ks, ck)
 		m = &c
 	}
 	return ical.Object(m, exceptions)
@@ -429,9 +485,9 @@ func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) [
 
 // renderRow decrypts and merges one row into its VEVENT, or returns its
 // placeholder.
-func (l *Local) renderRow(row *cache.StoredRow, ks *keyState, ck *calKeys) ical.Component {
-	ev, unverified, ok := l.decryptRow(row, ks, ck)
-	l.r.noteRow(row.ID, !ok, ok && unverified)
+func (l *Local) renderRow(calID string, row *cache.StoredRow, ks *keyState, ck *calKeys) ical.Component {
+	ev, unverified, dropped, ok := l.decryptRow(row, ks, ck)
+	l.r.noteRow(calID, row.ID, !ok, ok && unverified, dropped)
 	if !ok {
 		return placeholder(row)
 	}
@@ -441,16 +497,16 @@ func (l *Local) renderRow(row *cache.StoredRow, ks *keyState, ck *calKeys) ical.
 // decryptRow renders row's VEVENT; unverified when a part of it has a bad or
 // missing signature (unverifiedParts). Such an event is served marked
 // X-PCB-INTEGRITY:unverified, never dropped (ruling M3-R33).
-func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev ical.Component, unverified, ok bool) {
+func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev ical.Component, unverified bool, dropped int, ok bool) {
 	if ck.access == nil {
-		return ical.Component{}, false, false
+		return ical.Component{}, false, 0, false
 	}
 	l.r.decrypts.Add(1)
 	opened, err := cards.Open(row.Raw, ck.access.KR, ks.u.AddrKRs, func(email string) *crypto.KeyRing {
 		return ks.own[strings.ToLower(email)]
 	})
 	if err != nil {
-		return ical.Component{}, false, false
+		return ical.Component{}, false, 0, false
 	}
 	parts := make([][]byte, len(opened.Parts))
 	for i, p := range opened.Parts {
@@ -459,14 +515,16 @@ func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev 
 	unverified = unverifiedParts(opened.Parts)
 	ev, err = ical.MergeEvent(parts)
 	if err != nil {
-		return ical.Component{}, false, false
+		return ical.Component{}, false, 0, false
 	}
 	defaults := ck.partDay
 	if row.FullDay {
 		defaults = ck.fullDay
 	}
-	if err := ical.ApplyNotifications(&ev, opened.Notifications, defaults, row.FullDay); err != nil {
-		return ical.Component{}, false, false
+	// A malformed reminder is left out and counted; the event still renders.
+	dropped, err = ical.ApplyNotifications(&ev, opened.Notifications, defaults, row.FullDay)
+	if err != nil {
+		return ical.Component{}, false, 0, false
 	}
 	statuses := make(map[string]int, len(opened.Attendees))
 	for _, a := range opened.Attendees {
@@ -474,7 +532,7 @@ func (l *Local) decryptRow(row *cache.StoredRow, ks *keyState, ck *calKeys) (ev 
 	}
 	ical.ApplyRow(&ev, opened.Color, statuses)
 	ical.MarkIntegrity(&ev, unverified)
-	return ev, unverified, true
+	return ev, unverified, dropped, true
 }
 
 // unverifiedParts reports whether an event has a part of ours with a bad or
@@ -505,10 +563,18 @@ func unverifiedParts(parts []cards.Part) bool {
 // 3), RECURRENCE-ID for an exception, the placeholder SUMMARY and
 // X-PCB-PLACEHOLDER:1 (M4 refuses writes to such an object).
 func placeholder(row *cache.StoredRow) ical.Component {
+	startLoc, endLoc := placeholderZones(row)
 	at := func(name string, unix int64) ical.Property {
 		t := time.Unix(unix, 0).UTC()
 		if row.FullDay {
 			return ical.Property{Name: name, Params: ";VALUE=DATE", Value: t.Format("20060102")}
+		}
+		loc := startLoc
+		if name == "DTEND" {
+			loc = endLoc
+		}
+		if loc != nil {
+			return ical.Property{Name: name, Params: ";TZID=" + loc.String(), Value: t.In(loc).Format("20060102T150405")}
 		}
 		return ical.Property{Name: name, Value: t.Format("20060102T150405Z")}
 	}
@@ -535,6 +601,39 @@ func placeholder(row *cache.StoredRow) ical.Component {
 		c.Items = append(c.Items, ical.Item{Prop: p})
 	}
 	return c
+}
+
+// placeholderZones are the zones a recurring timed row's placeholder is
+// expressed in (audit read-M3): the row's StartTimezone and EndTimezone
+// columns when each is a known tzdata zone, so a series keeps its local time
+// across a DST change and its BYDAY keeps its weekday. nil (UTC) for any
+// other row, for a start zone that does not resolve, and for UTC itself; an
+// end zone that does not resolve follows the start's.
+func placeholderZones(row *cache.StoredRow) (start, end *time.Location) {
+	if row.FullDay || row.RRule == "" && row.RecurrenceID == nil {
+		return nil, nil
+	}
+	var cols struct{ StartTimezone, EndTimezone string }
+	if json.Unmarshal(row.Raw, &cols) != nil {
+		return nil, nil
+	}
+	zone := func(name string) *time.Location {
+		if name == "" || name == "UTC" || strings.ContainsAny(name, "\r\n;:,\" ") {
+			return nil
+		}
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			return nil
+		}
+		return loc
+	}
+	if start = zone(cols.StartTimezone); start == nil {
+		return nil, nil
+	}
+	if end = zone(cols.EndTimezone); end == nil {
+		end = start
+	}
+	return start, end
 }
 
 // placeholderRRule is the RRULE value of a row's plaintext rule: without a

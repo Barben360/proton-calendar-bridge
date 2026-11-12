@@ -50,8 +50,12 @@ func FuzzMergeEvent(f *testing.F) {
 			return
 		}
 		ApplyRow(&ev, "#abc", map[string]int{"t": 1})
-		if _, err := Parse(ev.Bytes()); err != nil {
+		out := ev.Bytes()
+		if _, err := Parse(out); err != nil {
 			t.Fatalf("merged output does not parse: %v", err)
+		}
+		if i := controlIn(string(out)); i >= 0 {
+			t.Fatalf("control byte at %d in output %q", i, out)
 		}
 	})
 }

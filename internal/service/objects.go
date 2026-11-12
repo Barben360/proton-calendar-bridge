@@ -398,6 +398,17 @@ func liveIn(groups []cache.Listed) func(string) bool {
 	return func(uid string) bool { return live[uid] }
 }
 
+// liveRows reports whether a row ID is one of groups'.
+func liveRows(groups []cache.Listed) func(string) bool {
+	live := map[string]bool{}
+	for _, g := range groups {
+		for _, r := range g.Rows {
+			live[r.ID] = true
+		}
+	}
+	return func(id string) bool { return live[id] }
+}
+
 // Objects implements API: every object of the calendar with its ETag, and
 // the sync token of that state, from one read transaction. Outside Serve
 // it opens the cache read-only for the call; during Serve it reads Serve's
@@ -417,6 +428,7 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 			}
 			out, token = infos(groups, ck, n), syncToken(v.Epoch(), position(v), ck.gen)
 			l.r.keepDuplicates(calID, liveIn(groups))
+			l.r.keepRows(calID, liveRows(groups))
 			return nil
 		})
 		return l.cacheFail(err)
@@ -571,6 +583,7 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 			}
 			if full {
 				l.r.keepDuplicates(calID, liveIn(changed))
+				l.r.keepRows(calID, liveRows(changed))
 			}
 			for _, uid := range deleted {
 				l.r.noteDuplicates(calID, uid, 0)

@@ -72,7 +72,7 @@ func served(t *testing.T, parts map[PartKind][]byte) Component {
 	}
 	ev := mustMerge(t, ordered...)
 	ApplyRow(&ev, "#3CBB82", map[string]int{"tok1": 3})
-	if err := ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT15M"}]`), nil, false); err != nil {
+	if _, err := ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT15M"}]`), nil, false); err != nil {
 		t.Fatal(err)
 	}
 	MarkIntegrity(&ev, false)

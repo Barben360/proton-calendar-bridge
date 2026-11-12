@@ -3,13 +3,17 @@ package service
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/cards"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
 // Ruling M3-R16: each address key ID is tagged with whether its key is in
@@ -98,6 +102,48 @@ func TestPlaceholderRRuleIsOneValue(t *testing.T) {
 	} {
 		if got := placeholderRRule(in); got != want {
 			t.Errorf("placeholderRRule(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A recurring timed placeholder keeps the row's local time across a DST
+// change, in the row's tzdata zone; any other row stays in UTC (audit
+// read-M3).
+func TestPlaceholderRecurringUsesTheRowZone(t *testing.T) {
+	paris, _ := time.LoadLocation("Europe/Paris")
+	at := func(y int, m time.Month, d int) int64 { return time.Date(y, m, d, 9, 0, 0, 0, paris).Unix() }
+	row := func(start int64, rrule, raw string) *cache.StoredRow {
+		return &cache.StoredRow{ID: "r", UID: "u@x", Start: start, End: start + 3600, RRule: rrule, Raw: json.RawMessage(raw)}
+	}
+	const parisRaw = `{"StartTimezone":"Europe/Paris","EndTimezone":"Europe/Paris"}`
+	render := func(r *cache.StoredRow) string { return string(ical.Object(new(placeholder(r)), nil)) }
+	// 09:00 Paris is 08:00Z in winter and 07:00Z in summer: same local time.
+	for _, start := range []int64{at(2026, time.January, 12), at(2026, time.July, 13)} {
+		got := render(row(start, "FREQ=WEEKLY;BYDAY=MO", parisRaw))
+		for _, want := range []string{"DTSTART;TZID=Europe/Paris:", "T090000\r\n", "DTEND;TZID=Europe/Paris:", "T100000\r\n"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("start %d: missing %q in\n%s", start, want, got)
+			}
+		}
+		if strings.Contains(got, "DTSTART:") {
+			t.Errorf("start %d: still a UTC DTSTART:\n%s", start, got)
+		}
+	}
+	// 00:30 Paris on a Monday is Sunday 23:30Z: BYDAY=MO stays right in the zone.
+	mon := time.Date(2026, time.July, 13, 0, 30, 0, 0, paris).Unix()
+	if got := render(row(mon, "FREQ=WEEKLY;BYDAY=MO", parisRaw)); !strings.Contains(got, "DTSTART;TZID=Europe/Paris:20260713T003000\r\n") {
+		t.Errorf("midnight series:\n%s", got)
+	}
+	// UTC as before: a single event, an unknown zone, no zone, UTC itself, an injection.
+	for name, r := range map[string]*cache.StoredRow{
+		"single":  row(at(2026, time.July, 13), "", parisRaw),
+		"unknown": row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"Mars/Olympus"}`),
+		"none":    row(at(2026, time.July, 13), "FREQ=DAILY", `{}`),
+		"utc":     row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"UTC"}`),
+		"inject":  row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"Europe/Paris\r\nX-EVIL:1"}`),
+	} {
+		if got := render(r); !strings.Contains(got, "DTSTART:20260713T070000Z\r\n") || strings.Contains(got, "TZID") {
+			t.Errorf("%s: want a UTC placeholder:\n%s", name, got)
 		}
 	}
 }

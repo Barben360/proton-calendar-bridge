@@ -216,7 +216,7 @@ func TestApplyNotificationsReplacesPartAlarms(t *testing.T) {
 
 	// Notifications present (custom): part alarms dropped.
 	ev := mk()
-	if err := ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT5M"}]`), defaults, false); err != nil {
+	if _, err := ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT5M"}]`), defaults, false); err != nil {
 		t.Fatal(err)
 	}
 	if a := alarmActions(ev.Subs("VALARM")); len(a) != 1 || a[0] != "DISPLAY/-PT5M" {
@@ -224,7 +224,7 @@ func TestApplyNotificationsReplacesPartAlarms(t *testing.T) {
 	}
 	// null counts as present: defaults replace part alarms.
 	ev = mk()
-	if err := ApplyNotifications(&ev, json.RawMessage(`null`), defaults, false); err != nil {
+	if _, err := ApplyNotifications(&ev, json.RawMessage(`null`), defaults, false); err != nil {
 		t.Fatal(err)
 	}
 	if a := alarmActions(ev.Subs("VALARM")); len(a) != 1 || a[0] != "DISPLAY/-PT30M" {
@@ -232,7 +232,7 @@ func TestApplyNotificationsReplacesPartAlarms(t *testing.T) {
 	}
 	// [] present: no alarms at all.
 	ev = mk()
-	if err := ApplyNotifications(&ev, json.RawMessage(`[]`), defaults, false); err != nil {
+	if _, err := ApplyNotifications(&ev, json.RawMessage(`[]`), defaults, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(ev.Subs("VALARM")); n != 0 {
@@ -240,7 +240,7 @@ func TestApplyNotificationsReplacesPartAlarms(t *testing.T) {
 	}
 	// Absent (nil): part alarms untouched.
 	ev = mk()
-	if err := ApplyNotifications(&ev, nil, defaults, false); err != nil {
+	if _, err := ApplyNotifications(&ev, nil, defaults, false); err != nil {
 		t.Fatal(err)
 	}
 	if a := alarmActions(ev.Subs("VALARM")); len(a) != 1 || a[0] != "AUDIO/-PT99M" {
@@ -248,7 +248,7 @@ func TestApplyNotificationsReplacesPartAlarms(t *testing.T) {
 	}
 	// Alarms land after the properties and the VEVENT stays well-formed.
 	ev = mk()
-	_ = ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT5M"}]`), nil, false)
+	_, _ = ApplyNotifications(&ev, json.RawMessage(`[{"Type":1,"Trigger":"-PT5M"}]`), nil, false)
 	if _, err := Parse(ev.Bytes()); err != nil {
 		t.Fatal(err)
 	}
@@ -339,4 +339,63 @@ func TestMarkIntegrity(t *testing.T) {
 	if b := string(ev.Bytes()); !strings.Contains(b, "X-PCB-INTEGRITY:unverified\r\nBEGIN:VALARM") {
 		t.Fatalf("the marker is not the last property before the alarm:\n%s", b)
 	}
+}
+
+// A malformed reminder is left out and counted; the good ones and the rest of
+// the event stay (audit read-M4). Alarms, the write path's validator, stays strict.
+func TestApplyNotificationsDropsMalformedReminders(t *testing.T) {
+	ev := mustMerge(t, part("UID:u", "SUMMARY:Keep"))
+	raw := json.RawMessage(`[{"Trigger":"-PT5M"},{"Type":1,"Trigger":"soon"},{"Type":1,"Trigger":"-PT10M"}]`)
+	dropped, err := ApplyNotifications(&ev, raw, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 2 {
+		t.Errorf("dropped = %d, want 2", dropped)
+	}
+	if a := alarmActions(ev.Subs("VALARM")); len(a) != 1 || a[0] != "DISPLAY/-PT10M" {
+		t.Errorf("alarms = %v, want only DISPLAY/-PT10M", a)
+	}
+	if v := values(ev, "SUMMARY"); len(v) != 1 {
+		t.Errorf("event lost its SUMMARY: %v", v)
+	}
+	if _, err := Alarms(raw, nil, false); err == nil {
+		t.Error("Alarms (write validation) must still refuse a malformed reminder")
+	}
+	if _, err := ApplyNotifications(&ev, json.RawMessage(`{"x":1}`), nil, false); err == nil {
+		t.Error("a value that is no list must still fail")
+	}
+}
+
+// Controls other than HTAB are dropped from every emitted value, parameter and
+// nested component (audit read-M2); the TEXT escape for a newline stays.
+func TestMergeEventDropsControls(t *testing.T) {
+	ev := mustMerge(t, []byte("BEGIN:VEVENT\nUID:u\nSUMMARY:x\rX-EVIL:1\x00\x7f\ty\nDESCRIPTION:a\\nb\nATTENDEE;CN=a\x01b:mailto:a@x\nBEGIN:VALARM\nACTION:DISPLAY\x1b\nEND:VALARM\nEND:VEVENT"))
+	out := string(ev.Bytes())
+	for _, want := range []string{"SUMMARY:xX-EVIL:1\ty\r\n", "DESCRIPTION:a\\nb\r\n", "ATTENDEE;CN=ab:mailto:a@x\r\n", "ACTION:DISPLAY\r\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in\n%q", want, out)
+		}
+	}
+	if i := controlIn(out); i >= 0 {
+		t.Errorf("control at %d in %q", i, out)
+	}
+	c := mustMerge(t, part("UID:u"))
+	ApplyRow(&c, "#a\x01bc", nil)
+	if v := values(c, "COLOR"); len(v) != 1 || v[0] != ":#abc" {
+		t.Errorf("color = %v", v)
+	}
+}
+
+// controlIn is the index of the first C0 control other than HTAB and the
+// CRLF of a line end, or DEL; -1 for none.
+func controlIn(s string) int {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\r' && i+1 < len(s) && s[i+1] == '\n', c == '\n' && i > 0 && s[i-1] == '\r', c == '\t':
+		case c < 0x20, c == 0x7f:
+			return i
+		}
+	}
+	return -1
 }

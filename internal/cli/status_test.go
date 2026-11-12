@@ -193,7 +193,7 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 				{ID: "cal-1", Name: "Work", SyncedAt: &synced, LagSeconds: &lag, Gate: "closed", GateReason: "our member lacks the Write permission"},
 				{ID: "cal-2", Name: "Home", Gate: "undecided", GateReason: "the keys were not loaded yet", ErrorClass: "network", Error: "dial tcp: refused"},
 			},
-			Render: service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3}},
+			Render: service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3, DroppedAlarms: 4}},
 	}
 	startDaemon(t, r, api, &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
 
@@ -205,7 +205,7 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 		"listener: https://pcb.lan:8443/ (TLS, certificate until 2027-01-01, fingerprint AB:CD)\n",
 		"calendar: Work (cal-1): synced 2026-11-12T11:59:00Z, lag 1m0s, write gate closed (our member lacks the Write permission)\n",
 		"calendar: Home (cal-2): synced never, write gate undecided (the keys were not loaded yet), last error network: dial tcp: refused\n",
-		"render: undecryptable 1, unverified 2, duplicate masters 3\n",
+		"render: undecryptable 1, unverified 2, duplicate masters 3, dropped alarms 4\n",
 		"alert: warning sync-stalled: no successful sync of Home for 1h0m0s (fix: see last_pass and the logs (pcb service logs))\n",
 		"alert: warning write-gate-undecided: writes to Home answer 503: the keys were not loaded yet (fix: check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container))",
 	} {

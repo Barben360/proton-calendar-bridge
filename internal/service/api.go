@@ -273,19 +273,22 @@ type WatchPass struct {
 // will). Since the keys were last loaded: Undecryptable counts the rows
 // served as placeholders (ruling M3-R4), Unverified the rows rendered with
 // X-PCB-INTEGRITY:unverified (ruling M3-R33), DuplicateMasters the masters
-// left out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
+// left out (ruling M3-R3; a second exception of one RECURRENCE-ID counts
+// with them), DroppedAlarms the malformed reminders left out of events that
+// still render; KeysErrors are the IDs of the calendars whose keys
 // did not unlock (every event of them is a placeholder), sorted, nil if
 // none.
 type RenderCounts struct {
 	Undecryptable    int      `json:"undecryptable"`
 	Unverified       int      `json:"unverified"`
 	DuplicateMasters int      `json:"duplicate_masters"`
+	DroppedAlarms    int      `json:"dropped_alarms"`
 	KeysErrors       []string `json:"keys_errors"`
 }
 
 // Zero reports whether every counter is zero.
 func (c RenderCounts) Zero() bool {
-	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
+	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && c.DroppedAlarms == 0 && len(c.KeysErrors) == 0
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or

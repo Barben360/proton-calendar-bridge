@@ -410,6 +410,7 @@ func TestServeLogsTheRenderCounters(t *testing.T) {
 		{Render: zero},                    // zero again: no line
 		{},                                // no counters (WatchSync's passes): no line
 		{Render: &service.RenderCounts{DuplicateMasters: 4}}, // line 6
+		{Render: &service.RenderCounts{DroppedAlarms: 2}},    // line 7
 	}
 	r := stubRig(t, &stub.stubAPI)
 	r.svc = stub
@@ -431,7 +432,8 @@ func TestServeLogsTheRenderCounters(t *testing.T) {
 		{"level=WARN", "undecryptable=2", "unverified=3", "duplicate_masters=1", `keys_error_ids="[cal-locked cal-other]"`},
 		{"level=WARN", "undecryptable=2", "unverified=3", "duplicate_masters=1", "keys_error_ids="},
 		{"level=INFO", "undecryptable=0", "unverified=0", "duplicate_masters=0"},
-		{"level=WARN", "undecryptable=0", "unverified=0", "duplicate_masters=4"},
+		{"level=WARN", "undecryptable=0", "unverified=0", "duplicate_masters=4", "dropped_alarms=0"},
+		{"level=WARN", "undecryptable=0", "unverified=0", "duplicate_masters=0", "dropped_alarms=2"},
 	}
 	if len(lines) != len(want) {
 		t.Fatalf("%d render counter lines, want %d:\n%s", len(lines), len(want), strings.Join(lines, "\n"))

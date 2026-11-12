@@ -60,9 +60,17 @@ func MergeEvent(parts [][]byte) (Component, error) {
 		}
 		for _, it := range ev.Items {
 			if it.Comp != nil {
-				out.Items = append(out.Items, Item{Comp: new(it.Comp.Clone())})
+				sub := it.Comp.Clone()
+				sub.stripControls()
+				out.Items = append(out.Items, Item{Comp: &sub})
 				continue
 			}
+			if dropControls(it.Prop.Name) != it.Prop.Name {
+				// Stripping would make another name of it (BEGIN, a blank that
+				// folds the line): the line is garbage, not served.
+				continue
+			}
+			it.Prop = it.Prop.stripControls()
 			name := strings.ToUpper(it.Prop.Name)
 			if name == sessionKey {
 				continue
@@ -94,21 +102,33 @@ type notification struct {
 var durationRE = regexp.MustCompile(`^[+-]?P(?:\d+W|\d+D(?:T(?:\d+H)?(?:\d+M)?(?:\d+S)?)?|T(?:\d+H)?(?:\d+M)?(?:\d+S)?)$`)
 
 // parseNotifications decodes a notification list. absent is true for a missing
-// or JSON null value (the tri-state's "use the calendar default").
-func parseNotifications(raw json.RawMessage) (list []notification, absent bool, err error) {
+// or JSON null value (the tri-state's "use the calendar default"). A
+// malformed entry is an error, or, with dropped non-nil, left out and counted
+// in *dropped.
+func parseNotifications(raw json.RawMessage, dropped *int) (list []notification, absent bool, err error) {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
 		return nil, true, nil
 	}
-	if err := json.Unmarshal(raw, &list); err != nil {
+	var all []notification
+	if err := json.Unmarshal(raw, &all); err != nil {
 		return nil, false, errors.New("ical: notifications are not a list")
 	}
-	for _, n := range list {
-		if n.Type == nil {
-			return nil, false, errors.New("ical: notification without Type")
+	for _, n := range all {
+		var bad error
+		switch {
+		case n.Type == nil:
+			bad = errors.New("ical: notification without Type")
+		case !durationRE.MatchString(n.Trigger) || strings.HasSuffix(n.Trigger, "T"):
+			bad = errors.New("ical: notification Trigger is not an iCalendar duration")
 		}
-		if !durationRE.MatchString(n.Trigger) || strings.HasSuffix(n.Trigger, "T") {
-			return nil, false, errors.New("ical: notification Trigger is not an iCalendar duration")
+		switch {
+		case bad == nil:
+			list = append(list, n)
+		case dropped == nil:
+			return nil, false, bad
+		default:
+			*dropped++
 		}
 	}
 	return list, false, nil
@@ -120,12 +140,19 @@ func parseNotifications(raw json.RawMessage) (list []notification, absent bool, 
 // EMAIL alarm, anything else DISPLAY; both carry a DESCRIPTION, EMAIL also a
 // SUMMARY. allDay only selects the wording.
 func Alarms(notifications, defaults json.RawMessage, allDay bool) ([]Component, error) {
-	list, absent, err := parseNotifications(notifications)
+	out, err := alarms(notifications, defaults, allDay, nil)
+	return out, err
+}
+
+// alarms is Alarms; with dropped non-nil it leaves a malformed reminder out
+// and counts it in *dropped instead of failing.
+func alarms(notifications, defaults json.RawMessage, allDay bool, dropped *int) ([]Component, error) {
+	list, absent, err := parseNotifications(notifications, dropped)
 	if err != nil {
 		return nil, err
 	}
 	if absent {
-		if list, _, err = parseNotifications(defaults); err != nil {
+		if list, _, err = parseNotifications(defaults, dropped); err != nil {
 			return nil, err
 		}
 	}
@@ -151,6 +178,40 @@ func Alarms(notifications, defaults json.RawMessage, allDay bool) ([]Component, 
 	return out, nil
 }
 
+// dropControls removes the C0 controls but HTAB, and DEL, from s: a bare CR
+// (unfold keeps one inside a line) must not reach a client that splits
+// lines on it (audit read-M2). TEXT's CR and LF are escaped ("\\n") and
+// untouched.
+func dropControls(s string) string {
+	if !strings.ContainsFunc(s, isControl) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isControl(r rune) bool { return r < 0x20 && r != '\t' || r == 0x7f }
+
+func (p Property) stripControls() Property {
+	return Property{Name: dropControls(p.Name), Params: dropControls(p.Params), Value: dropControls(p.Value)}
+}
+
+// stripControls applies Property.stripControls to c and its nested components.
+func (c *Component) stripControls() {
+	c.Name = dropControls(c.Name)
+	for i := range c.Items {
+		if sub := c.Items[i].Comp; sub != nil {
+			sub.stripControls()
+			continue
+		}
+		c.Items[i].Prop = c.Items[i].Prop.stripControls()
+	}
+}
+
 func (c *Component) add(p Property) { c.Items = append(c.Items, Item{Prop: p}) }
 
 // addProp inserts a property after the last existing one, before nested components.
@@ -164,14 +225,17 @@ func (c *Component) addProp(p Property) {
 // ApplyNotifications makes the row's Notifications the source of truth for the
 // alarms: when the row carries them (nil means the row has none; JSON null
 // counts as present and selects the defaults) every VALARM of the parts is
-// replaced by the rendered ones; otherwise the event is left alone.
-func ApplyNotifications(ev *Component, notifications, defaults json.RawMessage, allDay bool) error {
+// replaced by the rendered ones; otherwise the event is left alone. A
+// reminder without Type or with a Trigger that is no duration is left out
+// and counted in dropped (the event still renders, audit read-M4); only a
+// value that is no list fails.
+func ApplyNotifications(ev *Component, notifications, defaults json.RawMessage, allDay bool) (dropped int, err error) {
 	if len(strings.TrimSpace(string(notifications))) == 0 {
-		return nil
+		return 0, nil
 	}
-	alarms, err := Alarms(notifications, defaults, allDay)
+	alarms, err := alarms(notifications, defaults, allDay, &dropped)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	kept := ev.Items[:0:0]
 	for _, it := range ev.Items {
@@ -184,7 +248,7 @@ func ApplyNotifications(ev *Component, notifications, defaults json.RawMessage, 
 	for i := range alarms {
 		ev.Items = append(ev.Items, Item{Comp: &alarms[i]})
 	}
-	return nil
+	return dropped, nil
 }
 
 var partstat = map[int]string{0: "NEEDS-ACTION", 1: "TENTATIVE", 2: "DECLINED", 3: "ACCEPTED"}
@@ -196,6 +260,7 @@ var partstat = map[int]string{0: "NEEDS-ACTION", 1: "TENTATIVE", 2: "DECLINED", 
 // address (case-insensitive) are dropped.
 func ApplyRow(ev *Component, color string, statuses map[string]int) {
 	if color != "" && !strings.ContainsAny(color, "\r\n") {
+		color = dropControls(color)
 		ev.removeProps(func(p Property) bool { return strings.EqualFold(p.Name, "COLOR") })
 		ev.addProp(Property{Name: "COLOR", Value: color})
 	}

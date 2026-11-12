@@ -1030,7 +1030,7 @@ Structured text logs on stderr (`log/slog` key=value lines, M3 `pcb serve`;
 no event content, no secrets; IDs only). `pcb serve` logs one `render counters`
 line per sync pass while a counter is non-zero, and once more when they change:
 `undecryptable` (placeholders served), `unverified` (rows marked
-`X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out) and
+`X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out), `dropped_alarms` (malformed reminders left out) and
 `keys_error_ids` (calendars whose keys failed). Writes (M4) log warnings with
 IDs, fields and Proton codes only, never content: `refusing a write: a row's
 key packet changed since pcb first stored it` (calendar, row, field),
