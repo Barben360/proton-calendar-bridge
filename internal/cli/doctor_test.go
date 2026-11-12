@@ -15,6 +15,8 @@ import (
 func isolate(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	t.Setenv("PCB_CONFIG_DIR", "")
+	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	return filepath.Join(root, "cfg", "pcb")

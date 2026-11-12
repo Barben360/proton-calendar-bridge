@@ -180,6 +180,8 @@ func TestBareRootInJSONModeIsAUsageEnvelope(t *testing.T) {
 func TestUsageContractOfEveryPcbCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("PCB_CONFIG_DIR", "")
+	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	clitest.CheckUsageContract(t, cli.NewRoot)

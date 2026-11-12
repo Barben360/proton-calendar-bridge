@@ -1,6 +1,7 @@
 package paths_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -101,5 +102,26 @@ func TestRelativeOverrideIsRefused(t *testing.T) {
 func TestSocketPath(t *testing.T) {
 	if got := (paths.Dirs{Config: "/c", State: "/var/lib/pcb"}).Socket(); got != "/var/lib/pcb/pcb.sock" {
 		t.Fatalf("Socket = %q", got)
+	}
+}
+
+func TestEmptyOverrideIsUnset(t *testing.T) {
+	got, err := paths.Resolve(envOf(map[string]string{"PCB_CONFIG_DIR": "", "PCB_STATE_DIR": "", "XDG_CONFIG_HOME": "/x/cfg", "XDG_STATE_HOME": "/x/state"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (paths.Dirs{Config: "/x/cfg/pcb", State: "/x/state/pcb"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestCannotLocateNamesTheOverrides(t *testing.T) {
+	_, err := paths.Resolve(envOf(nil))
+	if err == nil || !strings.Contains(err.Error(), "PCB_CONFIG_DIR") {
+		t.Fatalf("config: %v", err)
+	}
+	_, err = paths.Resolve(envOf(map[string]string{"XDG_CONFIG_HOME": "/x/cfg"}))
+	if err == nil || !strings.Contains(err.Error(), "PCB_STATE_DIR") {
+		t.Fatalf("state: %v", err)
 	}
 }
