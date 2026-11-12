@@ -97,6 +97,11 @@ type Options struct {
 	// what pcb status shows); default err.Error(). The service passes its
 	// secret-free describer, so the cache never holds Proton's raw text.
 	Describe func(error) string
+	// Lock, when set, is called before each calendar is synced and its
+	// result runs once the calendar's rows are stored: the service holds a
+	// calendar's lock there, so its writes and the pass's reads and applies
+	// of that calendar never interleave (ruling M4-R5).
+	Lock func(calID string) (unlock func())
 }
 
 // Report is what a pass did, one entry per listed calendar in API order.
@@ -158,7 +163,12 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	}
 	rep := Report{Calendars: make([]CalendarReport, 0, len(cals))}
 	for _, cal := range cals {
+		unlock := func() {}
+		if o.Lock != nil {
+			unlock = o.Lock(cal.ID)
+		}
 		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o)
+		unlock()
 		r.ID, r.Name = cal.ID, cal.Name
 		var se *StoreError
 		if r.Err != nil && (errors.As(r.Err, &se) || api.SessionWide(ctx, r.Err)) {

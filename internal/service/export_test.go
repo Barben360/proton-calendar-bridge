@@ -45,3 +45,8 @@ func (l *Local) SetTouchTimeout(d time.Duration) { l.touchTimeout = d }
 
 // AddressKeyTags exposes the address-key tags of u.
 func AddressKeyTags(u *keys.Unlocked) []string { return addressKeyTags(u) }
+
+// OnWriteWait makes fn run when a write finds its calendar's lock taken (by
+// another write or the syncer's pass of the calendar), before it waits. Set
+// it before Serve.
+func (l *Local) OnWriteWait(fn func(calID string)) { l.cals.waiting = fn }

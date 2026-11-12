@@ -71,6 +71,8 @@ type Local struct {
 
 	smu    sync.RWMutex // guards served; held for reading while a read uses it
 	served *served      // Serve's cache handle, nil outside Serve
+
+	cals calLocks // one per calendar: a write and the syncer's pass of it run one at a time
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and

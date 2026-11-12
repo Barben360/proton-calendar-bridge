@@ -56,6 +56,25 @@ type API interface {
 	// everything); a token it cannot answer from is an error whose cause is
 	// ErrInvalidSyncToken.
 	Changes(ctx context.Context, calID, token string) (ChangeSet, error)
+	// The write methods below run only during Serve, on its cache handle
+	// (otherwise ErrNotServing). A write refreshes the object's rows from
+	// Proton, evaluates cond on that fresh state, sends one Sync call
+	// (never sent again) and reads the rows back into the cache before it
+	// answers: success only when Proton holds what was sent. Errors:
+	// ErrPreconditionFailed (412), *UIDConflictError (409),
+	// ErrNotWritable (403 need-privileges), *WriteRefusal (403 with its
+	// pcb precondition), ErrNoSuchObject and ErrNoSuchCalendar (404);
+	// ErrWriteNotConfirmed, ErrCalendarPending, ErrNotServing and every
+	// other error are unavailable (503, ProtonRetryAfter says how long
+	// Proton asked to wait).
+
+	// PutObject creates or replaces the object at name (a resource name
+	// within the calendar: its alias or its UID's canonical name, see
+	// ObjectName) with body, one VCALENDAR. A create at a name that is not
+	// the canonical name of the body's UID records the name as its alias.
+	PutObject(ctx context.Context, calID, name string, body []byte, cond Precondition) (PutResult, error)
+	// DeleteObject deletes the object at name: every row of its UID.
+	DeleteObject(ctx context.Context, calID, name string, cond Precondition) error
 	// The client methods manage the CalDAV app passwords in
 	// <state>/clients.json. They need no login and no network, and logout
 	// leaves them (ruling M3-R17).

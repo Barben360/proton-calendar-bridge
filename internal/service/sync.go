@@ -164,7 +164,8 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 			return final("pcb is now logged in to another Proton account than pcb serve started with", "restart pcb serve")
 		}
 		describe := func(err error) string { return calendarError(ctx, err) }
-		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe})
+		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe,
+			Lock: func(calID string) func() { return l.cals.lock(calID, nil) }})
 		if err != nil {
 			return err
 		}

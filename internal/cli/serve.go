@@ -93,7 +93,8 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc confi
 	var counters renderLog
 	go func() {
 		synced <- svc.Serve(syncCtx, service.ServeOptions{
-			Ready: func() { close(ready) },
+			Ready:  func() { close(ready) },
+			Logger: log,
 			OnPass: func(p service.WatchPass) {
 				logPass(log, p)
 				counters.log(log, p.Render)

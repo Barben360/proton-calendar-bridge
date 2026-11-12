@@ -24,7 +24,6 @@ package caldav
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -335,48 +334,9 @@ func calendarHref(id string) string { return homePath + calendarSegment(id) + "/
 
 func objectHref(calID, uid string) string { return calendarHref(calID) + objectName(uid) }
 
-// plainUID reports whether uid is its own resource name: 1 to 200 bytes of
-// [A-Za-z0-9._@-], the set Thunderbird names its own events with (E08 §4.4).
-func plainUID(uid string) bool {
-	if uid == "" || len(uid) > 200 {
-		return false
-	}
-	for i := range len(uid) {
-		switch c := uid[i]; {
-		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '.', c == '_', c == '@', c == '-':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// objectName is uid's resource name: the UID, or "~" + its unpadded
-// base64url, then ".ics".
-func objectName(uid string) string {
-	if plainUID(uid) {
-		return uid + ".ics"
-	}
-	return "~" + base64.RawURLEncoding.EncodeToString([]byte(uid)) + ".ics"
-}
+// objectName is uid's resource name (service.ObjectName).
+func objectName(uid string) string { return service.ObjectName(uid) }
 
 // parseName is objectName's inverse, exact: a name that is not the
-// canonical name of its UID does not decode.
-func parseName(name string) (string, bool) {
-	stem, ok := strings.CutSuffix(name, ".ics")
-	if !ok {
-		return "", false
-	}
-	uid := stem
-	if enc, encoded := strings.CutPrefix(stem, "~"); encoded {
-		b, err := base64.RawURLEncoding.Strict().DecodeString(enc)
-		if err != nil {
-			return "", false
-		}
-		uid = string(b)
-	}
-	if uid == "" || objectName(uid) != name {
-		return "", false
-	}
-	return uid, true
-}
+// canonical name of its UID does not decode (service.UIDOfName).
+func parseName(name string) (string, bool) { return service.UIDOfName(name) }

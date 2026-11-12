@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
 	"strconv"
@@ -54,10 +55,12 @@ func isHex(s string) bool    { return strings.Trim(s, "0123456789abcdef") == "" 
 // since, with no row past it yet).
 func position(v cache.View) int64 { return max(v.MaxSeq(), v.Floor()) }
 
-// served is the cache handle of a running Serve, and the account it is for.
+// served is the cache handle of a running Serve, the account it is for and
+// the logger of the writes it serves.
 type served struct {
 	db      *cache.Cache
 	account string
+	log     *slog.Logger
 }
 
 func notSynced() error { return mustAct("no events are cached yet", "run pcb sync") }

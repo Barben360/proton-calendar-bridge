@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"maps"
 	"slices"
 	"time"
@@ -26,10 +27,14 @@ const settingsRefresh = 10 * time.Minute
 // Ready, when set, is called once Serve holds the sync lock, a ready login
 // and its cache handle, before the first pass: pcb serve binds its listener
 // then, so a refused start (logged out, a sync running) never binds it.
+// Logger gets what the writes served meanwhile (PutObject, DeleteObject)
+// have to say: refusals worth a look at warning level, normalisations at
+// debug; IDs and fixed text only, never event content (nil discards it).
 type ServeOptions struct {
 	Interval time.Duration
 	OnPass   func(WatchPass)
 	Ready    func()
+	Logger   *slog.Logger
 }
 
 // Serve runs the sync loop of serve mode until ctx ends (nil) or a person
@@ -59,8 +64,12 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	if err != nil {
 		return l.fail(cacheError(err))
 	}
+	log := o.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	l.smu.Lock()
-	l.served = &served{db: db, account: acc.ID}
+	l.served = &served{db: db, account: acc.ID, log: log}
 	l.smu.Unlock()
 	defer func() {
 		l.smu.Lock()
