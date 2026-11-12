@@ -263,6 +263,7 @@ make image        # the container image, pcb:local
 make container-smoke systemd-smoke   # throwaway containers; each prints PASS last
 make rehearse     # developer only: the real pcb against pcb-fake, a loopback fake Proton (never installed)
 make live-preflight-test   # developer only: the live-session guard's own test; live-preflight checks a run root
+make shellcheck   # developer only: the live-session scripts, with the pinned shellcheck image CI uses (needs docker)
 bin/pcb version
 ```
 

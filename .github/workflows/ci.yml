@@ -24,7 +24,7 @@ jobs:
       - name: Live-session guard
         run: |
           make live-preflight-test
-          cd scripts/live && shellcheck -x -P SCRIPTDIR common.sh guard.sh run.sh preflight.sh guard_test.sh rehearse.sh
+          make shellcheck
       - name: Vet for Windows
         run: GOOS=windows go vet ./...
       - name: Build is stamped

@@ -23,7 +23,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install test lint image container-smoke systemd-smoke live-preflight live-preflight-test pcb-fake rehearse
+.PHONY: build install test lint image container-smoke systemd-smoke live-preflight live-preflight-test shellcheck pcb-fake rehearse
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -77,6 +77,14 @@ live-preflight:
 
 live-preflight-test:
 	scripts/live/guard_test.sh
+
+# shellcheck of the live-session scripts, pinned by digest so CI and a
+# workstation run the same one (the runner's own v0.11.0 crashes on
+# preflight.sh: "Non-exhaustive patterns in function checkCmd").
+SHELLCHECK_IMAGE ?= koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
+shellcheck:
+	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m/scripts/live $(SHELLCHECK_IMAGE) \
+		-x -P SCRIPTDIR common.sh guard.sh run.sh preflight.sh guard_test.sh rehearse.sh
 
 # The live session rehearsed offline against pcb-fake (plan R2): builds pcb
 # and pcb-fake into a temporary run root and prints PASS last.
