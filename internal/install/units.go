@@ -13,12 +13,19 @@ type UnitParams struct {
 	Exec, ConfigDir, StateDir string
 }
 
-const unitHead = `[Unit]
+const unitDescription = `[Unit]
 Description=pcb, the Proton Calendar CalDAV bridge
 Documentation=https://github.com/Barben360/proton-calendar-bridge
-After=network-online.target
+`
+
+// systemNetwork orders the system unit after the network. A user manager
+// has no network-online.target, so the user unit leaves it out; its first
+// sync, if early, recovers through the back-off.
+const systemNetwork = `After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=300
+`
+
+const unitStart = `StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
@@ -28,14 +35,16 @@ Type=simple
 // unitHardening needs no user namespace, so both units carry it (M5-P17).
 // No ~@resources: Go's runtime calls setrlimit. RestartPreventExitStatus=10
 // (M5-R8): exit 10 is a fault only the person can repair (a damaged cache,
-// a bad config), so systemd must not restart into it again.
+// a bad config), so systemd must not restart into it again. AF_NETLINK:
+// Go lists the network interfaces over netlink, which a self-signed
+// certificate for an unspecified listen address (0.0.0.0) needs.
 const unitHardening = `Restart=on-failure
 RestartSec=10s
 RestartPreventExitStatus=10
 TimeoutStopSec=30s
 UMask=0077
 NoNewPrivileges=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -76,7 +85,11 @@ func SystemUnit(p UnitParams) []byte { return unit(p, true) }
 
 func unit(p UnitParams, system bool) []byte {
 	var b strings.Builder
-	b.WriteString(unitHead)
+	b.WriteString(unitDescription)
+	if system {
+		b.WriteString(systemNetwork)
+	}
+	b.WriteString(unitStart)
 	if system {
 		b.WriteString("User=" + SystemUser + "\nGroup=" + SystemUser + "\n")
 	}

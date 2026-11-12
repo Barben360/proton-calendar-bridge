@@ -153,7 +153,30 @@ again=$(as_tester "$pcb" install --user --json)
 jq -e '[.data.steps[] | select(.kind == "file")] | length > 0 and all(.action == "keep")' <<<"$again" >/dev/null ||
 	fail "the second install changed a file: $again"
 
-step "u9. uninstall --user"
+step "u9. serve on 0.0.0.0 with a self-signed certificate (final review I1)"
+# The certificate names the interface addresses, which Go lists over
+# netlink: the unit must allow AF_NETLINK or pcb exits 20 in a loop.
+printf '[caldav]\nlisten = "0.0.0.0:1080"\n' | docker exec -i "$container" \
+	runuser -u tester -- tee /home/tester/.config/pcb/config.toml >/dev/null
+as_tester systemctl --user restart pcb
+wait_state active as_tester systemctl --user is-active pcb
+wait_status as_tester "$pcb" status --json --daemon
+url=$(as_tester "$pcb" status --json --daemon | jq -r '.data.listener.url // empty')
+case $url in
+https://localhost:* | "") fail "want an https URL on an interface address, got '$url'" ;;
+https://*:1080/) ;;
+*) fail "unexpected listener URL '$url'" ;;
+esac
+# curl checks the certificate against itself: it passes only if the
+# certificate names the interface address of the URL.
+got=$(printf 'user = "smoke:%s"\n' "$pw" | docker exec -i "$container" \
+	curl -s -K - --cacert /home/tester/.local/state/pcb/tls/cert.pem -X PROPFIND -H 'Depth: 0' \
+	-o /dev/null -w '%{http_code}' "${url}dav/calendars/me/") || true
+[ "$got" = 503 ] || fail "want 503 over TLS at $url, got '$got'"
+restarts=$(as_tester systemctl --user show -p NRestarts --value pcb)
+[ "$restarts" = 0 ] || fail "the unit restarted $restarts times while serving on 0.0.0.0"
+
+step "u10. uninstall --user"
 as_tester "$pcb" uninstall --user
 absent "$user_unit" "after uninstall --user"
 got=$(as_tester systemctl --user is-active pcb) || true

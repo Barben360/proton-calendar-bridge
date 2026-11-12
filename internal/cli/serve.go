@@ -272,7 +272,10 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		_ = ln.Close()
 		return finish(err)
 	}
-	url := thunderbirdURL(cc, ip, ln.Addr(), tlsConf != nil)
+	url, err := thunderbirdURL(cc, ip, ln.Addr(), tlsConf != nil)
+	if err != nil {
+		log.Warn("cannot list the network interfaces: the printed URL says localhost", "error", err.Error())
+	}
 	a.printIntro(cmd, svc, log, url, tlsConf != nil, fingerprint)
 	notice.intro()
 	published.Store(&ctl.Listener{Addr: ln.Addr().String(), URL: url, TLS: tlsConf != nil, Fingerprint: fingerprint,
@@ -474,9 +477,10 @@ func offlineListener(ctx context.Context, cc config.CalDAV, tlsDir string) (url,
 	ip, _ := (&doctor.Bind{Listen: cc.Listen}).IP(ctx)
 	useTLS := servesTLS(cc, ip)
 	addr := &net.TCPAddr{IP: ip, Port: port}
-	url = thunderbirdURL(cc, ip, addr, useTLS)
+	// A prediction: localhost when the interfaces cannot be listed.
+	url, _ = thunderbirdURL(cc, ip, addr, useTLS)
 	if ip == nil && len(cc.Hostnames) == 0 { // unresolved: the name itself
-		url = thunderbirdURL(config.CalDAV{Hostnames: []string{host}}, nil, addr, useTLS)
+		url, _ = thunderbirdURL(config.CalDAV{Hostnames: []string{host}}, nil, addr, useTLS)
 	}
 	if !useTLS {
 		return url, ""
@@ -494,8 +498,8 @@ func offlineListener(ctx context.Context, cc config.CalDAV, tlsDir string) (url,
 }
 
 // thunderbirdURL is the URL to enter in Thunderbird for the listener at
-// addr, bound to ip.
-func thunderbirdURL(cc config.CalDAV, ip net.IP, addr net.Addr, useTLS bool) string {
+// addr, bound to ip; the error is urlHost's.
+func thunderbirdURL(cc config.CalDAV, ip net.IP, addr net.Addr, useTLS bool) (string, error) {
 	scheme := "http"
 	if useTLS {
 		scheme = "https"
@@ -504,7 +508,8 @@ func thunderbirdURL(cc config.CalDAV, ip net.IP, addr net.Addr, useTLS bool) str
 	if t, ok := addr.(*net.TCPAddr); ok {
 		port = fmt.Sprint(t.Port)
 	}
-	return scheme + "://" + net.JoinHostPort(urlHost(cc, ip), port) + "/"
+	host, err := urlHost(cc, ip, net.InterfaceAddrs)
+	return scheme + "://" + net.JoinHostPort(host, port) + "/", err
 }
 
 // printIntro writes what to enter in Thunderbird: the URL, the
@@ -527,17 +532,21 @@ func (a *app) printIntro(cmd *cobra.Command, svc service.API, log *slog.Logger, 
 // urlHost is the host of the printed URL: the first configured hostname,
 // else localhost for 127.0.0.1 and ::1 (what localhost resolves to), else
 // the bind IP; for an unspecified bind, the first non-loopback interface
-// address (IPv4 first), else localhost.
-func urlHost(cc config.CalDAV, ip net.IP) string {
+// address (IPv4 first), else localhost. The error says why interfaces
+// could not be listed (the host is then localhost).
+func urlHost(cc config.CalDAV, ip net.IP, interfaces func() ([]net.Addr, error)) (string, error) {
 	switch {
 	case len(cc.Hostnames) > 0:
-		return cc.Hostnames[0]
+		return cc.Hostnames[0], nil
 	case ip == nil || ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback):
-		return "localhost"
+		return "localhost", nil
 	case !ip.IsUnspecified():
-		return ip.String()
+		return ip.String(), nil
 	}
-	addrs, _ := net.InterfaceAddrs()
+	addrs, err := interfaces()
+	if err != nil {
+		return "localhost", err
+	}
 	var v6 string
 	for _, a := range addrs {
 		n, ok := a.(*net.IPNet)
@@ -545,16 +554,16 @@ func urlHost(cc config.CalDAV, ip net.IP) string {
 			continue
 		}
 		if n.IP.To4() != nil {
-			return n.IP.String()
+			return n.IP.String(), nil
 		}
 		if v6 == "" {
 			v6 = n.IP.String()
 		}
 	}
 	if v6 != "" {
-		return v6
+		return v6, nil
 	}
-	return "localhost"
+	return "localhost", nil
 }
 
 // renderLog logs the render counters of each pass (ruling M3-R34) while one

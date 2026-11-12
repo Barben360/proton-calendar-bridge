@@ -957,7 +957,10 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
 - The user unit carries only hardening that needs no user namespace, so it starts under any user manager (M5-P17);
   the system unit carries the full set (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, an empty capability set
   and more). Both set `PCB_CONFIG_DIR`/`PCB_STATE_DIR`, `Restart=on-failure`, `RestartPreventExitStatus=10`,
-  `TimeoutStopSec=30s`, `UMask=0077`.
+  `TimeoutStopSec=30s`, `UMask=0077`, and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`: Go lists the
+  network interfaces over netlink, which the self-signed certificate of an unspecified listen address (`0.0.0.0`)
+  needs (final review I1; `make systemd-smoke` serves on `0.0.0.0` under the user unit). Only the system unit orders
+  itself after `network-online.target`: a user manager has none.
 - `pcb uninstall` stops and disables the unit and removes it (data kept). `--delete-data` needs a confirmation or
   `--yes`, then logs out (revoking the Proton session, best effort) and deletes the config and state directories, and
   with `--system` the `pcb` user; it reads the installed unit's own `PCB_*_DIR` (`systemctl show`, never the

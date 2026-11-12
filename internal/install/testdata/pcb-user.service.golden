@@ -1,8 +1,6 @@
 [Unit]
 Description=pcb, the Proton Calendar CalDAV bridge
 Documentation=https://github.com/Barben360/proton-calendar-bridge
-After=network-online.target
-Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -17,7 +15,7 @@ RestartPreventExitStatus=10
 TimeoutStopSec=30s
 UMask=0077
 NoNewPrivileges=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
