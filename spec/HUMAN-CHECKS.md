@@ -8,7 +8,7 @@ Nothing below has been run against Proton yet, except the GHCR checks of 7.8 (ma
 
 | # | Step | Author needed? | Logins |
 |---|---|---|---|
-| 0 | Before the session: build into the run root, `make live-preflight`, run `make rehearse` (added by R2: a red rehearsal stops the live run) | no | 0 |
+| 0 | Before the session: build into the run root, `make live-preflight`, run `make rehearse` (a red rehearsal stops the live run) | no | 0 |
 | 1 | **1** a fresh CAPTCHA, then **2a** | **AUTHOR NEEDED: solve the CAPTCHA the moment the agent shows it** | 2 (the challenge, then 2a) |
 | 2 | **2b, 2c, 2d** (60 s apart) | reachable (any login may meet a CAPTCHA) | 3 |
 | 3 | **3** the E01 long probe | reachable | 1 |
@@ -37,12 +37,13 @@ Every live command runs inside one run root, `~/pcb-live-run/<run>/` (`<run>` is
 mkdir -p "$R/bin" && make build OUT="$R/bin/pcb" && go build -trimpath -o "$R/bin/pcb-lab" ./cmd/pcb-lab
 # proton-cal: the fork at origin/main, DATASET.md "Pending live run" step 1, with -o "$R/bin/proton-cal"
 make live-preflight RUN="$R"        # tools, versions, guard, ports 1080/8443, host, login budget; no API call
-make rehearse                       # added by R2: the offline rehearsal; red means stop
+make rehearse                       # the offline rehearsal against pcb-fake; red means stop
 ```
 `make live-preflight RUN="$R" STEP7=1` on the step 7 host: it refuses blackwater. It never runs `pcb login` or any Proton call.
 
 ## Rules for the whole run
 
+- Before the live session, run `make rehearse` (the real `pcb` against `pcb-fake`, a local fake Proton on 127.0.0.1: login with the 2FA code held by the daemon, serve, CalDAV reads and writes with read-back, rotate, a revoked session, logout). A red rehearsal stops the live run.
 - Test account only (vault `pcb-dev`, item `proton-calendar-bridge-test`), credentials through `pass-cli run --env-file scripts/lab.env.example --` (never typed, never in argv; step 7 on the VM is the one exception, see there). `pass-cli` must be logged in on blackwater (pre-check in step 2).
 - Logins: the budget is the table above (step 2 alone has four, so "at most one per step" does not hold; each step names its own count). **At least 60 s between any two logins**: the lab's own guard refuses sooner with exit 20 but is per state dir, so the ledger (`live --login STEP PURPOSE`, `$R/logins.tsv`) is what enforces it across dirs, and it also refuses beyond the budget. Honour `Retry-After`.
 - Keep the login log: the ledger is it (step, UTC time, purpose); add the outcome by hand after each login.

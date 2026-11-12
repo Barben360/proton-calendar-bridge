@@ -2,7 +2,8 @@
 // httptest front over go-proton-api's in-memory server that adds what the
 // server lacks (Proton's envelope and error codes, CAPTCHA, TOTP, two-password
 // and FIDO2 accounts, the locked scope, token expiry, revocation and injected
-// failures). It never contacts Proton. Test use only.
+// failures). It never contacts Proton. Test use only, and the developer-only
+// rehearsal fake cmd/pcb-fake (through Process); pcb itself never links it.
 //
 // Backends and their accounts are pooled per test binary (see pool), so a
 // fake is cheap while its crypto stays real.
@@ -17,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -24,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/ProtonMail/go-proton-api/server"
@@ -71,6 +72,12 @@ type Options struct {
 	// Write selects the other reading of each unsettled write behaviour
 	// (see WriteOptions).
 	Write WriteOptions
+	// TOTPSecret is the base32 TOTP secret of the first account (Fake.TOTPURI
+	// carries it); empty: a random one.
+	TOTPSecret string
+	// Listener is where the fake serves; nil: a new loopback port. The fake
+	// closes it with the rest.
+	Listener net.Listener
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the
@@ -78,7 +85,7 @@ type Options struct {
 type Fake struct {
 	URL, Username, Password, TOTPURI string
 
-	t       testing.TB
+	t       TB
 	o       Options
 	backend *server.Server
 	pool    *pooled // where backend comes from
@@ -111,8 +118,8 @@ type failure struct {
 }
 
 // New starts a fake with one user (Options.Username and Password, or
-// throwaway values). It is closed when the test ends.
-func New(t testing.TB, o Options) *Fake {
+// throwaway values). It is closed when the test ends (t's cleanups run).
+func New(t TB, o Options) *Fake {
 	t.Helper()
 	if len(o.CaptchaMethods) == 0 {
 		o.CaptchaMethods = []string{"captcha"}
@@ -131,10 +138,13 @@ func New(t testing.TB, o Options) *Fake {
 	if o.Password == "" {
 		o.Password = defaultPassword()
 	}
+	if o.TOTPSecret == "" {
+		o.TOTPSecret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20))
+	}
 	f := &Fake{
 		Username:  o.Username,
 		Password:  o.Password,
-		TOTPURI:   "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20)),
+		TOTPURI:   "otpauth://totp/pcbfake?secret=" + o.TOTPSecret,
 		t:         t,
 		o:         o,
 		backend:   p.srv,
@@ -157,13 +167,18 @@ func New(t testing.TB, o Options) *Fake {
 	f.captcha = o.Captcha
 	f.proxy.ModifyResponse = f.fixResponse
 	f.AddUser(f.Username, f.Password)
-	ts := httptest.NewServer(http.HandlerFunc(f.serve))
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	if o.Listener != nil {
+		_ = ts.Listener.Close()
+		ts.Listener = o.Listener
+	}
+	ts.Start()
 	t.Cleanup(ts.Close)
 	f.URL = ts.URL
 	return f
 }
 
-func random(t testing.TB, n int) []byte {
+func random(t TB, n int) []byte {
 	t.Helper()
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -300,7 +315,7 @@ func (f *Fake) RevokeSessions() {
 // so every other route (calendar list and bootstrap, keys, addresses) answers
 // 401 and a refresh fails: a test needing those logs in. The tokens expire
 // (ExpireAccessTokens) and die (RevokeSessions) like issued ones.
-func (f *Fake) Session(t testing.TB, username string) api.Tokens {
+func (f *Fake) Session(t TB, username string) api.Tokens {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
