@@ -245,22 +245,49 @@ func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), 
 }
 
 func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last store.State, now time.Time, username string) (LoginResult, error) {
-	st := store.State{
-		AccountID:   last.AccountID,
-		Phase:       store.PhaseNeedsCaptcha,
-		Reason:      "Proton asks for a CAPTCHA",
-		Captcha:     &store.Captcha{URL: ce.URL, Token: ce.Token, At: now},
-		Unattended:  last.Unattended,
-		LastLogin:   last.LastLogin,
-		LastRelogin: last.LastRelogin,
-		Address:     username,
-		CalDAV:      last.CalDAV,
-		Created:     createdOr(last, now),
-	}
-	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
-		return LoginResult{}, l.stateWriteError(err)
+	err := l.writeLogin(ctx, last, func(cur store.State) store.State {
+		return store.State{
+			AccountID:   last.AccountID,
+			Phase:       store.PhaseNeedsCaptcha,
+			Reason:      "Proton asks for a CAPTCHA",
+			Captcha:     &store.Captcha{URL: ce.URL, Token: ce.Token, At: now},
+			Unattended:  last.Unattended,
+			LastLogin:   last.LastLogin,
+			LastRelogin: last.LastRelogin,
+			Address:     username,
+			CalDAV:      cur.CalDAV,
+			Created:     createdOr(cur, now),
+		}
+	})
+	if err != nil {
+		return LoginResult{}, err
 	}
 	return captchaResult(ce, username), nil
+}
+
+// writeLogin writes the state.json a login ends with, built by next from
+// the file as it is now, under state.lock (ruling R19): what the login does
+// not own (the CalDAV switch, the creation time, the address a relogin
+// keeps) is read there, not from last, the state the login began with, so
+// a switch made meanwhile is kept. The secrets generation mirror is the
+// file's. A state.json that can no longer be read is replaced as is, built
+// from last.
+func (l *Local) writeLogin(ctx context.Context, last store.State, next func(cur store.State) store.State) error {
+	loaded := false
+	err := store.UpdateStateContext(ctx, l.o.Dirs.State, func(cur *store.State) error {
+		loaded = true
+		st := next(*cur)
+		st.SecretsGeneration = cur.SecretsGeneration
+		*cur = st
+		return nil
+	})
+	if err != nil && !loaded && !errors.Is(err, store.ErrStateLock) {
+		err = store.SaveStateContext(ctx, l.o.Dirs.State, next(last))
+	}
+	if err != nil {
+		return l.stateWriteError(err)
+	}
+	return nil
 }
 
 // createdOr is when the account was added: last's, else now.
@@ -362,15 +389,21 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	l.dropClient()
 	// LastLogin is a person's last login; an unattended relogin only moves
 	// LastRelogin.
-	st := store.State{
-		AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
-		LastLogin: now, LastRelogin: pl.last.LastRelogin,
-		Address: pl.username, CalDAV: pl.last.CalDAV, Created: createdOr(pl.last, now),
-	}
-	if pl.relogin {
-		st.LastLogin, st.LastRelogin = pl.last.LastLogin, now
-	}
-	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
+	err = l.writeLogin(ctx, pl.last, func(cur store.State) store.State {
+		st := store.State{
+			AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
+			LastLogin: now, LastRelogin: pl.last.LastRelogin,
+			Address: pl.username, CalDAV: cur.CalDAV, Created: createdOr(cur, now),
+		}
+		if pl.relogin {
+			st.LastLogin, st.LastRelogin = pl.last.LastLogin, now
+			if cur.Address != "" {
+				st.Address = cur.Address // a relogin keeps the address the account shows
+			}
+		}
+		return st
+	})
+	if err != nil {
 		// Put the secrets back as they were, so the stored session stays the
 		// one state.json describes. If that fails too, the new session is
 		// what is sealed and must not be revoked.
@@ -384,7 +417,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		}); rerr == nil {
 			pl.sealed = false
 		}
-		return LoginResult{}, l.stateWriteError(err)
+		return LoginResult{}, err
 	}
 	// A relogin replaces a session Proton already ended: nothing to revoke.
 	if replaced && old.UID != acc.UID && !pl.relogin {

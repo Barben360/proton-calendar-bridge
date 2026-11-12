@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -59,13 +62,30 @@ type Hub struct {
 	closed   bool
 	changes  []func()
 	onOpen   func(*Local) // tests only: runs on every Local the Hub opens
+	stops    uint64       // the parks and waits of the serve loops so far, in order
+
+	// srv serialises the start and the stop of the serve loops (loops,
+	// Serve's start and end). Taken after ops, before mu; never held by a
+	// loop.
+	srv     sync.Mutex
+	serving *hubServe // Serve's run, nil outside Serve; guarded by srv
 }
 
 // hubAccount is one account of the Hub.
 type hubAccount struct {
 	id, dir string
 	local   *Local
-	stopped *StopInfo // set by Serve (Task 4); guarded by Hub.mu
+
+	// Guarded by Hub.mu: stopped and stopErr are set when the account's
+	// serve loop ended on an error not caused by its context (parked);
+	// state is the loop's last state ("" while it starts), waitErr why it
+	// waits for a login; stopSeq orders its last park or wait among the
+	// accounts' (Hub.stops).
+	stopped *StopInfo
+	stopErr error
+	state   ServeState
+	waitErr error
+	stopSeq uint64
 
 	// gate is held for reading by every call through the API Account
 	// hands out, and for writing while the account is deleted (retire),
@@ -73,9 +93,10 @@ type hubAccount struct {
 	gate    sync.RWMutex
 	removed bool // the account is gone: calls through its API fail; written under gate
 
-	lmu      sync.Mutex                  // guards removing and long
-	removing bool                        // retire has begun: a long call starts already ended
+	lmu      sync.Mutex                  // guards removing, long and loop
+	removing bool                        // retire has begun: a long call starts already ended, no loop starts
 	long     map[*int]context.CancelFunc // the long calls in flight (Serve, WatchSync), ended by retire
+	loop     *accountLoop                // the Hub's serve loop of the account, nil when none runs
 }
 
 // enter admits a call through a's API, or refuses it once a is removed.
@@ -116,17 +137,21 @@ func (a *hubAccount) enterLong(ctx context.Context) (context.Context, func(), er
 	return ctx, func() { leave(); end() }, nil
 }
 
-// retire deletes a: it ends the long calls through its API, waits for the
-// others, runs before (whose error leaves a as it was: gone false), then
-// closes a's Local and removes its directory with no call in flight (gone
-// true, err the removal's). Calls through its API then fail.
+// retire deletes a: it ends the long calls through its API and its serve
+// loop, waiting for the loop to end (ruling R18), waits for the other
+// calls, runs before (whose error leaves a as it was: gone false; the
+// caller starts its loop again), then closes a's Local and removes its
+// directory with no call in flight (gone true, err the removal's). Calls
+// through its API then fail.
 func (a *hubAccount) retire(before func() error) (gone bool, err error) {
 	a.lmu.Lock()
 	a.removing = true
 	for _, cancel := range a.long {
 		cancel()
 	}
+	run := a.loop
 	a.lmu.Unlock()
+	run.stop()
 	a.gate.Lock()
 	defer a.gate.Unlock()
 	if before != nil {
@@ -535,9 +560,9 @@ func (h *Hub) insert(a *hubAccount) bool {
 }
 
 // OnChange makes f run after an account is added (pending included),
-// completes its first login, is signed out, is removed or has its CalDAV
-// switched. f runs
-// on the goroutine of the change, outside the Hub's locks: it may call the
+// completes its first login, is signed out, is removed, has its CalDAV
+// switched, or is parked (from Serve's goroutine) or restarted. f runs on
+// the goroutine of the change, outside the Hub's locks: it may call the
 // Hub.
 func (h *Hub) OnChange(f func()) {
 	h.mu.Lock()
@@ -579,6 +604,7 @@ func (h *Hub) begin() (func(), error) {
 // runs at a time. The result's Account is the local ID.
 func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) {
 	res, changed, err := h.login(ctx, req)
+	h.loops()
 	h.notify(changed)
 	return res, err
 }
@@ -709,6 +735,9 @@ func (h *Hub) settle(ctx context.Context, a *hubAccount, added, fresh bool, res 
 		}
 	}
 	changed := fresh && res.State == StateReady
+	if res.State == StateReady && h.clearStop(a) {
+		changed = true
+	}
 	if added {
 		if !h.insert(a) {
 			return LoginResult{}, false, errClosed()
@@ -742,6 +771,7 @@ func (h *Hub) userAccount(userID string, except *hubAccount) string {
 // account whose login waits for a code.
 func (h *Hub) SubmitTOTP(ctx context.Context, selector, code string) (LoginResult, error) {
 	res, changed, err := h.submitTOTP(ctx, selector, code)
+	h.loops()
 	h.notify(changed)
 	return res, err
 }
@@ -806,10 +836,12 @@ func (h *Hub) signOut(ctx context.Context, selector string, req LogoutRequest) (
 	return a.local.Logout(ctx, req)
 }
 
-// Remove signs the account out, then deletes its directory. A sign-out it
-// refuses leaves the account as it was.
+// Remove stops the account's serve loop and waits for its end (ruling
+// R18), signs the account out, then deletes its directory. A sign-out it
+// refuses leaves the account as it was, its loop started again.
 func (h *Hub) Remove(ctx context.Context, selector string, req LogoutRequest) (AccountInfo, error) {
 	info, changed, err := h.remove(ctx, selector, req)
+	h.loops() // a removal Logout refused: its loop starts again
 	h.notify(changed)
 	return info, err
 }
@@ -841,11 +873,14 @@ func (h *Hub) remove(ctx context.Context, selector string, req LogoutRequest) (A
 	return info, true, nil
 }
 
-// SetCalDAV switches the account's CalDAV adapter, in its state.json. It
-// is refused while a login of the account waits for its 2FA code (that
-// login would write the switch back as it found it).
+// SetCalDAV switches the account's CalDAV adapter, in its state.json; while
+// the Hub serves, off stops the account's loop (it returns once the loop
+// ended) and on starts it, with a pass at once. It is refused while a
+// login of the account waits for its 2FA code (that login would write the
+// switch back as it found it).
 func (h *Hub) SetCalDAV(ctx context.Context, selector string, on bool) (AccountInfo, error) {
 	info, err := h.setCalDAV(ctx, selector, on)
+	h.loops()
 	h.notify(err == nil)
 	return info, err
 }
@@ -1112,3 +1147,390 @@ func (x accountAPI) CheckClient(ctx context.Context, password, remote string) (b
 
 // Close does nothing: the Hub closes its accounts.
 func (accountAPI) Close() error { return nil }
+
+// serveLockName is the root's lock of the serving process (design §4.1):
+// it holds the PID as decimal text and a newline (ruling R20).
+const serveLockName = "serve.lock"
+
+// HubServeOptions tune Hub.Serve: the ServeOptions of every account's loop
+// (Interval, LoginPoll, Logger, the latter with the account's local ID),
+// with the per-account callbacks in place of ServeOptions.OnState and
+// OnPass, which are ignored. Ready is called once, when Serve holds its
+// locks and found what it needs to start, before the loops start.
+// WaitForLogin is the process exit rule (Serve); every loop waits for a
+// login whatever it says (ruling R3).
+//
+// The callbacks run on the account's loop goroutine: they must not wait
+// for a change of the accounts (Login, SubmitTOTP, Remove, SetCalDAV,
+// Restart), which may wait for that loop to end. OnState also gets
+// ServeStopped when a loop ends: parked (AccountInfo.Stopped), paused
+// (CalDAV off), removed, or Serve ending.
+type HubServeOptions struct {
+	ServeOptions
+	OnState func(accountID string, s ServeState)
+	OnPass  func(accountID string, p WatchPass)
+}
+
+// hubServe is one run of Hub.Serve.
+type hubServe struct {
+	ctx  context.Context // the loops' parent; cancelled when Serve ends
+	o    HubServeOptions
+	log  *slog.Logger
+	wg   sync.WaitGroup // the loop goroutines
+	wake chan struct{}  // an account's loop changed state (capacity 1)
+
+	parked atomic.Bool // a loop parked its account since Serve last looked
+}
+
+func (sv *hubServe) poke() {
+	select {
+	case sv.wake <- struct{}{}:
+	default: // a wake is already waiting
+	}
+}
+
+// accountLoop is one account's serve loop: cancel ends it, done is closed
+// once it ended.
+type accountLoop struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// stop ends the loop, if any, and waits for its end.
+func (run *accountLoop) stop() {
+	if run == nil {
+		return
+	}
+	run.cancel()
+	<-run.done
+}
+
+// Serve serves every account until ctx ends: one Local.Serve loop per
+// account that is not pending and has its CalDAV adapter on, each in its
+// own goroutine and waiting for a login while it has none (ruling R3). It
+// holds the root's serve.lock (another holder: Blocked, naming the PID it
+// wrote) and the root's sync.lock, so an older pcb refuses to write, for
+// its whole run. A loop starts when its account is added, completes its
+// first login or has CalDAV switched on, and stops (Serve waits for its
+// end) when the account is removed or CalDAV switched off. A loop that
+// ends on an error its context did not cause parks its account
+// (AccountInfo.Stopped, OnChange runs) until Restart, a login of that
+// account, or a new Hub. One account's loop never stops another's.
+//
+// The process exit rule (design §4.1): with WaitForLogin, Serve runs until
+// ctx ends (nil). Without, it refuses to start when no account is logged
+// in (MustAct, or the only account's own error), and returns once every
+// account that is not pending has stopped (parked, or waiting for a login:
+// the loop of one account without WaitForLogin would have ended there),
+// with the error of the first to stop; with one account that is the
+// single-account Serve. An account with CalDAV off counts as running.
+// Serve returns once every loop ended, its locks released.
+func (h *Hub) Serve(ctx context.Context, o HubServeOptions) error {
+	if h.isClosed() {
+		return errClosed()
+	}
+	if _, err := watchInterval(o.Interval); err != nil {
+		return err
+	}
+	unlockServe, err := lockServe(h.root)
+	if err != nil {
+		return err
+	}
+	defer unlockServe()
+	unlockSync, err := tryLock(h.root, syncLockName, "another pcb holds the state", "stop the running pcb first")
+	if err != nil {
+		return err
+	}
+	defer unlockSync()
+	if !o.WaitForLogin {
+		if err := h.anyLoggedIn(); err != nil {
+			return err
+		}
+	}
+	log := o.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sv := &hubServe{ctx: sctx, o: o, log: log, wake: make(chan struct{}, 1)}
+	h.srv.Lock()
+	if h.serving != nil {
+		h.srv.Unlock()
+		return blocked("this pcb already serves its accounts", "stop it first, or use pcb status")
+	}
+	h.serving = sv
+	h.srv.Unlock()
+	if o.Ready != nil {
+		o.Ready()
+	}
+	h.loops()
+	err = h.supervise(sv)
+	h.srv.Lock()
+	h.serving = nil
+	h.srv.Unlock()
+	cancel()
+	sv.wg.Wait()
+	return err
+}
+
+// supervise waits for Serve's end: ctx (nil) or, without WaitForLogin,
+// every account stopped (the first stop's error). It runs OnChange after a
+// loop parked its account.
+func (h *Hub) supervise(sv *hubServe) error {
+	for {
+		select {
+		case <-sv.ctx.Done():
+			return nil
+		case <-sv.wake:
+		}
+		if !sv.o.WaitForLogin {
+			if err := h.allStopped(); err != nil {
+				return err
+			}
+		}
+		if sv.parked.Swap(false) {
+			h.notify(true)
+		}
+	}
+}
+
+// lockServe takes root's serve.lock without waiting and writes this
+// process's PID in it; the release empties it. Held, it is Blocked naming
+// the PID its holder wrote. Off Unix there is no lock to take.
+func lockServe(root string) (func(), error) {
+	path := filepath.Join(root, serveLockName)
+	unlock, ok, err := filelock.TryLock(path)
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+		return func() {}, nil
+	case err != nil:
+		return nil, blocked("cannot take "+serveLockName+" in "+root, "make sure "+root+" is writable by this user")
+	case !ok:
+		msg := "pcb is already serving"
+		if raw, err := os.ReadFile(path); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
+				msg += " (pid " + strconv.Itoa(pid) + ")"
+			}
+		}
+		return nil, blocked(msg, "stop it first, or use pcb status")
+	}
+	// Written in place: the lock is on this file, a rename would drop it.
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		unlock()
+		return nil, blocked("cannot write "+path, "make sure "+root+" is writable by this user")
+	}
+	return func() {
+		_ = os.Truncate(path, 0)
+		unlock()
+	}, nil
+}
+
+// anyLoggedIn is nil when an account that is not pending holds a ready
+// login; else the only such account's own error (as the single-account
+// Serve), or MustAct when there are none or several.
+func (h *Hub) anyLoggedIn() error {
+	var errs []error
+	for _, a := range h.list() {
+		if inspect(a).pending {
+			continue
+		}
+		_, _, err := a.local.stored()
+		if err == nil {
+			return nil
+		}
+		errs = append(errs, err)
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return loggedOut()
+}
+
+// allStopped is the error of the account that stopped first once every
+// account that is not pending has stopped (parked, or waiting for a
+// login), nil while one runs (or starts, or has CalDAV off). With no such
+// account left it is MustAct, as a start with none.
+func (h *Hub) allStopped() error {
+	var (
+		first error
+		seq   uint64
+		n     int
+	)
+	for _, a := range h.list() {
+		if inspect(a).pending {
+			continue
+		}
+		n++
+		h.mu.Lock()
+		var err error
+		switch {
+		case a.stopped != nil:
+			err = a.stopErr
+		case a.state == ServeWaitingForLogin:
+			err = a.waitErr
+		}
+		when := a.stopSeq
+		h.mu.Unlock()
+		if err == nil {
+			return nil
+		}
+		if first == nil || when < seq {
+			first, seq = err, when
+		}
+	}
+	if n == 0 {
+		return loggedOut()
+	}
+	return first
+}
+
+// loops makes the serve loops match the accounts while the Hub serves: a
+// loop runs for every account that is not pending, has CalDAV on and is
+// not parked; the others' loops are stopped, each waited for.
+func (h *Hub) loops() {
+	h.srv.Lock()
+	defer h.srv.Unlock()
+	sv := h.serving
+	if sv == nil {
+		return
+	}
+	for _, a := range h.list() {
+		if h.wantsLoop(a) {
+			h.startLoop(sv, a)
+			continue
+		}
+		a.lmu.Lock()
+		run := a.loop
+		a.lmu.Unlock()
+		run.stop()
+	}
+	sv.poke() // the accounts may have changed: the exit rule looks again
+}
+
+// wantsLoop reports whether a is served: not pending, CalDAV on, not
+// parked.
+func (h *Hub) wantsLoop(a *hubAccount) bool {
+	d := inspect(a)
+	if d.pending || (d.st.CalDAV != nil && !*d.st.CalDAV) {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return a.stopped == nil
+}
+
+// startLoop starts a's loop unless it runs or a is being removed. It holds
+// srv.
+func (h *Hub) startLoop(sv *hubServe, a *hubAccount) {
+	a.lmu.Lock()
+	if a.removing || a.loop != nil {
+		a.lmu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(sv.ctx)
+	run := &accountLoop{cancel: cancel, done: make(chan struct{})}
+	a.loop = run
+	a.lmu.Unlock()
+	h.mu.Lock()
+	a.state, a.waitErr = "", nil
+	h.mu.Unlock()
+	sv.wg.Add(1)
+	go h.runLoop(ctx, sv, a, run)
+}
+
+// runLoop runs a's Local.Serve until ctx ends or it stops on its own; then
+// a stop its context did not cause parks a.
+func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *accountLoop) {
+	defer sv.wg.Done()
+	o := sv.o
+	err := a.local.Serve(ctx, ServeOptions{
+		Interval:     o.Interval,
+		LoginPoll:    o.LoginPoll,
+		Logger:       sv.log.With("account", a.id),
+		WaitForLogin: true,
+		OnPass: func(p WatchPass) {
+			if o.OnPass != nil {
+				o.OnPass(a.id, p)
+			}
+		},
+		OnState: func(s ServeState) { h.loopState(sv, a, s) },
+		waitCause: func(cause error) {
+			h.mu.Lock()
+			h.stops++
+			a.waitErr, a.stopSeq = cause, h.stops
+			h.mu.Unlock()
+		},
+	})
+	cancelled := ctx.Err() != nil
+	run.cancel()
+	if !cancelled && err != nil {
+		h.mu.Lock()
+		a.stopped = &StopInfo{Code: int(exitcode.From(err)), Message: err.Error(), Hint: exitcode.HintOf(err), At: h.o.Now()}
+		a.stopErr = err
+		h.stops++
+		a.stopSeq = h.stops
+		h.mu.Unlock()
+		sv.parked.Store(true)
+		sv.log.Error("account stopped", "account", a.id, "reason", err.Error(), "hint", exitcode.HintOf(err))
+	}
+	a.lmu.Lock()
+	if a.loop == run {
+		a.loop = nil
+	}
+	a.lmu.Unlock()
+	h.loopState(sv, a, ServeStopped)
+	close(run.done)
+}
+
+// loopState records the state a's loop entered, reports it and lets the
+// exit rule look again.
+func (h *Hub) loopState(sv *hubServe, a *hubAccount, s ServeState) {
+	h.mu.Lock()
+	a.state = s
+	h.mu.Unlock()
+	if sv.o.OnState != nil {
+		sv.o.OnState(a.id, s)
+	}
+	sv.poke()
+}
+
+// clearStop forgets a's park, reporting whether it was parked.
+func (h *Hub) clearStop(a *hubAccount) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	was := a.stopped != nil
+	a.stopped, a.stopErr = nil, nil
+	return was
+}
+
+// Restart clears the account's park (AccountInfo.Stopped) and, while the
+// Hub serves, starts its loop (unless it is pending or has CalDAV off).
+// An account that is not parked is left as it is.
+func (h *Hub) Restart(ctx context.Context, selector string) (AccountInfo, error) {
+	h.ops.Lock()
+	a, err := h.pick(selector)
+	changed := err == nil && h.clearStop(a)
+	h.ops.Unlock()
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	h.loops()
+	h.notify(changed)
+	return h.info(a), nil
+}
+
+// Health is the account's Health (Local.Health): its loop's live state,
+// stopped when it runs no loop (parked, paused, or the Hub not serving).
+func (h *Hub) Health(ctx context.Context, selector string) (Health, error) {
+	a, err := h.pick(selector)
+	if err != nil {
+		return Health{}, err
+	}
+	leave, err := a.enter()
+	if err != nil {
+		return Health{}, err
+	}
+	defer leave()
+	return a.local.Health(ctx)
+}

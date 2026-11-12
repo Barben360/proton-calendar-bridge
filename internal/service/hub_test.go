@@ -44,6 +44,9 @@ type hubEnv struct {
 
 	amu    sync.Mutex
 	expiry []func() // the pending logins' expiry timers, fired by hand
+	// sleep, when set before open, is the services' Sleep (else the
+	// clock's).
+	sleep func(ctx context.Context, d time.Duration) error
 	// sessions records the tokens SkipSRP handed out, by username.
 	smu      sync.Mutex
 	sessions map[string]api.Tokens
@@ -81,8 +84,12 @@ func (e *hubEnv) expireAll() {
 }
 
 func (e *hubEnv) options() service.HubOptions {
+	sleep := e.clk.Sleep
+	if e.sleep != nil {
+		sleep = e.sleep
+	}
 	return service.HubOptions{Options: service.Options{
-		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, AfterFunc: e.afterFunc,
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: sleep, AfterFunc: e.afterFunc,
 	}}
 }
 

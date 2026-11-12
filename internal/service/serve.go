@@ -46,6 +46,11 @@ type ServeOptions struct {
 	// OnState, when set, gets each state Serve enters (serving, or
 	// waiting-for-login), from Serve's goroutine.
 	OnState func(ServeState)
+
+	// waitCause, when set, gets why Serve waits for a login (the stop a
+	// login fixes, or the switch to another account), just before OnState
+	// gets waiting-for-login: the Hub's exit rule returns it.
+	waitCause func(error)
 }
 
 // DefaultLoginPoll is how often a Serve waiting for a login reads
@@ -161,7 +166,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	if l.halts > 0 || l.logouts != gen { // a logout is wiping, or wiped since the login was read
 		l.gmu.Unlock()
 		if o.WaitForLogin {
-			l.enterWaiting(o)
+			l.enterWaiting(o, loggedOut())
 		}
 		return loggedOut()
 	}
@@ -170,7 +175,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	l.gmu.Unlock()
 	waitNext := func() {
 		if o.WaitForLogin && ctx.Err() == nil && waitsAfter(err) {
-			l.enterWaiting(o) // Serve waits next: say so before the handle goes
+			l.enterWaiting(o, err) // Serve waits next: say so before the handle goes
 		}
 	}
 	defer func() {
@@ -291,7 +296,14 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 				return store.Account{}, 0, persistent(err)
 			}
 		}
-		l.enterWaiting(o)
+		cause := err
+		if cause == nil {
+			cause = stopped
+		}
+		if cause == nil {
+			cause = loggedOut() // a logout is wiping
+		}
+		l.enterWaiting(o, cause)
 		if !logged && err != nil {
 			o.Logger.Warn("waiting for a login", "reason", err.Error(), "hint", exitcode.HintOf(err))
 			logged = true
@@ -320,9 +332,9 @@ func (l *Local) pollTimer(d time.Duration) (tick <-chan time.Time, stop func()) 
 	return t.C, func() { t.Stop() }
 }
 
-// enterWaiting marks Serve waiting for a login, reporting it to OnState
-// when it was not already.
-func (l *Local) enterWaiting(o ServeOptions) {
+// enterWaiting marks Serve waiting for a login because of cause, reporting
+// it to waitCause and OnState when it was not already.
+func (l *Local) enterWaiting(o ServeOptions, cause error) {
 	l.gmu.Lock()
 	entered := l.waitSince == nil
 	if entered {
@@ -330,6 +342,9 @@ func (l *Local) enterWaiting(o ServeOptions) {
 		l.waitSince = &now
 	}
 	l.gmu.Unlock()
+	if entered && o.waitCause != nil {
+		o.waitCause(cause)
+	}
 	if entered && o.OnState != nil {
 		o.OnState(ServeWaitingForLogin)
 	}
