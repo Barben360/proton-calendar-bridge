@@ -78,7 +78,7 @@ Creating, editing, moving and deleting events, single occurrences included, go t
 - `STATUS:TENTATIVE` is dropped (Proton refuses it), your colour choice is ignored (Proton's colour stays), `DURATION` becomes an end time, a "monthly on the 2nd Tuesday" or "every weekday" rule is written in Proton's equivalent form;
 - unknown properties (Thunderbird's `X-MOZ-*` and others) are kept, encrypted.
 
-Writes are refused (HTTP 403; Thunderbird shows a generic error, or, for a calendar with offline support, keeps the change locally and retries it silently) when pcb cannot store them faithfully or safely:
+Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely. For a calendar without offline support, Thunderbird shows a generic error and then **disables the calendar** until you enable it again (E08 §4.2); with offline support it keeps the change locally and retries it silently. Subscribe to pcb calendars with "Offline support" checked (the default in the New Calendar dialog; Calendar properties otherwise). The refusals:
 
 - calendars you may not write: holidays and subscribed calendars, calendars where your member lacks write permission, calendars whose key signature does not check out (`pcb calendar list` shows them `read_only`);
 - adding or removing attendees, or an attendee on a new event: invitations are not supported, and **pcb never notifies attendees** in v1 (moving an occurrence of a meeting keeps its attendees but sends them nothing);
@@ -86,7 +86,7 @@ Writes are refused (HTTP 403; Thunderbird shows a generic error, or, for a calen
 - floating times (no time zone) and time zones Go's database does not know;
 - events pcb cannot rewrite safely: one it cannot decrypt or verify, one written by another person, someone else's invitation, one whose key material changed since pcb first saw it.
 
-When Proton is unavailable or rate limiting, or a change cannot be confirmed by reading it back, the answer is 503 and Thunderbird tries again later; pcb's cache then holds whatever Proton holds, which Thunderbird sees at its next sync. When someone changed the same event elsewhere in the meantime, the answer is 412 and Thunderbird offers its conflict dialog.
+When Proton is unavailable, rate limiting or asking for a human verification (`pcb serve` logs it: open the Proton web app from the same network and complete it), or a change cannot be confirmed by reading it back, the answer is 503 and Thunderbird tries again later; pcb's cache then holds whatever Proton holds, which Thunderbird sees at its next sync. When someone changed the same event elsewhere in the meantime, the answer is 412 and Thunderbird offers its conflict dialog.
 
 The listener comes from `[caldav]` in `config.toml` (or `--listen`):
 

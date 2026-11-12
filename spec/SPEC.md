@@ -544,8 +544,8 @@ relogin credentials, client tokens (hashed, never stored in clear).
   `--watch` is refused (exit 2).
 - Writes (M4) go to Proton synchronously, during `pcb serve` only, and the
   client gets the real result; no offline write queue in v1 [call]. The flow
-  of a PUT or DELETE (ruling M4-R5, amended by M4-R31, R32, R34, R36, R37;
-  `internal/service/write.go`):
+  of a PUT or DELETE (ruling M4-R5, amended by M4-R31, R32, R34, R36, R37,
+  R42 to R45; `internal/service/write.go`):
   1. Resolve the resource name to a UID (its alias, else the UID whose
      canonical or alternative name it is; §9) and parse the body
      (`spec/mapping.md`; a refusal here sends nothing).
@@ -553,8 +553,13 @@ relogin credentials, client tokens (hashed, never stored in clear).
      undecided, M4-R39).
   3. Take the calendar's lock: one write of a calendar at a time, never
      beside the syncer's pass of that calendar. Waiting ends with the
-     request's context (503).
-  4. Refresh the UID's rows from Proton (`ListByUID`). A PUT compares their
+     request's context or the pre-send budget (503). Steps 2 to 6 (the
+     keys and the gate, the lock, the refresh, the checks and the plan)
+     run within a 20 s budget (M4-R42): past it the write answers 503 and sends nothing,
+     so no Sync call leaves when its answer could no longer reach the
+     client.
+  4. Refresh the UID's rows from Proton (`ListByUID`; rows of another UID
+     in the answer are ignored and logged by ID, M4-R45). A PUT compares their
      key packets with the pins (403 `pcb:untrusted-key`, §5.3); then the rows
      are stored (`ApplyWrite`: the change counter moves, the feed cursor does
      not).
@@ -569,11 +574,14 @@ relogin credentials, client tokens (hashed, never stored in clear).
      reaches Proton is served at the client's name whatever happens next.
   7. One `Sync` call holding every operation, master first; never sent
      again (`api.PutOnce`; a 401 answered before processing is resent once,
-     M4-R23). Rows Proton answered as created are pinned with the packets sent
-     (M4-R37).
-  8. Read the UID's rows back (`ListByUID`, bounded by 30 s even if the client
-     hung up) and store them: the cache holds what Proton holds, whatever the
-     answer. Never the row Proton echoed (the ETag is the whole listed row).
+     M4-R23), within 60 s (past it the call is ambiguous and read back).
+     Rows Proton answered as created are pinned with the packets sent
+     (M4-R37); a pin that cannot be stored is logged and the read-back
+     still decides (M4-R43).
+  8. Read the UID's rows back (`ListByUID`; the pins, the read-back and the
+     store bounded by 30 s, even if the client hung up) and store them: the
+     cache holds what Proton holds, whatever the answer. Never the row Proton
+     echoed (the ETag is the whole listed row).
   9. Decide (M4-R31, R32, R34, R36): every operation shown done by the rows
      read back, by decrypted, verified plaintext per part plus the row fields
      sent → success (201 for a create, else 204, with no `ETag` header),
@@ -581,20 +589,32 @@ relogin credentials, client tokens (hashed, never stored in clear).
      after a refusal (an entry's code, or the whole call refused with a 4xx
      that is not session-wide) or after a DELETE, rows changed by someone else
      since the plan → 412 (Thunderbird refetches), else a refusal → 403
-     `pcb:proton-refused` (Proton's code only, never its text); a row that
+     `pcb:proton-refused` (Proton's code only, never its text), also when
+     other entries of the same call landed: Proton then holds that part, and
+     the client's next read shows it; a row that
      came back under other key packets than sent or pinned → 503; anything
      else (an ambiguous call not shown done, a dropped edit, a read-back that
-     failed) → 503 "not confirmed", logged.
+     failed) → 503 "not confirmed", logged. A write shown done whose rows the
+     cache then cannot store is still a success, logged: the next sync pass
+     stores them (M4-R43).
   Proton 429, 5xx, a network failure or an ended session before the call
-  left: 503 with `Retry-After` (Proton's own on a 429), nothing retried
+  left: 503 with `Retry-After` (Proton's own on a 429), nothing retried; Proton
+  asking for a human verification (422, code 9001) on any of a write's calls:
+  503, logged as needing a person, never a 403 (M4-R44)
   [verified: `TestPutCreatesAndReadsBack`, `TestRefreshBeforePrecondition`,
   `TestProton5xxIs503AndNeverRetried`, `TestAmbiguousFailureReadsBack`,
   `TestEntryRefusalIsReadBack`, `TestDroppedEditIsNeverASuccess`,
   `TestWritesSerialiseWithTheSyncer`, `TestDeleteWithARowLeftIs412`,
-  `TestOccurrenceDeleteRaceIsTruthful`]. The lock is held across a GET's
-  backoff (a 429's `Retry-After`, up to 60 s) so that nothing is stored
-  between a write's refresh and its plan; parked for the final audit
-  (`OPEN.md`).
+  `TestOccurrenceDeleteRaceIsTruthful`, `TestSlowPreparationSendsNothing`,
+  `TestLandedWriteSurvivesACacheFailure`, `TestPinFailureStillReadsBack`,
+  `TestHumanVerificationIsUnavailable`, `TestUIDListingKeepsOnlyThatUID`].
+  The lock is held across a GET's backoff (a 429's `Retry-After`, up to 60 s
+  and at most twice, plus 5xx retries) so that nothing is stored between a
+  write's refresh and its plan; a write waiting behind it gives up at its
+  pre-send budget. A write thus runs up to 110 s (20 + 60 + 30), longer than
+  the listener's 60 s write timeout: PUT and DELETE extend their response's
+  write deadline to 150 s, so a write that landed delivers its answer
+  (M4-R42) [verified: `TestSlowWriteStillDeliversItsAnswer`].
 - Read-your-writes: the written rows are in the cache before the answer, and a
   later feed read of the same row finds the same ETag and changes nothing
   [verified offline: `TestFeedRereadOfAWrittenRowIsANoop`; live:
@@ -653,7 +673,10 @@ ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
   (`spec/mapping.md` §8);
 - writes to read-only calendars (`DAV:need-privileges`).
 A Thunderbird calendar with offline support keeps a refused change locally
-and retries it silently (E08 §3.8, §4.2): refusals are few and logged.
+and retries it silently (E08 §3.8, §4.2): refusals are few and logged. One
+without offline support shows an error and is disabled until the user
+enables it again (E08 §4.2): the README recommends offline support (checked
+by default in Thunderbird's New Calendar dialog).
 
 ## 9. A1 — CalDAV adapter
 

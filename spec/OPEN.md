@@ -79,18 +79,17 @@ For the live session (step 6), each a code change test first if Proton differs:
 
 For M5 (daemon and ops):
 - `pcb status` and `pcb doctor` must name a calendar whose write gate stays undecided (no usable write key: two calendar keys flagged primary, no unlocked primary address key, or no passphrase signature served) and why: every write to it is 503 and Thunderbird retries for ever (M4-R39, Task 8).
+- `pcb status` must say when Proton asks for a human verification (422, code 9001): every write answers 503 until a person completes it in the web app, and only `pcb serve`'s log says so today (M4-R44).
 - A log level for `pcb serve`: what a write normalised (`write normalised`, dropped VALARMs, TENTATIVE, attendee edits ignored…) is logged at debug, which the default level never prints.
 - The write gate's last decision is kept per process (M4-R40): after a restart, privileges are not advertised until the first bootstrap succeeds. Accepted; revisit with the daemon's state.
 
 For the final audit (parked minors):
-- The calendar lock is held across a GET's backoff (a 429's `Retry-After` up to 60 s, 5xx retries) during a write's refresh and read-back and the syncer's pass (`calLocks`, Task 7b): a slow Proton holds the other side waiting; releasing it there would let rows be stored between a refresh and a plan.
+- The calendar lock is held across a GET's backoff (a 429's `Retry-After` up to 60 s, 5xx retries) during a write's refresh and read-back and the syncer's pass (`calLocks`, Task 7b): a slow Proton holds the other side waiting; releasing it there would let rows be stored between a refresh and a plan. Since M4-R42 a write waiting behind it gives up at its 20 s pre-send budget (503, nothing sent), and a write's answer outlives the listener's 60 s write timeout; the lock itself is unchanged.
 - Pin pruning (M4-R35): pins of IDs tombstoned long ago are never removed until a new epoch.
 - Aliases of deleted UIDs are never pruned (M4-R22, Task 6 M7): growth bounded by the events ever created at a client's own name.
 - A read-only cache handle opened on a schema-1 file keeps "no aliases" after a writer upgrades the file (Task 6 M5): only long-lived read-only handles.
 - A Thunderbird faked master (`X-MOZ-FAKED-MASTER:1`) that carries an RRULE is dropped, not refused; `INTERVAL=01` and duplicate days in a DAILY BYDAY are rewritten as sent (Task 3 re-review).
 - `canonParams` (line identity in `ical.Patch`) can make two differently quoted parameter lists look equal (`X-FOO;A="B;C=d":v` ≡ `X-FOO;A=B;C=d:v`); contrived, Thunderbird does not write it (Task 3 M3).
 - Memory hygiene: the address-key copy and the passphrase clone made for verification are not zeroed (Task 2 M6); zeroing of minted session keys is untested (Task 4 M5).
-- `TestSecond401GivesNoThirdRequest` fails by hanging, not by a clean assertion, when its guard is sabotaged: give it a bounded client timeout (Task 5).
 - The fake parses an unfolded UID line over 75 octets differently from a folded one: a row seeded with one gets 2001 on update (403 `pcb:proton-refused`), the folded form 204 (Task 8 re-review). Matters only if real stored rows carry unfolded long lines (look for one in the live data).
 - The fake's `nullLists` check is case-sensitive while the typed decode is not (errs toward refusal; Task 1).
-- A `ListByUID` answer holding rows of another UID makes the write fail with 503 and the warning "the event cache cannot be opened", which names the wrong cause (found while writing the M4 live checklist).
