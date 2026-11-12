@@ -246,6 +246,7 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 	if err == nil {
 		pl.p.Close()
 		pl.release()
+		res.DefaultClientCreated = l.createDefaultClient(ctx)
 		l.wakeLogin() // a Serve waiting for a login serves at once (ruling M5-P9)
 		return res, nil
 	}

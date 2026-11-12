@@ -97,7 +97,8 @@ type API interface {
 	DeleteObject(ctx context.Context, calID, name string, cond Precondition) error
 	// The client methods manage the CalDAV app passwords in
 	// <state>/clients.json. They need no login and no network, and logout
-	// leaves them (ruling M3-R17).
+	// leaves them (ruling M3-R17). A login that completes (Login,
+	// SubmitTOTP) with no client in the list adds one named default.
 
 	// AddClient creates a client and returns its password, this once. A bad
 	// or taken name is a Usage error.
@@ -107,6 +108,17 @@ type API interface {
 	// RemoveClient deletes the client with this ID or (case-insensitive)
 	// name; an unknown one is a Usage error.
 	RemoveClient(ctx context.Context, idOrName string) (Client, error)
+	// ShowClient returns a client's credentials, its password opened from
+	// its sealed copy (decision 0013); a client made before that has none:
+	// Recoverable is false, with no error. A sealed copy the key cannot
+	// open is a MustAct naming the key file. An empty idOrName means the
+	// client named default, else the only client; with several and no
+	// default it is a MustAct. URL and Fingerprint are left empty: the
+	// caller that knows the listener fills them.
+	ShowClient(ctx context.Context, idOrName string) (ClientCredentials, error)
+	// RotateClient gives a client (chosen as ShowClient does) a new
+	// password and returns it; the old one stops passing CheckClient at once.
+	RotateClient(ctx context.Context, idOrName string) (ClientSecret, error)
 	// CheckClient reports whether password is a client's, for a request
 	// from remote ("ip:port"). A remote with 5 failures in the last minute
 	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
@@ -159,6 +171,9 @@ type LoginResult struct {
 	CaptchaURL   string     `json:"captcha_url,omitempty"`
 	CaptchaToken string     `json:"captcha_token,omitempty"`
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
+	// DefaultClientCreated: this login created the CalDAV client named
+	// default, the list being empty (decision 0013; pcb client show).
+	DefaultClientCreated bool `json:"default_client_created,omitempty"`
 }
 
 // LogoutResult says what Logout did. Revoked is false when Proton could not

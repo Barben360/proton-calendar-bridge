@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -33,7 +34,9 @@ func errClosed() error { return blocked("service closed", "start a new session")
 // the key file of Config, the API client's default, time.Now, a
 // context-aware sleep and time.AfterFunc. AfterFunc runs f once d has
 // passed, unless stop (true: it will not run) came first; it ends a login
-// left waiting for its 2FA code (pendingTTL).
+// left waiting for its 2FA code (pendingTTL). Logger gets what the service
+// says outside Serve (Serve's own logger wins while it runs); nil discards
+// it.
 type Options struct {
 	Dirs      paths.Dirs
 	Config    config.Config
@@ -42,6 +45,7 @@ type Options struct {
 	Now       func() time.Time
 	Sleep     func(ctx context.Context, d time.Duration) error
 	AfterFunc func(d time.Duration, f func()) (stop func() bool)
+	Logger    *slog.Logger
 }
 
 // Local is the in-process API. Operations that change the login (an
@@ -52,8 +56,9 @@ type Local struct {
 	secrets *store.Secrets
 	mgr     *gpa.Manager
 
-	clients *access.Store   // CalDAV app passwords, <state>/clients.json; survives logout (ruling M3-R17)
-	limiter *access.Limiter // failed CalDAV password checks per remote IP
+	clients *access.Store               // CalDAV app passwords, <state>/clients.json, sealed by o.Sealer; survives logout (ruling M3-R17)
+	slog    atomic.Pointer[slog.Logger] // Serve's logger while it runs (log)
+	limiter *access.Limiter             // failed CalDAV password checks per remote IP
 
 	tmu          sync.Mutex // guards touching and the start of touches
 	touching     map[string]bool
@@ -154,6 +159,7 @@ func NewLocal(o Options) (*Local, error) {
 		touchTimeout: defaultTouchTimeout,
 		loginWake:    make(chan struct{}, 1),
 	}
+	l.clients.Sealer = o.Sealer
 	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
 	l.secrets.Log = l.serveLog
@@ -169,6 +175,18 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// log is Serve's logger while Serve runs, else Options.Logger, else a
+// discarding one.
+func (l *Local) log() *slog.Logger {
+	if lg := l.slog.Load(); lg != nil {
+		return lg
+	}
+	if l.o.Logger != nil {
+		return l.o.Logger
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 // keyFile is the path named in store errors.

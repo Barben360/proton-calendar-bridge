@@ -170,7 +170,11 @@ func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error
 }
 
 func loggedIn(cmd *cobra.Command, res service.LoginResult) error {
-	return Finish(cmd, res, fmt.Sprintf("Logged in as %s (account %s)", res.Username, res.AccountID), nil)
+	text := fmt.Sprintf("Logged in as %s (account %s)", res.Username, res.AccountID)
+	if res.DefaultClientCreated {
+		text += "\nCalDAV credentials: pcb client show"
+	}
+	return Finish(cmd, res, text, nil)
 }
 
 // heldTOTPError is the exit 10 of a login the daemon holds for its 2FA

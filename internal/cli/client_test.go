@@ -1,11 +1,19 @@
 package cli_test
 
 import (
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
 // clientRig is a rig on the real service, logged out, with no Proton.
@@ -43,20 +51,20 @@ func TestClientAddPrintsThePasswordOnceInTheEnvelope(t *testing.T) {
 	}
 }
 
-func TestClientAddTextShowsThePasswordOnceAndHowToUseIt(t *testing.T) {
+func TestClientAddTextShowsThePasswordAndHowToUseIt(t *testing.T) {
 	t.Parallel()
 	r := clientRig(t)
 	r.want(exitcode.OK, "client", "add", "Phone")
 	out := r.out.String()
-	i := strings.Index(out, "Password (shown once, not stored): ")
+	i := strings.Index(out, "Password: ")
 	if i < 0 {
 		t.Fatalf("no password line:\n%s", out)
 	}
-	pw := strings.Fields(out[i+len("Password (shown once, not stored): "):])[0]
+	pw := strings.Fields(out[i+len("Password: "):])[0]
 	if len(pw) != 32 || strings.Count(out, pw) != 1 {
 		t.Errorf("password %q (%d chars) appears %d times, want 32 chars, once", pw, len(pw), strings.Count(out, pw))
 	}
-	for _, want := range []string{"Thunderbird", "Username", "anything", "pcb serve"} {
+	for _, want := range []string{"Thunderbird", "Username  Phone", "pcb client show Phone"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("instructions miss %q:\n%s", want, out)
 		}
@@ -179,5 +187,187 @@ func TestClientErrorsNeverCarryThePassword(t *testing.T) {
 	r.want(exitcode.Usage, "client", "add", "Phone", "--json")
 	if strings.Contains(r.out.String()+r.errb.String(), sec.Password) {
 		t.Error("an error output contains a password")
+	}
+}
+
+// showText runs pcb client show args and returns its text lines by label.
+func showText(t *testing.T, r *rig, args ...string) map[string]string {
+	t.Helper()
+	r.want(exitcode.OK, append([]string{"client", "show"}, args...)...)
+	lines := map[string]string{}
+	for _, l := range strings.Split(r.out.String(), "\n") {
+		if k, v, ok := strings.Cut(l, ": "); ok {
+			lines[k] = v
+		}
+	}
+	return lines
+}
+
+const fpLabel = "TLS certificate SHA-256 fingerprint"
+
+func TestClientShowPrintsWhatThunderbirdNeeds(t *testing.T) {
+	t.Parallel()
+	t.Run("offline, loopback", func(t *testing.T) {
+		t.Parallel()
+		r := clientRig(t)
+		sec := addClient(t, r, "Phone")
+		got := showText(t, r, "Phone")
+		if got["URL"] != "http://localhost:1080/" || got["Username"] != "Phone" || got["Password"] != sec.Password {
+			t.Errorf("show = %q", r.out.String())
+		}
+		if _, ok := got[fpLabel]; ok {
+			t.Errorf("a fingerprint line over plain HTTP:\n%s", r.out.String())
+		}
+	})
+	t.Run("offline, TLS", func(t *testing.T) {
+		t.Parallel()
+		r := clientRig(t)
+		writeConfig(t, r, "[caldav]\nlisten = \"192.0.2.10:8443\"\n")
+		sec := addClient(t, r, "Phone")
+		// Before pcb serve made the certificate there is no fingerprint
+		// yet, and show creates none.
+		got := showText(t, r, "Phone")
+		if got["URL"] != "https://192.0.2.10:8443/" || got["Password"] != sec.Password || !strings.Contains(got[fpLabel], "pcb serve") {
+			t.Errorf("show before a certificate = %q", r.out.String())
+		}
+		if _, err := os.Stat(filepath.Join(r.dirs.State, "tls")); err == nil {
+			t.Error("client show created the TLS directory")
+		}
+		res, err := tlsutil.SelfSigned(tlsutil.Options{Dir: filepath.Join(r.dirs.State, "tls"), BindIP: net.ParseIP("192.0.2.10")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := showText(t, r, "Phone"); got[fpLabel] != res.Fingerprint {
+			t.Errorf("fingerprint = %q, want %q", got[fpLabel], res.Fingerprint)
+		}
+	})
+	t.Run("daemon", func(t *testing.T) {
+		t.Parallel()
+		r := clientRig(t)
+		sec := addClient(t, r, "Phone")
+		startDaemon(t, r, &daemonAPI{}, &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD"})
+		got := showText(t, r, "Phone")
+		if got["URL"] != "https://pcb.lan:8443/" || got[fpLabel] != "AB:CD" || got["Username"] != "Phone" || got["Password"] != sec.Password {
+			t.Errorf("show with a daemon = %q", r.out.String())
+		}
+	})
+}
+
+// writeConfig replaces the rig's config.toml, keeping its Proton URL.
+func writeConfig(t *testing.T, r *rig, extra string) {
+	t.Helper()
+	if err := os.WriteFile(config.Path(r.dirs), []byte("[proton]\nbase_url = \"http://127.0.0.1:1\"\n"+extra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientShowJSONHidesThePasswordWithoutReveal(t *testing.T) {
+	t.Parallel()
+	r := clientRig(t)
+	sec := addClient(t, r, "Phone")
+	r.want(exitcode.OK, "client", "show", "Phone", "--json")
+	e := r.envelope()
+	var data map[string]any
+	mustUnmarshal(t, e.Data, &data)
+	if strings.Contains(r.out.String(), sec.Password) || data["password"] != nil {
+		t.Fatalf("--json without --reveal carries the password: %s", r.out.String())
+	}
+	if !e.OK || e.Command != "client show" || data["username"] != "Phone" || data["url"] != "http://localhost:1080/" || data["recoverable"] != true || data["id"] != sec.ID {
+		t.Fatalf("envelope = %+v, data %v", e, data)
+	}
+	r.want(exitcode.OK, "client", "show", "Phone", "--json", "--reveal")
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if data["password"] != sec.Password {
+		t.Errorf("--reveal: password = %v, want the client's", data["password"])
+	}
+	if r.errb.Len() != 0 {
+		t.Errorf("stderr = %q, want empty in JSON mode", r.errb.String())
+	}
+}
+
+func TestClientShowNamesRotateForAnUnrecoverablePassword(t *testing.T) {
+	t.Parallel()
+	r := clientRig(t)
+	addClient(t, r, "Old")
+	path := filepath.Join(r.dirs.State, "clients.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f map[string]any
+	mustUnmarshal(t, raw, &f)
+	f["version"] = 1
+	for _, c := range f["clients"].([]any) {
+		delete(c.(map[string]any), "sealed")
+	}
+	raw, _ = json.Marshal(f)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := showText(t, r, "Old")
+	if want := "not recoverable (made before pcb could show passwords): run pcb client rotate Old"; got["Password"] != want {
+		t.Errorf("Password line = %q, want %q", got["Password"], want)
+	}
+	r.want(exitcode.OK, "client", "show", "Old", "--json", "--reveal")
+	var data map[string]any
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if data["recoverable"] != false || data["password"] != nil {
+		t.Errorf("JSON = %v, want recoverable false and no password", data)
+	}
+	// Rotating makes it showable.
+	r.want(exitcode.OK, "client", "rotate", "Old", "--json")
+	var sec service.ClientSecret
+	mustUnmarshal(t, r.envelope().Data, &sec)
+	if got := showText(t, r, "Old"); got["Password"] != sec.Password || len(sec.Password) != 32 {
+		t.Errorf("after rotate: Password line %q", got["Password"])
+	}
+}
+
+func TestClientShowWithoutANamePicksDefaultElseTheOnlyClient(t *testing.T) {
+	t.Parallel()
+	r := clientRig(t)
+	phone := addClient(t, r, "Phone")
+	if got := showText(t, r); got["Username"] != "Phone" || got["Password"] != phone.Password {
+		t.Errorf("the only client: %q", r.out.String())
+	}
+	addClient(t, r, "Laptop")
+	r.want(exitcode.MustAct, "client", "show", "--json")
+	if e := r.envelope(); e.Error == nil || e.Error.Hint != "name a client: pcb client show NAME (pcb client list)" {
+		t.Errorf("several clients: %+v", e.Error)
+	}
+	r.want(exitcode.Usage, "client", "show", "a", "b")
+}
+
+func TestClientRotatePrintsTheNewPasswordAndTheHint(t *testing.T) {
+	t.Parallel()
+	r := clientRig(t)
+	old := addClient(t, r, "Phone")
+	r.want(exitcode.OK, "client", "rotate", "phone")
+	out := r.out.String()
+	got := showText(t, r, "Phone")
+	if got["Password"] == old.Password || !strings.Contains(out, "Password: "+got["Password"]) || !strings.Contains(out, "update the password in your CalDAV client") {
+		t.Errorf("rotate printed %q; show now gives a new password %v", out, got["Password"] != old.Password)
+	}
+	r.want(exitcode.Usage, "client", "rotate")
+	r.want(exitcode.Usage, "client", "rotate", "nobody")
+}
+
+func TestLoginTextNamesClientShowWhenItCreatedDefault(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive")
+	if !strings.HasSuffix(strings.TrimSpace(r.out.String()), "CalDAV credentials: pcb client show") {
+		t.Errorf("login text = %q, want it to end with the credentials line", r.out.String())
+	}
+	got := showText(t, r)
+	if got["Username"] != "default" || len(got["Password"]) != 32 {
+		t.Errorf("show after the first login = %q", r.out.String())
+	}
+	// A login that created nothing does not say it.
+	s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+	sr := stubRig(t, s)
+	sr.want(exitcode.OK, "login", "--non-interactive")
+	if strings.Contains(sr.out.String(), "CalDAV credentials") {
+		t.Errorf("login text without a new client = %q", sr.out.String())
 	}
 }

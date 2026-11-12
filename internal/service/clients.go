@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // ClientSecret is a newly created CalDAV client: its password is returned
@@ -58,6 +60,9 @@ func (l *Local) clientsError(err error) error {
 		return usage(err.Error(), "choose another name: 1 to 64 characters, unique, no control characters, no leading or trailing space")
 	case errors.Is(err, access.ErrNotFound):
 		return usage(err.Error(), "run pcb client list to see the clients")
+	case errors.Is(err, access.ErrSeal):
+		return blocked("the client's password could not be sealed with the key file "+l.keyFile()+", so nothing was stored",
+			"check the key file: 32 bytes, mode 0600 (pcb doctor)")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
@@ -157,4 +162,131 @@ func (l *Local) touch(id string) {
 			l.touchHook("done", id)
 		}
 	}()
+}
+
+// defaultClientName is the client a login creates when there is none
+// (decision 0013).
+const defaultClientName = "default"
+
+// defaultClientTimeout bounds the default client's wait for the clients
+// lock: the login it follows is already done.
+const defaultClientTimeout = 10 * time.Second
+
+// createDefaultClient adds the client default when the list holds none,
+// deciding under the clients lock (two logins completing at once add it
+// once). It is best effort: a failure is logged, secret-free, and never
+// fails the login. It reports whether it added the client.
+func (l *Local) createDefaultClient(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultClientTimeout)
+	defer cancel()
+	_, _, added, err := l.clients.AddFirst(ctx, defaultClientName)
+	switch {
+	case err != nil:
+		l.log().Warn(`the CalDAV client "default" could not be created: run pcb client add NAME`,
+			"error", l.clientsError(err).Error())
+	case added:
+		l.log().Info(`created the CalDAV client "default": see pcb client show`)
+	}
+	return added
+}
+
+// ClientCredentials is what a CalDAV client needs (decision 0013): the
+// URL, the username (the client's name: any username is accepted), the
+// password and, over TLS, the certificate's SHA-256 fingerprint. Password
+// is empty when not Recoverable (a client made before pcb kept sealed
+// copies). The service leaves URL and Fingerprint empty: the caller that
+// knows the listener fills them. It redacts itself in fmt and slog; only
+// its JSON form carries the password.
+type ClientCredentials struct {
+	Client
+	Username    string `json:"username"`
+	Password    string `json:"password,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Recoverable bool   `json:"recoverable"`
+}
+
+const redactedCredentials = "service.ClientCredentials(redacted)"
+
+// String hides the password from fmt.
+func (ClientCredentials) String() string { return redactedCredentials }
+
+// GoString hides the password from %#v.
+func (ClientCredentials) GoString() string { return redactedCredentials }
+
+// LogValue hides the password from slog.
+func (ClientCredentials) LogValue() slog.Value { return slog.StringValue(redactedCredentials) }
+
+// pickClient is the client idOrName names; "" names the client default,
+// else the only client.
+func (l *Local) pickClient(idOrName string) (access.Client, error) {
+	if idOrName != "" {
+		c, err := l.clients.Get(idOrName)
+		return c, l.clientsError(err)
+	}
+	c, err := l.clients.Get(defaultClientName)
+	if !errors.Is(err, access.ErrNotFound) {
+		return c, l.clientsError(err)
+	}
+	list, err := l.clients.List()
+	switch {
+	case err != nil:
+		return access.Client{}, l.clientsError(err)
+	case len(list) == 1:
+		return list[0], nil
+	case len(list) == 0:
+		return access.Client{}, mustAct("there is no CalDAV client yet",
+			"run pcb login (it creates the client default), or pcb client add NAME")
+	}
+	return access.Client{}, mustAct("there are several CalDAV clients and none is named default",
+		"name a client: pcb client show NAME (pcb client list)")
+}
+
+// ShowClient implements API.
+func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredentials, error) {
+	if l.closed.Load() {
+		return ClientCredentials{}, errClosed()
+	}
+	c, err := l.pickClient(idOrName)
+	if err != nil {
+		return ClientCredentials{}, err
+	}
+	out := ClientCredentials{Client: clientOf(c), Username: c.Name}
+	pw, err := l.clients.Reveal(c.ID, l.o.Sealer.Open)
+	switch {
+	case err == nil:
+		out.Password, out.Recoverable = pw, true
+	case errors.Is(err, access.ErrNoSealedCopy):
+	case errors.Is(err, access.ErrNotRecoverable):
+		return ClientCredentials{}, l.unrevealable(c.Name, err)
+	default:
+		return ClientCredentials{}, l.clientsError(err)
+	}
+	return out, nil
+}
+
+// unrevealable is the MustAct of a sealed copy the key does not open.
+func (l *Local) unrevealable(name string, err error) error {
+	why := "its sealed copy does not open with the key file " + l.keyFile()
+	if errors.Is(err, seal.ErrNoKey) {
+		why = "the key file " + l.keyFile() + " is missing"
+	}
+	return mustAct(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s", name, why),
+		"restore the key file from a backup, or run pcb client rotate "+shellquote.Quote(name)+" for a new password")
+}
+
+// RotateClient implements API.
+func (l *Local) RotateClient(ctx context.Context, idOrName string) (ClientSecret, error) {
+	if l.closed.Load() {
+		return ClientSecret{}, errClosed()
+	}
+	c, err := l.pickClient(idOrName)
+	if err != nil {
+		return ClientSecret{}, err
+	}
+	c, pw, err := l.clients.Rotate(ctx, c.ID)
+	if err != nil {
+		return ClientSecret{}, l.clientsError(err)
+	}
+	return ClientSecret{ID: c.ID, Name: c.Name, Password: pw}, nil
 }

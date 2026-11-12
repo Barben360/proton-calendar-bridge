@@ -79,6 +79,9 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	defer unlock()
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
+	} else {
+		l.slog.Store(o.Logger)
+		defer l.slog.Store(nil)
 	}
 	if !o.WaitForLogin {
 		gen := l.logoutGen()

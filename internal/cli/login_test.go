@@ -527,6 +527,7 @@ func serveWaiting(t *testing.T, r *rig) *fastPoll {
 	}
 	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
 	s.listening()
+	fp.run = s
 	return fp
 }
 
@@ -550,6 +551,14 @@ func TestLoginGoesThroughTheDaemon(t *testing.T) {
 	wantServeState(t, fp.states, service.ServeServing)
 	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
 		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+	// The daemon's login created the default client (decision 0013): the
+	// result says so across the socket, and the daemon logs it.
+	if !strings.HasSuffix(r.out.String(), "CalDAV credentials: pcb client show\n") {
+		t.Errorf("stdout %q; want the credentials line", r.out.String())
+	}
+	if log := fp.run.errb.String(); !strings.Contains(log, `created the CalDAV client \"default\": see pcb client show`) {
+		t.Errorf("daemon log = %q; want the default-client line", log)
 	}
 }
 
@@ -611,8 +620,8 @@ func TestNonInteractiveTOTPIsHeldByTheDaemon(t *testing.T) {
 	r.want(exitcode.OK, "login", "resume", "--totp", "--non-interactive", "--json")
 	var res service.LoginResult
 	mustUnmarshal(t, r.envelope().Data, &res)
-	if res.State != service.StateReady {
-		t.Fatalf("resume --totp = %+v, want ready", res)
+	if res.State != service.StateReady || !res.DefaultClientCreated {
+		t.Fatalf("resume --totp = %+v, want ready with the default client created", res)
 	}
 	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
 		t.Errorf("%d POST /auth/v4, want 1 (none for the resume)", n)

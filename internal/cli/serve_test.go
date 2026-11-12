@@ -1004,6 +1004,7 @@ type fastPoll struct {
 	states chan service.ServeState
 	passes chan service.WatchPass
 	poll   time.Duration
+	run    *serveRun // set by serveWaiting
 }
 
 func (f *fastPoll) Serve(ctx context.Context, o service.ServeOptions) error {

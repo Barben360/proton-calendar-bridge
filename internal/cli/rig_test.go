@@ -140,6 +140,12 @@ func (*stubAPI) RemoveClient(context.Context, string) (service.Client, error) {
 	return service.Client{}, nil
 }
 func (*stubAPI) CheckClient(context.Context, string, string) (bool, time.Duration) { return false, 0 }
+func (*stubAPI) ShowClient(context.Context, string) (service.ClientCredentials, error) {
+	return service.ClientCredentials{}, nil
+}
+func (*stubAPI) RotateClient(context.Context, string) (service.ClientSecret, error) {
+	return service.ClientSecret{}, nil
+}
 
 func (*stubAPI) PutObject(context.Context, string, string, []byte, service.Precondition) (service.PutResult, error) {
 	return service.PutResult{}, nil

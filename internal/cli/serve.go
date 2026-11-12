@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -426,7 +428,7 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 		case !now.Add(tlsutil.RenewBefore).Before(leaf.NotAfter):
 			fmt.Fprintf(warn, "Warning: the certificate of caldav.tls_cert expires on %s, in less than 30 days: renew it\n", expires)
 		}
-	case ip != nil && ip.IsLoopback():
+	case !servesTLS(cc, ip):
 		return nil, "", nil
 	default:
 		res, err := tlsutil.SelfSigned(tlsutil.Options{Dir: tlsDir, Hostnames: cc.Hostnames, BindIP: ip})
@@ -449,6 +451,46 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 		}
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, fingerprint, nil
+}
+
+// servesTLS reports whether pcb serve, bound to ip, serves TLS: always
+// with a configured certificate, else on any bind but a loopback one (nil:
+// unknown, counted as non-loopback).
+func servesTLS(cc config.CalDAV, ip net.IP) bool {
+	return cc.TLSCert != "" || ip == nil || !ip.IsLoopback()
+}
+
+// offlineListener is what pcb serve would print for cc with no daemon
+// running: the URL for the configured listen address (its host resolved
+// as pcb doctor predicts the bind) and, over TLS, the fingerprint of the
+// certificate on disk: caldav.tls_cert, else the self-signed one of tlsDir
+// ("" while there is none or it is unreadable). It creates nothing.
+func offlineListener(ctx context.Context, cc config.CalDAV, tlsDir string) (url, fingerprint string) {
+	host, portText, err := net.SplitHostPort(cc.Listen)
+	if err != nil {
+		return "", ""
+	}
+	port, _ := strconv.Atoi(portText)
+	ip, _ := (&doctor.Bind{Listen: cc.Listen}).IP(ctx)
+	useTLS := servesTLS(cc, ip)
+	addr := &net.TCPAddr{IP: ip, Port: port}
+	url = thunderbirdURL(cc, ip, addr, useTLS)
+	if ip == nil && len(cc.Hostnames) == 0 { // unresolved: the name itself
+		url = thunderbirdURL(config.CalDAV{Hostnames: []string{host}}, nil, addr, useTLS)
+	}
+	if !useTLS {
+		return url, ""
+	}
+	var leaf *x509.Certificate
+	if cc.TLSCert != "" {
+		leaf, err = tlsutil.ReadCertificate(cc.TLSCert)
+	} else {
+		leaf, err = tlsutil.Inspect(tlsDir)
+	}
+	if err != nil {
+		return url, ""
+	}
+	return url, tlsutil.Fingerprint(leaf.Raw)
 }
 
 // thunderbirdURL is the URL to enter in Thunderbird for the listener at

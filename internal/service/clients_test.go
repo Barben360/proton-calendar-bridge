@@ -3,12 +3,14 @@ package service_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -293,5 +296,307 @@ func TestClientSecretRedactsItself(t *testing.T) {
 	}
 	if !strings.Contains(fmt.Sprint(sec), "redacted") {
 		t.Errorf("String() = %q, want a redaction marker", fmt.Sprint(sec))
+	}
+}
+
+// loggedEnv is newEnv on a fake Proton with the service's log in buf.
+func loggedEnv(t *testing.T, fo protontest.Options) (*env, *bytes.Buffer) {
+	t.Helper()
+	e := newEnv(t, fo)
+	buf := &syncBuffer{}
+	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		Logger: slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	_ = e.svc.Close()
+	e.svc = s
+	return e, &buf.b
+}
+
+// syncBuffer is a bytes.Buffer the service's goroutines may write to.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (e *env) show(t *testing.T, name string) service.ClientCredentials {
+	t.Helper()
+	cr, err := e.svc.ShowClient(t.Context(), name)
+	if err != nil {
+		t.Fatalf("ShowClient(%q): %v", name, err)
+	}
+	return cr
+}
+
+const createdLog = `created the CalDAV client \"default\": see pcb client show`
+
+func TestFirstLoginCreatesTheDefaultClient(t *testing.T) {
+	t.Parallel()
+	for _, twoFA := range []bool{false, true} { // Login, and SubmitTOTP (the path a held login resumes on)
+		t.Run(fmt.Sprint("2FA=", twoFA), func(t *testing.T) {
+			t.Parallel()
+			e, logs := loggedEnv(t, protontest.Options{TwoFA: twoFA})
+			res := e.login(t, e.req())
+			if twoFA {
+				if res.DefaultClientCreated {
+					t.Fatal("a login waiting for its code created the client")
+				}
+				if list, _ := e.svc.Clients(t.Context()); len(list) != 0 {
+					t.Fatalf("clients before the code = %+v", list)
+				}
+				var err error
+				if res, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if res.State != service.StateReady || !res.DefaultClientCreated {
+				t.Fatalf("result = %+v, want ready with the default client created", res)
+			}
+			list, err := e.svc.Clients(t.Context())
+			if err != nil || len(list) != 1 || list[0].Name != "default" {
+				t.Fatalf("Clients = %+v, %v; want default", list, err)
+			}
+			cr := e.show(t, "")
+			if cr.ID != list[0].ID || cr.Username != "default" || !cr.Recoverable || len(cr.Password) != 32 {
+				t.Fatalf("ShowClient(\"\") = id %q username %q recoverable %v, %d password chars", cr.ID, cr.Username, cr.Recoverable, len(cr.Password))
+			}
+			if ok, _ := e.svc.CheckClient(t.Context(), cr.Password, "127.0.0.1:1"); !ok {
+				t.Error("the shown password does not pass the check")
+			}
+			if !strings.Contains(logs.String(), createdLog) {
+				t.Errorf("log = %q, want %q", logs.String(), createdLog)
+			}
+		})
+	}
+}
+
+func TestDefaultIsNotRecreatedOnceAnyClientExists(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	if _, err := e.svc.AddClient(t.Context(), "Phone"); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.login(t, e.req()); res.DefaultClientCreated {
+		t.Error("the login reported a default client with Phone there")
+	}
+	if list, _ := e.svc.Clients(t.Context()); len(list) != 1 || list[0].Name != "Phone" {
+		t.Fatalf("clients = %+v, want Phone only", list)
+	}
+	// Removing every client lets the next login create it; once it exists,
+	// a new login keeps it as is.
+	if _, err := e.svc.RemoveClient(t.Context(), "Phone"); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); !res.DefaultClientCreated {
+		t.Fatal("a login with no client left did not create default")
+	}
+	first := e.show(t, "default")
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.DefaultClientCreated {
+		t.Error("a second login created default again")
+	}
+	if again := e.show(t, "default"); again.ID != first.ID || again.Password != first.Password {
+		t.Error("a second login replaced the default client")
+	}
+	// Removing default is allowed and sticks while another client exists.
+	if _, err := e.svc.AddClient(t.Context(), "Laptop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.RemoveClient(t.Context(), "default"); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(61 * time.Second)
+	e.login(t, e.req())
+	if list, _ := e.svc.Clients(t.Context()); len(list) != 1 || list[0].Name != "Laptop" {
+		t.Errorf("clients = %+v, want Laptop only", list)
+	}
+}
+
+// Logout keeps the key file and the clients (ruling M3-R17), so a password
+// stays showable across a logout and a new login.
+func TestPasswordStaysRecoverableAcrossLogout(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	before := e.show(t, "")
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if after := e.show(t, ""); !after.Recoverable || after.Password != before.Password {
+		t.Fatalf("after logout: recoverable %v, same password %v", after.Recoverable, after.Password == before.Password)
+	}
+	e.clk.advance(61 * time.Second)
+	e.login(t, e.req())
+	if after := e.show(t, ""); !after.Recoverable || after.Password != before.Password || after.ID != before.ID {
+		t.Fatalf("after a new login: recoverable %v, same password %v, same client %v", after.Recoverable, after.Password == before.Password, after.ID == before.ID)
+	}
+	// A fresh process opens it too: the key is the file's, not the process's.
+	if again, err := e.open(t).ShowClient(t.Context(), ""); err != nil || again.Password != before.Password {
+		t.Fatalf("a new service: %v, same password %v", err, again.Password == before.Password)
+	}
+}
+
+func TestShowClientPicksDefaultElseTheOnlyClient(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	_, err := e.svc.ShowClient(t.Context(), "")
+	wantCode(t, err, exitcode.MustAct) // no client at all
+	phone, _ := e.svc.AddClient(t.Context(), "Phone")
+	if cr, err := e.svc.ShowClient(t.Context(), ""); err != nil || cr.ID != phone.ID || cr.Password != phone.Password || cr.Username != "Phone" {
+		t.Fatalf("the only client: %v (id %q, username %q)", err, cr.ID, cr.Username)
+	}
+	if _, err := e.svc.AddClient(t.Context(), "Laptop"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.ShowClient(t.Context(), "")
+	wantCode(t, err, exitcode.MustAct)
+	if h := exitcode.HintOf(err); h != "name a client: pcb client show NAME (pcb client list)" {
+		t.Errorf("hint = %q", h)
+	}
+	def, _ := e.svc.AddClient(t.Context(), "Default")
+	if cr, err := e.svc.ShowClient(t.Context(), ""); err != nil || cr.ID != def.ID {
+		t.Errorf("with default among several: %v, id %q, want default's", err, cr.ID)
+	}
+	if cr, err := e.svc.ShowClient(t.Context(), phone.ID); err != nil || cr.Name != "Phone" {
+		t.Errorf("by ID: %v, %q", err, cr.Name)
+	}
+	_, err = e.svc.ShowClient(t.Context(), "nobody")
+	wantCode(t, err, exitcode.Usage)
+}
+
+func TestRotateClientReplacesThePassword(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	old, _ := e.svc.AddClient(t.Context(), "Phone")
+	sec, err := e.svc.RotateClient(t.Context(), "phone")
+	if err != nil || sec.ID != old.ID || sec.Name != "Phone" || sec.Password == old.Password || len(sec.Password) != 32 {
+		t.Fatalf("RotateClient = id %q name %q, new password %v, %v", sec.ID, sec.Name, sec.Password != old.Password, err)
+	}
+	if ok, _ := e.svc.CheckClient(t.Context(), old.Password, "127.0.0.1:1"); ok {
+		t.Error("the old password still passes")
+	}
+	if cr, _ := e.svc.ShowClient(t.Context(), "Phone"); cr.Password != sec.Password {
+		t.Error("show does not give the rotated password")
+	}
+	_, err = e.svc.RotateClient(t.Context(), "nobody")
+	wantCode(t, err, exitcode.Usage)
+}
+
+func TestShowClientMadeBeforeSealingIsNotRecoverable(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	sec, _ := e.svc.AddClient(t.Context(), "Old")
+	stripSealed(t, e.dirs.State)
+	cr, err := e.svc.ShowClient(t.Context(), "Old")
+	if err != nil || cr.Recoverable || cr.Password != "" || cr.Username != "Old" {
+		t.Fatalf("ShowClient(v1-style) = recoverable %v, %d password chars, username %q, %v; want not recoverable, no error", cr.Recoverable, len(cr.Password), cr.Username, err)
+	}
+	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1"); !ok {
+		t.Error("an unsealed client no longer passes the check")
+	}
+}
+
+// stripSealed rewrites clients.json as pcb wrote it before decision 0013.
+func stripSealed(t *testing.T, state string) {
+	t.Helper()
+	path := filepath.Join(state, "clients.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Version int              `json:"version"`
+		Clients []map[string]any `json:"clients"`
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	f.Version = 1
+	for _, c := range f.Clients {
+		delete(c, "sealed")
+	}
+	if data, err = json.Marshal(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShowClientWithoutTheKeyNamesItAndCheckStillWorks(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	sec, _ := e.svc.AddClient(t.Context(), "Phone")
+	key := config.Defaults(e.dirs).Secrets.KeyFile
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.ShowClient(t.Context(), "Phone")
+	wantCode(t, err, exitcode.MustAct)
+	if !strings.Contains(err.Error(), key) || !strings.Contains(exitcode.HintOf(err), "pcb client rotate") {
+		t.Errorf("error = %q, hint %q; want the key file named and rotate offered", err, exitcode.HintOf(err))
+	}
+	if strings.Contains(err.Error()+exitcode.HintOf(err), sec.Password) {
+		t.Error("the error carries the password")
+	}
+	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1"); !ok {
+		t.Error("the check needs the key: it must not")
+	}
+}
+
+func TestClientCredentialsRedactThemselves(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	e.svc.AddClient(t.Context(), "Phone") //nolint:errcheck // shown below
+	cr, err := e.svc.ShowClient(t.Context(), "Phone")
+	if err != nil || cr.Password == "" {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("shown", "credentials", cr)
+	for name, got := range map[string]string{
+		"%v": fmt.Sprintf("%v", cr), "%+v": fmt.Sprintf("%+v", cr), "%#v": fmt.Sprintf("%#v", cr), "slog": buf.String(),
+	} {
+		if strings.Contains(got, cr.Password) {
+			t.Errorf("%s leaks the password: %s", name, got)
+		}
+	}
+}
+
+func TestNoPasswordInLogs(t *testing.T) {
+	t.Parallel()
+	e, logs := loggedEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	var passwords []string
+	passwords = append(passwords, e.show(t, "default").Password)
+	sec, err := e.svc.AddClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords = append(passwords, sec.Password)
+	rot, err := e.svc.RotateClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords = append(passwords, rot.Password, e.show(t, "Phone").Password)
+	for _, pw := range passwords {
+		if pw == "" {
+			t.Fatal("a password is empty: the scan would be vacuous")
+		}
+		if strings.Contains(logs.String(), pw) {
+			t.Errorf("the log holds a client password:\n%s", logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), createdLog) {
+		t.Fatalf("the log is empty of the default-client line, so the scan proves little:\n%s", logs.String())
 	}
 }
