@@ -18,10 +18,11 @@ import (
 )
 
 // m5Files are an M5 account's files at the state root, the exact list
-// Migrate moves.
+// Migrate moves. M5's root sync.lock stays (ruling R7): the fixture writes it
+// beside them.
 var m5Files = []string{
 	"state.json", "state.lock", "secrets.sealed", "secrets.lock", "clients.json",
-	"clients.lock", "pcb.db", "pcb.db-wal", "pcb.db-shm", "sync.lock",
+	"clients.lock", "pcb.db", "pcb.db-wal", "pcb.db-shm",
 }
 
 // m5DataFiles are those that hold data: LayoutInfo.Legacy lists them.
@@ -52,6 +53,7 @@ func writeM5State(t *testing.T, root string) (key string) {
 			writeFile(t, filepath.Join(root, name), nil)
 		}
 	}
+	writeFile(t, filepath.Join(root, "sync.lock"), nil)
 	writeFile(t, filepath.Join(root, "login.lock"), nil)
 	writeFile(t, filepath.Join(root, "last-login"), []byte("2026-11-01T10:00:00Z\n"))
 	for _, dir := range []string{"tls", "logs"} {
@@ -260,7 +262,7 @@ func whereIs(t *testing.T, root, id string) {
 
 func TestMigrationResumesAfterEachStep(t *testing.T) {
 	const id = "deadbeef"
-	// Renames 1 to 10 move the files, 11 renames the directory: a crash
+	// Renames 1 to 9 move the files, 10 renames the directory: a crash
 	// after it is one before layout.json.
 	for k := 1; k <= len(m5Files)+1; k++ {
 		root := t.TempDir()
@@ -321,14 +323,14 @@ func TestMigrationResumeRefusesASecondCopy(t *testing.T) {
 		t.Fatalf("Migrate = %v, want ErrLegacyBesideLayout naming state.json", err)
 	}
 	sameTree(t, tree(t, root), staged)
-	// A lock file at both places holds no data: the resume goes on (pcb
-	// itself recreates the root sync.lock when it takes it).
+	// A lock file at both places holds no data: the resume goes on (an
+	// older pcb's status recreates the root state.lock when it takes it).
 	if err := os.Remove(newer); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(root, "sync.lock"), nil)
+	writeFile(t, filepath.Join(root, "state.lock"), nil)
 	if got, migrated, err := store.Migrate(root, noNewID(t)); err != nil || !migrated || got != id {
-		t.Fatalf("resume with a second sync.lock: %q, %v, %v", got, migrated, err)
+		t.Fatalf("resume with a second state.lock: %q, %v, %v", got, migrated, err)
 	}
 	checkMigrated(t, root, before, id)
 }
@@ -395,11 +397,13 @@ func TestLayoutUnknownVersionIsRefused(t *testing.T) {
 		writeM5State(t, root)
 		writeFile(t, filepath.Join(root, "layout.json"), []byte(content))
 		before := tree(t, root)
-		if _, err := store.ReadLayout(root); err == nil {
-			t.Errorf("%s: ReadLayout accepted %s", name, content)
+		// Only a higher version is a newer pcb's (R9).
+		newer := name == "newer"
+		if _, err := store.ReadLayout(root); err == nil || errors.Is(err, store.ErrNewerLayout) != newer {
+			t.Errorf("%s: ReadLayout(%s) = %v; newer pcb's: %v", name, content, err, newer)
 		}
-		if _, _, err := store.Migrate(root, noNewID(t)); err == nil {
-			t.Errorf("%s: Migrate accepted %s", name, content)
+		if _, _, err := store.Migrate(root, noNewID(t)); err == nil || errors.Is(err, store.ErrNewerLayout) != newer {
+			t.Errorf("%s: Migrate(%s) = %v; newer pcb's: %v", name, content, err, newer)
 		}
 		sameTree(t, tree(t, root), before)
 	}
@@ -547,5 +551,27 @@ func TestMigrateRefusesAnInconsistentLayout(t *testing.T) {
 			t.Errorf("%s: Migrate = %q, %v, %v", name, id, migrated, err)
 		}
 		sameTree(t, tree(t, root), before)
+	}
+}
+
+func TestMigrateLeavesTheRootSyncLock(t *testing.T) {
+	root := t.TempDir()
+	writeM5State(t, root)
+	lock := filepath.Join(root, "sync.lock")
+	writeFile(t, lock, []byte("held by the migrating pcb"))
+	before, err := os.Stat(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := store.Migrate(root, fixedID("0a1b2c3d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(lock)
+	if err != nil || !os.SameFile(before, after) || string(readFile(t, lock)) != "held by the migrating pcb" {
+		t.Fatalf("root sync.lock after Migrate: %v, %v; want the same file", after, err)
+	}
+	if _, err := os.Lstat(filepath.Join(store.AccountDir(root, id), "sync.lock")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("accounts/%s/sync.lock: %v; want none", id, err)
 	}
 }

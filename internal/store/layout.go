@@ -31,11 +31,14 @@ const (
 	maxLocalIDTries = 64
 )
 
-// accountFiles are one account's files: at the state root in M5, in
-// accounts/<local-id>/ since layout v2. Migrate moves them in this order.
+// accountFiles are the account files Migrate moves from the state root (M5)
+// into accounts/<local-id>/ (layout v2), in this order. M5's root sync.lock
+// stays: it is layout v2's root lock (the serving process's, and the one the
+// migrating caller holds); an account's own sync.lock is made in its
+// directory when first taken.
 var accountFiles = []string{
 	"state.json", "state.lock", "secrets.sealed", "secrets.lock", "clients.json",
-	"clients.lock", "pcb.db", "pcb.db-wal", "pcb.db-shm", "sync.lock",
+	"clients.lock", "pcb.db", "pcb.db-wal", "pcb.db-shm",
 }
 
 // legacyFiles are the account files that hold data. One of them at the root
@@ -49,6 +52,11 @@ var legacyFiles = []string{"state.json", "secrets.sealed", "clients.json", "pcb.
 // nothing is moved; the person removes them or moves the state aside. The
 // error names the files.
 var ErrLegacyBesideLayout = errors.New("account files of an older pcb are beside the per-account layout")
+
+// ErrNewerLayout is the cause of ReadLayout's (and Migrate's) error for a
+// layout.json above LayoutVersion: a newer pcb wrote it. It stays refused
+// (fail closed), but it is not damaged: upgrading pcb reads it.
+var ErrNewerLayout = errors.New("layout.json was written by a newer pcb")
 
 // renameHook, when set, runs after each rename Migrate makes; its error
 // stops Migrate there, as a crash right after that rename would (tests).
@@ -169,7 +177,7 @@ func readLayoutVersion(stateDir string) (int, error) {
 	case l.Version == LayoutVersion:
 		return l.Version, nil
 	case l.Version > LayoutVersion:
-		return 0, fmt.Errorf("%s: version %d was written by a newer pcb", path, l.Version)
+		return 0, fmt.Errorf("%s: version %d: %w", path, l.Version, ErrNewerLayout)
 	}
 	return 0, fmt.Errorf("%s: unknown version %d", path, l.Version)
 }
