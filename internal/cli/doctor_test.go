@@ -178,7 +178,7 @@ func TestDoctorListsAlerts(t *testing.T) {
 	for _, want := range []string{
 		"✓  daemon: serving since 2026-11-12T11:00:00Z (pid 4242, version v1.2.3)\n",
 		"!  alert write-gate-undecided cal-2: writes to Home answer 503: the keys were not loaded yet\n" +
-			"   fix: check the calendar's keys in the Proton web app, then pcb service restart\n",
+			"   fix: check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container)\n",
 	} {
 		if !strings.Contains(r.out.String(), want) {
 			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())

@@ -207,7 +207,7 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 		"calendar: Home (cal-2): synced never, write gate undecided (the keys were not loaded yet), last error network: dial tcp: refused\n",
 		"render: undecryptable 1, unverified 2, duplicate masters 3\n",
 		"alert: warning sync-stalled: no successful sync of Home for 1h0m0s (fix: see last_pass and the logs (pcb service logs))\n",
-		"alert: warning write-gate-undecided: writes to Home answer 503: the keys were not loaded yet (fix: check the calendar's keys in the Proton web app, then pcb service restart)",
+		"alert: warning write-gate-undecided: writes to Home answer 503: the keys were not loaded yet (fix: check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container))",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status lacks %q:\n%s", want, got)

@@ -90,7 +90,7 @@ func TestAlerts(t *testing.T) {
 		}))},
 			[]ctl.Alert{{Code: "write-gate-undecided", Severity: "warning",
 				Message: "writes to Work answer 503: our member's address has no unlocked primary key",
-				Fix:     "check the calendar's keys in the Proton web app, then pcb service restart", Calendar: "cal-1"}}},
+				Fix:     "check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container)", Calendar: "cal-1"}}},
 		{"gate closed is no alert", ctl.AlertInput{Login: ready, Health: serving(cal(func(c *service.CalendarHealth) {
 			c.Gate, c.GateReason = "closed", "our member lacks the Write permission"
 		}))}, nil},

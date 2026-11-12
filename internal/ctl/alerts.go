@@ -114,7 +114,7 @@ func healthAlerts(h *service.Health, now time.Time, add func(code, sev, msg, fix
 		}
 		if c.Gate == "undecided" {
 			add(CodeWriteGateUndecided, SeverityWarning, fmt.Sprintf("writes to %s answer 503: %s", c.Name, c.GateReason),
-				"check the calendar's keys in the Proton web app, then pcb service restart", c.ID)
+				"check the calendar's keys in the Proton web app, then restart pcb (pcb service restart, or restart its container)", c.ID)
 		}
 	}
 }
