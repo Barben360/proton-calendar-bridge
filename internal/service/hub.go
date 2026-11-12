@@ -66,6 +66,80 @@ type hubAccount struct {
 	id, dir string
 	local   *Local
 	stopped *StopInfo // set by Serve (Task 4); guarded by Hub.mu
+
+	// gate is held for reading by every call through the API Account
+	// hands out, and for writing while the account is deleted (retire),
+	// so no call in flight writes into a directory being removed.
+	gate    sync.RWMutex
+	removed bool // the account is gone: calls through its API fail; written under gate
+
+	lmu      sync.Mutex                  // guards removing and long
+	removing bool                        // retire has begun: a long call starts already ended
+	long     map[*int]context.CancelFunc // the long calls in flight (Serve, WatchSync), ended by retire
+}
+
+// enter admits a call through a's API, or refuses it once a is removed.
+func (a *hubAccount) enter() (func(), error) {
+	a.gate.RLock()
+	if a.removed {
+		a.gate.RUnlock()
+		return nil, usage("no account "+a.id, "see pcb account list")
+	}
+	return a.gate.RUnlock, nil
+}
+
+// enterLong admits a long call (Serve, WatchSync) on a context retire
+// cancels.
+func (a *hubAccount) enterLong(ctx context.Context) (context.Context, func(), error) {
+	ctx, cancel := context.WithCancel(ctx)
+	key := new(int)
+	a.lmu.Lock()
+	if a.removing {
+		cancel()
+	}
+	if a.long == nil {
+		a.long = map[*int]context.CancelFunc{}
+	}
+	a.long[key] = cancel
+	a.lmu.Unlock()
+	leave, err := a.enter()
+	end := func() {
+		a.lmu.Lock()
+		delete(a.long, key)
+		a.lmu.Unlock()
+		cancel()
+	}
+	if err != nil {
+		end()
+		return nil, nil, err
+	}
+	return ctx, func() { leave(); end() }, nil
+}
+
+// retire deletes a: it ends the long calls through its API, waits for the
+// others, runs before (whose error leaves a as it was: gone false), then
+// closes a's Local and removes its directory with no call in flight (gone
+// true, err the removal's). Calls through its API then fail.
+func (a *hubAccount) retire(before func() error) (gone bool, err error) {
+	a.lmu.Lock()
+	a.removing = true
+	for _, cancel := range a.long {
+		cancel()
+	}
+	a.lmu.Unlock()
+	a.gate.Lock()
+	defer a.gate.Unlock()
+	if before != nil {
+		if err := before(); err != nil {
+			a.lmu.Lock()
+			a.removing = false
+			a.lmu.Unlock()
+			return false, err
+		}
+	}
+	a.removed = true
+	_ = a.local.Close()
+	return true, os.RemoveAll(a.dir)
 }
 
 // OpenHub opens the accounts of o.Dirs.State. A state without layout.json
@@ -119,9 +193,36 @@ func OpenHub(o HubOptions) (*Hub, error) {
 			_ = h.Close()
 			return nil, err
 		}
+		backfillAddress(l)
 		h.accounts[id] = &hubAccount{id: id, dir: dir, local: l}
 	}
 	return h, nil
+}
+
+// backfillAddress writes into l's state.json the address an M5 state
+// lacks (only an M6 login writes it): the username of its sealed account
+// (ruling R16). Best effort: without a readable session it stays empty.
+func backfillAddress(l *Local) {
+	dir := l.o.Dirs.State
+	st, err := store.LoadState(dir)
+	if err != nil || st.Address != "" || !exists(l.secrets.Path) {
+		return
+	}
+	accounts, err := l.secrets.Load()
+	if err != nil {
+		return
+	}
+	acc, ok := accounts[st.AccountID]
+	if !ok || acc.Username == "" {
+		return
+	}
+	_ = store.UpdateState(dir, func(s *store.State) error {
+		if s.Address != "" || s.AccountID != st.AccountID {
+			return store.ErrStateUnchanged
+		}
+		s.Address = acc.Username
+		return nil
+	})
 }
 
 // migrateLayout moves root to the per-account layout under its layout.lock
@@ -323,7 +424,7 @@ func (h *Hub) Account(selector string) (API, AccountInfo, error) {
 	if err != nil {
 		return nil, AccountInfo{}, err
 	}
-	return a.local, h.info(a), nil
+	return accountAPI{a}, h.info(a), nil
 }
 
 func (h *Hub) pick(selector string) (*hubAccount, error) {
@@ -414,11 +515,10 @@ func (h *Hub) drop(a *hubAccount) {
 	discard(a)
 }
 
-// discard closes a's Local and deletes its directory, best effort: what
-// is left is removed by a later OpenHub.
+// discard closes a's Local and deletes its directory (retire), best
+// effort: what is left is removed by a later OpenHub.
 func discard(a *hubAccount) {
-	_ = a.local.Close()
-	_ = os.RemoveAll(a.dir)
+	_, _ = a.retire(nil)
 }
 
 // insert adds a to the Hub; closed meanwhile, it closes a's Local instead
@@ -435,7 +535,8 @@ func (h *Hub) insert(a *hubAccount) bool {
 }
 
 // OnChange makes f run after an account is added (pending included),
-// completes its first login, is removed or has its CalDAV switched. f runs
+// completes its first login, is signed out, is removed or has its CalDAV
+// switched. f runs
 // on the goroutine of the change, outside the Hub's locks: it may call the
 // Hub.
 func (h *Hub) OnChange(f func()) {
@@ -502,6 +603,9 @@ func (h *Hub) login(ctx context.Context, req LoginRequest) (LoginResult, bool, e
 			break
 		}
 	}
+	if a == nil {
+		a = addressless(h.list())
+	}
 	added := a == nil
 	if added {
 		if a, err = h.add(); err != nil {
@@ -512,6 +616,22 @@ func (h *Hub) login(ctx context.Context, req LoginRequest) (LoginResult, bool, e
 	res, err := a.local.Login(ctx, req)
 	res, changed, err := h.settle(ctx, a, added, fresh, res, err)
 	return res, swept || changed, err
+}
+
+// addressless is the only account of list with no address, nil if there
+// are none or several: an M5 account migrated signed out, whose state.json
+// never had one (ruling R16; M5 held one account).
+func addressless(list []*hubAccount) *hubAccount {
+	var found *hubAccount
+	for _, a := range list {
+		if inspect(a).address == "" {
+			if found != nil {
+				return nil
+			}
+			found = a
+		}
+	}
+	return found
 }
 
 // freshDir reports whether the account directory dir never completed a login.
@@ -567,8 +687,12 @@ func (h *Hub) settle(ctx context.Context, a *hubAccount, added, fresh bool, res 
 	if res.AccountID != "" {
 		if other := h.userAccount(res.AccountID, a); other != "" {
 			// Ruling R12: the session this login opened is revoked, then
-			// an add's directory goes.
-			_, _ = a.local.Logout(ctx, LogoutRequest{})
+			// an add's directory goes. A logout that fails keeps the
+			// directory: it holds the session's only tokens.
+			out, lerr := a.local.Logout(context.WithoutCancel(ctx), LogoutRequest{})
+			if lerr != nil {
+				return LoginResult{}, added && h.insert(a), lerr
+			}
 			changed := false
 			switch {
 			case added:
@@ -577,8 +701,11 @@ func (h *Hub) settle(ctx context.Context, a *hubAccount, added, fresh bool, res 
 				h.drop(a)
 				changed = true
 			}
-			return LoginResult{}, changed, mustAct("this Proton account is already added as "+other,
-				"use that account, or remove it first (pcb account remove --account "+other+")")
+			hint := "use that account, or remove it first (pcb account remove --account " + other + ")"
+			if !out.Revoked {
+				hint += "; pcb could not revoke the session this login opened: end the session in " + SessionsPage
+			}
+			return LoginResult{}, changed, mustAct("this Proton account is already added as "+other, hint)
 		}
 	}
 	changed := fresh && res.State == StateReady
@@ -664,6 +791,12 @@ func (h *Hub) pickWaiting(selector string) (*hubAccount, error) {
 // secrets and event cache gone; its directory, address and CalDAV clients
 // stay.
 func (h *Hub) SignOut(ctx context.Context, selector string, req LogoutRequest) (LogoutResult, error) {
+	res, err := h.signOut(ctx, selector, req)
+	h.notify(err == nil)
+	return res, err
+}
+
+func (h *Hub) signOut(ctx context.Context, selector string, req LogoutRequest) (LogoutResult, error) {
 	h.ops.Lock()
 	defer h.ops.Unlock()
 	a, err := h.pick(selector)
@@ -688,15 +821,21 @@ func (h *Hub) remove(ctx context.Context, selector string, req LogoutRequest) (A
 	if err != nil {
 		return AccountInfo{}, false, err
 	}
-	if _, err := a.local.Logout(ctx, req); err != nil {
+	var info AccountInfo
+	gone, err := a.retire(func() error {
+		if _, err := a.local.Logout(ctx, req); err != nil {
+			return err
+		}
+		info = h.info(a)
+		return nil
+	})
+	if !gone {
 		return AccountInfo{}, false, err
 	}
-	info := h.info(a)
 	h.mu.Lock()
 	delete(h.accounts, a.id)
 	h.mu.Unlock()
-	_ = a.local.Close()
-	if err := os.RemoveAll(a.dir); err != nil {
+	if err != nil {
 		return info, true, blocked("the account is signed out but its directory could not be removed", "remove "+a.dir)
 	}
 	return info, true, nil
@@ -753,3 +892,223 @@ func (h *Hub) Close() error {
 	}
 	return nil
 }
+
+// accountAPI is the API of one account of a Hub, as Account hands it out:
+// each call runs on the account's Local unless the account was removed
+// (then a Usage error, "no account"), and Remove waits for the calls in
+// flight, ending the long ones (Serve, WatchSync), before it deletes the
+// directory. Close is the Hub's: here it does nothing.
+type accountAPI struct{ a *hubAccount }
+
+var _ API = accountAPI{}
+
+func (x accountAPI) Login(ctx context.Context, req LoginRequest) (LoginResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer leave()
+	return x.a.local.Login(ctx, req)
+}
+
+func (x accountAPI) SubmitTOTP(ctx context.Context, code string) (LoginResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer leave()
+	return x.a.local.SubmitTOTP(ctx, code)
+}
+
+func (x accountAPI) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return LogoutResult{}, err
+	}
+	defer leave()
+	return x.a.local.Logout(ctx, req)
+}
+
+func (x accountAPI) Status(ctx context.Context) (Status, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return Status{}, err
+	}
+	defer leave()
+	return x.a.local.Status(ctx)
+}
+
+func (x accountAPI) Calendars(ctx context.Context) ([]Calendar, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.Calendars(ctx)
+}
+
+func (x accountAPI) Sync(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer leave()
+	return x.a.local.Sync(ctx, req)
+}
+
+func (x accountAPI) WatchSync(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass)) error {
+	ctx, leave, err := x.a.enterLong(ctx)
+	if err != nil {
+		return err
+	}
+	defer leave()
+	return x.a.local.WatchSync(ctx, req, interval, onPass)
+}
+
+func (x accountAPI) Serve(ctx context.Context, o ServeOptions) error {
+	ctx, leave, err := x.a.enterLong(ctx)
+	if err != nil {
+		return err
+	}
+	defer leave()
+	return x.a.local.Serve(ctx, o)
+}
+
+func (x accountAPI) Health(ctx context.Context) (Health, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return Health{}, err
+	}
+	defer leave()
+	return x.a.local.Health(ctx)
+}
+
+func (x accountAPI) Events(ctx context.Context, req EventsRequest) ([]Event, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.Events(ctx, req)
+}
+
+func (x accountAPI) Collections(ctx context.Context) ([]Collection, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.Collections(ctx)
+}
+
+func (x accountAPI) Objects(ctx context.Context, calID string) ([]ObjectInfo, string, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, "", err
+	}
+	defer leave()
+	return x.a.local.Objects(ctx, calID)
+}
+
+func (x accountAPI) ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.ObjectsByUID(ctx, calID, uids)
+}
+
+func (x accountAPI) ObjectsByName(ctx context.Context, calID string, names []string) ([]Object, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.ObjectsByName(ctx, calID, names)
+}
+
+func (x accountAPI) Changes(ctx context.Context, calID, token string) (ChangeSet, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return ChangeSet{}, err
+	}
+	defer leave()
+	return x.a.local.Changes(ctx, calID, token)
+}
+
+func (x accountAPI) PutObject(ctx context.Context, calID, name string, body []byte, cond Precondition) (PutResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return PutResult{}, err
+	}
+	defer leave()
+	return x.a.local.PutObject(ctx, calID, name, body, cond)
+}
+
+func (x accountAPI) DeleteObject(ctx context.Context, calID, name string, cond Precondition) error {
+	leave, err := x.a.enter()
+	if err != nil {
+		return err
+	}
+	defer leave()
+	return x.a.local.DeleteObject(ctx, calID, name, cond)
+}
+
+func (x accountAPI) AddClient(ctx context.Context, name string) (ClientSecret, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return ClientSecret{}, err
+	}
+	defer leave()
+	return x.a.local.AddClient(ctx, name)
+}
+
+func (x accountAPI) Clients(ctx context.Context) ([]Client, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
+	return x.a.local.Clients(ctx)
+}
+
+func (x accountAPI) RemoveClient(ctx context.Context, idOrName string) (Client, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return Client{}, err
+	}
+	defer leave()
+	return x.a.local.RemoveClient(ctx, idOrName)
+}
+
+func (x accountAPI) ShowClient(ctx context.Context, idOrName string) (ClientCredentials, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return ClientCredentials{}, err
+	}
+	defer leave()
+	return x.a.local.ShowClient(ctx, idOrName)
+}
+
+func (x accountAPI) RotateClient(ctx context.Context, idOrName string) (ClientSecret, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return ClientSecret{}, err
+	}
+	defer leave()
+	return x.a.local.RotateClient(ctx, idOrName)
+}
+
+// CheckClient refuses (401) once the account is removed.
+func (x accountAPI) CheckClient(ctx context.Context, password, remote string) (bool, time.Duration) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return false, 0
+	}
+	defer leave()
+	return x.a.local.CheckClient(ctx, password, remote)
+}
+
+// Close does nothing: the Hub closes its accounts.
+func (accountAPI) Close() error { return nil }

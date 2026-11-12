@@ -152,3 +152,13 @@ func (h *Hub) SkipSRP(session func(username string) (api.Tokens, string)) {
 		l.SkipSRP(session)
 	}
 }
+
+// LocalOf is the Local of the Hub's account id, nil if none.
+func (h *Hub) LocalOf(id string) *Local {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if a, ok := h.accounts[id]; ok {
+		return a.local
+	}
+	return nil
+}

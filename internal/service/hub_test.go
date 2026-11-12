@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -819,10 +820,216 @@ func TestOnChangeRunsOutsideTheHubLock(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("after a switch: %d calls, want 2", calls.Load())
 	}
+	// Ruling R17: a sign-out is a change too.
+	if _, err := h.SignOut(t.Context(), ra.Account, service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 || seen.Load() != 1 {
+		t.Fatalf("after a sign-out: %d calls, %d accounts seen, want 3 and 1", calls.Load(), seen.Load())
+	}
 	if _, err := h.Remove(t.Context(), ra.Account, service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 3 || seen.Load() != 0 {
-		t.Fatalf("after a remove: %d calls, %d accounts seen, want 3 and 0", calls.Load(), seen.Load())
+	if calls.Load() != 4 || seen.Load() != 0 {
+		t.Fatalf("after a remove: %d calls, %d accounts seen, want 4 and 0", calls.Load(), seen.Load())
+	}
+}
+
+// stripAddress removes the address from the root state.json, as an M5
+// pcb wrote it (M5 had no such field).
+func (e *hubEnv) stripAddress(t *testing.T) {
+	t.Helper()
+	if err := store.UpdateState(e.dirs.State, func(s *store.State) error {
+		s.Address = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(e.dirs.State, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"address"`) {
+		t.Fatalf("state.json still has an address: %s", raw)
+	}
+}
+
+// Ruling R16: an M5 state.json has no address; the Hub takes it from the
+// sealed account, so the next login of that address finds the account.
+func TestOpenHubBackfillsTheM5Address(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	e.writeM5(t)
+	e.stripAddress(t)
+	h := e.open(t)
+	list := h.Accounts()
+	if len(list) != 1 || list[0].Address != userA {
+		t.Fatalf("Accounts = %+v, want a@x", list)
+	}
+	e.skip(t, h)
+	if res := e.mustLogin(t, h, userA); res.Account != list[0].ID {
+		t.Fatalf("Login(a) went to %q, want the migrated %q", res.Account, list[0].ID)
+	}
+	if got := e.accountDirs(t); !slices.Equal(got, []string{list[0].ID}) {
+		t.Errorf("accounts/ = %v, want only the migrated one", got)
+	}
+}
+
+// Ruling R16: an M5 account migrated signed out has neither a session nor
+// an address: the first login of an unknown address adopts it, keeping its
+// CalDAV clients.
+func TestLoginAdoptsTheSignedOutM5Account(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	pw := e.writeM5(t)
+	l, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+	e.stripAddress(t)
+	h := e.open(t)
+	list := h.Accounts()
+	if len(list) != 1 || list[0].Address != "" || list[0].Phase != string(store.PhaseLoggedOut) {
+		t.Fatalf("Accounts = %+v, want one signed out with no address", list)
+	}
+	e.skip(t, h)
+	if res := e.mustLogin(t, h, userA); res.Account != list[0].ID {
+		t.Fatalf("Login(a) went to %q, want the migrated %q", res.Account, list[0].ID)
+	}
+	if got := e.accountDirs(t); !slices.Equal(got, []string{list[0].ID}) {
+		t.Fatalf("accounts/ = %v, want only the migrated one", got)
+	}
+	a, info, err := h.Account(userA)
+	if err != nil || info.ID != list[0].ID {
+		t.Fatalf("Account(a) = %+v, %v", info, err)
+	}
+	if ok, _ := a.CheckClient(t.Context(), pw, "192.0.2.1:1"); !ok {
+		t.Error("the M5 CalDAV client was lost")
+	}
+}
+
+// Ruling R12: a refused duplicate whose session pcb could not revoke says
+// where to end it.
+func TestDuplicateRefusalNamesTheSessionsPageWhenTheRevokeFails(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	e.f.FailNext("DELETE", "/auth/v4", 400, 2001, 0)
+	_, err := e.login(t, h, aliasA)
+	ee := wantExit(t, err, exitcode.MustAct)
+	if !strings.Contains(ee.Hint, service.SessionsPage) {
+		t.Errorf("hint %q does not name %s", ee.Hint, service.SessionsPage)
+	}
+	if !strings.Contains(ee.Error(), userA) {
+		t.Errorf("message %q does not name %s", ee.Error(), userA)
+	}
+	if got := e.accountDirs(t); !slices.Equal(got, []string{ra.Account}) {
+		t.Errorf("accounts/ = %v, want only a's", got)
+	}
+}
+
+// A call in flight on the account's API when Remove begins ends before the
+// directory goes: it cannot bring the directory back.
+func TestRemoveWaitsForTheCallsInFlight(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	a, _, err := h.Account(userA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := store.AccountDir(e.dirs.State, ra.Account)
+	// Two client adds in flight: the first waits for clients.lock (held
+	// here, as another process would), the second for the first.
+	unlock, err := filelock.Lock(t.Context(), filepath.Join(dir, "clients.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adds := make(chan error, 2)
+	for _, name := range []string{"one", "two"} {
+		go func() {
+			_, err := a.AddClient(context.WithoutCancel(t.Context()), name)
+			adds <- err
+		}()
+		time.Sleep(100 * time.Millisecond)
+	}
+	removed := make(chan error, 1)
+	go func() {
+		_, err := h.Remove(t.Context(), ra.Account, service.LogoutRequest{})
+		removed <- err
+	}()
+	select {
+	case err := <-removed:
+		unlock()
+		t.Fatalf("Remove returned while calls were in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+	for range 2 {
+		if err := <-adds; err != nil {
+			t.Errorf("a client add in flight before Remove failed: %v", err)
+		}
+	}
+	if err := <-removed; err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a's directory is back after Remove: %v", err)
+	}
+	if _, err := a.Clients(t.Context()); err == nil {
+		t.Error("a call after Remove succeeded")
+	}
+}
+
+// A call that comes while Remove runs waits for it, then finds no account.
+func TestCallDuringRemoveFindsNoAccount(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	a, _, err := h.Account(userA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	h.LocalOf(ra.Account).OnWipe(func() {
+		close(entered)
+		<-release
+	})
+	removed := make(chan error, 1)
+	go func() {
+		_, err := h.Remove(t.Context(), ra.Account, service.LogoutRequest{})
+		removed <- err
+	}()
+	<-entered
+	added := make(chan error, 1)
+	go func() {
+		_, err := a.AddClient(t.Context(), "late")
+		added <- err
+	}()
+	select {
+	case err := <-added:
+		close(release)
+		t.Fatalf("AddClient returned during Remove: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-removed; err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if ee := wantExit(t, <-added, exitcode.Usage); !strings.HasPrefix(ee.Error(), "no account") {
+		t.Errorf("AddClient after Remove: %q, want no account", ee.Error())
+	}
+	if _, err := os.Stat(store.AccountDir(e.dirs.State, ra.Account)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a's directory is there after Remove: %v", err)
 	}
 }
