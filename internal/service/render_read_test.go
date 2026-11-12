@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,4 +76,51 @@ func TestDuplicateExceptionMostRecentWins(t *testing.T) {
 	if n := e.svc.RenderCounts().DuplicateMasters; n != 1 {
 		t.Errorf("DuplicateMasters = %d, want 1 (the exception left out)", n)
 	}
+}
+
+// A deleted placeholder stops counting on every Changes path, not only on
+// Objects: a full listing (empty token) and a delta that reports the UID
+// deleted, or the UID changed with the row gone (audit read-I1, fix round 1).
+func TestRenderCountsFollowDeletedRowsInChanges(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	broken := func(uid string) string {
+		return e.f.AddEvent(work, protontest.Event{UID: uid, Start: base, End: base + 3600, BrokenPart: protontest.SharedEncryptedPart, Card: card(uid, "Secret", base)})
+	}
+	forFull, forDelta := broken("full@x"), broken("delta@x")
+	rid := base + day
+	e.f.AddEvent(work, protontest.Event{UID: "s@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY", Card: card("s@x", "Series", base, "RRULE:FREQ=DAILY")})
+	exc := e.f.AddEvent(work, protontest.Event{UID: "s@x", Start: rid, End: rid + 3600, RecurrenceID: &rid, BrokenPart: protontest.SharedEncryptedPart,
+		Card: card("s@x", "Hidden", rid, "RECURRENCE-ID:"+stamp(rid))})
+	e.login(t, e.req())
+	e.sync(t, false)
+	_, tok := e.listing(t, work)
+	e.objects(t, work, "full@x", "delta@x", "s@x")
+	count := func(want int, what string) {
+		t.Helper()
+		if n := e.svc.RenderCounts().Undecryptable; n != want {
+			t.Fatalf("Undecryptable %s = %d, want %d", what, n, want)
+		}
+	}
+	count(3, "after the reads")
+
+	e.f.DeleteEvent(work, forFull)
+	e.sync(t, false)
+	e.changes(t, work, "")
+	count(2, "after a full Changes without full@x")
+
+	e.f.DeleteEvent(work, forDelta)
+	e.sync(t, false)
+	if cs := e.changes(t, work, tok); !slices.Contains(deletedUIDs(cs), "delta@x") {
+		t.Fatalf("Changes = %+v, want delta@x deleted", cs)
+	}
+	count(1, "after a delta reporting delta@x deleted")
+
+	e.f.DeleteEvent(work, exc)
+	e.sync(t, false)
+	if cs := e.changes(t, work, tok); !slices.Contains(changedUIDs(cs), "s@x") {
+		t.Fatalf("Changes = %+v, want s@x changed", cs)
+	}
+	count(0, "after a delta reporting s@x changed without its broken exception")
 }

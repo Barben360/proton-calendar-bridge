@@ -428,7 +428,7 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 			}
 			out, token = infos(groups, ck, n), syncToken(v.Epoch(), position(v), ck.gen)
 			l.r.keepDuplicates(calID, liveIn(groups))
-			l.r.keepRows(calID, liveRows(groups))
+			l.r.keepRows(calID, func(string) bool { return true }, liveRows(groups))
 			return nil
 		})
 		return l.cacheFail(err)
@@ -583,7 +583,12 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 			}
 			if full {
 				l.r.keepDuplicates(calID, liveIn(changed))
-				l.r.keepRows(calID, liveRows(changed))
+				l.r.keepRows(calID, func(string) bool { return true }, liveRows(changed))
+			} else {
+				// A delta forgets the rows it reports gone: a deleted UID's,
+				// and a changed UID's rows that no longer exist.
+				scope := liveIn(changed)
+				l.r.keepRows(calID, func(uid string) bool { return scope(uid) || slices.Contains(deleted, uid) }, liveRows(changed))
 			}
 			for _, uid := range deleted {
 				l.r.noteDuplicates(calID, uid, 0)

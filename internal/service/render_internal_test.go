@@ -140,6 +140,7 @@ func TestPlaceholderRecurringUsesTheRowZone(t *testing.T) {
 		"unknown": row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"Mars/Olympus"}`),
 		"none":    row(at(2026, time.July, 13), "FREQ=DAILY", `{}`),
 		"utc":     row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"UTC"}`),
+		"local":   row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"Local"}`),
 		"inject":  row(at(2026, time.July, 13), "FREQ=DAILY", `{"StartTimezone":"Europe/Paris\r\nX-EVIL:1"}`),
 	} {
 		if got := render(r); !strings.Contains(got, "DTSTART:20260713T070000Z\r\n") || strings.Contains(got, "TZID") {

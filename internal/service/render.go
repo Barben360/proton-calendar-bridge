@@ -60,8 +60,8 @@ type renderer struct {
 	beforeLoad func()
 
 	smu           sync.Mutex
-	undecryptable map[string]string     // row IDs served as placeholders, to their calendar ID
-	unverified    map[string]string     // row IDs rendered with X-PCB-INTEGRITY:unverified (M3-R33), to their calendar ID
+	undecryptable map[string]rowRef     // row IDs served as placeholders
+	unverified    map[string]rowRef     // row IDs rendered with X-PCB-INTEGRITY:unverified (M3-R33)
 	alarms        map[string]droppedRow // row IDs whose malformed reminders were left out, as last rendered
 	duplicates    map[string]int        // rows left out (M3-R3, M1) by calendar ID and UID, as last rendered
 }
@@ -300,58 +300,64 @@ func (r *renderer) drop() {
 	r.smu.Unlock()
 }
 
+// rowRef is the calendar and UID a marked row belongs to.
+type rowRef struct{ cal, uid string }
+
 // droppedRow is the number of malformed reminders left out of a row's last
-// render, and its calendar.
+// render, and the row's place.
 type droppedRow struct {
-	cal string
-	n   int
+	rowRef
+	n int
 }
 
-// noteRow records whether row id of calendar calID rendered as a
-// placeholder, whether it rendered as unverified, and how many malformed
-// reminders it left out.
-func (r *renderer) noteRow(calID, id string, placeholder, unverified bool, dropped int) {
+// noteRow records whether row of calendar calID rendered as a placeholder,
+// whether it rendered as unverified, and how many malformed reminders it
+// left out.
+func (r *renderer) noteRow(calID string, row *cache.StoredRow, placeholder, unverified bool, dropped int) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	mark(&r.undecryptable, calID, id, placeholder)
-	mark(&r.unverified, calID, id, unverified)
+	ref := rowRef{calID, row.UID}
+	mark(&r.undecryptable, row.ID, ref, placeholder)
+	mark(&r.unverified, row.ID, ref, unverified)
 	if dropped == 0 {
-		delete(r.alarms, id)
+		delete(r.alarms, row.ID)
 		return
 	}
 	if r.alarms == nil {
 		r.alarms = map[string]droppedRow{}
 	}
-	r.alarms[id] = droppedRow{calID, dropped}
+	r.alarms[row.ID] = droppedRow{ref, dropped}
 }
 
-// mark adds id (of calendar calID) to the set *m when on, else removes it.
-func mark(m *map[string]string, calID, id string, on bool) {
+// mark adds id to the set *m when on, else removes it.
+func mark(m *map[string]rowRef, id string, ref rowRef, on bool) {
 	if !on {
 		delete(*m, id)
 		return
 	}
 	if *m == nil {
-		*m = map[string]string{}
+		*m = map[string]rowRef{}
 	}
-	(*m)[id] = calID
+	(*m)[id] = ref
 }
 
-// keepRows forgets the row marks of calendar calID's rows that live does not
-// hold: a row deleted renders no more, so only a read that sees it gone can
-// uncount it.
-func (r *renderer) keepRows(calID string, live func(id string) bool) {
+// keepRows forgets the row marks of calendar calID's rows whose UID is in
+// scope and that live does not hold: a row deleted renders no more, so only
+// a read that sees it gone can uncount it. A listing is in scope for every
+// UID; a delta for the UIDs it reports, changed or deleted.
+func (r *renderer) keepRows(calID string, inScope func(uid string) bool, live func(id string) bool) {
 	r.smu.Lock()
 	defer r.smu.Unlock()
-	for _, set := range []map[string]string{r.undecryptable, r.unverified} {
-		for id, cal := range set {
-			if cal == calID && !live(id) {
+	gone := func(ref rowRef, id string) bool { return ref.cal == calID && inScope(ref.uid) && !live(id) }
+	for _, set := range []map[string]rowRef{r.undecryptable, r.unverified} {
+		for id, ref := range set {
+			if gone(ref, id) {
 				delete(set, id)
 			}
 		}
 	}
 	for id, d := range r.alarms {
-		if d.cal == calID && !live(id) {
+		if gone(d.rowRef, id) {
 			delete(r.alarms, id)
 		}
 	}
@@ -487,7 +493,7 @@ func (l *Local) render(calID string, g cache.Group, ks *keyState, ck *calKeys) [
 // placeholder.
 func (l *Local) renderRow(calID string, row *cache.StoredRow, ks *keyState, ck *calKeys) ical.Component {
 	ev, unverified, dropped, ok := l.decryptRow(row, ks, ck)
-	l.r.noteRow(calID, row.ID, !ok, ok && unverified, dropped)
+	l.r.noteRow(calID, row, !ok, ok && unverified, dropped)
 	if !ok {
 		return placeholder(row)
 	}
@@ -618,7 +624,8 @@ func placeholderZones(row *cache.StoredRow) (start, end *time.Location) {
 		return nil, nil
 	}
 	zone := func(name string) *time.Location {
-		if name == "" || name == "UTC" || strings.ContainsAny(name, "\r\n;:,\" ") {
+		// "Local" resolves to the host's zone: not a tzdata name to serve.
+		if name == "" || name == "UTC" || name == "Local" || strings.ContainsAny(name, "\r\n;:,\" ") {
 			return nil
 		}
 		loc, err := time.LoadLocation(name)

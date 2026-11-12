@@ -399,3 +399,21 @@ func controlIn(s string) int {
 	}
 	return -1
 }
+
+// Valid non-ASCII next to a dropped control survives intact (the drop is by
+// rune, not by byte).
+func TestDropControlsKeepsNonASCII(t *testing.T) {
+	for in, want := range map[string]string{
+		"é\x01😀":      "é😀",
+		"日本\x7f語\x00": "日本語",
+		"naïve\tcafé": "naïve\tcafé",
+	} {
+		if got := dropControls(in); got != want {
+			t.Errorf("dropControls(%q) = %q, want %q", in, got, want)
+		}
+	}
+	ev := mustMerge(t, []byte("BEGIN:VEVENT\nSUMMARY:é\x01😀\nEND:VEVENT"))
+	if v := values(ev, "SUMMARY"); len(v) != 1 || v[0] != ":é😀" {
+		t.Errorf("SUMMARY = %q", v)
+	}
+}
