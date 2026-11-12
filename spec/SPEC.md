@@ -867,7 +867,7 @@ writes (PUT, DELETE) since M4.
   1 000 objects only (the others keep `getetag` and get `calendar-data` in a 404
   propstat, M3-R35), `ReadHeaderTimeout` 10 s, no error text, Proton text or other
   users' IDs in bodies (a write refusal's `pcb:reason` is a fixed text of ours)
-  [verified: `TestBodiesOver8MiBAre413`,
+  [verified: `TestPropfindAndReportBodiesOver1MiBAre413`,
   `TestPropertyListsOver64NamesAre400`, `TestCalendarDataInListingsIsCapped`,
   `TestAvoidErrorTextInBodies`].
 - Library (E17, M3-R5): our own server. emersion/go-webdav v0.7.0 has no server-side

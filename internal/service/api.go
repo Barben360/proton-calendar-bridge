@@ -123,7 +123,7 @@ type API interface {
 	RotateClient(ctx context.Context, idOrName string) (ClientSecret, error)
 	// CheckClient reports whether password is a client's, for a request
 	// from remote ("ip:port"). A remote with 5 failures in the last minute
-	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
+	// is refused unexamined and retryAfter says for how long (CalDAV: 503 with Retry-After);
 	// otherwise a refusal has retryAfter 0 (401). While clients.json cannot be
 	// loaded every request is refused with a retryAfter (503) and no failure
 	// is charged to the remote.
