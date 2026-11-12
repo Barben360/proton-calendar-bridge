@@ -115,7 +115,7 @@ Fresh implementation (inspired by the fork's `pkg/auth/totp.go`; credit it).
 - [ ] **Step 1: Confirm the item's field names** with values never shown: `PROTON_PASS_PERSONAL_ACCESS_TOKEN=<the personal access token, from a file outside the repository> pass-cli login </dev/null`, then `pass-cli item view --vault-name <vault> --item-title <item> --output json | <print keys and types only>`; write the three references into `scripts/lab.env.example`.
 - [ ] **Step 2: Failing tests** against an `httptest` front of go-proton-api's in-memory `server` (pattern from proton-cal `pkg/auth/hv_test.go`, rewritten): `TestLoginGuardRefusesWithin60s`; `TestLoginHVStopsWithResumeInfo` (front answers 9001 with token `T1` → exit code 10, hint contains `--captcha-token T1`, `hv.json` written, exactly one `/auth/v4` call); `TestLoginWithCaptchaTokenSendsIt` (header `x-pm-human-verification-token: T1` on the first attempt); `TestLoginTOTPFromURI` (front fakes `2FA.Enabled=1`, receives the code for the injected clock); `TestSessionFileMode0600`.
 - [ ] **Step 3: Run** → FAIL. **Step 4: Implement.** **Step 5: Run** → PASS.
-- [ ] **Step 6: Live smoke** (one login): `pass-cli run --env-file scripts/lab.env -- go run ./cmd/pcb-lab login` then `pcb-lab whoami`; record nothing yet.
+- [ ] **Step 6: Live smoke** (one login): `pass-cli run --env-file ~/.config/pcb-live/lab.env -- go run ./cmd/pcb-lab login` then `pcb-lab whoami`; record nothing yet.
 - [ ] **Step 7: Commit** (`🧪 Add pcb-lab login against the test account`).
 
 ### Task 6: E03 — client identity (go/no-go gate)

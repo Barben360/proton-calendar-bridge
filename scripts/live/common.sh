@@ -28,9 +28,9 @@ live_home() {
 #   production <hostname>    never a live host, in every mode
 #   workstation <hostname>   the machine you run the session from: refused for
 #                            --vm, warned about by preflight (refused for step 7)
-# An empty file means no such hosts; a missing or unreadable file refuses
-# (fail closed). Names match case-insensitively on their first label, so an
-# FQDN matches its short name.
+# An empty file means no such hosts; a missing, unreadable or malformed file
+# refuses (fail closed). A host listed both ways is production. Names match
+# case-insensitively on their first label, so an FQDN matches its short name.
 live_hosts_file() { live_hook PCB_LIVE_HOSTS "${HOME-}/.config/pcb-live/hosts"; }
 
 # live_host_name: this host's short name, lower case.
@@ -56,6 +56,7 @@ live_host_role() {
   [[ -n $host ]] || { echo "live: cannot read this host's name: refused" >&2; return 1; }
   while IFS= read -r line || [[ -n $line ]]; do
     n=$((n + 1))
+    line=${line%$'\r'} # a CRLF file reads like an LF one
     read -r role name extra <<<"${line%%#*}"
     [[ -z ${role-} ]] && continue
     if [[ ($role != production && $role != workstation) || -z ${name-} || -n ${extra-} ]]; then

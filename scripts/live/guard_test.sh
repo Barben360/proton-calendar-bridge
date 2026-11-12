@@ -253,6 +253,24 @@ check "a line with a trailing comment still counts" "$rc $(grep -c 'pcb sees' <<
 printf 'server prod-host\n' > "$tmp/hosts-bad"
 out=$(hrun "$tmp/hosts-bad" ws-host 1 -- pcb status); rc=$?
 check "a malformed hosts line is refused (fail closed)" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'line 1' <<<"$out")" "1 0 1"
+printf 'workstation ws-host\nproduction prod-host extra\n' > "$tmp/hosts-extra"
+out=$(hrun "$tmp/hosts-extra" ws-host 1 -- pcb status); rc=$?
+check "a hosts line with an extra field is refused (fail closed)" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'line 2' <<<"$out")" "1 0 1"
+printf 'workstation ws-host\nproduction prod-host' > "$tmp/hosts-nonl"
+out=$(hrun "$tmp/hosts-nonl" prod-host 1 -- pcb status); rc=$?
+check "a last hosts line without a newline still counts" "$rc $(grep -c 'pcb sees' <<<"$out")" "1 0"
+printf 'production prod-host\r\n\r\nworkstation ws-host\r\n' > "$tmp/hosts-crlf"
+out=$(hrun "$tmp/hosts-crlf" prod-host 1 -- pcb status); rc=$?
+check "a CRLF hosts file still refuses its production host" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'is your production server' <<<"$out")" "1 0 1"
+out=$(hrun "$tmp/hosts-crlf" ws-host 1 -- pcb status); rc=$?
+check "a CRLF hosts file still lets the workstation run without --vm" "$rc $(grep -c 'pcb sees' <<<"$out")" "0 1"
+# A host listed both ways is production (refused in every mode), whatever the order.
+printf 'production dual-host\nworkstation dual-host\n' > "$tmp/hosts-dual1"
+printf 'workstation dual-host\nproduction dual-host\n' > "$tmp/hosts-dual2"
+for f in "$tmp/hosts-dual1" "$tmp/hosts-dual2"; do
+  out=$(hrun "$f" dual-host 1 -- pcb status); rc=$?
+  check "a host listed as production and workstation is refused without --vm (${f##*-})" "$rc $(grep -c 'pcb sees' <<<"$out") $(grep -c 'is your production server' <<<"$out")" "1 0 1"
+done
 # Without PCB_LIVE_TEST=1, PCB_LIVE_HOSTS is ignored: $HOME's file (empty, throwaway) is read, not the hook's (missing).
 hh=$tmp/hhome; mkdir -p "$hh/.config/pcb-live"; : > "$hh/.config/pcb-live/hosts"
 # shellcheck disable=SC2016 # $1 is for the inner bash
