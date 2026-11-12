@@ -20,6 +20,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // clientsEnv is a service with no Proton behind it (an unreachable base URL,
@@ -598,5 +599,96 @@ func TestNoPasswordInLogs(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), createdLog) {
 		t.Fatalf("the log is empty of the default-client line, so the scan proves little:\n%s", logs.String())
+	}
+}
+
+// M5-R14(2): with secrets.sealed there and its key file lost, add and
+// rotate refuse rather than mint a key that would turn "missing" into
+// "corrupt" for the stored session; nothing is written, no key created.
+func TestClientsRefuseToMintAKeyWhileTheSessionsKeyIsMissing(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	before, err := os.ReadFile(filepath.Join(e.dirs.State, "clients.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(e.cfg.Secrets.KeyFile); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.AddClient(t.Context(), "Phone")
+	wantCode(t, err, exitcode.MustAct)
+	if !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) || !strings.Contains(exitcode.HintOf(err), "pcb logout, then pcb login") {
+		t.Errorf("add: error %q, hint %q; want the key file named and logout then login", err, exitcode.HintOf(err))
+	}
+	_, err = e.svc.RotateClient(t.Context(), "default")
+	wantCode(t, err, exitcode.MustAct)
+	if _, err := os.Stat(e.cfg.Secrets.KeyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a key file was created: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(e.dirs.State, "clients.json")); !bytes.Equal(before, after) {
+		t.Error("clients.json changed")
+	}
+	// show names the same way out, not rotate (which is refused).
+	_, err = e.svc.ShowClient(t.Context(), "default")
+	wantCode(t, err, exitcode.MustAct)
+	if h := exitcode.HintOf(err); !strings.Contains(h, "pcb logout, then pcb login") || strings.Contains(h, "rotate") {
+		t.Errorf("show hint = %q; want logout then login, not rotate", h)
+	}
+	// The stored session reads as a missing key still, not as corrupt.
+	if st, _ := e.svc.Status(t.Context()); st.Secrets != "unreadable" {
+		t.Errorf("secrets = %q", st.Secrets)
+	}
+	if _, err := e.secrets().Load(); !errors.Is(err, seal.ErrNoKey) {
+		t.Errorf("secrets.sealed now loads as %v, want seal.ErrNoKey", err)
+	}
+}
+
+// Logged out, the lost key holds nothing else: rotate makes a new key and
+// the client recoverable again.
+func TestRotateRecoversAClientWhenTheKeyIsLostLoggedOut(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	e.svc.AddClient(t.Context(), "Phone") //nolint:errcheck // shown below
+	key := config.Defaults(e.dirs).Secrets.KeyFile
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.ShowClient(t.Context(), "Phone")
+	wantCode(t, err, exitcode.MustAct)
+	if !strings.Contains(exitcode.HintOf(err), "pcb client rotate Phone") {
+		t.Errorf("show hint = %q, want rotate offered", exitcode.HintOf(err))
+	}
+	sec, err := e.svc.RotateClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr, err := e.svc.ShowClient(t.Context(), "Phone"); err != nil || !cr.Recoverable || cr.Password != sec.Password {
+		t.Errorf("after rotate: %v, recoverable %v", err, cr.Recoverable)
+	}
+}
+
+func TestShowClientWhoseSealedCopyIsNotItsPasswordSaysSo(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	e.svc.AddClient(t.Context(), "a") //nolint:errcheck // edited below
+	e.svc.AddClient(t.Context(), "b") //nolint:errcheck // edited below
+	path := filepath.Join(e.dirs.State, "clients.json")
+	data, _ := os.ReadFile(path)
+	var f map[string]any
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	cs := f["clients"].([]any)
+	a, b := cs[0].(map[string]any), cs[1].(map[string]any)
+	a["salt"], a["hash"] = b["salt"], b["hash"]
+	data, _ = json.Marshal(f)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.ShowClient(t.Context(), "a")
+	wantCode(t, err, exitcode.MustAct)
+	if !strings.Contains(err.Error(), "does not match its password") || strings.Contains(err.Error(), "does not open") {
+		t.Errorf("error = %q; want the mismatch named", err)
 	}
 }

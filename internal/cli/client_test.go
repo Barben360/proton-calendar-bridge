@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -369,5 +370,30 @@ func TestLoginTextNamesClientShowWhenItCreatedDefault(t *testing.T) {
 	sr.want(exitcode.OK, "login", "--non-interactive")
 	if strings.Contains(sr.out.String(), "CalDAV credentials") {
 		t.Errorf("login text without a new client = %q", sr.out.String())
+	}
+}
+
+// showStub shows one client whatever is asked.
+type showStub struct{ stubAPI }
+
+func (*showStub) ShowClient(context.Context, string) (service.ClientCredentials, error) {
+	return service.ClientCredentials{Client: service.Client{ID: "c1", Name: "Phone"}, Username: "Phone", Password: "pw", Recoverable: true}, nil
+}
+
+// A configuration that no longer loads is named, never an empty URL line.
+func TestClientShowNamesAnUnknownURL(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	r.svc = &showStub{}
+	writeConfig(t, r, "[caldav]\nlisten = \"no port\"\n")
+	got := showText(t, r, "Phone")
+	if !strings.HasPrefix(got["URL"], "not known") || !strings.Contains(got["URL"], "listen") {
+		t.Errorf("URL line = %q; want not known with the config error\n%s", got["URL"], r.out.String())
+	}
+	r.want(exitcode.OK, "client", "show", "Phone", "--json")
+	var data map[string]any
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if _, ok := data["url"]; ok {
+		t.Errorf("JSON url = %v, want none", data["url"])
 	}
 }

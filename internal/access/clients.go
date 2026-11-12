@@ -41,9 +41,9 @@ var (
 	// ErrNoSealedCopy: the client was made before pcb kept a sealed copy
 	// (a version 1 record), or with no Sealer; only rotating it gives one.
 	ErrNoSealedCopy = errors.New("no sealed copy of it is kept")
-	// errStale: the sealed copy opens but is not the password the hash
+	// ErrStale: the sealed copy opens but is not the password the hash
 	// checks (a hand-edited file).
-	errStale = errors.New("its sealed copy does not match its hash")
+	ErrStale = errors.New("its sealed copy does not match its hash")
 	// ErrSeal: a new password could not be sealed (the Sealer's error is
 	// wrapped too); nothing was stored.
 	ErrSeal = errors.New("the client's password could not be sealed")
@@ -491,7 +491,7 @@ func (s *Store) Reveal(id string, open func(sealed, aad []byte) ([]byte, error))
 	password = string(plain)
 	clear(plain)
 	if subtle.ConstantTimeCompare(digest(r.salt, password), r.hash) != 1 {
-		return "", fmt.Errorf("%w: %w", ErrNotRecoverable, errStale)
+		return "", fmt.Errorf("%w: %w", ErrNotRecoverable, ErrStale)
 	}
 	return password, nil
 }

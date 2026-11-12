@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -87,8 +88,9 @@ func (a *app) newClientShow() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			cr.URL, cr.Fingerprint = a.listenerFacts(cmd)
-			text := clientShowText(cr)
+			var urlErr error
+			cr.URL, cr.Fingerprint, urlErr = a.listenerFacts(cmd)
+			text := clientShowText(cr, urlErr)
 			if !reveal {
 				cr.Password = "" // the JSON form only
 			}
@@ -102,28 +104,38 @@ func (a *app) newClientShow() *cobra.Command {
 // listenerFacts is the URL and, over TLS, the fingerprint a CalDAV client
 // needs: the running daemon's listener when one answers, else what pcb
 // serve would use for the configuration (offlineListener). Neither is
-// secret: a daemon that cannot be asked is passed over.
-func (a *app) listenerFacts(cmd *cobra.Command) (url, fingerprint string) {
+// secret: a daemon that cannot be asked is passed over. err says why the
+// URL is not known (a configuration that does not load).
+func (a *app) listenerFacts(cmd *cobra.Command) (url, fingerprint string, err error) {
 	ctx := cmd.Context()
 	if c, err := a.daemon(cmd); err == nil && c != nil {
 		st, err := c.Status(ctx)
 		_ = c.Close()
 		if err == nil && st.Listener != nil {
-			return st.Listener.URL, st.Listener.Fingerprint
+			return st.Listener.URL, st.Listener.Fingerprint, nil
 		}
 	}
 	dirs, cfg, err := loadConfig(a.Env)
 	if err != nil {
-		return "", ""
+		return "", "", err
 	}
-	return offlineListener(ctx, cfg.CalDAV, filepath.Join(dirs.State, "tls"))
+	url, fingerprint = offlineListener(ctx, cfg.CalDAV, filepath.Join(dirs.State, "tls"))
+	if url == "" {
+		return "", "", errors.New("caldav.listen is not HOST:PORT")
+	}
+	return url, fingerprint, nil
 }
 
-// clientShowText is one "Label: value" line per thing to enter.
-func clientShowText(cr service.ClientCredentials) string {
+// clientShowText is one "Label: value" line per thing to enter; urlErr
+// says why the URL is not known.
+func clientShowText(cr service.ClientCredentials, urlErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CalDAV client %q (id %s)\n", cr.Name, cr.ID)
-	fmt.Fprintf(&b, "URL: %s\n", cr.URL)
+	if urlErr != nil {
+		fmt.Fprintf(&b, "URL: not known (%s): check config.toml with pcb doctor\n", urlErr)
+	} else {
+		fmt.Fprintf(&b, "URL: %s\n", cr.URL)
+	}
 	fmt.Fprintf(&b, "Username: %s\n", cr.Username)
 	if cr.Recoverable {
 		fmt.Fprintf(&b, "Password: %s", cr.Password)

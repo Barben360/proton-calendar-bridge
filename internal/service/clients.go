@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
@@ -75,6 +77,9 @@ func (l *Local) clientsError(err error) error {
 func (l *Local) AddClient(ctx context.Context, name string) (ClientSecret, error) {
 	if l.closed.Load() {
 		return ClientSecret{}, errClosed()
+	}
+	if err := l.sessionKeyLost(); err != nil {
+		return ClientSecret{}, err
 	}
 	id, pw, err := l.clients.Add(ctx, name)
 	if err != nil {
@@ -268,11 +273,40 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 // unrevealable is the MustAct of a sealed copy the key does not open.
 func (l *Local) unrevealable(name string, err error) error {
 	why := "its sealed copy does not open with the key file " + l.keyFile()
-	if errors.Is(err, seal.ErrNoKey) {
+	switch {
+	case errors.Is(err, access.ErrStale):
+		why = "its sealed copy does not match its password (clients.json was edited)"
+	case errors.Is(err, seal.ErrNoKey):
 		why = "the key file " + l.keyFile() + " is missing"
 	}
-	return mustAct(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s", name, why),
-		"restore the key file from a backup, or run pcb client rotate "+shellquote.Quote(name)+" for a new password")
+	hint := "restore the key file from a backup, or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
+	if errors.Is(err, seal.ErrNoKey) && l.sessionSealed() {
+		// rotate is refused meanwhile (sessionKeyLost); after the new
+		// login, show offers it for a copy the new key does not open.
+		hint = "restore the key file from a backup, or run pcb logout, then pcb login"
+	}
+	return mustAct(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s", name, why), hint)
+}
+
+// sessionSealed reports whether secrets.sealed exists.
+func (l *Local) sessionSealed() bool {
+	_, err := os.Stat(l.secrets.Path)
+	return err == nil
+}
+
+// sessionKeyLost refuses to seal a client's password when the key file is
+// absent while secrets.sealed exists (ruling M5-R14): the sealer would mint
+// a new key, turning the stored session from "key missing, restore it"
+// into "corrupt", and the clients sealed meanwhile would not open once the
+// old key is restored. With no secrets.sealed a new key is the way back
+// (rotate). Only an absent key file counts: any other key error is the
+// sealer's to report. A login's own sealing still creates the key.
+func (l *Local) sessionKeyLost() error {
+	if _, err := os.Stat(l.keyFile()); !errors.Is(err, fs.ErrNotExist) || !l.sessionSealed() {
+		return nil
+	}
+	return mustAct("the key file "+l.keyFile()+" is missing while secrets.sealed exists: a new key would make the stored session unreadable",
+		"restore the key file from a backup, or run pcb logout, then pcb login")
 }
 
 // RotateClient implements API.
@@ -282,6 +316,9 @@ func (l *Local) RotateClient(ctx context.Context, idOrName string) (ClientSecret
 	}
 	c, err := l.pickClient(idOrName)
 	if err != nil {
+		return ClientSecret{}, err
+	}
+	if err := l.sessionKeyLost(); err != nil {
 		return ClientSecret{}, err
 	}
 	c, pw, err := l.clients.Rotate(ctx, c.ID)
