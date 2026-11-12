@@ -161,6 +161,13 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   (whoever unseals the store owns the account).
 - Session lifetime and refresh-token rotation rules [assumed → E01]: decide
   how often the daemon refreshes and when it must relogin. M1 refreshes on demand, once across processes; the Proton answers it classifies as "session ended" or "credentials refused" are all `[assumed]` until the live session lists them (`HUMAN-CHECKS.md`, "signals to confirm").
+- Refresh request: `POST /auth/v4/refresh` with `UID`, `RefreshToken`,
+  `ResponseType: token`, `GrantType: refresh_token`, `RedirectURI`, a random
+  `State` and the `AccessToken` of the pair being refreshed. Proton refuses a
+  refresh token issued by a refresh without that access token (400, code
+  10013); only the first refresh after a login works without it
+  [verified: live 2026-11-12, E01]. pcb (`auth.Refresh`) and pcb-lab always
+  send it, and the shared fake enforces the rule.
 - Locked ("password") scope for salts and calendar deletion via SRP to
   `/core/v4/users/unlock` [verified: proton-cal docs/overview.md].
 - Control channel [call]: the CLI talks to the daemon over a unix socket
