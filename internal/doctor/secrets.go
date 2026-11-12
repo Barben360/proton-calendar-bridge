@@ -9,12 +9,15 @@ import (
 	"strings"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // SecretsCheck reports how the secrets are protected. Only the key-file
 // sealer exists so far: a 0600 key file stops other local users and casual
 // disclosure, not root or the user's own processes, and a backup of one
-// volume holding both key and data exposes both (E15).
+// volume holding both key and data exposes both (E15). A secrets.sealed older
+// than the last one pcb wrote (restored or replaced, R3m) is an error; other
+// failures to open it are left to pcb status and pcb logout.
 type SecretsCheck struct {
 	StateDir string // holds state.json and secrets.sealed
 	KeyFile  string
@@ -42,6 +45,13 @@ func (c SecretsCheck) Run(context.Context) Result {
 			r.Status = StatusError
 			r.Message = "sealed secrets exist but the key file is missing: they cannot be read; `pcb logout` wipes them, then log in again"
 			r.Fix = "pcb logout"
+			return r
+		}
+		var rb *store.RolledBackError
+		if _, err := store.NewSecrets(c.StateDir, &seal.KeyFile{Path: c.KeyFile}).Load(); errors.As(err, &rb) {
+			r.Status = StatusError
+			r.Message = rb.Error() + ": it was restored or replaced"
+			r.Fix = "if you restored it on purpose, run pcb logout, then pcb login"
 			return r
 		}
 		msgs = append(msgs, "secrets sealed with a key file (headless fallback)")

@@ -263,27 +263,35 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 // needs-login with err's message as the reason (it is secret-free: the
 // service wrote it). st is the state the decision was based on: the mark is
 // written only if state.json still says the same, so a login that finished
-// meanwhile (in another process) is never overwritten. state.json is
-// replaced atomically; a login finishing between the check and the write
-// is the remaining window (no lock covers both a person's login and this
-// path without blocking on a login waiting for its 2FA code).
+// meanwhile (in another process) is never overwritten. The check and the
+// write are one store.UpdateState, under state.lock, which every writer of
+// state.json takes (R10m): no login lands between them. The lock is held for
+// the file's load and write only, never across a login waiting for its 2FA
+// code.
 func (l *Local) humanNeeded(st store.State, err error) error {
 	var ee *exitcode.Error
 	if !errors.As(err, &ee) || ee.Code != exitcode.MustAct {
 		return err
 	}
-	cur, lerr := store.LoadState(l.o.Dirs.State)
-	if lerr != nil {
-		return stateError(lerr)
-	}
-	if !sameLogin(cur, st) {
+	loaded := false
+	uerr := store.UpdateState(l.o.Dirs.State, func(cur *store.State) error {
+		loaded = true
+		if !sameLogin(*cur, st) {
+			return store.ErrStateUnchanged
+		}
+		if l.humanHook != nil {
+			l.humanHook()
+		}
+		cur.Phase, cur.Reason, cur.Captcha = store.PhaseNeedsLogin, ee.Err.Error(), nil
+		return nil
+	})
+	switch {
+	case uerr == nil:
 		return err
+	case !loaded && !errors.Is(uerr, context.DeadlineExceeded):
+		return stateError(uerr) // state.json could not be read
 	}
-	cur.Phase, cur.Reason, cur.Captcha = store.PhaseNeedsLogin, ee.Err.Error(), nil
-	if serr := store.SaveState(l.o.Dirs.State, cur); serr != nil {
-		return storeError(serr, l.keyFile())
-	}
-	return err
+	return storeError(uerr, l.keyFile())
 }
 
 // sameLogin reports whether a and b describe the same login: no login,

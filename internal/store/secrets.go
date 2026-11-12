@@ -8,20 +8,31 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
-const secretsVersion = 1
+// secretsVersion is the envelope version written. Version 2 seals the
+// generation with the accounts; version 1 (M1-M4) sealed the accounts only,
+// and reads as generation 0.
+const secretsVersion = 2
 
 // Secrets is the sealed store of accounts (SPEC C2). The file only holds an
-// envelope and one sealed blob; the key stays with the Sealer. Restoring an
-// older secrets.sealed is not detected (no rollback protection yet; a
-// generation counter is planned for M5).
+// envelope and one sealed blob; the key stays with the Sealer.
+//
+// Rollback (R3m, M5-P14): every write seals a generation one above the last
+// and then mirrors it in state.json (State.SecretsGeneration); removing the
+// file moves the mirror one above too. A sealed generation below the mirror is
+// a restored or replaced file (ErrRolledBack). The version and the sealer are
+// in the AAD, so editing the envelope's version cannot make a v2 file read as
+// v1 (generation 0): it no longer authenticates. A file ahead of the mirror is
+// accepted (a crash, or a failed mirror write, between the two writes).
+// Restoring the whole state directory, state.json included, is not detected.
 type Secrets struct {
-	Path     string // secrets.sealed
+	Path     string // secrets.sealed; state.json is in the same directory
 	LockPath string // secrets.lock
 	Sealer   seal.Sealer
 }
@@ -35,50 +46,132 @@ func NewSecrets(stateDir string, s seal.Sealer) *Secrets {
 	}
 }
 
+// ErrRolledBack means secrets.sealed holds a generation below the one
+// state.json mirrors: an older file was restored, or the file was replaced.
+// Load returns it as a *RolledBackError.
+var ErrRolledBack = errors.New("secrets.sealed is older than the last one pcb wrote")
+
+// RolledBackError is ErrRolledBack with the two generations.
+type RolledBackError struct {
+	Generation uint64 // sealed in the file
+	Mirror     uint64 // last written, from state.json
+}
+
+func (e *RolledBackError) Error() string {
+	return fmt.Sprintf("%v (generation %d < %d)", ErrRolledBack, e.Generation, e.Mirror)
+}
+
+// Unwrap makes errors.Is(err, ErrRolledBack) hold.
+func (e *RolledBackError) Unwrap() error { return ErrRolledBack }
+
 type envelope struct {
 	Version int    `json:"version"`
 	Sealer  string `json:"sealer"`
 	Data    []byte `json:"data"` // base64 in JSON
 }
 
-func (s *Secrets) aad(sealer string) []byte { return []byte("pcb-secrets/v1/" + sealer) }
-
-// Load returns the accounts by ID; a missing file is an empty store. It
-// fails with seal.ErrNoKey when the key is gone and seal.ErrCorrupt when the
-// data does not authenticate: never with an empty map in their place.
-func (s *Secrets) Load() (map[string]Account, error) {
-	raw, err := os.ReadFile(s.Path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]Account{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("%s: not a sealed store: %w", s.Path, seal.ErrCorrupt)
-	}
-	if env.Version != secretsVersion {
-		return nil, fmt.Errorf("%s: unsupported version %d", s.Path, env.Version)
-	}
-	if env.Sealer != s.Sealer.Name() {
-		return nil, fmt.Errorf("%s is sealed with %q, not %q", s.Path, env.Sealer, s.Sealer.Name())
-	}
-	plain, err := s.Sealer.Open(env.Data, s.aad(env.Sealer))
-	if err != nil {
-		return nil, err
-	}
-	accounts := map[string]Account{}
-	if err := json.Unmarshal(plain, &accounts); err != nil {
-		return nil, fmt.Errorf("%s: %w", s.Path, seal.ErrCorrupt) // never echo the decoder's text
-	}
-	return accounts, nil
+// payload is what version 2 seals.
+type payload struct {
+	Generation uint64             `json:"generation"`
+	Accounts   map[string]Account `json:"accounts"`
 }
 
-// Update runs fn on the accounts under the store lock and saves the result;
-// an empty result removes the file. If the existing file cannot be opened
-// (no key, corrupt) it returns that error and writes nothing, so a lost key
-// can never turn into an overwrite. If fn fails nothing is written either.
+func aad(version int, sealer string) []byte {
+	return []byte("pcb-secrets/v" + strconv.Itoa(version) + "/" + sealer)
+}
+
+func (s *Secrets) stateDir() string { return filepath.Dir(s.Path) }
+
+// mirror is the generation state.json mirrors, 0 when it has none. A
+// state.json that cannot be read gives 0: the check is then skipped, which
+// is the residual of a replaced state directory (M5-P14), and every service
+// path refuses an unreadable state.json before it uses the secrets.
+func (s *Secrets) mirror() uint64 {
+	st, err := LoadState(s.stateDir())
+	if err != nil {
+		return 0
+	}
+	return st.SecretsGeneration
+}
+
+// Load returns the accounts by ID; a missing file is an empty store. It
+// fails with seal.ErrNoKey when the key is gone, seal.ErrCorrupt when the
+// data does not authenticate and ErrRolledBack when the file is older than
+// the last one written: never with an empty map in their place.
+func (s *Secrets) Load() (map[string]Account, error) {
+	accounts, _, _, err := s.load()
+	return accounts, err
+}
+
+// load is Load with the file's generation and the mirror. The mirror is read
+// first: writers seal the file before they move the mirror, so a load that
+// races a write never sees a mirror above the file it then reads.
+func (s *Secrets) load() (accounts map[string]Account, gen, mirror uint64, err error) {
+	mirror = s.mirror()
+	accounts, gen, found, err := s.open()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if found && gen < mirror {
+		return nil, 0, 0, &RolledBackError{Generation: gen, Mirror: mirror}
+	}
+	return accounts, gen, mirror, nil
+}
+
+// open reads and opens the file with no rollback check; a missing file
+// (found false) is an empty store of generation 0.
+func (s *Secrets) open() (accounts map[string]Account, gen uint64, found bool, err error) {
+	raw, err := os.ReadFile(s.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]Account{}, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	accounts, gen, err = s.decode(raw)
+	return accounts, gen, true, err
+}
+
+// decode opens the envelope raw.
+func (s *Secrets) decode(raw []byte) (map[string]Account, uint64, error) {
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, 0, fmt.Errorf("%s: not a sealed store: %w", s.Path, seal.ErrCorrupt)
+	}
+	if env.Version != 1 && env.Version != secretsVersion {
+		return nil, 0, fmt.Errorf("%s: unsupported version %d", s.Path, env.Version)
+	}
+	if env.Sealer != s.Sealer.Name() {
+		return nil, 0, fmt.Errorf("%s is sealed with %q, not %q", s.Path, env.Sealer, s.Sealer.Name())
+	}
+	plain, err := s.Sealer.Open(env.Data, aad(env.Version, env.Sealer))
+	if err != nil {
+		return nil, 0, err
+	}
+	// Never echo the decoder's text: it may quote the plaintext.
+	if env.Version == 1 {
+		accounts := map[string]Account{}
+		if err := json.Unmarshal(plain, &accounts); err != nil {
+			return nil, 0, fmt.Errorf("%s: %w", s.Path, seal.ErrCorrupt)
+		}
+		return accounts, 0, nil
+	}
+	var p payload
+	if err := json.Unmarshal(plain, &p); err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", s.Path, seal.ErrCorrupt)
+	}
+	if p.Accounts == nil {
+		p.Accounts = map[string]Account{}
+	}
+	return p.Accounts, p.Generation, nil
+}
+
+// Update runs fn on the accounts under the store lock and saves the result
+// as version 2, one generation above the last; an empty result removes the
+// file. The mirror in state.json follows the file. If the existing file
+// cannot be opened (no key, corrupt, rolled back) it returns that error and
+// writes nothing, so a lost key can never turn into an overwrite. If fn fails
+// nothing is written either.
 func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Account) error) error {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return err
@@ -88,22 +181,28 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 		return err
 	}
 	defer unlock()
-	accounts, err := s.Load()
+	accounts, gen, mirror, err := s.load()
 	if err != nil {
 		return err
 	}
 	if err := fn(accounts); err != nil {
 		return err
 	}
+	next := max(gen, mirror) + 1
 	if len(accounts) == 0 {
-		return s.wipe()
+		removed, err := s.wipe()
+		if removed {
+			s.setMirror(next)
+		}
+		return err
 	}
-	plain, err := json.Marshal(accounts)
+	plain, err := json.Marshal(payload{Generation: next, Accounts: accounts})
 	if err != nil {
 		return err
 	}
 	name := s.Sealer.Name()
-	sealed, err := s.Sealer.Seal(plain, s.aad(name))
+	sealed, err := s.Sealer.Seal(plain, aad(secretsVersion, name))
+	clear(plain)
 	if err != nil {
 		return err
 	}
@@ -111,11 +210,30 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.Path, out)
+	if err := atomicfile.Write(s.Path, out); err != nil {
+		return err
+	}
+	s.setMirror(next)
+	return nil
+}
+
+// setMirror raises the mirror in state.json to gen, best effort: if the
+// write fails the sealed file is ahead of the mirror, which Load accepts, and
+// the next write moves the mirror again.
+func (s *Secrets) setMirror(gen uint64) {
+	_ = UpdateState(s.stateDir(), func(st *State) error {
+		if st.SecretsGeneration >= gen {
+			return ErrStateUnchanged
+		}
+		st.SecretsGeneration = gen
+		return nil
+	})
 }
 
 // Wipe removes the sealed file under the store lock, for a store that can no
-// longer be opened. A missing file is not an error.
+// longer be opened or was rolled back; the mirror moves one above the last
+// generation, so the removed file is refused if restored. A missing file is
+// not an error.
 func (s *Secrets) Wipe(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return err
@@ -125,12 +243,24 @@ func (s *Secrets) Wipe(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	return s.wipe()
+	// The file's generation when it still opens (a rolled-back store), so
+	// the mirror ends above it too.
+	_, gen, _, _ := s.open()
+	mirror := s.mirror()
+	removed, err := s.wipe()
+	if removed {
+		s.setMirror(max(gen, mirror) + 1)
+	}
+	return err
 }
 
-func (s *Secrets) wipe() error {
-	if err := os.Remove(s.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+// wipe removes the file, then the mirror moves (the callers): a load racing
+// the removal never sees the new mirror with the old file. removed reports
+// whether there was a file.
+func (s *Secrets) wipe() (removed bool, err error) {
+	err = os.Remove(s.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	return nil
+	return err == nil, err
 }

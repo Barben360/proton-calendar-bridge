@@ -3,9 +3,11 @@ package service_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -543,5 +545,51 @@ func TestCloseDropsClient(t *testing.T) {
 	}
 	if e.svc.HasCachedClient() {
 		t.Error("the client survived Close")
+	}
+}
+
+// A login that finishes in another process while needs-login is being
+// written is kept: the decision and the write are one step under state.lock.
+func TestHumanNeededDoesNotOverwriteAFinishedLogin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file locks are Unix only")
+	}
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	newer := e.loadState(t)
+	newer.LastLogin = t0.Add(time.Hour) // a person's login, in another process
+	statePath := filepath.Join(e.dirs.State, "state.json")
+	var landed chan error
+	e.svc.OnHumanNeeded(func() {
+		// needs-login is decided; the other process writes state.json now.
+		landed = make(chan error, 1)
+		unlock, ok, err := filelock.TryLock(filepath.Join(e.dirs.State, "state.lock"))
+		switch {
+		case err != nil:
+			landed <- err
+		case ok: // nothing holds state.lock between the decision and the write
+			defer unlock()
+			raw, err := json.MarshalIndent(newer, "", "  ")
+			if err == nil {
+				err = os.WriteFile(statePath, raw, 0o600)
+			}
+			landed <- err
+		default: // it waits for the lock, as a login's SaveState does
+			go func() { landed <- store.SaveState(e.dirs.State, newer) }()
+		}
+	})
+	_, err := e.svc.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.MustAct)
+	if landed == nil {
+		t.Fatal("needs-login was never decided")
+	}
+	if err := <-landed; err != nil {
+		t.Fatal(err)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseReady || !st.LastLogin.Equal(newer.LastLogin) {
+		t.Errorf("state = %+v, want the finished login kept", st)
 	}
 }

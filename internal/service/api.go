@@ -161,7 +161,8 @@ type LogoutResult struct {
 
 // Status is the login as the files describe it. Phase is the store's phase
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none" or "unreadable".
+// waits for its code. Secrets is "sealed", "none", "unreadable" or
+// "rolled-back" (secrets.sealed older than the last one pcb wrote).
 type Status struct {
 	Phase       string     `json:"phase"`
 	Reason      string     `json:"reason,omitempty"`

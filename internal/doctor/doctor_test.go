@@ -12,6 +12,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
@@ -303,6 +304,42 @@ func TestSecretsCheckFailsOnMalformedState(t *testing.T) {
 	}
 	got := doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(t.TempDir(), "k")}.Run(context.Background())
 	if got.Status != doctor.StatusError {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSecretsCheckReportsRollback(t *testing.T) {
+	root := t.TempDir()
+	state, key := filepath.Join(root, "state"), filepath.Join(root, "cfg", "secrets.key")
+	secrets := store.NewSecrets(state, &seal.KeyFile{Path: key})
+	seal1 := func() {
+		t.Helper()
+		err := secrets.Update(context.Background(), func(m map[string]store.Account) error {
+			m["userA"] = store.Account{ID: "userA", UID: "uid", AccessToken: "at", RefreshToken: "rt"}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seal1()
+	old, err := os.ReadFile(secrets.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal1()
+	restore := doctor.SetDevice(func(p string) (uint64, bool) { return uint64(len(p)), true })
+	defer restore()
+	if got := (doctor.SecretsCheck{StateDir: state, KeyFile: key}).Run(context.Background()); got.Status != doctor.StatusWarn {
+		t.Fatalf("before the restore: %+v", got)
+	}
+	if err := os.WriteFile(secrets.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError ||
+		got.Message != "secrets.sealed is older than the last one pcb wrote (generation 1 < 2): it was restored or replaced" ||
+		got.Fix != "if you restored it on purpose, run pcb logout, then pcb login" {
 		t.Fatalf("got %+v", got)
 	}
 }

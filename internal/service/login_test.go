@@ -1006,3 +1006,88 @@ func TestAbortAfterRefreshRevokesLiveSession(t *testing.T) {
 		t.Error("the refreshed session is still alive after the failed login")
 	}
 }
+
+const (
+	rolledBackMsg  = "secrets.sealed is older than the last one pcb wrote (generation 1 < 2): it was restored or replaced"
+	rolledBackHint = "if you restored it on purpose, run pcb logout, then pcb login"
+)
+
+// restoreOlderSecrets puts back secrets.sealed as it was after the login
+// (generation 1) once the store sealed generation 2: a restored backup.
+func restoreOlderSecrets(t *testing.T, e *env) []byte {
+	t.Helper()
+	old, err := os.ReadFile(e.secrets().Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.editAccount(t, func(a *store.Account) { a.AccessToken += "-rotated" })
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return old
+}
+
+func TestRolledBackSecretsNeedALogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	restoreOlderSecrets(t, e)
+	calls := e.f.Calls("", "/")
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Secrets != "rolled-back" || st.Phase != "needs-login" || st.Reason != rolledBackMsg || st.Username != "" {
+		t.Fatalf("Status = %+v, %v", st, err)
+	}
+	_, err = e.svc.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != rolledBackMsg || ee.Hint != rolledBackHint {
+		t.Errorf("Calendars: message %q hint %q", ee.Error(), ee.Hint)
+	}
+	e.clk.advance(61 * time.Second)
+	_, err = e.svc.Login(t.Context(), e.req())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != rolledBackMsg || ee.Hint != rolledBackHint {
+		t.Errorf("Login: message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("", "/") - calls; n != 0 {
+		t.Errorf("%d requests made with the restored secrets, want 0", n)
+	}
+}
+
+func TestLogoutWipesRolledBackSecrets(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	acc := e.account(t)
+	old := restoreOlderSecrets(t, e)
+	res, err := e.svc.Logout(t.Context())
+	if err != nil || !res.WasLoggedIn || res.Revoked {
+		t.Fatalf("Logout = %+v, %v", res, err)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d revocations with the restored tokens, want 0", n)
+	}
+	if !sessionAlive(t, e, tokensOf(acc)) {
+		t.Error("the session was revoked")
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("the restored secrets.sealed remains")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut {
+		t.Errorf("state = %+v", st)
+	}
+	// Restored once more after the logout: still refused.
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.secrets().Load(); !errors.Is(err, store.ErrRolledBack) {
+		t.Errorf("restored after logout: Load err = %v, want ErrRolledBack", err)
+	}
+	if err := os.Remove(e.secrets().Path); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login after the logout: %+v", res)
+	}
+	if st, err := e.svc.Status(t.Context()); err != nil || st.Secrets != "sealed" || st.Phase != "ready" {
+		t.Errorf("Status after a new login = %+v, %v", st, err)
+	}
+}

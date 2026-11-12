@@ -84,6 +84,7 @@ type Local struct {
 	// otherwise), and a failure injected at a write's cache steps (fault).
 	preSend    time.Duration
 	writeFault func(stage string) error
+	humanHook  func() // runs once a needs-login mark is decided, before its write
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -192,8 +193,11 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 	var res LogoutResult
 	accounts, err := l.secrets.Load()
 	switch {
-	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt):
-		// Unopenable for good: nothing to revoke with, so wipe what cannot be used.
+	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack):
+		// Unopenable for good, or restored (its tokens are not the current
+		// session's, and may be someone else's to keep): nothing to revoke
+		// with, so wipe what cannot be used. The wipe moves the mirror past
+		// it, so the file is refused if restored again.
 		res.WasLoggedIn = true
 		if werr := l.secrets.Wipe(wipe); werr != nil {
 			return LogoutResult{}, storeError(werr, l.keyFile())
@@ -257,9 +261,13 @@ func (l *Local) Status(context.Context) (Status, error) {
 	}
 	if _, err := os.Stat(l.secrets.Path); err == nil {
 		accounts, err := l.secrets.Load()
-		if err != nil {
+		var rb *store.RolledBackError
+		switch {
+		case errors.As(err, &rb):
+			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rolledBack(rb).Error()
+		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
-		} else {
+		default:
 			s.Secrets = "sealed"
 			s.Username = accounts[st.AccountID].Username
 		}

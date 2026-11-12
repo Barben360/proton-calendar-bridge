@@ -503,7 +503,7 @@ protects against: `spec/experiments/E15-secret-sealing.md`):
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
-Restoring an older `secrets.sealed` is not detected (no rollback protection yet; a generation counter is planned for M5, see "M5 carry-overs" in §18).
+Restoring an older `secrets.sealed` is detected (M5, R3m): format version 2 seals a monotonic generation with the accounts under AAD `pcb-secrets/v2/<sealer>`, mirrored as `secrets_generation` in `state.json`; a sealed generation below the mirror is refused (`pcb status` shows `rolled-back`, `pcb logout` wipes it without revoking, then `pcb login`). Removing the file (logout) moves the mirror one above, so a removed file is refused if restored. A file ahead of the mirror is accepted (a crash between the two writes). Restoring the whole state directory, `state.json` included, is not detected. A v1 file reads as generation 0 and is rewritten as v2 at the next write. Every writer of `state.json` holds the leaf lock `state.lock` (R10m; an in-process mutex off Unix).
 Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
 Sealed content: session tokens, salted key passphrase, optional unattended
 relogin credentials, client tokens (hashed, never stored in clear).

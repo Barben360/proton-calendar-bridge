@@ -14,6 +14,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
@@ -123,6 +124,7 @@ func mapError(err error, keyFile string) error {
 		uve *auth.UnsupportedVerificationError
 		ae  *api.Error
 		ts  *loginguard.TooSoon
+		rb  *store.RolledBackError
 		ne  net.Error
 		ue  *url.Error
 	)
@@ -161,6 +163,8 @@ func mapError(err error, keyFile string) error {
 		return blocked(uve.Error(), "complete the verification once in a browser on this network, then retry later")
 	case errors.Is(err, auth.ErrServerProof):
 		return blocked("Proton's answer could not be authenticated", "retry later; if it persists, check for a proxy that rewrites traffic")
+	case errors.As(err, &rb):
+		return rolledBack(rb)
 	case errors.Is(err, seal.ErrNoKey):
 		return blocked("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
@@ -192,10 +196,19 @@ func protonDown(e *api.Error) error {
 	return classed(classRefused, fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
 }
 
+// rolledBack is what a person must do about a restored or replaced
+// secrets.sealed (store.ErrRolledBack): only they know whether the restore
+// was meant, and a new login is the way out either way.
+func rolledBack(rb *store.RolledBackError) *exitcode.Error {
+	return mustAct(rb.Error()+": it was restored or replaced", "if you restored it on purpose, run pcb logout, then pcb login")
+}
+
 // storeError maps a failure of the sealed store: a lost or foreign key names
-// the key file; anything else is a store that cannot be used.
+// the key file, a rolled-back file is a MustAct; anything else is a store
+// that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}
 	var ee *exitcode.Error

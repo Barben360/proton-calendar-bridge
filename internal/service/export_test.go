@@ -87,3 +87,8 @@ func (l *Local) WakesSent() int64 {
 	}
 	return 0
 }
+
+// OnHumanNeeded makes f run when a needs-login mark is decided (state.json
+// still describes the failed login), before it is written. Set it before
+// the first call.
+func (l *Local) OnHumanNeeded(f func()) { l.humanHook = f }
