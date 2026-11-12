@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 )
 
 // SessionClient exposes the stored session's client so tests can tell a
@@ -41,3 +42,26 @@ func (l *Local) SetTouchHook(f func(phase, id string)) { l.touchHook = f }
 
 // SetTouchTimeout sets how long a background touch may wait for the clients lock.
 func (l *Local) SetTouchTimeout(d time.Duration) { l.touchTimeout = d }
+
+// AddressKeyTags exposes the address-key tags of u.
+func AddressKeyTags(u *keys.Unlocked) []string { return addressKeyTags(u) }
+
+// OnWriteWait makes fn run when a write finds its calendar's lock taken (by
+// another write or the syncer's pass of the calendar), before it waits. Set
+// it before Serve.
+func (l *Local) OnWriteWait(fn func(calID string)) { l.cals.waiting = fn }
+
+// LockCalendar takes calendar calID's write lock, as a write or the
+// syncer's pass of the calendar does.
+func (l *Local) LockCalendar(ctx context.Context, calID string) (func(), error) {
+	return l.cals.lock(ctx, calID, nil)
+}
+
+// SetPreSendBudget sets how long a write may take before its Sync call
+// (preSendBudget in production). Set it before Serve.
+func (l *Local) SetPreSendBudget(d time.Duration) { l.preSend = d }
+
+// SetWriteFault makes fn fail a write's cache steps: stage "pin" (the rows
+// Proton answered as created, before the read-back) and "store" (the rows
+// read back); a nil return lets the step run. Set it before Serve.
+func (l *Local) SetWriteFault(fn func(stage string) error) { l.writeFault = fn }

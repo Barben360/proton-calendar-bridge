@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
@@ -33,6 +34,20 @@ func (t Type) String() string {
 		return "holidays"
 	}
 	return "type " + strconv.Itoa(int(t))
+}
+
+// ParseType is the inverse of String; a name it does not know is an unknown
+// type (fails closed: never Normal).
+func ParseType(s string) Type {
+	for _, t := range []Type{Normal, Subscribed, Holidays} {
+		if t.String() == s {
+			return t
+		}
+	}
+	if n, err := strconv.Atoi(strings.TrimPrefix(s, "type ")); err == nil && n != int(Normal) && strings.HasPrefix(s, "type ") {
+		return Type(n)
+	}
+	return Type(-1)
 }
 
 // ReadOnly reports whether the calendar must not be written: true for every

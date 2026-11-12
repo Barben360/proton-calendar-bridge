@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -14,7 +16,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
 
-// The read API for adapters (Collections, Objects, ObjectsByUID, Changes)
+// The read API for adapters (Collections, Objects, ObjectsByUID,
+// ObjectsByName, Changes)
 // reads the event cache: during Serve, Serve's own writer handle (WAL read
 // transactions beside its writes, ruling M3-R6); otherwise a read-only
 // handle opened for each call (CLI use). Its only network use is unlocking
@@ -53,10 +56,12 @@ func isHex(s string) bool    { return strings.Trim(s, "0123456789abcdef") == "" 
 // since, with no row past it yet).
 func position(v cache.View) int64 { return max(v.MaxSeq(), v.Floor()) }
 
-// served is the cache handle of a running Serve, and the account it is for.
+// served is the cache handle of a running Serve, the account it is for and
+// the logger of the writes it serves.
 type served struct {
 	db      *cache.Cache
 	account string
+	log     *slog.Logger
 }
 
 func notSynced() error { return mustAct("no events are cached yet", "run pcb sync") }
@@ -139,7 +144,11 @@ func errKeysDropped() error { return blocked("the login changed during the read"
 // reason. A failure that is not the calendar's own (network, Proton
 // unavailable, the session) is returned and nothing is kept, so the next
 // read tries again.
-func (l *Local) ensureKeys(ctx context.Context, ids []string) error {
+//
+// cals gives each calendar's type, from the cache (the bootstrap has none): it
+// feeds the write gate.
+func (l *Local) ensureKeys(ctx context.Context, cals map[string]calendar.Type) error {
+	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.has(ids) {
 		return nil
 	}
@@ -149,11 +158,12 @@ func (l *Local) ensureKeys(ctx context.Context, ids []string) error {
 		return nil
 	}
 	return l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
-		return l.loadKeys(ctx, c, acc, ids)
+		return l.loadKeys(ctx, c, acc, cals)
 	})
 }
 
-func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, ids []string) error {
+func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, cals map[string]calendar.Type) error {
+	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.beforeLoad != nil {
 		l.r.beforeLoad()
 	}
@@ -198,7 +208,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		if fresh[id] != nil || (cur != nil && cur.cals[id] != nil) {
 			continue
 		}
-		a, err := calendar.Unlock(ctx, c, u, calendar.Calendar{ID: id})
+		a, err := calendar.Unlock(ctx, c, u, calendar.Calendar{ID: id, Type: cals[id]})
 		switch {
 		case err == nil:
 			fresh[id] = newCalKeys(id, a, addrTags)
@@ -206,7 +216,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 			discard()
 			return err
 		default:
-			fresh[id] = failedCalKeys(id, keysError(err))
+			fresh[id] = failedCalKeys(id, cals[id], keysError(err))
 		}
 	}
 	l.r.kmu.Lock()
@@ -227,6 +237,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		l.r.refreshedAt = l.o.Now()
 	}
 	maps.Copy(l.r.ks.cals, fresh)
+	l.r.noteGates(acc.ID, fresh)
 	return nil
 }
 
@@ -242,7 +253,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		return nil, errClosed()
 	}
 	var known []cache.Calendar
-	var ids []string
+	ids := map[string]calendar.Type{}
 	err := l.withCache(func(db *cache.Cache) error {
 		cals, err := db.Calendars(ctx)
 		if err != nil {
@@ -251,7 +262,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		known = cals
 		for _, c := range cals {
 			if !c.SyncedAt.IsZero() {
-				ids = append(ids, c.ID)
+				ids[c.ID] = calendar.ParseType(c.Type)
 			}
 		}
 		return nil
@@ -270,8 +281,9 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	out := make([]Collection, 0, len(known))
 	err = l.withCache(func(db *cache.Cache) error {
 		for _, c := range known {
-			coll := Collection{ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description,
-				ReadOnly: c.Type != calendar.Normal.String(), Pending: c.SyncedAt.IsZero()}
+			// A calendar not synced yet has no keys: read only until it is.
+			coll := Collection{ID: c.ID, Name: c.Name, Color: c.Color, Description: c.Description, ReadOnly: true,
+				Pending: c.SyncedAt.IsZero()}
 			if coll.Pending {
 				out = append(out, coll)
 				continue
@@ -280,6 +292,14 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 			if ck == nil {
 				return errKeysDropped()
 			}
+			// The write gate (rulings M4-R1, M4-R39, M4-R40): when it cannot
+			// be decided now (keys that did not unlock, a passphrase
+			// signature not checkable), the last decided privileges; none
+			// before any decision (PrivilegesUnknown, ReadOnly true).
+			writable, known := l.r.advertised(c.ID, ck)
+			coll.ReadOnly = !writable
+			coll.PrivilegesUnknown = !known
+			coll.WriteGateUndecided = ck.gate == calendar.GateUndecided
 			var epoch string
 			var seq int64
 			if err := db.Snapshot(ctx, c.ID, func(v cache.View) error {
@@ -307,14 +327,16 @@ func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.C
 	if l.closed.Load() {
 		return errClosed()
 	}
+	var typ calendar.Type
 	err := l.withCache(func(db *cache.Cache) error {
-		_, err := syncedCalendar(ctx, db, calID)
+		c, err := syncedCalendar(ctx, db, calID)
+		typ = calendar.ParseType(c.Type)
 		return l.fail(err)
 	})
 	if err != nil {
 		return err
 	}
-	if err := l.ensureKeys(ctx, []string{calID}); err != nil {
+	if err := l.ensureKeys(ctx, map[string]calendar.Type{calID: typ}); err != nil {
 		return err
 	}
 	return l.withCache(func(db *cache.Cache) error {
@@ -326,16 +348,25 @@ func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.C
 	})
 }
 
-// infos lists the groups' objects, skipping a group without UID (it cannot
-// be named).
-func infos(groups []cache.Listed, ck *calKeys) []ObjectInfo {
+// infos lists the groups' objects at their served names, skipping a group
+// without UID (it cannot be named).
+func infos(groups []cache.Listed, ck *calKeys, n nameIndex) []ObjectInfo {
 	out := make([]ObjectInfo, 0, len(groups))
 	for _, g := range groups {
 		if g.UID != "" {
-			out = append(out, ObjectInfo{UID: g.UID, ETag: objectETag(g, ck)})
+			out = append(out, ObjectInfo{UID: g.UID, Name: n.served(g.UID), ETag: objectETag(g, ck)})
 		}
 	}
 	return out
+}
+
+// servedNames reads the calendar's aliases from v (names.go).
+func servedNames(v cache.View) (nameIndex, error) {
+	aliases, err := v.AliasesFor()
+	if err != nil {
+		return nameIndex{}, err
+	}
+	return newNames(aliases), nil
 }
 
 // liveIn reports whether a UID is one of groups'.
@@ -360,7 +391,11 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 			if err != nil {
 				return err
 			}
-			out, token = infos(groups, ck), syncToken(v.Epoch(), position(v), ck.gen)
+			n, err := servedNames(v)
+			if err != nil {
+				return err
+			}
+			out, token = infos(groups, ck, n), syncToken(v.Epoch(), position(v), ck.gen)
 			l.r.keepDuplicates(calID, liveIn(groups))
 			return nil
 		})
@@ -373,15 +408,47 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 }
 
 // ObjectsByUID implements API: the rendered objects of uids, in their
-// order, Missing for a UID with no live row. Rendered objects are kept in
-// memory by ETag (LRU), so an unchanged object is decrypted once. Outside
-// Serve it opens the cache read-only for the call; during Serve it reads
-// Serve's handle. It calls Proton only to unlock the calendar's keys the
-// first time.
+// order, at their served names, Missing for a UID with no live row.
+// Rendered objects are kept in memory by ETag (LRU), so an unchanged object
+// is decrypted once. Outside Serve it opens the cache read-only for the
+// call; during Serve it reads Serve's handle. It calls Proton only to
+// unlock the calendar's keys the first time.
 func (l *Local) ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error) {
-	groups := make([]*cache.Group, len(uids))
+	return l.objects(ctx, calID, func(n nameIndex) ([]string, []string) {
+		served := make([]string, len(uids))
+		for i, uid := range uids {
+			served[i] = n.served(uid)
+		}
+		return uids, served
+	})
+}
+
+// ObjectsByName implements API: the rendered objects served at names, in
+// their order (names.resolve), as ObjectsByUID renders them.
+func (l *Local) ObjectsByName(ctx context.Context, calID string, names []string) ([]Object, error) {
+	return l.objects(ctx, calID, func(n nameIndex) ([]string, []string) {
+		uids := make([]string, len(names))
+		for i, name := range names {
+			uids[i] = n.resolve(name)
+		}
+		return uids, names
+	})
+}
+
+// objects renders the objects pick chooses, from one read transaction:
+// pick gets the calendar's served names and returns, per object, its UID
+// ("" for none: Missing) and its name.
+func (l *Local) objects(ctx context.Context, calID string, pick func(nameIndex) (uids, names []string)) ([]Object, error) {
+	var uids, served []string
+	var groups []*cache.Group
 	err := l.calendarRead(ctx, calID, func(db *cache.Cache, _ *calKeys) error {
 		err := db.Snapshot(ctx, calID, func(v cache.View) error {
+			n, err := servedNames(v)
+			if err != nil {
+				return err
+			}
+			uids, served = pick(n)
+			groups = make([]*cache.Group, len(uids))
 			for i, uid := range uids {
 				if uid == "" {
 					continue
@@ -412,7 +479,7 @@ func (l *Local) ObjectsByUID(ctx context.Context, calID string, uids []string) (
 	for i, uid := range uids {
 		g := groups[i]
 		if g == nil {
-			out[i] = Object{UID: uid, Missing: true}
+			out[i] = Object{UID: uid, Name: served[i], Missing: true}
 			continue
 		}
 		etag := objectETag(g.Listed(), ck)
@@ -421,7 +488,7 @@ func (l *Local) ObjectsByUID(ctx context.Context, calID string, uids []string) (
 			data = l.render(calID, *g, ks, ck)
 			l.r.lru.put(etag, data)
 		}
-		out[i] = Object{UID: uid, ETag: etag, Data: data}
+		out[i] = Object{UID: uid, Name: served[i], ETag: etag, Data: data}
 	}
 	return out, nil
 }
@@ -447,7 +514,7 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 	if !full && !ok {
 		return ChangeSet{}, invalidSyncToken()
 	}
-	out := ChangeSet{Changed: []ObjectInfo{}, Deleted: []string{}}
+	out := ChangeSet{Changed: []ObjectInfo{}, Deleted: []ObjectInfo{}}
 	err := l.calendarRead(ctx, calID, func(db *cache.Cache, ck *calKeys) error {
 		err := db.Snapshot(ctx, calID, func(v cache.View) error {
 			pos := position(v)
@@ -470,10 +537,16 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 			if err != nil {
 				return err
 			}
-			out.Changed = infos(changed, ck)
+			n, err := servedNames(v)
+			if err != nil {
+				return err
+			}
+			out.Changed = infos(changed, ck, n)
 			for _, uid := range deleted {
 				if uid != "" {
-					out.Deleted = append(out.Deleted, uid)
+					// At the name it was served at: an alias outlives its
+					// UID (ruling M4-R22).
+					out.Deleted = append(out.Deleted, ObjectInfo{UID: uid, Name: n.served(uid)})
 				}
 			}
 			if full {

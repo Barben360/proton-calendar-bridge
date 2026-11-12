@@ -186,7 +186,8 @@ and edits that break or strip our signatures, not a server that rewrites a
 part's `Author` to an address not ours or adds an unsigned cleartext
 attendees or personal part (those parts merge EXDATE, RDATE, ATTENDEE,
 VALARM and missing single-value properties). Binding the author to the
-signing key and refusing unsigned parts wait for E10 (`OPEN.md`).
+signing key and refusing unsigned parts wait for E10 (`OPEN.md`,
+`spec/experiments/E10-signatures.md`).
 A part authored by an address that is not ours (an invitation, another
 member of a shared calendar) is not verified in v1 and never marks the
 event: there is no public-key lookup, and invitations and shared calendars
@@ -197,6 +198,125 @@ dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
 if Proton signs a part of ours with another key than its author address's,
 the event shows as unverified.
 
+Member passphrase signature and the write gate [call] (research G, rulings
+R17, M4-R1, M4-R39, M4-R40). A calendar is written only when its type is
+normal, our member's `Permissions` has the Write bit (8 [assumed → E14]), the
+member passphrase signature verifies, over the decrypted passphrase, with our
+member's address keyring [assumed → E10], and both write keys exist (the
+calendar key flagged primary, the primary key of our member's address).
+Without the signature check the server could serve a calendar key it chose
+and read what we encrypt to it. A signature served and checked that does not
+verify, a Write bit off or another type closes the gate (read-only
+privileges, 403 `need-privileges`); missing data (keys not unlocked, no
+signature served, no write key) leaves it undecided (503 on a write, the last
+decided privileges, none before any decision) [verified: `TestGateVerdicts`,
+`TestUnverifiableSignatureLeavesTheGateUndecided`,
+`TestUndecidedWriteGateIs503`, `TestPrivilegesFollowTheWriteGate`].
+
+Session-key reuse on write [call] (research G, rulings M4-R14 to M4-R20,
+M4-R30, M4-R35 to M4-R37). An update reuses a row's session keys and sends no
+key packet (Proton keeps a row's key packets on update, research B.5). The
+threat: the server substitutes a key packet, a key it chose wrapped to our
+calendar key, and reads our update. Defences:
+- **Primary, key-packet pinning (M4-R17, durable since M4-R30):** the cache's
+  `pins` table keeps each row's `SharedKeyPacket`, `CalendarKeyPacket` and
+  `AddressKeyPacket` as first stored, from every path that stores rows (sync
+  passes, full listings, writes; rows already cached are pinned when the
+  file is upgraded to schema 2). A pin is never replaced. A PUT's pre-write
+  refresh compares each refreshed row with its pin (base64-decoded bytes)
+  and refuses a difference with 403 `pcb:untrusted-key`, logged with the
+  calendar, row and field only, without storing the refreshed rows. Pins
+  outlive their rows and calendars and die only with a new cache epoch
+  (M4-R35), so hiding a row once and returning it with new packets does not
+  reset its pin. A row pcb creates is pinned with the packets pcb sent: by the
+  row ID of Proton's answer, before the read-back (M4-R37), and the read-back
+  must show those packets, else 503 (M4-R36). A DELETE checks no pin: it
+  encrypts nothing (M4-R27) [verified: `TestChangedKeyPacketRefusesTheWrite`,
+  `TestHiddenRowKeepsItsPin`, `TestEachKeyPacketIsPinned`,
+  `TestCreatePinsTheSentPackets`, `TestPinRowsNeverReplacesAPin`,
+  `TestPinsOutliveTheirRow`, `TestPinsDieWithTheEpochOnly`,
+  `TestUpgradePinsTheStoredRows`].
+- **Secondary, a signature proof (`cards.Event.SessionKeys`):** a key is
+  reused only when every part encrypted under it verifies as ours and one of
+  its shared or calendar encrypted parts (never the attendees part) proves
+  it (`ical.ProvesKey`): Proton's fragment form (one VCALENDAR holding one
+  VEVENT, and no VCALENDAR-level property but VERSION, PRODID or CALSCALE,
+  M4-R20), the row's UID, and an encrypted-only property
+  that the routing table puts in that very part. Otherwise
+  `ErrUntrustedSessionKey`, and the write is refused (403
+  `pcb:untrusted-key`). The proof rules out the texts the server holds with
+  our signature [verified: `TestUntrustedSessionKeyIsRefused`,
+  `TestProvesKey`]:
+  - our cleartext signed parts: we never sign an encrypted-only property in
+    clear. `cards.Seal` refuses a signed fragment holding one
+    (`ErrMisroutedProperty`, M4-R16), and `ical.Patch` refuses a stored
+    signed part holding one (403 `pcb:misrouted-stored-line`, M4-R19)
+    instead of signing it or moving it into an encrypted part whose
+    plaintext the server would then know [verified:
+    `TestPatchSealReplayChain`, `TestPatchRefusesMisroutedStoredLines`];
+  - attendees parts, whose plaintext (UID, DTSTAMP, ATTENDEE with tokens)
+    the server knows, in their slot or replayed into another;
+  - an `.ics` our address key signed outside the bridge (a Proton Mail
+    invitation or RSVP, which carries METHOD at VCALENDAR level as iTIP
+    requires, RFC 5546; a proof may not carry it);
+  - another event's parts (the UID must be the row's).
+- **Group checks:** a write to a group with any part of ours that is not
+  `Verified`, unsigned parts of every kind included, or any part authored by
+  an address not ours, is refused before planning (M4-R18, M4-R19; not the
+  render's `unverifiedParts`, which spares unsigned attendees and personal
+  parts), so an injected line or an unsigned cleartext attendees part never
+  reaches `Patch`.
+- **Confirmation by plaintext (M4-R32):** a write is answered success only
+  when the rows read back open with the pinned packets (an update) or the
+  packets sent (a create), every part is ours and verifies, and each part's
+  plaintext is the one sent [verified: `TestReadBackComparesPlaintext`].
+
+Residual risks, accepted (M4-R17, M4-R19, M4-R35 to M4-R37). Proton's own
+clients reuse keys under the same trust model:
+1. An encrypted plaintext the server can guess (a default title such as
+   `New Event` with the UID and DTSTAMP it sees), confirmed offline with our
+   public key against the part's clear detached signature, then replayed
+   under a key it chose as the proof.
+2. Rows whose key packet was already substituted when pcb first stored them:
+   the pin is that first copy.
+3. Content the server learnt elsewhere for the same UID, in the fragment
+   form, signed by our address key (an invitation sent in clear to an
+   external address).
+4. Another client of the same account that signs an encrypted-only line in
+   clear for that UID (a same-UID proof).
+5. A create whose Sync call is ambiguous (the answer is lost, so no row ID)
+   and whose read-back fails too leaves the first pin of that row to the next
+   sync pass, which pins whatever Proton then serves (M4-R37: closing it needs
+   a durable journal of pending creates). Likewise, when Proton's answer
+   names no row, a create read back with other content and other packets is
+   not recognised as ours: answered 503, and pinned from Proton on first
+   sight.
+6. A Sync answer that names a row ID pcb has not seen pins the packets pcb
+   sent to that row (first seen wins). A lying server can only make that row
+   read only for pcb (403 `pcb:untrusted-key`): denial of service, no
+   disclosure.
+7. Pins outlive their rows: the table grows slowly, a few hundred bytes per
+   event ever seen, until a new epoch (pruning is parked, `OPEN.md`).
+8. A legitimate key-packet change (should Proton or another client ever
+   rewrite a row's key packets) makes that event read only for pcb: 403
+   `pcb:untrusted-key`, logged, fail closed. Whether it ever happens is a
+   live check (`HUMAN-CHECKS.md` §6, step 6.4.2).
+
+Rows an update refuses rather than risk a substituted key (fail closed, 403,
+M4-R19, M4-R20): a shared encrypted part holding only UID and DTSTAMP (an
+untitled event), a calendar encrypted part holding only lines routed
+elsewhere, a fragment carrying a VCALENDAR-level line other than VERSION,
+PRODID or CALSCALE, a misrouted line stored in a signed part, a change that
+needs a session key the row lacks (a first COMMENT on a row without a
+calendar part, 403 `pcb:unsupported-change`, M4-R13), and (to be confirmed
+live, `HUMAN-CHECKS.md` §6 W10) a UID containing `,`, `;` or `\` if Proton's
+column holds it unescaped.
+
+The full fix (`OPEN.md`): fresh session keys and their key packets on every
+update, once live check L.4 #3 (research L.4) shows Proton accepts new key
+packets on an update. That removes the reuse, so residuals 1 to 5 go, and
+pinning with residuals 6 to 8 can go with it.
+
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
   (default calendar), create/update/delete owned calendars, leave holidays
@@ -204,12 +324,30 @@ the event shows as unverified.
 - Events: windowed query (4 `Type` buckets, ≤ 93-day windows, `More` cursor)
   [verified: proton-cal docs/api.md]; unscoped full listing paged with
   `Total` (no `More`) [verified: live probe 2026-11-10]; get by ID (422/2501
-  for an ID of another calendar [verified: live 2026-11-10]); get by UID;
-  writes through `PUT /calendar/v1/{cal}/events/sync` only [verified:
-  proton-cal docs/api.md].
+  for an ID of another calendar [verified: live 2026-11-10]); get by UID
+  (`GET /calendar/v1/{cal}/events?UID=<uid>`, paged like the listing; M4's
+  write refresh and read-back, `events.ListByUID`; that Proton matches the
+  UID exactly [assumed → `HUMAN-CHECKS.md` §6 W1, W3]).
+- Writes (M4): `PUT /calendar/v1/{cal}/events/sync` only [claim: proton-cal
+  live; research A.1], body `{MemberID, Events: [{Overwrite: 0, Event}
+  | {ID, Event} | {ID}]}` (create, update, delete). One call per CalDAV write,
+  never sent twice (a 401 answered before processing is the one resend,
+  M4-R23). Per-entry codes in a 1001 envelope; the client reads 2000
+  (STATUS), 2001 (signature or exception SEQUENCE, not told apart, M4-R24),
+  2011 (unsupported content), 2061 (unknown ID), 2501 (gone); a delete answers
+  `Responses: []` [claim: research A.3, A.4; the fake implements them]. The
+  `Event` body: the card parts, key packets on a create only, `Permissions`
+  1, `Notifications`, `Color`, `Attendees`, `IsOrganizer`; never the
+  plaintext time columns, `IsImport` or a personal part (`spec/mapping.md`
+  §5).
+- Bootstrap fields M4 reads: `Keys[].Flags` (bit 2: the primary calendar
+  key, the only recipient of new key packets), `MemberPassphrases[].Signature`
+  (R17, §5.3), `Members[].Permissions`.
 - Member permissions and calendar type (normal 0, subscribed 1, holidays 2)
-  [verified for types: proton-cal]; member `Permissions` bit values for
-  view-only shares [assumed → E14].
+  [verified for types: proton-cal]; the Write bit of `Permissions` is 8
+  [claim: caloxide; assumed → E14, `spec/experiments/E14-member-permissions.md`];
+  the bits of view-only and edit shares are not needed (shared calendars are
+  out of scope).
 
 ### 5.5 Change feed
 Goal: incremental sync without re-listing. Source-based so far (third-party
@@ -257,10 +395,12 @@ windowed re-list plus a nightly full list [call].
 ### 5.6 Proton card codec
 Model ⇄ Proton parts (shared signed, shared encrypted, calendar signed,
 calendar encrypted, attendee parts, per-member personal notifications).
-Which iCalendar properties go in which part, and what Proton keeps or drops
-on unknown properties [verified for the parts proton-cal writes; unknown
-properties assumed → E13]. The codec has a round-trip property test: model
-→ parts → model is identity for every supported field.
+Which iCalendar property goes in which part on write is `spec/mapping.md`
+(research B.1 [claim: proton-cal live, carbonate live]); what Proton keeps of
+unknown properties [assumed → E13, `spec/experiments/E13-unknown-properties.md`].
+`cards.Seal` is `cards.Open`'s inverse: `Open(Seal(x))` returns the sealed
+parts byte for byte, signed, ours and verified [verified:
+`TestOpenSealRoundTrip`]; the personal part is never written.
 
 ## 6. C0 — Model block
 
@@ -304,8 +444,9 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
 files 0600; `doctor` checks them.
 
 ### 7.2 What is cached [call]
-What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 1 in
-`PRAGMA user_version`; `sync.lock` beside it), all keyed by account ID (the
+What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 2 in
+`PRAGMA user_version` since M4, which adds `aliases` and `pins` and migrates an
+M3 file in place; `sync.lock` beside it), all keyed by account ID (the
 cache records its account in `meta` and is emptied when opened for another):
 - `meta`: the account ID, the change counter and its epoch: 128 random bits
   (hex) drawn when the file is created and again when it is emptied for
@@ -319,10 +460,17 @@ cache records its account in `meta` and is emptied when opened for another):
   `raw`, the row exactly as Proton returned it (ciphertext parts and
   plaintext fields). Plus `tombstones` (deleted IDs with the row's UID and their
   sequence, indexed by calendar and sequence) so a later sync-token read can
-  report deletions; M3's CalDAV resources are per UID, so a deletion is
-  reported as a 404 for the UID's href (M2-R16). `Changes(calendar, since)`
+  report deletions; CalDAV resources are per UID, so a deletion is
+  reported as a 404 at the UID's served name (M2-R16, §9). `Changes(calendar, since)`
   reads the writes and tombstones after a sequence number, in order.
-- Not stored in M2: members, settings, key material (the key chain stays in
+- `aliases` (M4-R6, M4-R22): (calendar, resource name) → UID, one name per
+  UID, for a UID a client created at a name of its own; an alias outlives the
+  UID's deletion (a tombstone is reported at the name the client knows) and
+  dies with the calendar's removal and a new epoch.
+- `pins` (M4-R30, M4-R35): (calendar, event ID) → the row's three key packets
+  as first stored (§5.3); never replaced, outliving rows and calendars, gone
+  only with a new epoch.
+- Not stored: members, settings, key material (the key chain stays in
   M1's sealed store and is re-derived per session).
 - **Nothing decrypted is ever written.** Event decryption, the iCalendar merge
   and E09 (decrypt cost per 1 000 events, cold start) moved to M3 (M2-R1).
@@ -394,51 +542,161 @@ relogin credentials, client tokens (hashed, never stored in clear).
   on an account without calendars says so, `pcb status` logged in but never
   synced shows `sync: never (run pcb sync)`, and `--interval` without
   `--watch` is refused (exit 2).
-- Writes go to Proton synchronously (the client gets the real result), then
-  the cache is updated from Proton's answer [call; no offline write queue
-  in v1].
+- Writes (M4) go to Proton synchronously, during `pcb serve` only, and the
+  client gets the real result; no offline write queue in v1 [call]. The flow
+  of a PUT or DELETE (ruling M4-R5, amended by M4-R31, R32, R34, R36, R37,
+  R42 to R45; `internal/service/write.go`):
+  1. Resolve the resource name to a UID (its alias, else the UID whose
+     canonical or alternative name it is; §9) and parse the body
+     (`spec/mapping.md`; a refusal here sends nothing).
+  2. The write gate (§5.3; 403 `need-privileges` when closed, 503 when
+     undecided, M4-R39).
+  3. Take the calendar's lock: one write of a calendar at a time, never
+     beside the syncer's pass of that calendar. Waiting ends with the
+     request's context or the pre-send budget (503). Steps 2 to 6 (the
+     keys and the gate, the lock, the refresh, the checks and the plan)
+     run within a 20 s budget (M4-R42): past it the write answers 503 and sends nothing,
+     so no Sync call leaves when its answer could no longer reach the
+     client.
+  4. Refresh the UID's rows from Proton (`ListByUID`; rows of another UID
+     in the answer are ignored and logged by ID, M4-R45). A PUT compares their
+     key packets with the pins (403 `pcb:untrusted-key`, §5.3); then the rows
+     are stored (`ApplyWrite`: the change counter moves, the feed cursor does
+     not).
+  5. Conflicts and the precondition, on that fresh state: the UID served at
+     another name, or the name serving another live UID → 409; `If-Match`
+     (exact string, or `*`) and `If-None-Match` (`*`, or ETags compared
+     weakly) on the fresh object ETag → 412.
+  6. Plan the row operations (`Plan`, `PlanDelete`; refusals are 403 with a
+     pcb precondition, `spec/mapping.md` §8) and seal them. A plan with no
+     operation answers 204 without calling Proton. A create at a name that is
+     not the UID's canonical one records the alias first, so a create that
+     reaches Proton is served at the client's name whatever happens next.
+  7. One `Sync` call holding every operation, master first; never sent
+     again (`api.PutOnce`; a 401 answered before processing is resent once,
+     M4-R23), within 60 s (past it the call is ambiguous and read back).
+     Rows Proton answered as created are pinned with the packets sent
+     (M4-R37); a pin that cannot be stored is logged and the read-back
+     still decides (M4-R43).
+  8. Read the UID's rows back (`ListByUID`; the pins, the read-back and the
+     store bounded by 30 s, even if the client hung up) and store them: the
+     cache holds what Proton holds, whatever the answer. Never the row Proton
+     echoed (the ETag is the whole listed row).
+  9. Decide (M4-R31, R32, R34, R36): every operation shown done by the rows
+     read back, by decrypted, verified plaintext per part plus the row fields
+     sent → success (201 for a create, else 204, with no `ETag` header),
+     whatever Proton answered, an ambiguous failure included. Otherwise:
+     after a refusal (an entry's code, or the whole call refused with a 4xx
+     that is not session-wide) or after a DELETE, rows changed by someone else
+     since the plan → 412 (Thunderbird refetches), else a refusal → 403
+     `pcb:proton-refused` (Proton's code only, never its text), also when
+     other entries of the same call landed: Proton then holds that part, and
+     the client's next read shows it; a row that
+     came back under other key packets than sent or pinned → 503; anything
+     else (an ambiguous call not shown done, a dropped edit, a read-back that
+     failed) → 503 "not confirmed", logged. A write shown done whose rows the
+     cache then cannot store is still a success, logged: the next sync pass
+     stores them (M4-R43).
+  Proton 429, 5xx, a network failure or an ended session before the call
+  left: 503 with `Retry-After` (Proton's own on a 429), nothing retried; Proton
+  asking for a human verification (422, code 9001) on any of a write's calls:
+  503, logged as needing a person, never a 403 (M4-R44)
+  [verified: `TestPutCreatesAndReadsBack`, `TestRefreshBeforePrecondition`,
+  `TestProton5xxIs503AndNeverRetried`, `TestAmbiguousFailureReadsBack`,
+  `TestEntryRefusalIsReadBack`, `TestDroppedEditIsNeverASuccess`,
+  `TestWritesSerialiseWithTheSyncer`, `TestDeleteWithARowLeftIs412`,
+  `TestOccurrenceDeleteRaceIsTruthful`, `TestSlowPreparationSendsNothing`,
+  `TestLandedWriteSurvivesACacheFailure`, `TestPinFailureStillReadsBack`,
+  `TestHumanVerificationIsUnavailable`, `TestUIDListingKeepsOnlyThatUID`].
+  The lock is held across a GET's backoff (a 429's `Retry-After`, up to 60 s
+  and at most twice, plus 5xx retries) so that nothing is stored between a
+  write's refresh and its plan; a write waiting behind it gives up at its
+  pre-send budget. A write thus runs up to 110 s (20 + 60 + 30), longer than
+  the listener's 60 s write timeout: PUT and DELETE extend their response's
+  write deadline to 150 s, so a write that landed delivers its answer
+  (M4-R42) [verified: `TestSlowWriteStillDeliversItsAnswer`].
+- Read-your-writes: the written rows are in the cache before the answer, and a
+  later feed read of the same row finds the same ETag and changes nothing
+  [verified offline: `TestFeedRereadOfAWrittenRowIsANoop`; live:
+  `HUMAN-CHECKS.md` §6 W2, that the row `ListByUID` returns equals the one the
+  feed reads].
 
 ### 8.2 ETags and conflicts
 ETag = `"v1-"` + the first 32 hex characters of the sha256 of the canonical
 JSON of the whole raw row (numbers kept as written, keys sorted) (M2-R4): every
 field counts, so an edit that does not move `LastEditTime` (notification-only,
 colour-only: unknown) is still seen [assumed → E07]; `v1` is the render
-version, bumped when our rendering changes so clients re-download. Writes
-(M4) carry `If-Match`; a mismatch returns 412 and a fresh copy, never a blind
-overwrite.
+version, bumped when our rendering changes so clients re-download.
+
+An object's ETag (the CalDAV resource, one per UID) hashes the render version,
+its rows' IDs and row ETags and the calendar settings used (§9). Writes (M4)
+evaluate `If-Match` (exact string) and `If-None-Match` on that ETag
+**after** refreshing the UID's rows from Proton (§8.1), never on a stale
+cache: a mismatch is 412 (Thunderbird then opens its conflict dialog and
+refetches, E08 §4.2), never a blind overwrite. A write without a
+precondition (Thunderbird's "overwrite" choice) replaces what Proton holds.
+A concurrent change Proton shows during a write (another client edited the
+same UID between the plan and the call) is 412 too (M4-R34). A PUT answer
+carries no `ETag` header: the object served is what Proton stored, which
+differs from the body (`spec/mapping.md`), and Thunderbird reads it back
+with a multiget anyway (E08 §4.1).
 
 ### 8.3 Free-busy
 Computed locally from cached own calendars (respecting `TRANSP`) [call];
 other users' free-busy is phase 3.
 
 ### 8.4 Fidelity rules
-A mapping table (`spec/mapping.md`, written during block C0/C1) lists every
-iCalendar/JSCalendar property as: preserved, transformed, stripped with a
-warning, or refused. Refused writes (CalDAV 403 with a precondition and a
-human-readable reason) [call]:
-- "this and following" splits (RANGE=THISANDFUTURE);
-- attendee changes that would need invitations (not planned);
-- writes to read-only calendars;
-- recurrence forms Proton cannot store [which → E12].
+`spec/mapping.md` lists every VEVENT and VCALENDAR property a PUT can carry
+as routed (to which card part), transformed, stripped (with a debug note), or
+refused (403 with a `urn:pcb` precondition and a short reason of the
+bridge's own, never Proton's text). The rule [call, research J]: accept and
+normalise where nothing the user sees is lost; refuse where writing would
+lose or corrupt data or reach the Proton web app in a form it cannot show.
+Accepted and normalised: `STATUS:TENTATIVE` dropped (Proton refuses it),
+unsupported VALARMs dropped, the client's `COLOR` ignored, `DURATION` made
+`DTEND`, Mozilla TZIDs mapped, two RRULE forms rewritten (M4-R5, M4-R12),
+missing `DTSTAMP`/`DTEND` defaulted (M4-R8), attendee parameter edits
+ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
+- "this and following" splits (`RANGE=THISANDFUTURE`), RDATE, EXRULE;
+- an RRULE outside Proton's supported set (`spec/mapping.md` §4; whether
+  Proton alters the accepted ones [assumed → E12,
+  `spec/experiments/E12-recurrence-forms.md`]);
+- floating date-times, TZIDs Go's zone database cannot resolve;
+- adding or removing attendees, any attendee on a new event, a new
+  occurrence whose attendees differ from its series' (invitations are not
+  planned; pcb never notifies attendees);
+- bodies that are not one VCALENDAR of VEVENTs of one UID, or over 100
+  VEVENTs;
+- events pcb cannot rewrite faithfully or safely: placeholders,
+  undecryptable or unverified parts, parts of another author, someone else's
+  invitation, untrusted session keys, a change needing a key the row lacks
+  (`spec/mapping.md` §8);
+- writes to read-only calendars (`DAV:need-privileges`).
+A Thunderbird calendar with offline support keeps a refused change locally
+and retries it silently (E08 §3.8, §4.2): refusals are few and logged. One
+without offline support shows an error and is disabled until the user
+enables it again (E08 §4.2): the README recommends offline support (checked
+by default in Thunderbird's New Calendar dialog).
 
 ## 9. A1 — CalDAV adapter
 
-As built in M3 (`internal/caldav`, our own handler on `net/http` and `encoding/xml`;
-it imports `service` and the standard library only [verified:
-`TestCalDAVImportsOnlyTheServiceAndTheStandardLibrary`]). Read-only: writes are M4.
+As built in M3 and M4 (`internal/caldav`, our own handler on `net/http` and
+`encoding/xml`; it imports `service` and the standard library only [verified:
+`TestCalDAVImportsOnlyTheServiceAndTheStandardLibrary`]). Reads since M3,
+writes (PUT, DELETE) since M4.
 
 - Surface: `/.well-known/caldav` 308 to the principal (behind auth); PROPFIND Depth 0
   and 1 (infinity: 403 `propfind-finite-depth`); REPORT `sync-collection` and
-  `calendar-multiget`; GET and HEAD on `<uid>.ics`; OPTIONS on any path with
-  `DAV: 1, 3, calendar-access` (never the scheduling classes). PUT and DELETE: 403
-  `DAV:need-privileges` until M4; PROPPATCH and MKCALENDAR: 405. Not built:
+  `calendar-multiget`; GET, HEAD, PUT and DELETE on an object's name (below);
+  OPTIONS on any path with `DAV: 1, 3, calendar-access` (never the scheduling
+  classes). PUT and DELETE on a collection, PROPPATCH and MKCALENDAR: 405. Not built:
   `calendar-query`, `free-busy-query` (403 `supported-report`), RFC 6638 scheduling
   [verified: the contract tests listed in E08, "What the bridge does (M3)"], nor 507
   paging [source: ruling M3-R23; no test asserts the absence].
 - Thunderbird is the reference client: its requests and failure modes were read from
   its source [verified: E08 source]; the MUST/SHOULD/AVOID list of
   `spec/experiments/E08-thunderbird-caldav.md` is the contract and every item maps to
-  a test there. No live session yet: it runs after M4 (M3-R1,
+  a test there. No live session yet: it runs with the M4 live session (M3-R1,
   `spec/HUMAN-CHECKS.md` step 6) [claim: Thunderbird behaves as the source says].
 - Identifiers (rulings M3-R9, R11, R12, R16): object ETag
   `"v1-" + hex32(sha256(render version, sorted (row ID, row ETag), the calendar settings
@@ -450,11 +708,67 @@ it imports `service` and the standard library only [verified:
   changed plus the deletions (one full refetch) [verified:
   `TestSyncTokenOfAnotherEpochIsRefused`, `TestMust07InvalidSyncTokenIs403ValidSyncToken`;
   the gen rule: `TestObjectChanges/TokenOfAnotherCalendarListsInFull`, `/KeyRotationChangesETagsAndGeneration`, `/KeyReactivationChangesETagsAndGeneration` in `internal/service/render_test.go`]. Deletions are response-level
-  404 per UID (M2-R16) [verified: `TestSyncCollectionReportsDeletionsPerUID`].
-- Privileges (M3-R1): owned normal calendars advertise read and write although writes
-  are refused until M4; subscribed, holiday and other calendars read only. M4 must
-  derive writability from member permissions (M3-R15, `OPEN.md`) [verified:
-  `TestShouldPrivilegesFollowReadOnly`].
+  404 per UID, at the UID's served name (M2-R16, M4-R22) [verified:
+  `TestSyncCollectionReportsDeletionsPerUID`, `TestAnAliasIsWrittenAndDeletedThere`].
+- Resource names (rulings M4-R6, R22, R33, R38, R41; `internal/service/names.go`):
+  every UID has exactly one served name and every served name one UID, in every
+  read (listings, multiget, sync-collection, deletions) and every write:
+  - its **alias**, when a client created it with a PUT at a name of its own
+    choice (Thunderbird names an imported or invited UID with `@` by replacing
+    each character outside `[A-Za-z0-9_.-]` with `_`, E08 §4.4); the alias is
+    recorded before the create is sent and outlives the UID's deletion, so the
+    deletion is reported where the client knows it (R22);
+  - else its **canonical name**: the UID itself when it is 1 to 200 bytes of
+    `[A-Za-z0-9._@-]`, else `~` + its unpadded base64url; then `.ics`;
+  - but when another UID's alias already holds that canonical name (an alias
+    made before this UID existed), its **alternative name** `~~` + unpadded
+    base64url + `.ics` (R38). A PUT may not take another UID's alternative name
+    (403 `pcb:bad-resource-name`). When an alias moves away from the canonical
+    name of a UID served at its alternative name, that UID keeps its
+    alternative name as its own alias, so no href changes (R41).
+  The canonical name of an aliased UID serves nothing (404). A PUT whose UID is
+  served at another name, or at a name serving another live UID, is 409 with
+  `<C:no-uid-conflict><D:href>` naming the object that holds it. A name may be
+  up to 255 bytes when it becomes an alias; a served canonical or alternative
+  name may be longer. Aliases and served names come from the same cache
+  snapshot as the rows (R33) [verified: `TestCreateAtASanitisedNameIsServedThere`,
+  `TestUIDConflictNamesTheOtherHref`, `TestALaterUIDMovesAsideForAnAlias`,
+  `TestAMovedAliasLeavesTheDisplacedObjectWhereItIs`,
+  `TestAMovedAliasLeavesADeletedObjectsHrefToo`, `TestServedNamesAreOneUIDPerName`,
+  `TestLongServedNamesWorkOnEveryMethod`].
+- Writes (M4; flow in §8.1, mapping in `spec/mapping.md`). A PUT needs
+  `Content-Type: text/calendar` (else 415) and at most 8 MiB (else 413). The
+  status mapping (`internal/caldav/write.go`):
+
+  | Answer | When |
+  |---|---|
+  | 201, no body, no `ETag` | a PUT created the event |
+  | 204, no body, no `ETag` | a PUT replaced it, or changed nothing; a DELETE removed every row of the UID |
+  | 412 | `If-Match` or `If-None-Match` does not hold on the refreshed object; a concurrent change Proton showed during the write (M4-R34); an `If-None-Match` naming no ETag |
+  | 409 + `<C:no-uid-conflict><D:href>…</D:href>` | the UID lives at another name, or the name holds another UID |
+  | 403 `<D:need-privileges>` | the write gate is closed, decided from good data (write-content on the object for a PUT, unbind on the calendar for a DELETE) |
+  | 403 `<pcb:CODE xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">…</pcb:reason>` | the bridge refuses the change, or Proton refused it (`pcb:proton-refused`, its code only); the reason is a fixed text of ours, never event content or Proton's text (Thunderbird never shows it, E08 §4.2; it is for curl and logs) |
+  | 404 | a DELETE of a name that serves nothing (Thunderbird: success) |
+  | 503 + `Retry-After` | anything else: not serving, a pending calendar, an undecided write gate (M4-R39), Proton unavailable or rate limiting (its own `Retry-After` on a 429), a write not confirmed by the read-back; never a 4xx for a state that may pass (M3-R22) |
+
+  [verified: `TestMust10PutIs201Or204WithoutAnETag`,
+  `TestMust10PreconditionsAre412AndUIDConflictsAre409`,
+  `TestMust11DeleteIs204Or404Or412AndHeadAnswers`,
+  `TestWriteRefusalsAre403WithTheirPCBPrecondition`,
+  `TestWritesAre503WhenTheServiceCannotAnswer`,
+  `TestRefusedWritesNeverReachProton`, `TestUnavailableWritesAre503WithRetryAfter`,
+  `TestGoWebdavClientWritesAndReadsBack`].
+- Privileges (rulings M4-R1, M4-R39, M4-R40, replacing M3-R1): a calendar
+  advertises read and write (`write`, `write-content`, `bind`, `unbind`) when
+  its write gate is open (§5.3), read alone when the gate is closed. While the
+  gate cannot be decided (keys not unlocked, no passphrase signature, no write
+  key) it keeps the last decision this process made, and before any decision
+  advertises **no** `current-user-privilege-set` (a 404 propstat):
+  Thunderbird persists a read-only flag and never clears it (E08 §5), so a
+  transient bootstrap failure must not make a subscription read only for
+  good; a write meanwhile is 503 [verified: `TestShouldPrivilegesFollowReadOnly`,
+  `TestPrivilegesFollowTheWriteGate`, `TestUndecidedWriteGateIs503`,
+  `TestUndecidedGateKeepsTheLastDecision`].
 - Availability (M3-R22, R25, R26, R30, R35): while the service cannot answer (logged out, no
   cache yet, Proton 5xx), a calendar is not yet synced, or an IP is rate limited, the
   answer is 503 + `Retry-After`, never 4xx: a 4xx on the first PROPFIND, OPTIONS or
@@ -477,7 +791,8 @@ it imports `service` and the standard library only [verified:
   `calendar-data` in a PROPFIND Depth 1 or a sync-collection rendered for the first
   1 000 objects only (the others keep `getetag` and get `calendar-data` in a 404
   propstat, M3-R35), `ReadHeaderTimeout` 10 s, no error text, Proton text or other
-  users' IDs in bodies [verified: `TestBodiesOver8MiBAre413`,
+  users' IDs in bodies (a write refusal's `pcb:reason` is a fixed text of ours)
+  [verified: `TestBodiesOver8MiBAre413`,
   `TestPropertyListsOver64NamesAre400`, `TestCalendarDataInListingsIsCapped`,
   `TestAvoidErrorTextInBodies`].
 - Library (E17, M3-R5): our own server. emersion/go-webdav v0.7.0 has no server-side
@@ -530,13 +845,13 @@ Command tree:
 pcb install [--system|--user] [--plan]     # unit files, dirs, config; no root needed for --user
 pcb uninstall [--delete-data] [--plan]
 pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients)
-pcb serve [--listen HOST:PORT]              # sync loop (30 s) + CalDAV listener in one process (M3, foreground; the unit and the container run it); not with --json. Refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20); prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0; stops with Proton's error code when the session ends (M3-R28)
+pcb serve [--listen HOST:PORT]              # sync loop (30 s) + CalDAV listener in one process (M3 reads, M4 writes; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20); prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0; stops with Proton's error code when the session ends (M3-R28)
 pcb service start|stop|restart|status|logs
 pcb login [--username U] [--password-fd N] [--unattended-relogin]
 pcb login resume --captcha-token T          # (--totp CODE moves to M5: the daemon must hold the half-authenticated session; until then the 2FA code comes from PCB_TOTP or a prompt in the same process)
 pcb logout
 pcb status                                  # login state, sync state, listeners, alerts
-pcb calendar list                           # what Thunderbird will see, with read-only flags
+pcb calendar list                           # what Thunderbird will see; read_only is the write gate (M4-R1: false only for a normal calendar with the Write bit and a verified passphrase signature)
 pcb sync [--full] [--watch [--interval 30s]] # M2: fill/refresh the event cache (--watch not with --json)
 pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no network call
 pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords, printed once; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
@@ -579,7 +894,15 @@ no event content, no secrets; IDs only). `pcb serve` logs one `render counters`
 line per sync pass while a counter is non-zero, and once more when they change:
 `undecryptable` (placeholders served), `unverified` (rows marked
 `X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out) and
-`keys_error_ids` (calendars whose keys failed). Only the serving process holds
+`keys_error_ids` (calendars whose keys failed). Writes (M4) log warnings with
+IDs, fields and Proton codes only, never content: `refusing a write: a row's
+key packet changed since pcb first stored it` (calendar, row, field),
+`Proton refused a write` (calendar, entry or status, code), `a write met a
+concurrent change of its event`, `a write is not confirmed by the rows read
+back`, `a write is not confirmed: a row came back under other key packets`,
+`a write could not be read back`, and the adapter's `caldav: the service
+could not answer` for each 503. What a write normalised is logged at debug
+(`write normalised`), which `pcb serve`'s default level does not print. Only the serving process holds
 them, so `pcb status` and `pcb doctor` do not show them until M5's local API
 socket (M3-R34) [verified: `TestServeLogsTheRenderCounters`,
 `TestServePassesCarryTheRenderCounters`]. Then `pcb status`,
@@ -616,11 +939,11 @@ captcha needed, sync stalled) that `doctor` and `status` surface [call].
 | E07 | What changes in a row on edit (modify time, sequence, parts) | ETags | edit fields one at a time (`E07-row-changes.md`, source-based, live run pending) |
 | E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | read Thunderbird's source (done, `E08-thunderbird-caldav.md`); live capture against a reference server deferred to the human check |
 | E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, M2-R1) | offline: 0.2 to 0.4 ms per event, signatures checked [verified: `BenchmarkOpen`], `E09-decrypt-cost.md`; live half (test-account rows, cold start) pending |
-| E10 | Signature verification of each part, own and shared calendars | C1 keys | verify on test-account events, incl. a shared calendar |
+| E10 | Which keys sign each part; does the member passphrase signature verify with our address key (R17) | C1 keys, M4 write gate | `E10-signatures.md`: `pcb calendar list`, the parts pcb writes, the render counters, on the test account (HUMAN-CHECKS §6); a shared calendar needs a second account |
 | E11 | Does Thunderbird need VTIMEZONE? | C0 | answered from source inside E08 (§6.3, "Answers to SPEC questions"; no E11 file): **no** [source: E08]; the bridge emits none; live check pending with the Thunderbird session |
-| E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity | write each RRULE form, read back |
-| E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec | write X- and standard extras, read back |
-| E14 | Member `Permissions` values for view-only vs edit shares (not planned: shared calendars) | – | – |
+| E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity (M4) | `E12-recurrence-forms.md`: write each RRULE form and series operation through pcb, read back, compare in the web app and Thunderbird (HUMAN-CHECKS §6) |
+| E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
+| E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on morpheus-like Debian 13 |
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
@@ -642,6 +965,11 @@ Status at the close of M3 (2026-11-11):
 - E08: implemented and contract-tested ("What the bridge does (M3)" in `E08-thunderbird-caldav.md`); live Thunderbird session after M4 (`spec/HUMAN-CHECKS.md` step 6).
 - E09: offline measured, live half pending. E11: answered from source in E08, live check pending. E17: done.
 
+Status at the close of M4 (2026-11-12):
+- E10, E12, E13, E14: source-based write-ups, each with what the code assumes and the exact live steps; the code gatekeeps so that a wrong assumption fails closed (read only, 403 or 503), never writes wrong data silently. The live run is `spec/HUMAN-CHECKS.md` step 6 (the M4 live session, with the Thunderbird session of M3).
+- E08: writes implemented and contract-tested (MUST 10 and 11, "What the bridge does"); live with step 6.
+- E06 (rate limits): not started; writes are never retried and a 429 is a 503 with Proton's `Retry-After`.
+
 Each experiment gets `spec/experiments/E##-<slug>.md`: question, method,
 raw results (redacted), conclusion, and the decision it feeds.
 
@@ -653,7 +981,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M1 Proton core, read | C0 (read side), C1 auth + keys + read endpoints, C2 secrets, `pcb login` (password, TOTP, CAPTCHA resume, unattended relogin) | `pcb calendar list` against the test account |
 | M2 Store and sync | C2 cache, C4 initial + incremental (E04, E05, E07; E09 moved to M3) | cache follows edits made in the Proton web app |
 | M3 CalDAV read (built, live session after M4) | A1 read, client credentials, TLS for non-loopback binds, E08, E11, E17 | Thunderbird (local and over the network) shows all calendars and stays in sync: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
-| M4 CalDAV writes | C1 codec write path, A1 writes, fidelity table (E12, E13) | Thunderbird two-way edits, incl. single occurrences |
+| M4 CalDAV writes (built, live session pending) | C1 codec write path, A1 writes, fidelity table (E12, E13), write gate (E10, E14) | Thunderbird two-way edits, incl. single occurrences: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
 | M5 Daemon and ops | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only |
 
 Nothing after M5 is planned [decided 0007].
@@ -662,11 +990,14 @@ M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext 
 
 M3 delivered (2026-11-11, branch m3-caldav-read): event decryption and the iCalendar merge (`internal/proton/cards`, `internal/ical`), the render and sync-token layer in `service.Local.Serve`, `internal/caldav` (read-only CalDAV), `pcb client`, `pcb serve` with generated or user TLS, the doctor checks for listener, certificate and clients, E08 contract tests, E09 (offline), E17. Deferred: the live Thunderbird session and the live halves of E08/E09/E11 (after M4); writes (M4); the daemon behaviours (M5). Rulings recorded: M3-R1 privileges read+write on owned calendars, live session after M4; R2 iCalendar-native (decision 0012); R3 duplicate masters; R4 placeholders; R5 own server; R6 serve reads on the writer's handle; R9 to R12, R16 tokens and ETags; R15 writability from member permissions parked to M4; R17 to R21 client store and limiter; R22 to R26, R30 503 rather than 4xx; R28 to R32 `pcb serve` and TLS.
 
+M4 delivered (2026-11-12, branch m4-caldav-write): the fake Proton's sync endpoint and `?UID=` listing (`internal/proton/protontest`), the write gate with the member passphrase signature (`internal/proton/calendar`), the write side of the iCalendar codec (`ical.ParseWrite`, `Route`, `Patch`, VALARM → `Notifications`), sealing (`cards.Seal`, the session-key proof), `events.ListByUID` and `events.Sync`, the cache's `aliases` and `pins` (schema 2), the planner and executor (`service.PutObject`, `DeleteObject`), CalDAV PUT and DELETE with served names, `spec/mapping.md`, E10, E12, E13, E14 write-ups. Deferred: the live session (`spec/HUMAN-CHECKS.md` step 6) and every live marker above; fresh session keys on update (after L.4 #3); the daemon behaviours (M5). Rulings recorded (`.superpowers/sdd/2026-11-11-m4-caldav-write/progress.md`): Rpre1–3 package seams; R1 the write gate; R2, R3 the fake as an oracle, stricter than Proton where marked; R4 SEQUENCE (and fail closed on two primary keys); R5 MONTHLY ordinal → BYSETPOS; R6 aliases, X-PM-CONFERENCE-ID shared signed; R7 strip pcb lines, keep stored COLOR and components; R8 DTSTAMP and DTEND defaults; R9 attendee parameter edits ignored; R10 the RRULE allow-list; R11 Thunderbird's faked master dropped; R12 DAILY BYDAY → WEEKLY; R13, R15 no new session key on update; R14, R16, R19, R20 the session-key proof; R17, R30, R35, R36, R37 key-packet pinning; R18 only our own verified parts are rewritten; R21, R22 ApplyWrite and alias lifetime; R23, R24 one resend after a 401, 2001 not split; R25 Task 7 in two; R26 controller re-review; R27 deletes skip the trust checks; R28 new exceptions take the master's attendees; R29 colours and mirrored exception rows; R31 an ambiguous call confirmed by the read-back is a success; R32 confirmation by plaintext; R33 names from the service; R34 412 for a concurrent change, 403 for a refusal; R38 alternative names; R39, R40 undecided gate is 503 with no privileges advertised; R41 displaced hrefs kept.
+
 M5 carry-overs (known gaps left by M1, to close with the daemon work):
 - R3m: rollback of `secrets.sealed` (a restored old blob is accepted): a monotonic generation counter, sealed and mirrored in `state.json`.
 - R8m: a pending login holds the password in memory with no timeout in M1; the daemon gives it a TTL (about 5 min).
 - R10m: a leaf state-file lock (held only for load-and-write) on every writer of `state.json`, to close the rare spurious `needs-login` overwrite.
-- R17 (needed before M4, not M5): member-passphrase signature verification (E10) must be settled before M4 encrypts to a calendar key.
+- R17: done in M4 (the passphrase signature is verified and gates writes, §5.3); its live confirmation is E10, step 6.
+- M4 (Task 8, M4-R39): a calendar with no usable write key (two calendar keys flagged primary, no unlocked primary address key, no passphrase signature) keeps its write gate undecided, so every write is 503 and Thunderbird retries for ever: `pcb status` and `pcb doctor` must name such a calendar and why (`OPEN.md`).
 - R16: `pcb login resume --totp CODE`.
 
 ## 19. Security model (summary)
@@ -677,7 +1008,10 @@ users, network peers, malicious calendar content, a leaked CalDAV app
 password. Controls: sealed secrets (§7.3), no plaintext cache (§7.2),
 loopback by default, TLS and authentication on any other bind (§9), per-
 client app passwords stored hashed, signature verification (§5.3: an
-event that fails it is served marked, not dropped), no
+event that fails it is served marked, not dropped), writes only to calendars
+whose member passphrase signature verifies with our key, and only over
+content of ours that verifies, with pinned key packets (§5.3, its residual
+risks listed there), no
 secrets in argv or logs, state directory 0700. On a server, the daemon runs
 as a dedicated `pcb` user (system service) or in its container [call].
 Residual risk, stated in the docs: the bridge holds the decrypted calendar

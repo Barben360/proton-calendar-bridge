@@ -15,6 +15,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -560,7 +561,7 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 	contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "TRIGGER:-PT30M\r\n")
 	// a@x and b@x did not change, yet a client holding the former token
 	// fetches them all, and still learns that c@x is gone.
-	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || !slices.Equal(cs.Deleted, []string{"c@x"}) || cs.Token != tok {
+	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || !slices.Equal(deletedUIDs(cs), []string{"c@x"}) || cs.Token != tok {
 		t.Errorf("Changes(token before the settings change) = %+v, want a@x and b@x changed, c@x deleted", cs)
 	}
 	// Other's keys now unlock: its objects decrypt, and its former token
@@ -650,4 +651,165 @@ func TestServeStopsWhileAReadUnlocksKeys(t *testing.T) {
 	if err := <-read; err != nil {
 		t.Errorf("the read = %v, want it served (from the file once Serve ended)", err)
 	}
+}
+
+// Would fail if ReadOnly were still "type is normal" (M3-R15), ignored the
+// Write bit, the passphrase verification or a calendar whose keys do not
+// unlock.
+func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
+	t.Parallel()
+	t.Run("permissions and types", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		owner := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Owner"})
+		editor := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Editor", Permissions: 8})
+		viewer := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Viewer", Permissions: 2 | 4})
+		busy := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Busy", Permissions: 1})
+		hol := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		odd := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Odd", Type: 7})
+		locked := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Locked", BrokenPassphrase: true})
+		e.login(t, e.req())
+		e.sync(t, false)
+		for id, want := range map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true} {
+			c := e.collection(t, id)
+			if c.ReadOnly != want {
+				t.Errorf("calendar %s: ReadOnly = %v, want %v", id, c.ReadOnly, want)
+			}
+			// Only the calendar whose keys do not unlock is undecided (ruling
+			// M4-R39); the others are decided from their type and bits.
+			if c.WriteGateUndecided != (id == locked) || c.PrivilegesUnknown != (id == locked) {
+				t.Errorf("calendar %s: WriteGateUndecided = %v, PrivilegesUnknown = %v", id, c.WriteGateUndecided, c.PrivilegesUnknown)
+			}
+		}
+		// The CLI listing follows the same gate, row by row.
+		want := map[string]bool{owner: false, editor: false, viewer: true, busy: true, hol: true, sub: true, odd: true, locked: true}
+		got := e.calendars(t)
+		if len(got) != len(want) {
+			t.Fatalf("calendar list has %d rows, want %d", len(got), len(want))
+		}
+		for _, c := range got {
+			if c.ReadOnly != want[c.ID] {
+				t.Errorf("pcb calendar %s (%s, keys %s): ReadOnly = %v, want %v", c.ID, c.Name, c.Keys, c.ReadOnly, want[c.ID])
+			}
+		}
+	})
+	t.Run("bad passphrase signature", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{BadPassphraseSignature: true})
+		id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+		e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		e.sync(t, false)
+		if !e.collection(t, id).ReadOnly {
+			t.Error("a calendar whose passphrase signature fails is writable")
+		}
+		// Still readable: the objects decrypt.
+		lacks(t, "a@x", e.objects(t, id, "a@x")["a@x"].Data, "X-PCB-PLACEHOLDER")
+	})
+}
+
+// Would fail if the write gate were not among the render inputs: a permission
+// change would leave ETags, CTag and token alone and clients would keep a
+// stale privilege set.
+func TestWritabilityChangeIsSeenByClients(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	id := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.f.AddEvent(id, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+	e.login(t, e.req())
+	s := e.serve(t)
+	s.next(t, true)
+	before := e.collection(t, id)
+	etags, tok := e.listing(t, id)
+	if before.ReadOnly {
+		t.Fatal("precondition: the calendar starts writable")
+	}
+	e.f.SetPermissions(id, 2) // the owner downgrades us to a viewer
+	e.clk.advance(10*time.Minute + time.Second)
+	s.next(t, false)
+	after := e.collection(t, id)
+	etags2, tok2 := e.listing(t, id)
+	if !after.ReadOnly {
+		t.Error("the downgrade did not make the collection read only")
+	}
+	if after.CTag == before.CTag || after.SyncToken == before.SyncToken || tok2 == tok || etags2["a@x"] == etags["a@x"] {
+		t.Errorf("a writability change left CTag %q->%q, token %q->%q, ETag %q->%q",
+			before.CTag, after.CTag, tok, tok2, etags["a@x"], etags2["a@x"])
+	}
+	s.stop(t)
+}
+
+// The fake's own address keys unlock through keys.Fetch and keys.Unlock and
+// every key tags as unlocked (it would not with the armor parse of M3).
+func TestAddressKeyTagsOfTheFakesKeysAreUnlocked(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	c, err := e.svc.SessionClient(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, addrs, err := keys.Fetch(t.Context(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := keys.Unlock(user, addrs, e.account(t).KeyPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	tags := service.AddressKeyTags(u)
+	if len(tags) == 0 {
+		t.Fatal("no address key tagged")
+	}
+	for _, tag := range tags {
+		if !strings.HasSuffix(tag, ":unlocked") {
+			t.Errorf("tag %q: a key of the fake unlocked", tag)
+		}
+	}
+}
+
+// The cached type reaches the gate on every path that unlocks keys (ruling
+// M4-R1): a read that loads the keys before any listing, and the settings
+// refresh under Serve. A subscribed calendar with every permission stays
+// read only through both.
+func TestCachedTypeFeedsTheGateOnEveryKeyLoad(t *testing.T) {
+	t.Parallel()
+	t.Run("a read loads the keys first", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		e.sync(t, false)
+		e.objects(t, sub, "a@x") // calendarRead unlocks: no Collections call before
+		if !e.collection(t, sub).ReadOnly {
+			t.Error("a subscribed calendar became writable after calendarRead loaded its keys")
+		}
+	})
+	t.Run("refreshSettings", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
+		e.f.AddEvent(sub, protontest.Event{UID: "a@x", Start: base, End: base + 60})
+		e.login(t, e.req())
+		s := e.serve(t)
+		s.next(t, true)
+		if !e.collection(t, sub).ReadOnly {
+			t.Fatal("precondition: a subscribed calendar starts read only")
+		}
+		// A settings change makes the refresh replace the calendar's keys.
+		e.f.SetDefaultNotifications(sub, []protontest.Notification{{Type: 1, Trigger: "-PT30M"}}, nil)
+		boots := e.f.Calls("GET", "/calendar/v2/")
+		e.clk.advance(10*time.Minute + time.Second)
+		s.next(t, false)
+		if e.f.Calls("GET", "/calendar/v2/") == boots {
+			t.Fatal("the refresh read no bootstrap")
+		}
+		if !e.collection(t, sub).ReadOnly {
+			t.Error("a subscribed calendar became writable after a settings refresh")
+		}
+		s.stop(t)
+	})
 }

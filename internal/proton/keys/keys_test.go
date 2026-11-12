@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,4 +354,37 @@ func TestDeriveKeyPassUserWithoutKey(t *testing.T) {
 	if err == nil || pass != nil {
 		t.Fatalf("DeriveKeyPass = %v, %v; want an error and no passphrase", pass, err)
 	}
+}
+
+// Unlock serialises each address key once, so concurrent copies of one key
+// (a Signer built per calendar) write no cache. Would fail under -race if
+// Unlock stopped warming the keys (ruling M4-R4).
+func TestUnlockedAddressKeysCopyConcurrentlyWithoutRace(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	pass, err := keys.DeriveKeyPass(user, addrs, salts, []byte(f.Password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := keys.Unlock(user, addrs, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(u.Close)
+	var wg sync.WaitGroup
+	for range 8 {
+		for _, kr := range u.AddrKRs {
+			for _, k := range kr.GetKeys() {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if _, err := k.Copy(); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+		}
+	}
+	wg.Wait()
 }

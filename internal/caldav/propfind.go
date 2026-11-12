@@ -175,8 +175,10 @@ func homeResource() *resource {
 	return res
 }
 
-// The privileges a calendar advertises (rulings M3-R1, M3-R15): a writable
-// one says so already, though writes are refused until M4.
+// The privileges a calendar advertises: read and write when the write gate
+// lets us write it (ruling M4-R1: Collection.ReadOnly), else read alone,
+// none before the gate was ever decided (M4-R40); a write to a calendar
+// decided read only is 403 need-privileges (write.go).
 const (
 	readPrivileges  = "<D:privilege><D:read/></D:privilege>"
 	writePrivileges = readPrivileges + "<D:privilege><D:write/></D:privilege><D:privilege><D:write-content/></D:privilege>" +
@@ -199,11 +201,16 @@ func calendarResource(c service.Collection) *resource {
 	res.add(caldav("supported-calendar-data"), `<C:calendar-data content-type="text/calendar" version="2.0"/>`)
 	res.add(dav("supported-report-set"), "<D:supported-report><D:report><D:sync-collection/></D:report></D:supported-report>"+
 		"<D:supported-report><D:report><C:calendar-multiget/></D:report></D:supported-report>")
-	privileges := writePrivileges
-	if c.ReadOnly {
-		privileges = readPrivileges
+	// No decision yet (ruling M4-R40): no set, so a request for it gets it
+	// in a 404 propstat, E08's "no decision" (Thunderbird persists a
+	// read-only flag and never clears it).
+	if !c.PrivilegesUnknown {
+		privileges := writePrivileges
+		if c.ReadOnly {
+			privileges = readPrivileges
+		}
+		res.add(dav("current-user-privilege-set"), privileges)
 	}
-	res.add(dav("current-user-privilege-set"), privileges)
 	res.add(xml.Name{Space: nsCS, Local: "getctag"}, text(c.CTag))
 	res.addHidden(dav("sync-token"), text(c.SyncToken)) // RFC 6578 §4: not in allprop
 	res.add(dav("owner"), principalHref)
@@ -211,10 +218,10 @@ func calendarResource(c service.Collection) *resource {
 	return res
 }
 
-// objectResource is an object's properties; calendar-data only when data
-// was read (never in allprop, RFC 4791 §9.6).
-func objectResource(calID, uid, etag string, data []byte, haveData bool) *resource {
-	res := &resource{href: objectHref(calID, uid)}
+// objectResource is the properties of the object served at name;
+// calendar-data only when data was read (never in allprop, RFC 4791 §9.6).
+func objectResource(calID, name, etag string, data []byte, haveData bool) *resource {
+	res := &resource{href: objectHref(calID, name)}
 	res.add(dav("resourcetype"), "")
 	res.add(dav("getetag"), text(etag))
 	res.add(dav("getcontenttype"), componentType)
@@ -287,7 +294,7 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 		if !ok {
 			return
 		}
-		objectResource(c.ID, o.UID, o.ETag, o.Data, true).write(ms, q)
+		objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
 	}
 	ms.send(w)
 }
@@ -303,7 +310,7 @@ func (s *server) listObjects(w http.ResponseWriter, r *http.Request, ms *multist
 	}
 	if !q.wants(caldav("calendar-data")) {
 		for _, o := range infos {
-			objectResource(c.ID, o.UID, o.ETag, nil, false).write(ms, q)
+			objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
 		}
 		return true
 	}

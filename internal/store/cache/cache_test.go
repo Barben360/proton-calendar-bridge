@@ -439,7 +439,7 @@ func TestInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.Exists || info.Schema != 1 || info.Account != "acct-9" || info.QuickCheck != "ok" {
+	if !info.Exists || info.Schema != schemaVersion || info.Account != "acct-9" || info.QuickCheck != "ok" {
 		t.Errorf("info = %+v", info)
 	}
 	if runtime.GOOS != "windows" && info.Mode.Perm() != 0o600 {

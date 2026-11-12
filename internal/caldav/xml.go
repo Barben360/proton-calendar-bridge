@@ -289,10 +289,13 @@ const (
 )
 
 // forbidden answers 403 with a DAV:error body.
-func forbidden(w http.ResponseWriter, body string) {
+func forbidden(w http.ResponseWriter, body string) { xmlError(w, http.StatusForbidden, body) }
+
+// xmlError answers status with a DAV:error body.
+func xmlError(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", xmlType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(http.StatusForbidden)
+	w.WriteHeader(status)
 	_, _ = io.WriteString(w, body)
 }
 

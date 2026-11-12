@@ -47,15 +47,42 @@ type API interface {
 	// MustAct. It may call Proton (the
 	// CTag holds each calendar's settings, ruling M3-R14).
 	Collections(ctx context.Context) ([]Collection, error)
-	// Objects lists a calendar's objects (one per UID) with their ETags, and
-	// the calendar's current sync token.
+	// Objects lists a calendar's objects (one per UID) with their ETags and
+	// the names they are served at, and the calendar's current sync token.
 	Objects(ctx context.Context, calID string) ([]ObjectInfo, string, error)
 	// ObjectsByUID returns the rendered objects of uids, in their order.
 	ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error)
+	// ObjectsByName returns the rendered objects served at names (resource
+	// names within the calendar), in their order: Missing for a name that
+	// serves no live object. Each UID is served at one name, its alias or
+	// its canonical name (ObjectName), or its alternative name when another
+	// UID's alias holds its canonical name (rulings M4-R6, M4-R38); any
+	// other name of it serves nothing.
+	ObjectsByName(ctx context.Context, calID string, names []string) ([]Object, error)
 	// Changes returns what changed in a calendar since a sync token ("" for
 	// everything); a token it cannot answer from is an error whose cause is
 	// ErrInvalidSyncToken.
 	Changes(ctx context.Context, calID, token string) (ChangeSet, error)
+	// The write methods below run only during Serve, on its cache handle
+	// (otherwise ErrNotServing). A write refreshes the object's rows from
+	// Proton, evaluates cond on that fresh state, sends one Sync call
+	// (never sent again) and reads the rows back into the cache before it
+	// answers: success only when Proton holds what was sent. Errors:
+	// ErrPreconditionFailed (412), *UIDConflictError (409),
+	// ErrNotWritable (403 need-privileges: the gate decided read only;
+	// undecided is ErrGateUndecided, unavailable, ruling M4-R39), *WriteRefusal (403 with its
+	// pcb precondition), ErrNoSuchObject and ErrNoSuchCalendar (404);
+	// ErrWriteNotConfirmed, ErrCalendarPending, ErrNotServing and every
+	// other error are unavailable (503, ProtonRetryAfter says how long
+	// Proton asked to wait).
+
+	// PutObject creates or replaces the object at name (a resource name
+	// within the calendar: its alias or its UID's canonical name, see
+	// ObjectName) with body, one VCALENDAR. A create at a name that is not
+	// the canonical name of the body's UID records the name as its alias.
+	PutObject(ctx context.Context, calID, name string, body []byte, cond Precondition) (PutResult, error)
+	// DeleteObject deletes the object at name: every row of its UID.
+	DeleteObject(ctx context.Context, calID, name string, cond Precondition) error
 	// The client methods manage the CalDAV app passwords in
 	// <state>/clients.json. They need no login and no network, and logout
 	// leaves them (ruling M3-R17).
@@ -263,10 +290,13 @@ type Calendar struct {
 	Description string `json:"description,omitempty"`
 	Color       string `json:"color,omitempty"`
 	Type        string `json:"type"`
-	ReadOnly    bool   `json:"read_only"`
-	Default     bool   `json:"default"`
-	Keys        string `json:"keys"`
-	KeysError   string `json:"keys_error,omitempty"`
+	// ReadOnly follows the write gate (ruling M4-R1): false only for a normal
+	// calendar whose keys unlocked, our member has the Write bit and the
+	// member passphrase signature verified.
+	ReadOnly  bool   `json:"read_only"`
+	Default   bool   `json:"default"`
+	Keys      string `json:"keys"`
+	KeysError string `json:"keys_error,omitempty"`
 }
 
 // Collection is a synced calendar as the read API serves it. CTag is
@@ -279,36 +309,54 @@ type Collection struct {
 	Name        string `json:"name"`
 	Color       string `json:"color,omitempty"`
 	Description string `json:"description,omitempty"`
-	ReadOnly    bool   `json:"read_only"`
+	// ReadOnly follows the write gate (ruling M4-R1), as Calendar.ReadOnly;
+	// true as well when the keys are not loaded.
+	ReadOnly bool `json:"read_only"`
 	// Pending: the cache knows the calendar but has not synced it yet (a
 	// first pass is on its way to it, or it failed): no CTag, no sync token,
 	// and its reads return ErrCalendarPending (ruling M3-R25).
-	Pending   bool   `json:"pending,omitempty"`
-	CTag      string `json:"ctag"`
-	SyncToken string `json:"sync_token"`
+	Pending bool `json:"pending,omitempty"`
+	// PrivilegesUnknown: the gate was never decided for this calendar
+	// (ruling M4-R40): no privileges are advertised (ReadOnly is true for
+	// callers that need a value). Thunderbird keeps a read-only flag for
+	// good, so one failed bootstrap must not set it.
+	PrivilegesUnknown bool `json:"privileges_unknown,omitempty"`
+	// WriteGateUndecided: the gate cannot be decided now (ruling M4-R39:
+	// the keys did not unlock, the passphrase signature cannot be checked):
+	// ReadOnly is the last decided value, and a write answers unavailable
+	// (503), not ErrNotWritable.
+	WriteGateUndecided bool   `json:"write_gate_undecided,omitempty"`
+	CTag               string `json:"ctag"`
+	SyncToken          string `json:"sync_token"`
 }
 
-// ObjectInfo names one object: the UID of its rows and its ETag (quoted, as
-// HTTP sends it). The adapter derives the object's href from the UID.
+// ObjectInfo names one object: the UID of its rows, the resource name it is
+// served at within its calendar (ObjectsByName says which) and its ETag
+// (quoted, as HTTP sends it; "" for a deletion).
 type ObjectInfo struct {
 	UID  string `json:"uid"`
-	ETag string `json:"etag"`
+	Name string `json:"name"`
+	ETag string `json:"etag,omitempty"`
 }
 
 // Object is a rendered object: a VCALENDAR (CRLF line ends) holding the
-// UID's master and exceptions, decrypted. Missing: the UID has no live row.
-// Data is shared with the service's in-memory cache: never modify it.
+// UID's master and exceptions, decrypted, and the name it is served at.
+// Missing: the UID has no live row (ObjectsByName: or the name serves no
+// UID, then UID is ""). Data is shared with the service's in-memory cache:
+// never modify it.
 type Object struct {
 	UID     string `json:"uid"`
+	Name    string `json:"name"`
 	ETag    string `json:"etag,omitempty"`
 	Data    []byte `json:"data,omitempty"`
 	Missing bool   `json:"missing,omitempty"`
 }
 
 // ChangeSet is what changed since a sync token: the objects to fetch, the
-// UIDs with no live row left, and the token to ask from next.
+// UIDs with no live row left (at the name each was served at, ETag ""),
+// and the token to ask from next.
 type ChangeSet struct {
 	Changed []ObjectInfo `json:"changed"`
-	Deleted []string     `json:"deleted"`
+	Deleted []ObjectInfo `json:"deleted"`
 	Token   string       `json:"token"`
 }

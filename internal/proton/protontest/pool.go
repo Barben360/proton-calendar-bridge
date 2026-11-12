@@ -2,6 +2,7 @@ package protontest
 
 import (
 	"crypto/rand"
+	"strings"
 	"sync"
 	"testing"
 
@@ -39,13 +40,36 @@ type pooled struct {
 
 type account struct{ id, password string }
 
-// fastKeys makes the backend reuse one precomputed key instead of generating
+// fastKeys makes the backend reuse precomputed keys instead of generating
 // one per user and address (seconds per test). Insecure; test use only.
 var fastKeys sync.Once
 
+// generateKey replaces the backend's key generator: an account's user key
+// and first address take FastGenerateKey's precomputed key (signer), every
+// other address otherAddressKey, so a part signed by the wrong address does
+// not verify (research A.4). The backend names the key after the username
+// and the address.
+func generateKey(name, email string, pass []byte, keyType string, bits int) (string, error) {
+	if !strings.Contains(email, "@") || strings.HasPrefix(email, name+"@") {
+		return backend.FastGenerateKey(name, email, pass, keyType, bits)
+	}
+	key, err := otherAddressKey()
+	if err != nil {
+		return "", err
+	}
+	locked, err := key.Lock(pass)
+	if err != nil {
+		return "", err
+	}
+	return locked.Armor()
+}
+
+// secondAddress is the email of the second address every account has.
+func secondAddress(username, domain string) string { return "second-" + username + "@" + domain }
+
 // borrow takes an idle backend, or starts one, and gives it back when t ends.
 func borrow(t testing.TB) *pooled {
-	fastKeys.Do(func() { backend.GenerateKey = backend.FastGenerateKey })
+	fastKeys.Do(func() { backend.GenerateKey = generateKey })
 	pool.mu.Lock()
 	var p *pooled
 	if n := len(pool.idle); n > 0 {
@@ -70,7 +94,8 @@ func borrow(t testing.TB) *pooled {
 	return p
 }
 
-// user returns the ID of username's account, created on first use. Asked
+// user returns the ID of username's account, created on first use with two
+// addresses: username@domain, then secondAddress with its own key. Asked
 // with another password, the account is replaced.
 func (p *pooled) user(username, password string) (string, error) {
 	p.mu.Lock()
@@ -86,6 +111,9 @@ func (p *pooled) user(username, password string) (string, error) {
 	}
 	id, _, err := p.srv.CreateUser(username, []byte(password))
 	if err != nil {
+		return "", err
+	}
+	if _, err := p.srv.CreateAddress(id, secondAddress(username, p.srv.GetDomain()), []byte(password), true); err != nil {
 		return "", err
 	}
 	p.accounts[username] = account{id, password}

@@ -125,6 +125,14 @@ func Unlock(user gpa.User, addrs []gpa.Address, keyPass []byte) (*Unlocked, erro
 		return nil, fmt.Errorf("%w: no address key opened", ErrKeysLocked)
 	}
 	userKR.ClearPrivateParams()
+	// go-crypto writes a cache on a key's first Serialize (so on its first
+	// Copy): do it once here, before the keys are shared, so no later copy
+	// writes concurrently (ruling M4-R4).
+	for _, kr := range addrKRs {
+		for _, k := range kr.GetKeys() {
+			_, _ = k.Serialize()
+		}
+	}
 	return &Unlocked{User: user, Addresses: addrs, AddrKRs: addrKRs}, nil
 }
 

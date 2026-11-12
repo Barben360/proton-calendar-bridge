@@ -59,6 +59,18 @@ type Options struct {
 	Now            func() time.Time // clock for TOTP; default time.Now
 	// Username and Password name the first account; empty: throwaway values.
 	Username, Password string
+	// BadPassphraseSignature serves our member passphrases signed by an
+	// unrelated key, so the signature does not verify with ours (research G).
+	BadPassphraseSignature bool
+	// EmptyPassphraseSignature serves no signature at all (a stripped one).
+	EmptyPassphraseSignature bool
+	// ReplayedPassphraseSignature serves a genuine signature of our own
+	// address key over another plaintext (a replay from another calendar,
+	// research G): it verifies on its own, not on this passphrase.
+	ReplayedPassphraseSignature bool
+	// Write selects the other reading of each unsettled write behaviour
+	// (see WriteOptions).
+	Write WriteOptions
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the

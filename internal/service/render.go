@@ -48,6 +48,12 @@ type renderer struct {
 	// their bootstraps (Serve refreshes them every settingsRefresh).
 	refreshedAt time.Time
 
+	// decided is each calendar's last decided write gate (ruling M4-R39),
+	// by account and calendar ID: true when it was writable. A calendar
+	// whose gate is undecided now keeps advertising it. Guarded by kmu;
+	// kept across key drops (in memory only).
+	decided map[string]bool
+
 	lru      *lru
 	decrypts atomic.Int64 // rows decrypted (tests)
 	// beforeLoad, when set (tests), runs as a key load starts.
@@ -80,6 +86,9 @@ type keyState struct {
 type calKeys struct {
 	access *calendar.Access // nil when the keys did not unlock
 	err    string           // the secret-free reason they did not
+	// gate is the write gate's verdict on these keys and the calendar's
+	// cached type (ruling M4-R39).
+	gate calendar.Gate
 	// settings is every non-row input of the render: the calendar's default
 	// notifications and the IDs of the keys that open it (sorted calendar
 	// keys, sorted address keys), so a settings change or a key rotation
@@ -100,11 +109,16 @@ func newCalKeys(calID string, a *calendar.Access, addrTags []string) *calKeys {
 		calTags = append(calTags, keyTag(k.ID, k.Unlocked))
 	}
 	slices.Sort(calTags)
+	// Writable is an input too (ruling M4-R1): a change of the member's
+	// permissions, of the type or of the passphrase verification must change
+	// the ETags and the token generation, so clients re-read the calendar's
+	// privileges.
 	settings, _ := json.Marshal(struct {
 		PartDay, FullDay          json.RawMessage
 		CalendarKeys, AddressKeys []string
-	}{partDay, fullDay, calTags, addrTags})
-	return &calKeys{access: a, settings: settings, hash: settingsHash(settings), gen: tokenGen(calID, settings),
+		Writable                  bool
+	}{partDay, fullDay, calTags, addrTags, a.Writable()})
+	return &calKeys{access: a, gate: a.Gate(a.Type), settings: settings, hash: settingsHash(settings), gen: tokenGen(calID, settings),
 		partDay: partDay, fullDay: fullDay}
 }
 
@@ -130,7 +144,8 @@ func addressKeyTags(u *keys.Unlocked) []string {
 		}
 		for _, k := range addr.Keys {
 			unlocked := false
-			if key, err := crypto.NewKeyFromArmored(string(k.PrivateKey)); err == nil {
+			// go-proton-api decodes the armor: PrivateKey is the binary key.
+			if key, err := crypto.NewKey(k.PrivateKey); err == nil {
 				unlocked = open[key.GetFingerprint()]
 			}
 			tags = append(tags, keyTag(k.ID, unlocked))
@@ -140,8 +155,8 @@ func addressKeyTags(u *keys.Unlocked) []string {
 	return tags
 }
 
-func failedCalKeys(calID, reason string) *calKeys {
-	return &calKeys{err: reason, settings: keysUnavailable, hash: settingsHash(keysUnavailable), gen: tokenGen(calID, keysUnavailable)}
+func failedCalKeys(calID string, typ calendar.Type, reason string) *calKeys {
+	return &calKeys{err: reason, gate: (*calendar.Access)(nil).Gate(typ), settings: keysUnavailable, hash: settingsHash(keysUnavailable), gen: tokenGen(calID, keysUnavailable)}
 }
 
 // tokenGen is the generation part of calendar calID's sync tokens: 8 hex of
@@ -191,6 +206,35 @@ func (r *renderer) has(ids []string) bool {
 		}
 	}
 	return true
+}
+
+// noteGates records the decided gates of cals, installed for account; kmu
+// held for writing.
+func (r *renderer) noteGates(account string, cals map[string]*calKeys) {
+	if r.decided == nil {
+		r.decided = map[string]bool{}
+	}
+	for id, ck := range cals {
+		if ck.gate != calendar.GateUndecided {
+			r.decided[account+"\x00"+id] = ck.gate == calendar.GateOpen
+		}
+	}
+}
+
+// advertised is the privileges calendar id is advertised with (rulings
+// M4-R39, M4-R40): its gate when decided, else the last decided one;
+// known is false while none was ever decided.
+func (r *renderer) advertised(id string, ck *calKeys) (writable, known bool) {
+	if ck.gate != calendar.GateUndecided {
+		return ck.gate == calendar.GateOpen, true
+	}
+	r.kmu.RLock()
+	defer r.kmu.RUnlock()
+	if r.ks == nil {
+		return false, false
+	}
+	writable, known = r.decided[r.ks.account+"\x00"+id]
+	return writable, known
 }
 
 // calKeys returns calendar id's keys, nil when they were not loaded.

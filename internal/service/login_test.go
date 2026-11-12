@@ -940,6 +940,10 @@ func TestEveryMethodAfterCloseIsBlocked(t *testing.T) {
 			_, err := e.svc.ObjectsByUID(ctx, "cal", []string{"a@x"})
 			return err
 		},
+		"ObjectsByName": func() error {
+			_, err := e.svc.ObjectsByName(ctx, "cal", []string{"a@x.ics"})
+			return err
+		},
 		"Changes": func() error { _, err := e.svc.Changes(ctx, "cal", ""); return err },
 		"Serve":   func() error { return e.svc.Serve(ctx, service.ServeOptions{}) },
 	}

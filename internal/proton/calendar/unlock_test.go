@@ -3,8 +3,10 @@ package calendar_test
 import (
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -126,12 +128,14 @@ func TestUnlockSkipsUndecryptableKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if n := a.KR.CountEntities(); n != 1 {
-		t.Fatalf("keyring holds %d keys, want 1", n)
+	// The fake lists the locked key, then a retired key and the primary
+	// one, both opening with the passphrase.
+	if n := a.KR.CountEntities(); n != 2 {
+		t.Fatalf("keyring holds %d keys, want 2 (every key but the locked one)", n)
 	}
 	// Every listed key is named, the locked one too, with whether it
 	// unlocked: the list changes on a rotation and on a reactivation.
-	if want := []calendar.KeyState{{ID: "key0"}, {ID: "key1", Unlocked: true}}; !slices.Equal(a.Keys, want) {
+	if want := []calendar.KeyState{{ID: "key0"}, {ID: "key1", Unlocked: true}, {ID: "key2", Unlocked: true}}; !slices.Equal(a.Keys, want) {
 		t.Errorf("Keys = %+v, want %+v", a.Keys, want)
 	}
 	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
@@ -225,5 +229,381 @@ func TestUnlockResolvesSecondAddressMember(t *testing.T) {
 	defer a.Close()
 	if a.MemberID != cal.MemberID || a.AddressID != u.Addresses[1].ID {
 		t.Fatalf("member %q address %q, want %q and the second address %q", a.MemberID, a.AddressID, cal.MemberID, u.Addresses[1].ID)
+	}
+}
+
+func fingerprints(kr *crypto.KeyRing) []string {
+	var out []string
+	for _, k := range kr.GetKeys() {
+		out = append(out, k.GetFingerprint())
+	}
+	return out
+}
+
+// Would fail if Primary took any key but the one flagged 2 (say the first or
+// the last unlocked one), or the whole keyring.
+func TestPrimaryKeyIsTheFlaggedOne(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	id := f.AddCalendar(f.Username, protontest.Calendar{ExtraLockedKey: true})
+	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.Primary == nil || a.Primary.CountEntities() != 1 {
+		t.Fatalf("Primary = %v, want a ring of exactly one key", a.Primary)
+	}
+	want := fingerprints(f.CalendarKeyRing(id))
+	if got := fingerprints(a.Primary); !slices.Equal(got, want) {
+		t.Errorf("Primary = %v, want the flagged key %v", got, want)
+	}
+	if retired := fingerprints(f.RetiredCalendarKeyRing(id)); slices.Equal(fingerprints(a.Primary), retired) {
+		t.Error("Primary is the retired key")
+	}
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
+	msg, err := crypto.NewPGPMessageFromArmored(f.EncryptToCalendar(id, []byte("probe")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Primary.Decrypt(msg, nil, 0); err != nil {
+		t.Errorf("a message to the primary key does not open with Primary: %v", err)
+	}
+}
+
+// Would fail if verification used no signature, the wrong plaintext, or never
+// ran (PassphraseVerified false), or if Signer were another address's key.
+func TestPassphraseSignatureVerifiedWithOurAddressKey(t *testing.T) {
+	t.Parallel()
+	t.Run("first address", func(t *testing.T) {
+		t.Parallel()
+		f, c, u := session(t)
+		f.AddCalendar(f.Username, protontest.Calendar{})
+		a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		if !a.PassphraseVerified {
+			t.Fatal("PassphraseVerified = false for a genuine signature")
+		}
+		if got, want := fingerprints(a.Signer), fingerprints(f.AddressKeyRing()); !slices.Equal(got, want) {
+			t.Errorf("Signer = %v, want the first address's primary key %v", got, want)
+		}
+	})
+	t.Run("second address", func(t *testing.T) {
+		t.Parallel()
+		f, c, _ := session(t)
+		f.AddAddress(f.Username, "second@proton.local")
+		u := unlockKeys(t, c, f.Password)
+		f.AddCalendar(f.Username, protontest.Calendar{ToSecondAddress: true})
+		a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		if !a.PassphraseVerified {
+			t.Fatal("PassphraseVerified = false: the second address's key signed it")
+		}
+		want, first := fingerprints(f.OtherAddressKeyRing()), fingerprints(f.AddressKeyRing())
+		if slices.Equal(want, first) {
+			t.Fatal("precondition: the two addresses share a key")
+		}
+		if got := fingerprints(a.Signer); !slices.Equal(got, want) || a.Signer.CountEntities() != 1 {
+			t.Errorf("Signer = %v, want the member's address key %v alone", got, want)
+		}
+	})
+	t.Run("signer signs and the address key verifies", func(t *testing.T) {
+		t.Parallel()
+		f, c, u := session(t)
+		f.AddCalendar(f.Username, protontest.Calendar{})
+		a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := crypto.NewPlainMessage([]byte("x"))
+		sig, err := a.Signer.SignDetached(msg)
+		if err != nil {
+			t.Fatalf("Signer cannot sign: %v", err)
+		}
+		if err := f.AddressKeyRing().VerifyDetached(msg, sig, crypto.GetUnixTime()); err != nil {
+			t.Errorf("signature does not verify with the address key: %v", err)
+		}
+		// Close clears the copy only: the account's key still signs.
+		a.Close()
+		if _, err := u.AddrKRs[a.AddressID].SignDetached(msg); err != nil {
+			t.Errorf("closing the calendar broke the shared address key: %v", err)
+		}
+	})
+}
+
+// Would fail if a bad signature were an unlock error, or if it left the
+// calendar writable.
+func TestBadPassphraseSignatureLeavesTheCalendarReadOnly(t *testing.T) {
+	t.Parallel()
+	f, c, u := sessionWith(t, protontest.Options{BadPassphraseSignature: true})
+	id := f.AddCalendar(f.Username, protontest.Calendar{})
+	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+	if err != nil {
+		t.Fatalf("a bad signature must not fail the unlock: %v", err)
+	}
+	defer a.Close()
+	if a.PassphraseVerified || a.Writable() {
+		t.Errorf("verified %v, writable %v; want neither", a.PassphraseVerified, a.Writable())
+	}
+	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe"))) // still readable
+}
+
+// Would fail if Writable ignored the type, the Write bit (8), or the
+// verification, or accepted any non-zero permission.
+func TestWritableNeedsTheWriteBit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		typ   int
+		perms int
+		bad   bool
+		want  bool
+	}{
+		{"owner", 0, 0, false, true}, // the fake serves 127
+		{"write bit alone", 0, 8, false, true},
+		{"view only", 0, 2 | 4, false, false},
+		{"availability only", 0, 1, false, false},
+		{"admin without write", 0, 16 | 32, false, false},
+		{"write but a bad signature", 0, 8, true, false},
+		{"write but a subscribed calendar", 1, 8, false, false},
+		{"write but holidays", 2, 127, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, c, u := sessionWith(t, protontest.Options{BadPassphraseSignature: tc.bad})
+			f.AddCalendar(f.Username, protontest.Calendar{Type: tc.typ, Permissions: tc.perms})
+			cal := firstCalendar(t, c)
+			a, err := calendar.Unlock(t.Context(), c, u, cal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			if got := a.Writable(); got != tc.want {
+				t.Errorf("Writable = %v, want %v (type %d, perms %d, verified %v)", got, tc.want, tc.typ, a.Permissions, a.PassphraseVerified)
+			}
+			if tc.perms != 0 && a.Permissions != tc.perms {
+				t.Errorf("Permissions = %d, want the bootstrap's %d", a.Permissions, tc.perms)
+			}
+		})
+	}
+}
+
+// Unlocking many calendars at once copies the one shared address key for
+// each Signer: under -race this fails if the copy is not serialised (the
+// go-crypto serialisation cache is written on a shared key's first copy).
+func TestConcurrentUnlocksShareTheAddressKeySafely(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	const n = 8
+	for range n {
+		f.AddCalendar(f.Username, protontest.Calendar{})
+	}
+	cals, err := calendar.List(t.Context(), c)
+	if err != nil || len(cals) != n {
+		t.Fatalf("List: %v (%d)", err, len(cals))
+	}
+	var wg sync.WaitGroup
+	signers := make([]*calendar.Access, n)
+	for i, cal := range cals {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a, err := calendar.Unlock(t.Context(), c, u, cal)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			signers[i] = a
+		}()
+	}
+	wg.Wait()
+	for i, a := range signers {
+		if a == nil || a.Signer == nil || !a.Writable() {
+			t.Fatalf("calendar %d: not writable after a concurrent unlock", i)
+		}
+		a.Close()
+	}
+}
+
+// Would fail if a stripped signature, or a genuine signature of ours over
+// another plaintext (a replay, research G), counted as verified; reads keep
+// working.
+func TestStrippedOrReplayedPassphraseSignatureIsNotVerified(t *testing.T) {
+	t.Parallel()
+	for name, o := range map[string]protontest.Options{
+		"empty":    {EmptyPassphraseSignature: true},
+		"replayed": {ReplayedPassphraseSignature: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, c, u := sessionWith(t, o)
+			id := f.AddCalendar(f.Username, protontest.Calendar{})
+			a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+			if err != nil {
+				t.Fatalf("must not be an unlock error: %v", err)
+			}
+			defer a.Close()
+			if a.PassphraseVerified || a.Writable() {
+				t.Errorf("verified %v, writable %v; want neither", a.PassphraseVerified, a.Writable())
+			}
+			decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
+		})
+	}
+}
+
+// The Signer is the address's primary key, not any key of its ring: the ring
+// here holds a stranger first, and the address lists it first, unflagged.
+func TestSignerIsThePrimaryKeyOfTheAddress(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{})
+	cal := firstCalendar(t, c)
+	extra, err := crypto.GenerateKey("x", "x@x", "x25519", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := extra.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr, err := crypto.NewKeyRing(extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range u.AddrKRs[cal.AddressID].GetKeys() {
+		if err := kr.AddKey(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u2 := *u
+	u2.AddrKRs = map[string]*crypto.KeyRing{}
+	for k, v := range u.AddrKRs {
+		u2.AddrKRs[k] = v
+	}
+	u2.AddrKRs[cal.AddressID] = kr
+	u2.Addresses = slices.Clone(u.Addresses)
+	for i, a := range u2.Addresses {
+		if a.ID == cal.AddressID {
+			u2.Addresses[i].Keys = append(gpa.Keys{{ID: "extra", PrivateKey: bin, Active: true}}, a.Keys...)
+		}
+	}
+	a, err := calendar.Unlock(t.Context(), c, &u2, cal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if got, want := fingerprints(a.Signer), fingerprints(f.AddressKeyRing()); !slices.Equal(got, want) {
+		t.Errorf("Signer = %v, want the address's primary key %v", got, want)
+	}
+}
+
+// Would fail if the permissions came from the first member of the bootstrap
+// (the foreign one, Permissions 1) rather than ours.
+func TestPermissionsAreOurOwnMembers(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{ForeignMemberFirst: true, Permissions: 8})
+	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.Permissions != 8 || !a.Writable() {
+		t.Errorf("Permissions = %d, writable %v; want our member's 8 and writable", a.Permissions, a.Writable())
+	}
+}
+
+// No flagged key, or two (ruling M4-R4), is an anomalous bootstrap: reads
+// work, there is no Primary and the calendar is not writable.
+func TestAnomalousPrimaryFlagsFailClosed(t *testing.T) {
+	t.Parallel()
+	for name, cal := range map[string]protontest.Calendar{
+		"no primary":  {NoPrimaryKey: true},
+		"two primary": {TwoPrimaryKeys: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, c, u := session(t)
+			id := f.AddCalendar(f.Username, cal)
+			a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			if a.Primary != nil || a.Writable() {
+				t.Errorf("Primary %v, writable %v; want none and read only", a.Primary, a.Writable())
+			}
+			if !a.PassphraseVerified {
+				t.Error("the passphrase itself is genuine")
+			}
+			decrypts(t, a, f.EncryptToCalendar(id, []byte("probe")))
+		})
+	}
+}
+
+// Ruling M4-R39: the passphrase signature is checked only with our
+// member's address keyring unlocked. When it is not (here the member's
+// address is one whose keys did not unlock, the passphrase opening with
+// another of ours), nothing was checked: the gate is undecided, never
+// closed (a write then answers 503, not 403).
+func TestUnverifiableSignatureLeavesTheGateUndecided(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{})
+	cal := firstCalendar(t, c)
+	if cal.MemberID == "" {
+		t.Fatal("test bug: the listing names no member, Unlock would look it up")
+	}
+	cal.AddressID = "an-address-whose-keys-are-locked"
+	a, err := calendar.Unlock(t.Context(), c, u, cal)
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	defer a.Close()
+	if a.PassphraseChecked || a.PassphraseVerified {
+		t.Errorf("checked %v, verified %v; want neither", a.PassphraseChecked, a.PassphraseVerified)
+	}
+	if g := a.Gate(calendar.Normal); g != calendar.GateUndecided {
+		t.Errorf("Gate = %v, want undecided", g)
+	}
+}
+
+// Would fail if Gate confused its three verdicts.
+func TestGateVerdicts(t *testing.T) {
+	t.Parallel()
+	open := func() *calendar.Access {
+		return &calendar.Access{Type: calendar.Normal, Permissions: 127, PassphraseChecked: true, PassphraseVerified: true,
+			Primary: &crypto.KeyRing{}, Signer: &crypto.KeyRing{}}
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(a *calendar.Access)
+		typ  calendar.Type
+		want calendar.Gate
+	}{
+		{"writable", func(*calendar.Access) {}, calendar.Normal, calendar.GateOpen},
+		{"holidays", func(*calendar.Access) {}, calendar.ParseType("holidays"), calendar.GateClosed},
+		{"no Write bit", func(a *calendar.Access) { a.Permissions = 2 | 4 }, calendar.Normal, calendar.GateClosed},
+		{"checked, bad", func(a *calendar.Access) { a.PassphraseVerified = false }, calendar.Normal, calendar.GateClosed},
+		{"not checked", func(a *calendar.Access) { a.PassphraseChecked, a.PassphraseVerified = false, false }, calendar.Normal, calendar.GateUndecided},
+		{"no write key", func(a *calendar.Access) { a.Primary = nil }, calendar.Normal, calendar.GateUndecided},
+	} {
+		a := open()
+		tc.edit(a)
+		if got := a.Gate(tc.typ); got != tc.want {
+			t.Errorf("%s: Gate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got := (*calendar.Access)(nil).Gate(calendar.Normal); got != calendar.GateUndecided {
+		t.Errorf("no keys: Gate = %v, want undecided", got)
+	}
+	if got := (*calendar.Access)(nil).Gate(calendar.ParseType("subscribed")); got != calendar.GateClosed {
+		t.Errorf("no keys, subscribed: Gate = %v, want closed", got)
 	}
 }

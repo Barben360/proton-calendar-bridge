@@ -3,6 +3,7 @@ module github.com/Barben360/proton-calendar-bridge
 go 1.27
 
 require (
+	github.com/ProtonMail/go-crypto v1.5.2-proton
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
 	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton
@@ -20,7 +21,6 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/ProtonMail/bcrypt v0.0.0-20211005172633-e235017c1baf // indirect
 	github.com/ProtonMail/gluon v0.17.0 // indirect
-	github.com/ProtonMail/go-crypto v1.5.2-proton // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
 	github.com/PuerkitoBio/goquery v1.12.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect

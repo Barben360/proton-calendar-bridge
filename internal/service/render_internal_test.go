@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -12,9 +13,11 @@ import (
 )
 
 // Ruling M3-R16: each address key ID is tagged with whether its key is in
-// the address's unlocked keyring, so a reactivated key changes the tags.
+// the address's unlocked keyring, so a reactivated key changes the tags. The
+// fixture has the shape go-proton-api produces: the address is JSON-decoded
+// from armored keys, and the decode stores each key in binary.
 func TestAddressKeyTagsMarkUnlockedKeys(t *testing.T) {
-	gen := func() (*crypto.Key, []byte) {
+	gen := func() (*crypto.Key, string) {
 		k, err := crypto.GenerateKey("a", "a@x", "x25519", 0)
 		if err != nil {
 			t.Fatal(err)
@@ -23,7 +26,7 @@ func TestAddressKeyTagsMarkUnlockedKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return k, []byte(armored)
+		return k, armored
 	}
 	open, openArmor := gen()
 	_, lockedArmor := gen()
@@ -31,10 +34,20 @@ func TestAddressKeyTagsMarkUnlockedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := &keys.Unlocked{
-		Addresses: []gpa.Address{{ID: "addr1", Keys: gpa.Keys{{ID: "k2", PrivateKey: lockedArmor}, {ID: "k1", PrivateKey: openArmor}}}},
-		AddrKRs:   map[string]*crypto.KeyRing{"addr1": kr},
+	raw, err := json.Marshal(map[string]any{"ID": "addr1", "Keys": []map[string]any{
+		{"ID": "k2", "PrivateKey": lockedArmor, "Active": 1}, {"ID": "k1", "PrivateKey": openArmor, "Active": 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	var addr gpa.Address
+	if err := json.Unmarshal(raw, &addr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := crypto.NewKey(addr.Keys[0].PrivateKey); err != nil {
+		t.Fatalf("precondition: go-proton-api does not store binary keys: %v", err)
+	}
+	u := &keys.Unlocked{Addresses: []gpa.Address{addr}, AddrKRs: map[string]*crypto.KeyRing{"addr1": kr}}
 	if got, want := addressKeyTags(u), []string{"k1:unlocked", "k2:locked"}; !slices.Equal(got, want) {
 		t.Errorf("addressKeyTags = %v, want %v", got, want)
 	}

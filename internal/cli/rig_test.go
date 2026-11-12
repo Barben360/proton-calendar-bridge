@@ -121,6 +121,10 @@ func (*stubAPI) ObjectsByUID(context.Context, string, []string) ([]service.Objec
 	return nil, nil
 }
 
+func (*stubAPI) ObjectsByName(context.Context, string, []string) ([]service.Object, error) {
+	return nil, nil
+}
+
 func (*stubAPI) Changes(context.Context, string, string) (service.ChangeSet, error) {
 	return service.ChangeSet{}, nil
 }
@@ -133,6 +137,11 @@ func (*stubAPI) RemoveClient(context.Context, string) (service.Client, error) {
 	return service.Client{}, nil
 }
 func (*stubAPI) CheckClient(context.Context, string, string) (bool, time.Duration) { return false, 0 }
+
+func (*stubAPI) PutObject(context.Context, string, string, []byte, service.Precondition) (service.PutResult, error) {
+	return service.PutResult{}, nil
+}
+func (*stubAPI) DeleteObject(context.Context, string, string, service.Precondition) error { return nil }
 
 func (s *stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return nil, nil }
 func (s *stubAPI) Close() error                                          { s.closed++; return s.closeErr }

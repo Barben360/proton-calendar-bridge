@@ -9,7 +9,7 @@ Planned shape:
 - **Core** (Go): accounts and login (as unattended as Proton allows), sync
   engine on Proton's change feed, encrypted local cache, access policy, and an
   iCalendar-native event model (decision 0012; JSCalendar deferred).
-- **Adapters**: CalDAV (Thunderbird first; read-only so far) and a CLI; REST and
+- **Adapters**: CalDAV (Thunderbird first; read and write) and a CLI; REST and
   MCP adapters are out of scope for now (decision 0007).
 - **Runs** headless (systemd / Docker) or on a desktop, same daemon.
 
@@ -20,13 +20,13 @@ caloxide.
 
 ## Status
 
-Design phase, milestone M3 (CalDAV read): `pcb login` (password, TOTP,
+Design phase, milestone M4 (CalDAV writes): `pcb login` (password, TOTP,
 CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status`,
 `pcb calendar list`, `pcb sync`, `pcb event list`, `pcb client` and
-`pcb serve` (read-only CalDAV for Thunderbird) are built and tested
-against a fake Proton; writes come with M4, the background daemon with M5. The live
-sessions against the test account (M1, then M2 for the change feed, `pcb-lab probe feed`) are deferred until the author can solve a
-CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session" and "M2 live session"); the cache and sync rules are source-based until then. The design is in
+`pcb serve` (CalDAV for Thunderbird, reads and writes) are built and tested
+against a fake Proton only; the background daemon comes with M5. The live
+sessions against the test account (M1, M2 for the change feed, then step 6 for Thunderbird and the M4 writes) are deferred until the author can solve a
+CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", step 6); until then the cache, sync and write rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before step 6 has run. The design is in
 `spec/SPEC.md`.
 
 ## Usage
@@ -62,13 +62,31 @@ pcb serve                    # prints the URL to enter, e.g. "Thunderbird URL: h
 ```
 
 In Thunderbird: New Calendar > On the Network, format CalDAV, the printed URL as Location, any username and the
-app password (the live session against the bridge runs after M4: `spec/HUMAN-CHECKS.md`, step 6). `pcb serve` keeps the cache in sync (a pass every 30 s) and serves it read-only until Ctrl-C
+app password (the live session against the bridge is `spec/HUMAN-CHECKS.md` step 6, not run yet). `pcb serve` keeps the cache in sync (a pass every 30 s) and serves it, with writes, until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0); it refuses to start logged out (exit 10, `pcb login`) or
 while `pcb sync` runs (exit 20), and stops when Proton needs you again (exit 10). Logs go to stderr, IDs only.
 After each sync pass, while an event is served as a placeholder (it could not be decrypted) or marked
 `X-PCB-INTEGRITY:unverified` (a signature did not verify), a duplicate
 master is left out or a calendar's keys fail, it logs a `render counters` line (counts and calendar IDs), and once
 more when they change; `pcb status` does not show these counts, since only the serving process has them.
+
+## Writes from Thunderbird
+
+Creating, editing, moving and deleting events, single occurrences included, go to Proton while `pcb serve` runs: each change is one Proton write call, read back before Thunderbird gets its answer, and never retried once it may have reached Proton (the one exception: it is resent once when Proton answers 401 for an expired token before processing it, which refreshes the session, M4-R23). Thunderbird shows what Proton stored, which can differ from what it sent (the full table: `spec/mapping.md`):
+
+- alarms become Proton notifications (email or device, before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost;
+- `STATUS:TENTATIVE` is dropped (Proton refuses it), your colour choice is ignored (Proton's colour stays), `DURATION` becomes an end time, a "monthly on the 2nd Tuesday" or "every weekday" rule is written in Proton's equivalent form;
+- unknown properties (Thunderbird's `X-MOZ-*` and others) are kept, encrypted.
+
+Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely. For a calendar without offline support, Thunderbird shows a generic error and then **disables the calendar** until you enable it again (E08 §4.2); with offline support it keeps the change locally and retries it silently. Subscribe to pcb calendars with "Offline support" checked (the default in the New Calendar dialog; Calendar properties otherwise). The refusals:
+
+- calendars you may not write: holidays and subscribed calendars, calendars where your member lacks write permission, calendars whose key signature does not check out (`pcb calendar list` shows them `read_only`);
+- adding or removing attendees, or an attendee on a new event: invitations are not supported, and **pcb never notifies attendees** in v1 (moving an occurrence of a meeting keeps its attendees but sends them nothing);
+- recurrence rules Proton cannot hold: hourly or finer, a count above 49, an end after 2037-12-31, `RDATE`, `EXRULE`, "this and all future occurrences" sent as one change, and the other forms in `spec/mapping.md` §4;
+- floating times (no time zone) and time zones Go's database does not know;
+- events pcb cannot rewrite safely: one it cannot decrypt or verify, one written by another person, someone else's invitation, one whose key material changed since pcb first saw it.
+
+When Proton is unavailable, rate limiting or asking for a human verification (`pcb serve` logs it: open the Proton web app from the same network and complete it), or a change cannot be confirmed by reading it back, the answer is 503 and Thunderbird tries again later; pcb's cache then holds whatever Proton holds, which Thunderbird sees at its next sync. When someone changed the same event elsewhere in the meantime, the answer is 412 and Thunderbird offers its conflict dialog.
 
 The listener comes from `[caldav]` in `config.toml` (or `--listen`):
 
@@ -110,4 +128,8 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
 - **develonrails/carbonate** (MIT), **jmdlab/cal-gateway** (MIT) and **WentTheFox/caloxide** (MIT; derives from hydroxide, ferroxide and protoxide, all MIT), for the M2 sync design notes (ideas audited, no code copied; the feed research is in `spec/experiments/raw/m2-feed-research.md`, citations by file and line): carbonate's measured pitfall that a cursor derived at `latest` loses events and its ID-driven re-read that ignores `Action`; jmdlab's order (read the feed head before the full listing) and its rule that a re-read row answering 404 is a delete; caloxide's feed endpoint shapes and its 30 s poll with exponential backoff. Rewritten with our own tests (`internal/syncer`, `internal/store/cache`).
 - **WentTheFox/caloxide**, **develonrails/carbonate**, **jmdlab/cal-gateway** (all MIT) and **cheeseandcereal/proton-cal** (Unlicense), for the M3 CalDAV design notes (research, no code copied): what each had to patch around go-webdav (getctag and `supported-report-set`, privileges, sync-collection, body limits), the Proton card-to-iCalendar merge and the one-object-per-UID rule, tolerance of undecryptable events. Rewritten with our own tests (`internal/caldav`, `internal/ical`, `internal/proton/cards`).
+- **jmdlab/cal-gateway** (MIT), **cheeseandcereal/proton-cal** (Unlicense), **develonrails/carbonate** (MIT) and **WentTheFox/caloxide** (MIT), for the M4 write design (research `spec/experiments/raw/m4-research.md`, citations by file and line; no code copied, every rule rewritten with our own tests):
+  - cal-gateway's alarm rules (`internal/proton/notifications.go`, which it says it ported from the web client): EMAIL to an email notification, DISPLAY and AUDIO to a device one, relative-to-start triggers only, nothing after the start except on all-day events, Proton's per-unit bounds, at most 10, and the tri-state of `Notifications` on update (`internal/ical/alarms_write.go`, `internal/service/writeplan.go`); also its refusals of floating times and `RANGE=THISANDFUTURE`, its RRULE INTERVAL bounds, its mirroring of a full PUT onto master and exception rows, and its rule that a refusal must be an honest 403, never a 2xx no-op;
+  - proton-cal's RRULE limits (`docs/api.md`: FREQ, COUNT ≤ 49, UNTIL ≤ 2037-12-31, COUNT and UNTIL exclusive, MONTHLY and YEARLY forms; `internal/ical/validate.go`), its documentation of the sync endpoint, the property routing table, the fragment form, the sealing of each part, session-key reuse on update and full-replace semantics (`docs/api.md`, `docs/crypto.md`; `internal/proton/cards`, `internal/proton/events`, `internal/ical/write.go`), and its patch-in-place update;
+  - carbonate's and caloxide's live notes on Proton's refusals (signing with the member's address key, bare `SEQUENCE`, RECURRENCE-ID with RRULE), and caloxide's member permission bits (`Write = 8`, `internal/proton/calendar`).
 - The other prior art listed in spec §20: design references only; nothing from them is used in this repository so far.

@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -167,18 +168,57 @@ var richData = ics(oddUID, "Lunch <with> Zoé & \"co\" ]]>", "X-MOZ-LASTACK:2027
 type stub struct {
 	service.API
 
-	mu      sync.Mutex
-	colls   []service.Collection
-	objs    map[string][]service.Object     // calID → objects, listing order
-	deltas  map[string]service.ChangeSet    // token → answer, any calendar
-	gone    map[string]bool                 // calIDs Collections lists but reads call unknown
-	pending map[string]bool                 // calIDs whose reads say ErrCalendarPending
-	readErr error                           // every read fails with it
-	wait    time.Duration                   // CheckClient's retryAfter on a refusal
-	checks  int                             // CheckClient calls
-	reads   int                             // read calls
-	uidReqs [][]string                      // ObjectsByUID's uids, per call
-	before  func(ctx context.Context) error // runs first in each read, when set
+	mu       sync.Mutex
+	colls    []service.Collection
+	objs     map[string][]service.Object     // calID → objects, listing order
+	deltas   map[string]service.ChangeSet    // token → answer, any calendar
+	gone     map[string]bool                 // calIDs Collections lists but reads call unknown
+	pending  map[string]bool                 // calIDs whose reads say ErrCalendarPending
+	readErr  error                           // every read fails with it
+	wait     time.Duration                   // CheckClient's retryAfter on a refusal
+	checks   int                             // CheckClient calls
+	reads    int                             // read calls
+	uidReqs  [][]string                      // ObjectsByUID's uids, per call
+	nameReqs [][]string                      // ObjectsByName's names, per call
+	before   func(ctx context.Context) error // runs first in each read, when set
+	// aliases[calID][uid] is the name uid is served at instead of its
+	// canonical one.
+	aliases map[string]map[string]string
+	// The writes: each call recorded, answered with putRes or writeErr.
+	writes   []write
+	putRes   service.PutResult
+	writeErr error
+	// slow, when set, runs in each write before it answers, outside the
+	// lock; its error is the write's (a write that outlasts the listener's
+	// timeouts, or whose context ends meanwhile).
+	slow func(ctx context.Context) error
+	// misnamed makes ObjectsByName answer each object under another name
+	// (a service that broke its contract).
+	misnamed bool
+}
+
+// write is a PutObject or DeleteObject call the stub received.
+type write struct {
+	method, calID, name string
+	body                []byte
+	cond                service.Precondition
+}
+
+// served is the name the stub serves uid at in calID.
+func (s *stub) served(calID, uid string) string {
+	if a, ok := s.aliases[calID][uid]; ok {
+		return a
+	}
+	return service.ObjectName(uid)
+}
+
+// dels lists deletions for a ChangeSet (the stub names them).
+func dels(uids ...string) []service.ObjectInfo {
+	out := []service.ObjectInfo{}
+	for _, u := range uids {
+		out = append(out, service.ObjectInfo{UID: u})
+	}
+	return out
 }
 
 func newStub() *stub {
@@ -198,6 +238,7 @@ func newStub() *stub {
 		deltas:  map[string]service.ChangeSet{},
 		gone:    map[string]bool{},
 		pending: map[string]bool{},
+		aliases: map[string]map[string]string{},
 	}
 }
 
@@ -251,7 +292,7 @@ func (s *stub) Objects(ctx context.Context, calID string) ([]service.ObjectInfo,
 	}
 	var out []service.ObjectInfo
 	for _, o := range s.objs[calID] {
-		out = append(out, service.ObjectInfo{UID: o.UID, ETag: o.ETag})
+		out = append(out, service.ObjectInfo{UID: o.UID, Name: s.served(calID, o.UID), ETag: o.ETag})
 	}
 	for _, c := range s.colls {
 		if c.ID == calID {
@@ -270,14 +311,72 @@ func (s *stub) ObjectsByUID(ctx context.Context, calID string, uids []string) ([
 	s.mu.Unlock()
 	out := make([]service.Object, len(uids))
 	for i, uid := range uids {
-		out[i] = service.Object{UID: uid, Missing: true}
+		out[i] = service.Object{UID: uid, Name: s.served(calID, uid), Missing: true}
 		for _, o := range s.objs[calID] {
 			if o.UID == uid {
 				out[i] = o
+				out[i].Name = s.served(calID, uid)
 			}
 		}
 	}
 	return out, nil
+}
+
+// ObjectsByName serves each object at its served name only.
+func (s *stub) ObjectsByName(ctx context.Context, calID string, names []string) ([]service.Object, error) {
+	if err := s.read(ctx, calID); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.nameReqs = append(s.nameReqs, slices.Clone(names))
+	s.mu.Unlock()
+	out := make([]service.Object, len(names))
+	for i, name := range names {
+		out[i] = service.Object{Name: name, Missing: true}
+		for _, o := range s.objs[calID] {
+			if s.served(calID, o.UID) == name {
+				out[i] = o
+				out[i].Name = name
+				if s.misnamed {
+					out[i].Name = "not-" + name
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *stub) PutObject(ctx context.Context, calID, name string, body []byte, cond service.Precondition) (service.PutResult, error) {
+	if s.slow != nil {
+		if err := s.slow(ctx); err != nil {
+			return service.PutResult{}, err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes = append(s.writes, write{method: http.MethodPut, calID: calID, name: name, body: slices.Clone(body), cond: cond})
+	if s.writeErr != nil {
+		return service.PutResult{}, s.writeErr
+	}
+	return s.putRes, nil
+}
+
+func (s *stub) DeleteObject(ctx context.Context, calID, name string, cond service.Precondition) error {
+	if s.slow != nil {
+		if err := s.slow(ctx); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes = append(s.writes, write{method: http.MethodDelete, calID: calID, name: name, cond: cond})
+	return s.writeErr
+}
+
+func (s *stub) writeCalls() []write {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.writes)
 }
 
 func (s *stub) Changes(ctx context.Context, calID, token string) (service.ChangeSet, error) {
@@ -286,10 +385,17 @@ func (s *stub) Changes(ctx context.Context, calID, token string) (service.Change
 	}
 	if token == "" {
 		infos, tok, _ := s.Objects(ctx, calID)
-		return service.ChangeSet{Changed: infos, Deleted: []string{}, Token: tok}, nil
+		return service.ChangeSet{Changed: infos, Deleted: []service.ObjectInfo{}, Token: tok}, nil
 	}
 	if cs, ok := s.deltas[token]; ok {
-		return cs, nil
+		out := service.ChangeSet{Changed: slices.Clone(cs.Changed), Deleted: slices.Clone(cs.Deleted), Token: cs.Token}
+		for i, o := range out.Changed {
+			out.Changed[i].Name = s.served(calID, o.UID)
+		}
+		for i, o := range out.Deleted {
+			out.Deleted[i].Name = s.served(calID, o.UID)
+		}
+		return out, nil
 	}
 	return service.ChangeSet{}, &exitcode.Error{Code: exitcode.Usage, Err: service.ErrInvalidSyncToken, Hint: "x"}
 }
@@ -797,10 +903,10 @@ func TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T) {
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{
 		Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}},
-		Deleted: []string{"gone@x", "gone too/ü"},
+		Deleted: dels("gone@x", "gone too/ü"),
 		Token:   "tok-2",
 	}
-	s.deltas["tok-2"] = service.ChangeSet{Changed: []service.ObjectInfo{}, Deleted: []string{}, Token: "tok-2"}
+	s.deltas["tok-2"] = service.ChangeSet{Changed: []service.ObjectInfo{}, Deleted: dels(), Token: "tok-2"}
 	h := caldav.Handler(s, caldav.Options{})
 	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbSync("tok-1"), "Depth", "1"))
 	if len(ms.responses) != 3 {
@@ -879,9 +985,42 @@ func TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T) {
 			t.Errorf("%s: status %q with %d propstats; want a response-level 404 alone", p, r.status, r.propstats)
 		}
 	}
-	// One fetch for the batch, of the three named objects only.
-	if len(s.uidReqs) != 1 || len(s.uidReqs[0]) != 4 || !slices.Contains(s.uidReqs[0], "nobody@x") {
-		t.Errorf("ObjectsByUID calls %q", s.uidReqs)
+	// One fetch for the batch, of the six names in this calendar only (the
+	// service says which of them serve an object).
+	if len(s.nameReqs) != 1 || len(s.nameReqs[0]) != 6 || !slices.Contains(s.nameReqs[0], "nobody@x.ics") ||
+		slices.Contains(s.nameReqs[0], "newyear@x.ics") {
+		t.Errorf("ObjectsByName calls %q", s.nameReqs)
+	}
+}
+
+// An aliased object deleted between the change list and the render of its
+// calendar-data is a deletion at its alias, the only href a client knows.
+func TestSyncWithCalendarDataReportsAVanishedAliasAtItsAlias(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.aliases[workID] = map[string]string{"vanished@x": "my event.ics"}
+	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: "vanished@x", ETag: `"v1-vanished"`}}, Deleted: dels(), Token: "tok-2"}
+	h := caldav.Handler(s, caldav.Options{})
+	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><sync-level>1</sync-level><prop><getetag/><C:calendar-data/></prop></sync-collection>`
+	ms := parseMS(t, do(h, "REPORT", calPath(workID), body, "Depth", "1"))
+	if len(ms.responses) != 1 {
+		t.Fatalf("%d responses:\n%s", len(ms.responses), ms.raw)
+	}
+	if r := ms.get(t, calPath(workID)+"my event.ics"); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+		t.Errorf("the vanished alias: %+v", r)
+	}
+}
+
+// An object the service answers under another name than the href asked is
+// never served at that href: the href is a 404.
+func TestMultigetServesAnObjectOnlyAtItsOwnName(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.misnamed = true
+	h := caldav.Handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "Depth", "1"))
+	if r := ms.get(t, objPath(workID, plainUID)); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+		t.Errorf("a misnamed object: status %q, %d propstats; want a response-level 404", r.status, r.propstats)
 	}
 }
 
@@ -973,42 +1112,320 @@ func TestHrefNamesDecodeExactly(t *testing.T) {
 	}
 }
 
-// --- MUST 10/11: writes are M4 --------------------------------------------
+// --- MUST 10/11: writes ---------------------------------------------------
 
-func TestMust10And11WritesAreRefusedUntilM4AndHeadAnswers(t *testing.T) {
+// svcErr is err as the service returns it: in an *exitcode.Error.
+func svcErr(code exitcode.Code, err error) error {
+	return &exitcode.Error{Code: code, Err: err, Hint: "x"}
+}
+
+// MUST 10: a PUT with Thunderbird's headers reaches the service with the
+// object's name, the body byte for byte and the precondition as sent; a
+// create is 201, a replace 204, neither with an ETag or a body (E08 §4.1).
+func TestMust10PutIs201Or204WithoutAnETag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		created bool
+		hdr     []string
+		cond    service.Precondition
+		code    int
+	}{
+		{"create", true, []string{"If-None-Match", "*"}, service.Precondition{IfNoneMatchAny: true}, http.StatusCreated},
+		{"update", false, []string{"If-Match", `"v1-plain"`}, service.Precondition{IfMatch: `"v1-plain"`}, http.StatusNoContent},
+		{"forced", false, nil, service.Precondition{}, http.StatusNoContent},
+		{"If-Match *", false, []string{"If-Match", "*"}, service.Precondition{IfMatch: "*"}, http.StatusNoContent},
+	} {
+		s := newStub()
+		s.putRes = service.PutResult{Created: tc.created}
+		h := caldav.Handler(s, caldav.Options{})
+		body := string(richData)
+		rec := do(h, http.MethodPut, calPath(workID)+"3f2a1c9e-new%20one.ics", body,
+			append([]string{"Content-Type", "text/calendar; charset=utf-8", "Accept", "text/xml"}, tc.hdr...)...)
+		wantStatus(t, rec, tc.code)
+		if rec.Header().Get("ETag") != "" || rec.Body.Len() != 0 {
+			t.Errorf("%s: ETag %q, body %q; want neither", tc.name, rec.Header().Get("ETag"), rec.Body)
+		}
+		w := s.writeCalls()
+		if len(w) != 1 || w[0].method != http.MethodPut || w[0].calID != workID || w[0].name != "3f2a1c9e-new one.ics" ||
+			string(w[0].body) != body || !reflect.DeepEqual(w[0].cond, tc.cond) {
+			t.Errorf("%s: the service got %+v", tc.name, w)
+		}
+	}
+}
+
+// An If-None-Match naming ETags reaches the service as the list of them
+// (RFC 9110 §13.1.2: the service compares them with the object's, and a
+// missing object passes), from one header or several.
+func TestIfNoneMatchETagsReachTheService(t *testing.T) {
 	t.Parallel()
 	s := newStub()
 	h := caldav.Handler(s, caldav.Options{})
+	req := authed(call(http.MethodPut, objPath(workID, "new@x"), "x", "Content-Type", "text/calendar"))
+	req.Header.Add("If-None-Match", `"v1-a", W/"v1-b"`)
+	req.Header.Add("If-None-Match", `"v1-c"`)
+	wantStatus(t, serve(h, req), http.StatusNoContent)
+	wantStatus(t, do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-None-Match", ` "v1-d" `), http.StatusNoContent)
+	w := s.writeCalls()
+	if len(w) != 2 || !slices.Equal(w[0].cond.IfNoneMatch, []string{`"v1-a"`, `W/"v1-b"`, `"v1-c"`}) || w[0].cond.IfNoneMatchAny ||
+		!slices.Equal(w[1].cond.IfNoneMatch, []string{`"v1-d"`}) {
+		t.Errorf("the service got %+v", w)
+	}
+}
+
+// MUST 10: a failed precondition is a 412 with no body; a UID living
+// elsewhere is a 409 whose no-uid-conflict names that object's href (E08
+// §4.2, RFC 4791 §5.3.2.1), percent-encoded.
+func TestMust10PreconditionsAre412AndUIDConflictsAre409(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	put := func() *httptest.ResponseRecorder {
+		return do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar", "If-Match", `"v1-old"`)
+	}
+	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
+	rec := put()
+	wantStatus(t, rec, http.StatusPreconditionFailed)
+	wantBody(t, rec, "")
+
+	s.writeErr = svcErr(exitcode.Usage, &service.UIDConflictError{Href: "other one.ics"})
+	rec = put()
+	wantStatus(t, rec, http.StatusConflict)
+	wantBody(t, rec, `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:no-uid-conflict><D:href>`+
+		calPath(workID)+`other%20one.ics</D:href></C:no-uid-conflict></D:error>`)
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "xml") {
+		t.Errorf("409 Content-Type %q", ct)
+	}
+}
+
+// MUST 11: DELETE reaches the service with the name and If-Match, and is a
+// 204; a missing object is 404 (Thunderbird: success), a mismatch 412.
+// HEAD answers 200 with the ETag or 404, which ends Thunderbird's delete
+// flow after a 412 (E08 §4.3).
+func TestMust11DeleteIs204Or404Or412AndHeadAnswers(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	rec := do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
+	wantStatus(t, rec, http.StatusNoContent)
+	wantBody(t, rec, "")
+	if w := s.writeCalls(); len(w) != 1 || w[0].method != http.MethodDelete || w[0].name != objName(plainUID) ||
+		!reflect.DeepEqual(w[0].cond, service.Precondition{IfMatch: `"v1-plain"`}) {
+		t.Errorf("the service got %+v", w)
+	}
 	for _, tc := range []struct {
-		method, path string
-		hdr          []string
+		err  error
+		code int
 	}{
-		{"PUT", calPath(workID) + "3f2a1c9e-new.ics", []string{"If-None-Match", "*", "Content-Type", "text/calendar; charset=utf-8"}},
-		{"PUT", objPath(workID, plainUID), []string{"If-Match", `"v1-plain"`}},
-		{"DELETE", objPath(workID, plainUID), []string{"If-Match", `"v1-plain"`}},
-		{"DELETE", objPath(holID, "newyear@x"), nil},
+		{svcErr(exitcode.Usage, service.ErrNoSuchObject), http.StatusNotFound},
+		{svcErr(exitcode.Usage, service.ErrPreconditionFailed), http.StatusPreconditionFailed},
 	} {
-		rec := do(h, tc.method, tc.path, string(ics("x", "x")), tc.hdr...)
-		wantStatus(t, rec, http.StatusForbidden)
-		var e el
-		if err := xml.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.XMLName != n(nsD, "error") {
-			t.Fatalf("%s: body %q is not a DAV:error", tc.method, rec.Body)
-		}
-		if _, ok := e.kid(n(nsD, "need-privileges")); !ok {
-			t.Errorf("%s: body %q lacks need-privileges", tc.method, rec.Body)
-		}
+		s.writeErr = tc.err
+		rec := do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
+		wantStatus(t, rec, tc.code)
+		wantBody(t, rec, "")
 	}
-	if _, reads := s.counts(); reads != 0 {
-		t.Errorf("refused writes made %d reads", reads)
-	}
+
 	o := s.objs[workID][0]
-	rec := do(h, "HEAD", objPath(workID, o.UID), "")
+	rec = do(h, "HEAD", objPath(workID, o.UID), "")
 	wantStatus(t, rec, http.StatusOK)
 	if rec.Header().Get("ETag") != o.ETag || rec.Header().Get("Content-Length") != fmt.Sprint(len(o.Data)) || rec.Body.Len() != 0 {
 		t.Errorf("HEAD: ETag %q, Content-Length %q, %d body bytes", rec.Header().Get("ETag"), rec.Header().Get("Content-Length"), rec.Body.Len())
 	}
 	wantStatus(t, do(h, "HEAD", objPath(workID, "nobody@x"), ""), http.StatusNotFound)
 	wantStatus(t, do(h, "GET", objPath(workID, "nobody@x"), ""), http.StatusNotFound)
+}
+
+// A write to a read-only calendar is 403 need-privileges naming the
+// privilege it lacks, without asking the service to write; so is the
+// service's own ErrNotWritable (the gate changed since the listing).
+func TestWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	const putBody = `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource><D:href>%s</D:href><D:privilege><D:write-content/></D:privilege></D:resource></D:need-privileges></D:error>`
+	const delBody = `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource><D:href>%s</D:href><D:privilege><D:unbind/></D:privilege></D:resource></D:need-privileges></D:error>`
+	rec := do(h, http.MethodPut, objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar")
+	wantStatus(t, rec, http.StatusForbidden)
+	wantBody(t, rec, fmt.Sprintf(putBody, objPath(holID, "newyear@x")))
+	rec = do(h, http.MethodDelete, objPath(holID, "newyear@x"), "")
+	wantStatus(t, rec, http.StatusForbidden)
+	wantBody(t, rec, fmt.Sprintf(delBody, calPath(holID)))
+	if w := s.writeCalls(); len(w) != 0 {
+		t.Errorf("writes to a read-only calendar reached the service: %+v", w)
+	}
+
+	s.writeErr = svcErr(exitcode.Usage, service.ErrNotWritable)
+	rec = do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
+	wantStatus(t, rec, http.StatusForbidden)
+	wantBody(t, rec, fmt.Sprintf(putBody, objPath(workID, plainUID)))
+	rec = do(h, http.MethodDelete, objPath(workID, plainUID), "")
+	wantStatus(t, rec, http.StatusForbidden)
+	wantBody(t, rec, fmt.Sprintf(delBody, calPath(workID)))
+}
+
+// Ruling M4-R40: a calendar whose gate was never decided advertises no
+// privileges: current-user-privilege-set is in a 404 propstat (E08: no
+// decision; Thunderbird keeps a read-only flag for good), in a Depth 0 and
+// a Depth 1 PROPFIND, and allprop leaves it out.
+func TestUndecidedPrivilegesAreA404Propstat(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.colls[1].ReadOnly, s.colls[1].PrivilegesUnknown, s.colls[1].WriteGateUndecided = true, true, true
+	h := caldav.Handler(s, caldav.Options{})
+	hs := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
+	one := parseMS(t, do(h, "PROPFIND", calPath(holID), tbServerInfo, "Depth", "0"))
+	for _, r := range []response{hs.get(t, calPath(holID)), one.get(t, calPath(holID))} {
+		if _, ok := r.props[n(nsD, "current-user-privilege-set")]; ok || !r.missing[n(nsD, "current-user-privilege-set")] {
+			t.Errorf("an undecided calendar: privileges %v, missing %v; want a 404 propstat", r.props[n(nsD, "current-user-privilege-set")], r.missing)
+		}
+	}
+	wantNames(t, "a decided calendar", privileges(t, hs.get(t, calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
+		n(nsD, "read"), n(nsD, "write"), n(nsD, "write-content"), n(nsD, "bind"), n(nsD, "unbind"))
+	all := parseMS(t, do(h, "PROPFIND", calPath(holID), "", "Depth", "0")).get(t, calPath(holID))
+	if _, ok := all.props[n(nsD, "current-user-privilege-set")]; ok || len(all.missing) != 0 {
+		t.Errorf("allprop of an undecided calendar: %+v", all)
+	}
+}
+
+// Ruling M4-R39: a calendar advertised read only whose gate is undecided
+// is not refused by the adapter: the write goes to the service, whose
+// ErrGateUndecided is a 503 with Retry-After.
+func TestUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.colls[1].WriteGateUndecided = true // Holidays: read only, undecided
+	s.writeErr = svcErr(exitcode.Blocked, service.ErrGateUndecided)
+	h := caldav.Handler(s, caldav.Options{})
+	for _, rec := range []*httptest.ResponseRecorder{
+		do(h, http.MethodPut, objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
+		do(h, http.MethodDelete, objPath(holID, "newyear@x"), ""),
+	} {
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
+			t.Errorf("%d, Retry-After %q; want 503, 30", rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+	if w := s.writeCalls(); len(w) != 2 {
+		t.Errorf("the service got %d writes, want both", len(w))
+	}
+}
+
+// A change the bridge refuses is a 403 whose DAV:error holds its pcb
+// precondition in the urn:pcb namespace and its reason (ours: the service
+// keeps Proton's text out of it), XML-escaped; a code that is not one of
+// ours is pcb:refused.
+func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	for _, tc := range []struct {
+		refusal *service.WriteRefusal
+		body    string
+	}{
+		{&service.WriteRefusal{Code: "pcb:unsupported-recurrence", Reason: "RRULE BYDAY=2MO & <more>"},
+			`<D:error xmlns:D="DAV:"><pcb:unsupported-recurrence xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">RRULE BYDAY=2MO &amp; &lt;more&gt;</pcb:reason></D:error>`},
+		{&service.WriteRefusal{Code: "pcb:proton-refused", Reason: "Proton refused the write (code 2001)"},
+			`<D:error xmlns:D="DAV:"><pcb:proton-refused xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">Proton refused the write (code 2001)</pcb:reason></D:error>`},
+		{&service.WriteRefusal{Code: "pcb:<bad>", Reason: "r"},
+			`<D:error xmlns:D="DAV:"><pcb:refused xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">r</pcb:reason></D:error>`},
+		{&service.WriteRefusal{Code: "other:x", Reason: "r"},
+			`<D:error xmlns:D="DAV:"><pcb:refused xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">r</pcb:reason></D:error>`},
+	} {
+		s.writeErr = svcErr(exitcode.Usage, tc.refusal)
+		for _, method := range []string{http.MethodPut, http.MethodDelete} {
+			rec := do(h, method, objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
+			wantStatus(t, rec, http.StatusForbidden)
+			wantBody(t, rec, tc.body)
+			if rec.Body.String() == rateLimitBody {
+				t.Error("the rate-limit body")
+			}
+		}
+	}
+}
+
+// The adapter's own refusals, before the service: a PUT body that is not
+// text/calendar is 415, over 8 MiB 413, an If-None-Match that names no
+// ETag 412; PUT or DELETE on a
+// collection 405, on no resource 404. None reaches the service.
+func TestPutRequestChecksComeFirst(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	obj := objPath(workID, plainUID)
+	for _, tc := range []struct {
+		name, method, target, body string
+		hdr                        []string
+		code                       int
+	}{
+		{"no Content-Type", http.MethodPut, obj, "x", nil, http.StatusUnsupportedMediaType},
+		{"text/plain", http.MethodPut, obj, "x", []string{"Content-Type", "text/plain"}, http.StatusUnsupportedMediaType},
+		{"application/xml", http.MethodPut, obj, "x", []string{"Content-Type", "application/xml"}, http.StatusUnsupportedMediaType},
+		{"broken Content-Type", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar; ="}, http.StatusUnsupportedMediaType},
+		{"over 8 MiB", http.MethodPut, obj, strings.Repeat("x", 8<<20+1), []string{"Content-Type", "text/calendar"}, http.StatusRequestEntityTooLarge},
+		{"If-None-Match without an ETag", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-None-Match", ","}, http.StatusPreconditionFailed},
+		{"DELETE If-None-Match without an ETag", http.MethodDelete, obj, "", []string{"If-None-Match", " , "}, http.StatusPreconditionFailed},
+		{"PUT a calendar", http.MethodPut, calPath(workID), "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
+		{"DELETE a calendar", http.MethodDelete, calPath(workID), "", nil, http.StatusMethodNotAllowed},
+		{"PUT the home set", http.MethodPut, home, "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
+		{"DELETE the principal", http.MethodDelete, principal, "", nil, http.StatusMethodNotAllowed},
+		{"PUT nested", http.MethodPut, calPath(workID) + "x/y.ics", "x", []string{"Content-Type", "text/calendar"}, http.StatusNotFound},
+		{"DELETE elsewhere", http.MethodDelete, "/nowhere.ics", "", nil, http.StatusNotFound},
+	} {
+		rec := do(h, tc.method, tc.target, tc.body, tc.hdr...)
+		if rec.Code != tc.code || rec.Body.Len() != 0 {
+			t.Errorf("%s: %d with body %q, want %d and none", tc.name, rec.Code, rec.Body, tc.code)
+		}
+	}
+	if _, reads := s.counts(); reads != 0 {
+		t.Errorf("the refused requests made %d service reads", reads)
+	}
+	if w := s.writeCalls(); len(w) != 0 {
+		t.Errorf("the refused requests reached the service: %+v", w)
+	}
+	// Exactly 8 MiB, and iCalendar spelt in capitals, pass.
+	wantStatus(t, do(h, http.MethodPut, obj, strings.Repeat("x", 8<<20), "Content-Type", "TEXT/Calendar; Charset=UTF-8"), http.StatusNoContent)
+	if w := s.writeCalls(); len(w) != 1 || len(w[0].body) != 8<<20 {
+		t.Errorf("an 8 MiB PUT: %d writes", len(w))
+	}
+}
+
+// A write the service cannot answer is a 503 with Retry-After: 30 and no
+// body, never a 4xx (ruling M3-R22): not serving, the calendar pending, a
+// write not confirmed, the keys dropped, a Usage error outside the
+// contract, an unknown error; logged without the body, except a pending
+// calendar or a client gone.
+func TestWritesAre503WhenTheServiceCannotAnswer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		warn bool
+	}{
+		{"not serving", svcErr(exitcode.Blocked, service.ErrNotServing), true},
+		{"pending", svcErr(exitcode.Blocked, service.ErrCalendarPending), false},
+		{"not confirmed", svcErr(exitcode.Blocked, service.ErrWriteNotConfirmed), true},
+		{"gate undecided", svcErr(exitcode.Blocked, service.ErrGateUndecided), true},
+		{"blocked", svcErr(exitcode.Blocked, errors.New(secretText)), true},
+		{"must act", svcErr(exitcode.MustAct, errors.New(secretText)), true},
+		{"a Usage error outside the contract", svcErr(exitcode.Usage, service.ErrInvalidSyncToken), true},
+		{"a bare error", errors.New(secretText), true},
+	} {
+		var logs bytes.Buffer
+		s := newStub()
+		s.writeErr = tc.err
+		h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+		for _, rec := range []*httptest.ResponseRecorder{
+			do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar"),
+			do(h, http.MethodDelete, objPath(workID, plainUID), ""),
+		} {
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
+				t.Errorf("%s: %d, Retry-After %q, body %q; want 503, 30, none", tc.name, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+			}
+		}
+		if got := strings.Contains(logs.String(), "level=WARN"); got != tc.warn {
+			t.Errorf("%s: warned %v, want %v:\n%s", tc.name, got, tc.warn, logs.String())
+		}
+	}
 }
 
 // --- MUST 12 --------------------------------------------------------------
@@ -1178,7 +1595,8 @@ func TestAvoid403OutsideGenuineRefusals(t *testing.T) {
 	}
 	for _, rec := range []*httptest.ResponseRecorder{
 		do(h, "REPORT", calPath(workID), tbSync("bad"), "Depth", "1"),
-		do(h, "PUT", objPath(workID, plainUID), "x"),
+		do(h, "PUT", objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
+		do(h, "DELETE", objPath(holID, "newyear@x"), ""),
 		do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "infinity"),
 		do(h, "REPORT", calPath(workID), `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"/>`, "Depth", "1"),
 	} {
@@ -1206,8 +1624,11 @@ func TestAvoid4xxWhenTheServiceIsUnavailable(t *testing.T) {
 		{"REPORT", calPath(workID), tbSync("urn:pcb:sync:1:e1:7:gen1"), "1"},
 		{"REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "1"},
 		{"GET", objPath(workID, plainUID), "", ""},
+		{"PUT", objPath(workID, plainUID), "x", ""},
+		{"PUT", objPath(holID, "newyear@x"), "x", ""},
+		{"DELETE", objPath(workID, plainUID), "", ""},
 	} {
-		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
+		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth, "Content-Type", "text/calendar")
 		wantStatus(t, rec, http.StatusServiceUnavailable)
 		if got := rec.Header().Get("Retry-After"); got != "30" {
 			t.Errorf("%s %s: Retry-After %q, want 30", tc.method, tc.path, got)
@@ -1218,6 +1639,9 @@ func TestAvoid4xxWhenTheServiceIsUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "level=WARN") {
 		t.Errorf("no warning logged for the 503s:\n%s", logs.String())
+	}
+	if w := s.writeCalls(); len(w) != 0 {
+		t.Errorf("writes reached a service that cannot answer: %+v", w)
 	}
 	wantStatus(t, serve(h, call("OPTIONS", calPath(workID), "")), http.StatusOK)
 	parseMS(t, do(h, "PROPFIND", "/", tbDetect, "Depth", "0"))
@@ -1301,7 +1725,7 @@ var spaceBetweenTags = regexp.MustCompile(`>\s+<`)
 func TestAvoidWhitespaceInLeafElements(t *testing.T) {
 	t.Parallel()
 	s := newStub()
-	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: []string{"gone@x"}, Token: "tok-2"}
+	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
 	h := caldav.Handler(s, caldav.Options{})
 	recs := []*httptest.ResponseRecorder{
 		do(h, "PROPFIND", "/", tbDetect, "Depth", "0"),
@@ -1339,7 +1763,7 @@ func TestAvoidWhitespaceInLeafElements(t *testing.T) {
 func TestAvoidUnclassifiableSyncResponses(t *testing.T) {
 	t.Parallel()
 	s := newStub()
-	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: oddUID, ETag: `"v1-odd"`}}, Deleted: []string{"gone@x"}, Token: "tok-2"}
+	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: oddUID, ETag: `"v1-odd"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
 	h := caldav.Handler(s, caldav.Options{})
 	for _, tok := range []string{"", "tok-1"} {
 		for _, r := range parseMS(t, do(h, "REPORT", calPath(workID), tbSync(tok), "Depth", "1")).responses {
@@ -1600,7 +2024,7 @@ func TestSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions(t *testi
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{
 		Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}, {UID: "vanished@x", ETag: `"v1-vanished"`}},
-		Deleted: []string{}, Token: "tok-2",
+		Deleted: dels(), Token: "tok-2",
 	}
 	h := caldav.Handler(s, caldav.Options{})
 	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><prop><getetag/><C:calendar-data/></prop></sync-collection>`
@@ -1705,11 +2129,15 @@ func TestPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T) {
 			{"REPORT", calPath(id), tbSync("urn:pcb:sync:1:e1:3:gen2"), "1"},
 			{"REPORT", calPath(id), tbMultiget(tbHref(id, "newyear@x")), "1"},
 			{"GET", objPath(id, "newyear@x"), "", ""},
+			{"PUT", objPath(id, "newyear@x"), "x", ""},
+			{"DELETE", objPath(id, "newyear@x"), "", ""},
 		} {
-			if id == holID && tc.method == "PROPFIND" && tc.depth == "0" {
-				continue // reads nothing but the listing, which says synced
+			if id == holID && (tc.method == "PROPFIND" && tc.depth == "0" || tc.method == "PUT" || tc.method == "DELETE") {
+				// Reads nothing but the listing, which says synced (and,
+				// for a write, read only: 403, as it is in every cache life).
+				continue
 			}
-			rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
+			rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth, "Content-Type", "text/calendar")
 			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
 				t.Errorf("%s %s (%s): %d, Retry-After %q, body %q; want 503, 30, none", tc.method, tc.path, id, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
 			}
@@ -1756,5 +2184,67 @@ func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
 		if len(ms.responses) != want {
 			t.Errorf("one synced, Depth %s: %d responses, want %d", depth, len(ms.responses), want)
 		}
+	}
+}
+
+// Ruling M4-R42: a write may outlast the listener's timeouts (Proton slow
+// or rate limiting). PUT and DELETE extend their connection's write
+// deadline, so a write that landed still delivers its 201 or 204; the read
+// timeout does not cut the request's context meanwhile (a cut context is a
+// 503 here, as the service would give).
+func TestSlowWriteStillDeliversItsAnswer(t *testing.T) {
+	t.Parallel()
+	const timeout = 250 * time.Millisecond
+	s := newStub()
+	s.putRes = service.PutResult{Created: true}
+	s.slow = func(ctx context.Context) error {
+		select {
+		case <-time.After(3 * timeout): // past both listener timeouts
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	srv := httptest.NewUnstartedServer(caldav.Handler(s, caldav.Options{}))
+	srv.Config.ReadTimeout, srv.Config.WriteTimeout = timeout, timeout
+	srv.Start()
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		method string
+		body   []byte
+		hdr    []string
+		want   int
+	}{
+		{http.MethodPut, ics("new@x", "New"), []string{"Content-Type", "text/calendar", "If-None-Match", "*"}, http.StatusCreated},
+		{http.MethodDelete, nil, nil, http.StatusNoContent},
+	} {
+		req, err := http.NewRequestWithContext(t.Context(), tc.method, srv.URL+objPath(workID, "new@x"), bytes.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(tc.hdr); i += 2 {
+			req.Header.Set(tc.hdr[i], tc.hdr[i+1])
+		}
+		resp, err := srv.Client().Do(authed(req))
+		if err != nil {
+			t.Errorf("%s: %v: the answer of a write that took longer than the listener's timeouts was lost", tc.method, err)
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("%s: status %d, want %d", tc.method, resp.StatusCode, tc.want)
+		}
+	}
+	if n := len(s.writeCalls()); n != 2 {
+		t.Errorf("%d writes reached the service, want 2", n)
+	}
+}
+
+// Ruling M4-R42: the connection of a write stays usable for at least
+// 150 s, longer than the service may take.
+func TestWriteBudgetCoversTheService(t *testing.T) {
+	t.Parallel()
+	if caldav.WriteBudget < 150*time.Second || caldav.WriteBudget <= service.MaxWriteDuration {
+		t.Errorf("write budget %v: want at least 150 s and more than the service's %v", caldav.WriteBudget, service.MaxWriteDuration)
 	}
 }

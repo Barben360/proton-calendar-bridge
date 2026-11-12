@@ -97,6 +97,12 @@ type Options struct {
 	// what pcb status shows); default err.Error(). The service passes its
 	// secret-free describer, so the cache never holds Proton's raw text.
 	Describe func(error) string
+	// Lock, when set, is called before each calendar is synced or dropped,
+	// and its result runs once the calendar's rows are stored or dropped:
+	// the service holds a calendar's lock there, so its writes and the
+	// pass's reads and applies of that calendar never interleave (ruling
+	// M4-R5). An error (ctx ended while waiting) ends the pass with it.
+	Lock func(ctx context.Context, calID string) (unlock func(), err error)
 }
 
 // Report is what a pass did, one entry per listed calendar in API order.
@@ -144,7 +150,13 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	for _, k := range known {
 		prev[k.ID] = k
 		if !listed[k.ID] {
-			if err := db.DropCalendar(ctx, k.ID); err != nil {
+			unlock, err := lockCalendar(ctx, o, k.ID)
+			if err != nil {
+				return Report{}, err
+			}
+			err = db.DropCalendar(ctx, k.ID)
+			unlock()
+			if err != nil {
 				return Report{}, storeErr("dropping calendar %s from the cache: %w", k.ID, err)
 			}
 		}
@@ -158,7 +170,12 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 	}
 	rep := Report{Calendars: make([]CalendarReport, 0, len(cals))}
 	for _, cal := range cals {
+		unlock, err := lockCalendar(ctx, o, cal.ID)
+		if err != nil {
+			return Report{}, err
+		}
 		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o)
+		unlock()
 		r.ID, r.Name = cal.ID, cal.Name
 		var se *StoreError
 		if r.Err != nil && (errors.As(r.Err, &se) || api.SessionWide(ctx, r.Err)) {
@@ -405,4 +422,12 @@ func toCache(r events.Row) cache.Row {
 		ID: r.ID, UID: r.UID, Start: r.Start, End: r.End, FullDay: r.FullDay,
 		RecurrenceID: r.RecurrenceID, RRule: r.RRule, LastEditTime: r.LastEditTime, Raw: r.Raw,
 	}
+}
+
+// lockCalendar takes calID's lock through o.Lock, when set.
+func lockCalendar(ctx context.Context, o Options, calID string) (func(), error) {
+	if o.Lock == nil {
+		return func() {}, nil
+	}
+	return o.Lock(ctx, calID)
 }

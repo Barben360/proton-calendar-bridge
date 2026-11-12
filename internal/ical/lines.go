@@ -1,8 +1,11 @@
 // Package ical is the iCalendar codec of the bridge: RFC 5545 content lines
 // (unfold, parse, fold, serialise) kept byte-exact for content it does not
 // model, the merge of Proton's decrypted card parts into one VEVENT, and the
-// per-UID VCALENDAR that CalDAV serves. Pure functions, no Proton or crypto
-// imports.
+// per-UID VCALENDAR that CalDAV serves; and its inverse for writes: what a
+// client PUTs validated and normalised (validate.go), routed to card parts
+// and patched line by line over the stored ones (write.go), its alarms made
+// Proton notifications (alarms_write.go). Pure functions, no Proton or
+// crypto imports.
 package ical
 
 import (

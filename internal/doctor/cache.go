@@ -36,14 +36,14 @@ func (c CacheCheck) Run(context.Context) Result {
 		r.Fix = "chmod 600 " + shellquote.Quote(path)
 	case info.QuickCheck != "ok":
 		r.Status, r.Message, r.Fix = StatusError, "cache is damaged: "+info.QuickCheck, rebuild
-	case info.Schema > 1:
+	case info.Schema > cache.SchemaVersion:
 		r.Status, r.Fix = StatusError, "upgrade pcb (or remove the cache and run `pcb sync --full` to rebuild it with this version)"
-		r.Message = fmt.Sprintf("cache has schema version %d, newer than this pcb supports (1)", info.Schema)
-	case info.Schema != 1:
+		r.Message = fmt.Sprintf("cache has schema version %d, newer than this pcb supports (%d)", info.Schema, cache.SchemaVersion)
+	case info.Schema < 1: // version 1 is an M3 file, upgraded by the next opening for writing
 		r.Status, r.Fix = StatusError, rebuild
 		r.Message = fmt.Sprintf("cache has an unknown schema version %d", info.Schema)
 	default:
-		r.Status, r.Message = StatusOK, path+" 600, schema 1, integrity ok"
+		r.Status, r.Message = StatusOK, fmt.Sprintf("%s 600, schema %d, integrity ok", path, info.Schema)
 	}
 	return r
 }

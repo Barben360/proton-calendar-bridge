@@ -33,7 +33,8 @@ func (s *server) report(w http.ResponseWriter, r *http.Request, t target) {
 
 // syncCollection answers RFC 6578's report as the service computed the
 // changes (ruling M3-R11): changed objects with the asked properties,
-// deletions as response-level 404s, and the new token. An empty token lists
+// deletions as response-level 404s at the name each object was served at
+// (its alias included, ruling M4-R22), and the new token. An empty token lists
 // everything; one the service cannot answer from is 403 valid-sync-token.
 // Depth is ignored (Thunderbird sends Depth: 1), and so is a DAV:limit: the
 // answer is never paged (ruling M3-R23); calendar-data is rendered for the
@@ -67,7 +68,10 @@ func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target
 		return
 	}
 	ms := newMultistatus()
-	deleted := cs.Deleted
+	deleted := make([]string, len(cs.Deleted))
+	for i, o := range cs.Deleted {
+		deleted[i] = o.Name
+	}
 	if q.wants(caldav("calendar-data")) {
 		gone, ok := s.withData(w, r, ms, c.ID, cs.Changed, q)
 		if !ok {
@@ -76,11 +80,11 @@ func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target
 		deleted = append(deleted, gone...) // deleted since the changes were read
 	} else {
 		for _, o := range cs.Changed {
-			objectResource(c.ID, o.UID, o.ETag, nil, false).write(ms, q)
+			objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
 		}
 	}
-	for _, uid := range deleted {
-		ms.notFound(objectHref(c.ID, uid))
+	for _, name := range deleted {
+		ms.notFound(objectHref(c.ID, name))
 	}
 	ms.syncToken(cs.Token)
 	ms.send(w)
@@ -114,23 +118,25 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 	if !ok {
 		return
 	}
-	// uidOf[i] is the UID hrefs[i] names in this calendar, "" if none.
-	uidOf := make([]string, len(hrefs))
-	var uids []string
+	// nameOf[i] is the resource name hrefs[i] names in this calendar, ""
+	// if it names nothing of it; the service says which object, if any, is
+	// served there (aliases included, ruling M4-R6).
+	nameOf := make([]string, len(hrefs))
+	var names []string
 	for i, h := range hrefs {
 		u, err := url.Parse(h)
 		if err != nil {
 			continue
 		}
 		if ht := resolve(u.Path); ht.kind == kindObject && ht.calseg == t.calseg {
-			uidOf[i] = ht.uid
-			uids = append(uids, ht.uid)
+			nameOf[i] = ht.name
+			names = append(names, ht.name)
 		}
 	}
 	var objs []service.Object
-	if len(uids) > 0 {
+	if len(names) > 0 {
 		var err error
-		if objs, err = s.api.ObjectsByUID(r.Context(), c.ID, uids); err != nil {
+		if objs, err = s.api.ObjectsByName(r.Context(), c.ID, names); err != nil {
 			s.fail(w, r, err)
 			return
 		}
@@ -138,7 +144,7 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 	ms := newMultistatus()
 	next := 0
 	for i, h := range hrefs {
-		if uidOf[i] == "" {
+		if nameOf[i] == "" {
 			ms.notFound(h)
 			continue
 		}
@@ -147,11 +153,11 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 			o = objs[next]
 		}
 		next++
-		if o.Missing || o.UID != uidOf[i] {
-			ms.notFound(objectHref(c.ID, uidOf[i]))
+		if o.Missing || o.Name != nameOf[i] {
+			ms.notFound(objectHref(c.ID, nameOf[i]))
 			continue
 		}
-		objectResource(c.ID, o.UID, o.ETag, o.Data, true).write(ms, q)
+		objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
 	}
 	ms.send(w)
 }
