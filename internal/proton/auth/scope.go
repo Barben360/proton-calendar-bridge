@@ -36,13 +36,15 @@ func (Scope) GoString() string { return redactedScope }
 func (Scope) LogValue() slog.Value { return slog.StringValue(redactedScope) }
 
 // Unlock sends an SRP proof to PUT /core/v4/users/unlock and checks the
-// server's proof. A wrong password (422, code 8002) is ErrBadCredentials; a
-// mismatching, empty or absent proof is ErrServerProof, after a Lock whose
-// failure is joined to it.
+// server's proof; each of its two calls has callTimeout. A wrong password
+// (422, code 8002) is ErrBadCredentials; a mismatching, empty or absent proof
+// is ErrServerProof, after a Lock whose failure is joined to it.
 func (s Scope) Unlock(ctx context.Context) error {
-	info, err := s.M.AuthInfo(ctx, gpa.AuthInfoReq{Username: s.Username})
+	ictx, cancel := callContext(ctx)
+	info, err := s.M.AuthInfo(ictx, gpa.AuthInfoReq{Username: s.Username})
+	cancel()
 	if err != nil {
-		perr := protonError(http.MethodPost, "/auth/v4/info", err)
+		perr := protonError(ictx, http.MethodPost, "/auth/v4/info", err)
 		if wrongPassword(perr) {
 			return fmt.Errorf("%w: %w", ErrBadCredentials, perr)
 		}
@@ -62,7 +64,10 @@ func (s Scope) Unlock(ctx context.Context) error {
 		info.SRPSession,
 	}
 	var out struct{ ServerProof string }
-	if err := s.C.Put(ctx, "/core/v4/users/unlock", req, &out); err != nil {
+	pctx, cancel := callContext(ctx)
+	err = s.C.Put(pctx, "/core/v4/users/unlock", req, &out)
+	cancel()
+	if err != nil {
 		if wrongPassword(err) {
 			return fmt.Errorf("%w: %w", ErrBadCredentials, err)
 		}

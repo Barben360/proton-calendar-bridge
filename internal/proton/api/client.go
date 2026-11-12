@@ -309,15 +309,33 @@ func parse(method, path string, status int, hdr http.Header, data []byte) *Error
 	if e.Message == "" {
 		e.Message = http.StatusText(status)
 	}
-	secs, err := strconv.ParseInt(strings.TrimSpace(hdr.Get("Retry-After")), 10, 64)
+	e.RetryAfter = ParseRetryAfter(hdr, time.Now())
+	return e
+}
+
+// ParseRetryAfter is the wait h's Retry-After asks for at now, in either
+// form (delay-seconds or an HTTP date), clamped to an hour; 0 when there is
+// none, it is malformed or its date is past.
+func ParseRetryAfter(h http.Header, now time.Time) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.ParseInt(v, 10, 64)
 	var ne *strconv.NumError
 	switch {
 	case errors.As(err, &ne) && errors.Is(ne.Err, strconv.ErrRange):
-		e.RetryAfter = maxRetryAfterHeader
+		return maxRetryAfterHeader
 	case err == nil && secs > 0:
-		e.RetryAfter = min(time.Duration(min(secs, 3600))*time.Second, maxRetryAfterHeader)
+		return min(time.Duration(min(secs, 3600))*time.Second, maxRetryAfterHeader)
+	case err == nil:
+		return 0
 	}
-	return e
+	at, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	return min(max(at.Sub(now), 0), maxRetryAfterHeader)
 }
 
 func decode(where string, data []byte, out any) error {

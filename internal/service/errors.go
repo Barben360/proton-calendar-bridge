@@ -244,6 +244,10 @@ func protonDown(e *api.Error) error {
 			Hint: "retry in " + wait}
 	case e.Status >= 500:
 		return classed(classProtonUnavailable, "Proton is unavailable", "try again later")
+	case e.Code == api.CodeHumanVerification:
+		// It never clears by waiting: a person completes it in a browser.
+		return classed(classRefused, "Proton asks for a human verification (code 9001)",
+			"open the Proton web app from this machine's network and complete the verification")
 	}
 	return classed(classRefused, fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
 }

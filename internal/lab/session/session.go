@@ -154,7 +154,7 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 	if err := ensureDir(o.StateDir); err != nil {
 		return nil, err
 	}
-	release, err := loginguard.Acquire(o.StateDir, loginguard.MinInterval, o.now())
+	release, err := loginguard.Acquire(o.StateDir, loginguard.MinInterval, o.now(), nil)
 	if err != nil {
 		return nil, err
 	}

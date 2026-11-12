@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -29,6 +30,32 @@ const (
 	// caller's context is already cancelled.
 	cleanupTimeout = 10 * time.Second
 )
+
+// callTimeout bounds each login call: Begin, SubmitTOTP and Scope.Unlock's
+// two calls (ruling A1). A Proton that accepts the connection and never
+// answers must not hold the login lock; go-proton-api's client has no
+// timeout of its own. A variable for the tests.
+var callTimeout = 30 * time.Second
+
+// retryKey keys the Retry-After a login call's answers carried: the
+// transport records it (go-proton-api's errors drop the headers) and
+// protonError puts it in the *api.Error.
+type retryKey struct{}
+
+// callContext bounds one login call by callTimeout and records the
+// Retry-After of its answers.
+func callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	return context.WithValue(ctx, retryKey{}, new(atomic.Int64)), cancel
+}
+
+// retryAfter is the Retry-After the last answer of ctx's call carried.
+func retryAfter(ctx context.Context) time.Duration {
+	if ra, ok := ctx.Value(retryKey{}).(*atomic.Int64); ok {
+		return time.Duration(ra.Load())
+	}
+	return 0
+}
 
 // cleanupContext keeps ctx's values but not its cancellation.
 func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -108,13 +135,18 @@ func (silent) Errorf(string, ...any) {}
 func (silent) Warnf(string, ...any)  {}
 func (silent) Debugf(string, ...any) {}
 
-// userAgent sets pcb's User-Agent, which go-proton-api has no option for.
+// userAgent sets pcb's User-Agent, which go-proton-api has no option for,
+// and records the Retry-After of the answer for a call's callContext.
 type userAgent struct{ next *http.Transport }
 
 func (u userAgent) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("User-Agent", "pcb/"+buildinfo.Version)
-	return u.next.RoundTrip(r)
+	resp, err := u.next.RoundTrip(r)
+	if ra, ok := r.Context().Value(retryKey{}).(*atomic.Int64); ok && resp != nil {
+		ra.Store(int64(api.ParseRetryAfter(resp.Header, time.Now())))
+	}
+	return resp, err
 }
 
 // CloseIdleConnections lets Manager.Close reach the transport.
@@ -146,15 +178,17 @@ func (Pending) LogValue() slog.Value { return slog.StringValue(redacted) }
 // challenge. Errors: *CaptchaError, *UnsupportedVerificationError,
 // ErrCaptchaRejected, ErrBadCredentials, ErrServerProof, and ErrTwoPassword or
 // ErrFIDO2 once the session they opened is revoked. Begin sends one
-// POST /auth/v4.
+// POST /auth/v4, within callTimeout.
 func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte, captchaToken string) (*Pending, error) {
 	var hv *gpa.APIHVDetails
 	if captchaToken != "" {
 		hv = &gpa.APIHVDetails{Methods: []string{"captcha"}, Token: captchaToken}
 	}
-	c, a, err := m.NewClientWithLoginWithHVToken(ctx, username, password, hv)
+	cctx, cancel := callContext(ctx)
+	c, a, err := m.NewClientWithLoginWithHVToken(cctx, username, password, hv)
+	cancel()
 	if err != nil {
-		return nil, loginError(err)
+		return nil, loginError(cctx, err)
 	}
 	p := &Pending{
 		Tokens:    api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken},
@@ -187,13 +221,13 @@ func (p *Pending) revoke(ctx context.Context) error {
 	ctx, cancel := cleanupContext(ctx)
 	defer cancel()
 	if err := p.c.AuthDelete(ctx); err != nil {
-		return fmt.Errorf("revoking the session: %w", protonError(http.MethodDelete, "/auth/v4", err))
+		return fmt.Errorf("revoking the session: %w", protonError(ctx, http.MethodDelete, "/auth/v4", err))
 	}
 	return nil
 }
 
-// loginError classifies a failed SRP login.
-func loginError(err error) error {
+// loginError classifies a failed SRP login of ctx's call.
+func loginError(ctx context.Context, err error) error {
 	// go-proton-api compares the login's ServerProof (bytes.Equal) and, on a
 	// mismatch, returns no client: the session the server may have opened
 	// cannot be revoked from here. It expires server-side; its tokens are
@@ -201,7 +235,7 @@ func loginError(err error) error {
 	if errors.Is(err, gpa.ErrInvalidProof) {
 		return ErrServerProof
 	}
-	perr := protonError(http.MethodPost, "/auth/v4", err)
+	perr := protonError(ctx, http.MethodPost, "/auth/v4", err)
 	var ge *gpa.APIError
 	if !errors.As(err, &ge) {
 		return fmt.Errorf("proton login: %w", perr)
@@ -220,25 +254,27 @@ func loginError(err error) error {
 		return &CaptchaError{Token: d.Token, URL: VerifyURL(d.Token)}
 	case ge.Code == gpa.HumanValidationInvalidToken:
 		return fmt.Errorf("%w: %w", ErrCaptchaRejected, perr)
-	case ge.Code == codePasswordWrong || ge.Status == http.StatusUnprocessableEntity:
+	case wrongPassword(perr):
 		return fmt.Errorf("%w: %w", ErrBadCredentials, perr)
 	}
 	return fmt.Errorf("proton login: %w", perr)
 }
 
-// SubmitTOTP sends the 2FA code. A refused code (HTTP 422) is
-// ErrTOTPRejected; a session that ended meanwhile (401, or a refused refresh)
-// wraps api.ErrSessionEnded; anything else is a plain error.
+// SubmitTOTP sends the 2FA code, within callTimeout. A refused code (HTTP
+// 422) is ErrTOTPRejected; a session that ended meanwhile (401, or a refused
+// refresh) wraps api.ErrSessionEnded; anything else is a plain error.
 func (p *Pending) SubmitTOTP(ctx context.Context, code string) error {
 	if p.c == nil {
 		return errors.New("auth: the login is closed")
 	}
-	err := p.c.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: code})
+	cctx, cancel := callContext(ctx)
+	err := p.c.Auth2FA(cctx, gpa.Auth2FAReq{TwoFactorCode: code})
+	cancel()
 	if err == nil {
 		p.NeedsTOTP = false
 		return nil
 	}
-	perr := protonError(http.MethodPost, "/auth/v4/2fa", err)
+	perr := protonError(cctx, http.MethodPost, "/auth/v4/2fa", err)
 	var ge *gpa.APIError
 	switch {
 	case p.ended || (errors.As(err, &ge) && ge.Status == http.StatusUnauthorized):
@@ -272,12 +308,13 @@ func Logout(ctx context.Context, c *api.Client) error {
 }
 
 // protonError turns a go-proton-api failure into an *api.Error (so callers
-// test codes with api.IsCode) and strips the request URL from transport
-// errors. Nothing from the request body survives.
-func protonError(method, path string, err error) error {
+// test codes with api.IsCode), with the Retry-After ctx's call recorded,
+// and strips the request URL from transport errors. Nothing from the
+// request body survives.
+func protonError(ctx context.Context, method, path string, err error) error {
 	var ge *gpa.APIError
 	if errors.As(err, &ge) {
-		return &api.Error{Method: method, Path: path, Status: ge.Status, Code: int(ge.Code), Message: ge.Message}
+		return &api.Error{Method: method, Path: path, Status: ge.Status, Code: int(ge.Code), Message: ge.Message, RetryAfter: retryAfter(ctx)}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
