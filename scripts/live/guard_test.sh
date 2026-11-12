@@ -139,6 +139,18 @@ ln -s "$HOME/.config/pcb" "$HOME/pcb-live-run/t5/pcb"
 out=$(runsh "$here/run.sh" --run t5 -- pcb status 2>&1); rc=$?
 check "run.sh refuses a run whose pcb dir is a link to ~/.config/pcb" "$rc" 1
 check "run.sh did not run pcb there" "$(grep -c 'pcb sees' <<<"$out")" 0
+# M3: a wrapped tool is found by basename, also by absolute path; only the run root's build is allowed.
+out=$(runsh "$here/run.sh" --run t3 -- env pcb status 2>&1); rc=$?
+check "run.sh runs a wrapped bare pcb from the run root" "$rc" 0
+out=$(runsh "$here/run.sh" --run t3 -- env "$HOME/pcb-live-run/t3/bin/pcb" status 2>&1); rc=$?
+check "run.sh accepts the run root's absolute pcb" "$rc" 0
+out=$(runsh "$here/run.sh" --run t3 -- env /usr/local/bin/pcb status 2>&1); rc=$?
+check "run.sh refuses a wrapped absolute pcb elsewhere" "$rc" 1
+out=$(runsh "$here/run.sh" --run t3 -- env /home/x/.local/bin/pcb-lab login 2>&1); rc=$?
+check "run.sh refuses a wrapped absolute pcb-lab elsewhere" "$rc" 1
+out=$(runsh "$here/run.sh" --run t3 -- env pcb-lab login 2>&1); rc=$?
+check "run.sh refuses a wrapped pcb-lab missing from the run root" "$rc" 1
+
 runsh PCB_LIVE_NOW=2000 "$here/run.sh" --run t3 --login 2a 'first' -- pcb status >/dev/null 2>&1
 out=$(runsh PCB_LIVE_NOW=2010 "$here/run.sh" --run t3 --login 2b 'too soon' -- pcb status 2>&1); rc=$?
 check "run.sh --login refuses a second login at once (exit 20)" "$rc" 20

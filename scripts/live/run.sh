@@ -70,12 +70,17 @@ unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
 # shellcheck source=guard.sh
 . "$here/guard.sh" || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
 
-# The first word that names one of our tools must exist in $R/bin, also when
-# the command is wrapped (env ..., pass-cli run ... --).
+# The first word whose basename is one of our tools must be the run root's
+# build ($R/bin/<tool>, bare or by that absolute path), also when the command
+# is wrapped (env ..., pass-cli run ... --).
 for w in "$@"; do
-  case $w in
+  w=${w//@RUN@/$PCB_LIVE_RUN}
+  case ${w##*/} in
     pcb | pcb-lab | proton-cal)
-      [[ -x $PCB_LIVE_RUN/bin/$w ]] || { echo "run.sh: $PCB_LIVE_RUN/bin/$w is missing: build it into the run root first" >&2; exit 1; }
+      if [[ $w == */* && $w != "$PCB_LIVE_RUN/bin/${w##*/}" ]]; then
+        echo "run.sh: $w is not the run root's build ($PCB_LIVE_RUN/bin/${w##*/}): refused" >&2; exit 1
+      fi
+      [[ -x $PCB_LIVE_RUN/bin/${w##*/} ]] || { echo "run.sh: $PCB_LIVE_RUN/bin/${w##*/} is missing: build it into the run root first" >&2; exit 1; }
       break ;;
   esac
 done

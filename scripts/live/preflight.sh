@@ -76,6 +76,7 @@ done
 
 # 4. The host.
 host=$(hostname -s 2>/dev/null || hostname)
+host=${host,,}
 case $host in
   morpheus*) fail "host is morpheus: never run anything live here" ;;
   blackwater*)
