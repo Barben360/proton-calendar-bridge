@@ -26,7 +26,7 @@ func newClient(f *protontest.Fake, tok api.Tokens) *api.Client {
 	return api.New(tok, api.Options{
 		BaseURL: f.URL,
 		Limiter: rate.NewLimiter(rate.Inf, 1),
-		HTTP:    &http.Client{Timeout: 5 * time.Second},
+		HTTP:    &http.Client{Timeout: 2 * time.Minute}, // SRP checks run server-side, slow under -race and load
 	})
 }
 

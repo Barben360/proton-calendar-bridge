@@ -105,9 +105,18 @@ func TestBeginKeepsRetryAfter(t *testing.T) {
 	if got := retryAfter(); got != 120*time.Second {
 		t.Errorf("Retry-After: 120 gave %v, want 2m0s", got)
 	}
-	f.FailNextRetryAt(http.MethodPost, "/auth/v4", http.StatusTooManyRequests, 85131, time.Now().Add(300*time.Second))
-	if got := retryAfter(); got < 290*time.Second || got > 300*time.Second {
-		t.Errorf("Retry-After as a date 300 s ahead gave %v", got)
+	// The date form is measured by the client against its own clock when the
+	// answer arrives, so a loaded scheduler eats into it. A date 50 min ahead
+	// leaves a 10 min window for that delay; a client that ignored the date
+	// would give 0. The exact arithmetic is pinned with a fixed clock below.
+	f.FailNextRetryAt(http.MethodPost, "/auth/v4", http.StatusTooManyRequests, 85131, time.Now().Add(50*time.Minute))
+	if got := retryAfter(); got < 40*time.Minute || got > 50*time.Minute {
+		t.Errorf("Retry-After as a date 50 min ahead gave %v", got)
+	}
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	h := http.Header{"Retry-After": {now.Add(300 * time.Second).Format(http.TimeFormat)}}
+	if got := api.ParseRetryAfter(h, now); got != 300*time.Second {
+		t.Errorf("ParseRetryAfter(date 300 s ahead) = %v, want 5m0s", got)
 	}
 }
 
