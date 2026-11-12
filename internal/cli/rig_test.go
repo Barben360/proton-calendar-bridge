@@ -251,6 +251,7 @@ func (r *rig) run(args ...string) exitcode.Code {
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
 	}
 	io.DialDaemon = r.dial
+	io.Host = noSystemHost()
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()
 	if r.ctrlC {

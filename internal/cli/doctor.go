@@ -32,7 +32,7 @@ func (a *app) newDoctor() *cobra.Command {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
 			results := doctor.Run(cmd.Context(), doctorChecks(a.Env), stream)
-			for _, r := range a.daemonResults(cmd.Context()) {
+			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, a.daemonResults(cmd.Context())...) {
 				if stream != nil {
 					stream(r)
 				}

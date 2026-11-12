@@ -12,6 +12,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -32,12 +33,16 @@ type IO struct {
 	// DialDaemon connects to pcb serve's control socket at path (ctl.Dial):
 	// ctl.ErrNoDaemon when none answers.
 	DialDaemon func(ctx context.Context, path string) (*ctl.Client, error)
+	// Host is the machine pcb install, uninstall, service and doctor act
+	// on (install.OSHost). One with Run set is used as it is; a nil Env
+	// takes IO's Env.
+	Host install.Host
 }
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
 	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen,
-		DialDaemon: ctl.Dial}
+		DialDaemon: ctl.Dial, Host: install.OSHost()}
 }
 
 // withDefaults fills the nil fields with the operating system's values.
@@ -62,6 +67,13 @@ func (o IO) withDefaults() IO {
 	}
 	if o.DialDaemon == nil {
 		o.DialDaemon = ctl.Dial
+	}
+	if o.Host.Run == nil {
+		o.Host = install.OSHost()
+		o.Host.Env = nil
+	}
+	if o.Host.Env == nil {
+		o.Host.Env = o.Env
 	}
 	return o
 }

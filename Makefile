@@ -7,11 +7,17 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
 	-X $(PKG)/internal/buildinfo.Date=$(DATE)
 OUT     ?= bin/pcb
+# make install puts pcb in $(PREFIX)/bin (M5-P23); pcb install then sets up
+# the service.
+PREFIX  ?= $(HOME)/.local
 
-.PHONY: build test lint
+.PHONY: build install test lint
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
+
+install: build
+	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
 
 # PKGS narrows the packages (CI runs two shards in parallel).
 PKGS ?= ./...

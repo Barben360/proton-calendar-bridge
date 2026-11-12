@@ -60,12 +60,12 @@ func TestDoctorExitCode(t *testing.T) {
 		names = append(names, r.Name)
 		statuses = append(statuses, r.Status)
 	}
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients,daemon"; got != want {
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,sealed secrets,secrets,cache,caldav listener,tls certificate,caldav clients,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,skip,skip,skip,ok,ok,skip,warn,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -82,11 +82,14 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 13 { // 11 checks, the clients warning with its fix line, the daemon
-		t.Fatalf("stdout = %q, want 13 lines", out)
+	if len(lines) != 14 { // 11 checks, the clients warning with its fix line, the service, the daemon
+		t.Fatalf("stdout = %q, want 14 lines", out)
 	}
-	if want := "–  daemon: not running: offline checks only"; lines[12] != want {
+	if want := "–  service: no systemd here"; lines[12] != want {
 		t.Errorf("line 12 = %q, want %q", lines[12], want)
+	}
+	if want := "–  daemon: not running: offline checks only"; lines[13] != want {
+		t.Errorf("line 13 = %q, want %q", lines[13], want)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)

@@ -1,0 +1,48 @@
+[Unit]
+Description=pcb, the Proton Calendar CalDAV bridge
+Documentation=https://github.com/Barben360/proton-calendar-bridge
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pcb
+Group=pcb
+Environment=PCB_CONFIG_DIR=/etc/pcb
+Environment=PCB_STATE_DIR=/var/lib/pcb
+ExecStart=/usr/local/bin/pcb serve --wait-for-login
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/pcb /var/lib/pcb
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

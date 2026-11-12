@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -14,9 +15,11 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
 
+// run is pcb on the process's environment and terminal, as cli.Execute
+// runs it, but on a host with no system to touch (noSystemHost).
 func run(args ...string) (exitcode.Code, string, string) {
 	var out, errb bytes.Buffer
-	code := cli.Execute(args, &out, &errb)
+	code := cli.Main(context.Background(), args, cli.IO{Stdout: &out, Stderr: &errb, Host: noSystemHost()})
 	return code, out.String(), errb.String()
 }
 
