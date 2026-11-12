@@ -100,17 +100,20 @@ func VerifyURL(token string) string {
 // NewManager returns a go-proton-api manager for baseURL (required: its own
 // default host is not ours) with pcb's identity and a silent logger. It never
 // retries: one login attempt is one request, and writes are not repeated.
+// Refresh needs a manager built here.
 func NewManager(baseURL, appVersion string) *gpa.Manager {
 	if appVersion == "" {
 		appVersion = "Other"
 	}
-	return gpa.New(
+	m := gpa.New(
 		gpa.WithHostURL(baseURL),
 		gpa.WithAppVersion(appVersion),
 		gpa.WithLogger(silent{}),
 		gpa.WithRetryCount(0),
 		gpa.WithTransport(userAgent{newTransport()}),
 	)
+	hook(m) // Refresh sends the access token (refreshHook)
+	return m
 }
 
 // newTransport clones http.DefaultTransport, or builds the same defaults when

@@ -318,6 +318,59 @@ func TestRefreshRotates(t *testing.T) {
 	}
 }
 
+// Proton refuses a refreshed pair's refresh token unless the refresh carries
+// that pair's access token (measured live 2026-11-12, E01): pcb's client
+// survives two 401 → refresh cycles in a row, the second being the one Proton
+// refused.
+func TestClientSurvivesTwoRefreshesInARow(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	m := manager(t, f)
+	tok := f.Login(t, f.Username)
+	c := api.New(tok, api.Options{
+		BaseURL: f.URL,
+		Limiter: rate.NewLimiter(rate.Inf, 1),
+		HTTP:    &http.Client{Timeout: 5 * time.Second},
+		Refresh: func(ctx context.Context, stale api.Tokens) (api.Tokens, error) { return auth.Refresh(ctx, m, stale) },
+	})
+	seen := map[string]bool{tok.RefreshToken: true}
+	for i := 1; i <= 2; i++ {
+		f.ExpireAccessTokens()
+		if err := c.Get(t.Context(), "/core/v4/users", nil, nil); err != nil {
+			t.Fatalf("GET after expiry %d: %v", i, err)
+		}
+		if rt := c.Tokens().RefreshToken; seen[rt] {
+			t.Fatalf("expiry %d: the tokens did not rotate", i)
+		} else {
+			seen[rt] = true
+		}
+	}
+	if n := f.Calls("POST", "/auth/v4/refresh"); n != 2 {
+		t.Fatalf("%d refreshes, want 2", n)
+	}
+}
+
+// A manager that does not come from NewManager lacks the hook that puts the
+// access token in the refresh: Refresh sends nothing rather than a refresh
+// Proton would refuse, ending the session.
+func TestRefreshRefusesAForeignManagerWithoutSending(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	m := gpa.New(gpa.WithHostURL(f.URL), gpa.WithAppVersion("Other"), gpa.WithRetryCount(0))
+	t.Cleanup(m.Close)
+	tok := f.Login(t, f.Username)
+	_, err := auth.Refresh(t.Context(), m, tok)
+	if err == nil || errors.Is(err, api.ErrSessionEnded) {
+		t.Fatalf("Refresh with a foreign manager = %v, want a plain error", err)
+	}
+	if n := f.Calls("POST", "/auth/v4/refresh"); n != 0 {
+		t.Fatalf("%d refreshes sent, want none", n)
+	}
+	if strings.Contains(err.Error(), tok.AccessToken) || strings.Contains(err.Error(), tok.RefreshToken) {
+		t.Fatalf("the error carries a token: %v", err)
+	}
+}
+
 func TestRefreshAfterRevokeIsSessionEnded(t *testing.T) {
 	t.Parallel()
 	f := protontest.New(t, protontest.Options{})
