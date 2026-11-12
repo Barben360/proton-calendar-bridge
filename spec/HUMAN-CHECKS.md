@@ -1,6 +1,6 @@
 # Live runs and human checks
 
-One ordered sequence. **Only step 1 needs the author** (solve a CAPTCHA, and a fresh one if Proton refuses the old token); the M1 live session at the end adds at most three short author actions (a CAPTCHA if one is asked, adding the holidays and subscribed calendars, revoking a session). Everything else is run by the agent alone, from this repo, once the author says "captcha solved at HH:MM". The per-experiment detail (what each probe records, how to fill the results) is in the "Pending live run" section of each experiment file; this file is the order and the rules.
+One ordered sequence. **Only step 1 needs the author** (solve a CAPTCHA, and a fresh one if Proton refuses the old token); the M1 live session at the end adds at most three short author actions (a CAPTCHA if one is asked, adding the holidays and subscribed calendars, revoking a session). Everything else is run by the agent alone, from this repo, once the author says "captcha solved at HH:MM". Step 6 (Thunderbird and the M4 writes) runs last, after the M1 and M2 live sessions, and needs one author sitting in Thunderbird and the web app. The per-experiment detail (what each probe records, how to fill the results) is in the "Pending live run" section of each experiment file; this file is the order and the rules.
 
 Nothing below has been run: no live result exists yet.
 
@@ -54,50 +54,242 @@ At least 60 s after step 3's login. Commands and the wipe/reseed notes: `DATASET
 
 Update `E01`, `E02`, `E03`, `DATASET.md`, SPEC §5.1/§5.2 markers, `spec/OPEN.md`, commit on a branch. The E01 14-day window keeps running after this; its close-out is a separate, later commit.
 
-## 6. Thunderbird against the bridge (author, GUI; M3 adapter built, run after M4)
+## 6. Thunderbird and the M4 live session (agent, then one author sitting; after the M1 and M2 live sessions)
 
-Per ruling M3-R1 the live session runs **after M4**, so nobody subscribes Thunderbird to a server that refuses writes. Until then the M3 behaviour rests on the contract tests (`spec/experiments/E08-thunderbird-caldav.md`, "What the bridge does (M3)"). **Test account only**: the cache `pcb` serves must come from the test account's login (steps 2 to 5), never the author's. Use a fresh Thunderbird profile, so no earlier calendar or certificate exception interferes. The agent prepares and watches the logs; the author drives Thunderbird.
+M3 (CalDAV read) and M4 (CalDAV writes) are built and tested against the fake Proton only. This step proves both against the real account in one session (ruling M3-R1: nobody subscribes Thunderbird before writes work). It runs **after the M1 and M2 live sessions**: `pcb` must already be logged in to the test account with a filled cache.
 
-**6.1 Prepare (agent).** With the test account logged in and the cache filled (`pcb sync`):
+Order, chosen so the author acts once:
+1. **6.1** the agent prepares (no author);
+2. **6.2** the agent runs every write check it can make over the wire with `curl` (no author);
+3. **6.3** one author sitting, Thunderbird and the web app side by side (the agent watches the logs and runs the checks after each author action);
+4. **6.4** the agent's checks after the sitting (no author);
+5. **6.5** what to record; **6.6** clean up.
+
+**Rules for this step** (on top of "Rules for the whole run"):
+- **Test account only** (vault `pcb-dev`, item `proton-calendar-bridge-test`), never the author's own account: before anything, `bin/pcb status --json | jq -r .data.username` must print the test account's username (compare by eye; do not record it). Nothing here writes to any other account.
+- **No new login.** `pcb` reuses the session of the M1/M2 live sessions, in their isolated dirs. If that session is gone, one login per M1.2 is allowed (at least 60 s after the last login, CAPTCHA rules of M1.2), and counts in the login log.
+- Every event the session creates has a title starting `pcb-m4` and a UID starting `pcb-m4-`, dated January–February 2027, so it can be found and removed.
+- **Never provoke a 429** (no loops, no bursts). Each `curl` below is one request; run them one at a time.
+- Stop conditions: those of the whole run, plus: the owned default calendar is not writable at 6.1.4 (do the diagnosis there, then stop the write part); any write answers 5xx twice in a row; any `pcb serve` log line `refusing a write: a row's key packet changed` (record it, stop: R17/R30 must be looked at before more writes).
+- Nothing decrypted goes into the repository except the test events' own lines written below; key packets, signatures and ciphertext are compared, never copied into a write-up.
+
+**6.1 Prepare (agent).**
+1. Build and point at the M1/M2 dirs (worktree `/home/jduff/Workspace/worktrees/proton-calendar-bridge-m4`, or main once merged), in **bash**:
+   ```sh
+   cd /home/jduff/Workspace/worktrees/proton-calendar-bridge-m4 && make build
+   export XDG_CONFIG_HOME=$HOME/.local/share/pcb-m1-live/config XDG_STATE_HOME=$HOME/.local/share/pcb-m1-live/state
+   DB=$XDG_STATE_HOME/pcb/pcb.db LIVE=$HOME/.local/share/pcb-m4-live
+   (umask 077; mkdir -p "$LIVE")
+   bin/pcb status --json | jq '.data | {phase, username, unattended}'   # phase "ready"; username: the test account
+   bin/pcb sync --json | jq '.data.calendars[] | {name, mode, error}'   # exit 0, no error
+   ```
+2. Two CalDAV clients: one for Thunderbird, one for the agent's `curl` (its password goes to a 0600 netrc file, never into argv):
+   ```sh
+   bin/pcb client add Thunderbird        # prints the password once: hand it to the author out of band
+   (umask 077; bin/pcb client add m4-curl --json | jq -r '"machine localhost login me password " + .data.password' > "$LIVE/netrc")
+   ```
+3. Start the bridge in a second terminal (same exports), logs kept: `bin/pcb serve 2> >(tee "$LIVE/serve.log" >&2)`. Expect on stdout `Thunderbird URL: http://localhost:1080/`; it refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20).
+4. The write gate (E14, R17/E10). `bin/pcb calendar list --json > "$LIVE/calendars.json"; jq '.data.calendars[] | {name, type, default, read_only, keys}' "$LIVE/calendars.json"`. Expect the default calendar `type` `normal`, `read_only` **false**, `keys` `ok`; holidays and subscribed calendars `read_only` true. If the default calendar is `read_only` true, diagnose before stopping (only if the lab session of step 2a is still alive; never log in for it):
+   ```sh
+   bin/pcb-lab probe calendar-access --state-dir ~/.local/state/pcb-lab --record-dir "$LIVE/lab"
+   jq '.body.Calendars[] | {Type, Permissions: [.Members[].Permissions]}' "$LIVE"/lab/*calendar-list.json
+   jq '[.body.Passphrase.MemberPassphrases[].Signature]' "$LIVE"/lab/*calendar-bootstrap.json   # first calendar only; the probe reads the v1 bootstrap, assumed to carry the same field as the v2 one pcb reads
+   ```
+   Read it as: a `Permissions` value without the 8 bit → E14's bit is wrong; 8 set and a signature `<redacted:len=N>` with N > 0 → the signature does not verify with our address key (R17's assumption is wrong, E10); no signature (empty) → the gate stays undecided and every write would be 503. Record, then stop the write part (6.2, 6.3 writes); the read part of 6.3 can still run.
+5. Variables and helpers for 6.2 (bash; `BASE` is the default calendar's CalDAV URL, its path segment being the first 16 hex digits of the SHA-256 of the calendar ID):
+   ```sh
+   CAL_ID=$(jq -r '.data.calendars[] | select(.default) | .id' "$LIVE/calendars.json")
+   BASE=http://localhost:1080/dav/calendars/me/$(printf %s "$CAL_ID" | sha256sum | cut -c1-16)
+   C=(curl -s --netrc-file "$LIVE/netrc")
+   # ev FILE UID SUMMARY DTSTART-LINE DTEND-LINE [more lines]: one VEVENT body, CRLF
+   ev() { local f=$1 uid=$2 sum=$3 s=$4 e=$5; shift 5
+     { printf 'BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//pcb m4 live//EN\nBEGIN:VEVENT\nUID:%s\nDTSTAMP:20261201T000000Z\nSUMMARY:%s\n%s\n%s\nSEQUENCE:0\n' "$uid" "$sum" "$s" "$e"
+       for l in "$@"; do printf '%s\n' "$l"; done; printf 'END:VEVENT\nEND:VCALENDAR\n'; } | sed 's/$/\r/' > "$LIVE/$f"; }
+   ics() { sed 's/$/\r/' > "$LIVE/$1"; }   # ics FILE <<'EOF' … EOF: a free-form body, CRLF
+   put() { "${C[@]}" -o "$LIVE/out.xml" -w '%{http_code}\n' -X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @"$LIVE/$2" "${@:3}" "$BASE/$1"; cat "$LIVE/out.xml"; echo; }
+   del() { "${C[@]}" -o /dev/null -w '%{http_code}\n' -X DELETE "${@:2}" "$BASE/$1"; }
+   get() { "${C[@]}" "$BASE/$1" | tr -d '\r'; }
+   etag() { "${C[@]}" -o /dev/null -D - "$BASE/$1" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: //p'; }
+   rows() { sqlite3 -readonly "$DB" "select substr(id,1,10), etag, seq, recurrence_id from events where calendar_id='$CAL_ID' and uid='$1' order by recurrence_id"; }
+   raw() { sqlite3 -readonly "$DB" "select cast(raw as text) from events where calendar_id='$CAL_ID' and uid='$1' and recurrence_id is null"; }
+   newest() { sqlite3 -readonly "$DB" "select uid, rrule from events where calendar_id='$CAL_ID' order by last_edit desc limit ${1:-3}"; }   # the UIDs of the latest edits
+   AL=(BEGIN:VALARM ACTION:DISPLAY TRIGGER:-PT15M DESCRIPTION:r END:VALARM)
+   ```
+   Check: `"${C[@]}" -o /dev/null -w '%{http_code}\n' -X PROPFIND -H 'Depth: 0' "$BASE/"` prints `207`; `"${C[@]}" -X PROPFIND -H 'Depth: 0' -H 'Content-Type: text/xml' --data '<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/></D:prop></D:propfind>' "$BASE/"` contains `<D:privilege><D:write/></D:privilege>`.
+
+**6.2 Writes over the wire (agent alone).** Each line: the command, then what to expect. After each 2xx write, `grep -c 'not confirmed\|refusing a write' "$LIVE/serve.log"` must stay 0 unless the step says otherwise. Results go to the experiment named in brackets.
+
+*W1. Create, read back, signatures, key packets* [L.4 #1, E10, R32, `?UID=`]:
 ```sh
-pcb client add Thunderbird
+ev basic.ics pcb-m4-basic 'pcb-m4 basic' 'DTSTART;TZID=Europe/Paris:20270104T100000' 'DTEND;TZID=Europe/Paris:20270104T110000' 'DESCRIPTION:first line' 'LOCATION:Room 1' "${AL[@]}"
+put pcb-m4-basic.ics basic.ics -H 'If-None-Match: *'   # 201, empty body
+get pcb-m4-basic.ics          # SUMMARY:pcb-m4 basic, DESCRIPTION, LOCATION, SEQUENCE:0, one VALARM with TRIGGER:-PT15M, no VTIMEZONE
+rows pcb-m4-basic             # one row, recurrence_id empty
+raw pcb-m4-basic | jq -r '.SharedEvents[] | select(.Type==2) | .Data'      # pcb's fragment: BEGIN:VCALENDAR, BEGIN:VEVENT, then UID, DTSTAMP, DTSTART, DTEND, SEQUENCE and nothing else (no SUMMARY, VERSION or PRODID), END:VEVENT, END:VCALENDAR
+raw pcb-m4-basic | jq -r '.SharedEvents[] | select(.Type==2) | .Signature' | gpg --list-packets 2>/dev/null | grep -o 'sigclass 0x0[01]'   # sigclass 0x00 (binary)
+raw pcb-m4-basic | jq -r '.SharedKeyPacket' | base64 -d | gpg --list-packets 2>/dev/null | grep -c ':pubkey enc packet:'                # 1 (primary calendar key only)
+raw pcb-m4-basic | jq -r '[(.SharedEvents // [])[], (.CalendarEvents // [])[]] | map(select(.Type==3) | (.Data | test("^[A-Za-z0-9+/]+=*$"))) | all'  # true: one line of standard base64, as pcb sent it
 ```
-Expect `Client "Thunderbird" added (id ...)`, a line `Password (shown once, not stored): <32 characters>`, and the Thunderbird hints. Hand the password to the author out of band; it is not stored anywhere. Then, in a terminal kept open:
+A 201 also proves `?UID=` filters exactly: had Proton ignored it, the refresh would have returned other UIDs' rows and the PUT would answer 503 with the warning `the event cache cannot be opened` and send nothing. A confirmed write also proves the signed parts came back byte for byte (their signatures verify over exact bytes); an encrypted `Data` other than one line of standard base64 means Proton re-encoded it (harmless, R32: the confirmation compares plaintext).
+
+*W2. The ListByUID row equals the feed row* [Task 6 live check, L.4 #11]: note `rows pcb-m4-basic` (etag, seq), wait 70 s (two `pcb serve` passes, no edit), `rows pcb-m4-basic` again: **same etag and seq**. A new seq with no edit means the row Proton lists by UID differs from the one it serves by ID: every write would then churn a second change (record which fields differ: `raw` before and after, `jq -S . | diff`). Optional: run `bin/pcb-lab probe feed --calendar "$CAL_ID" --wait 2m` during W1 to time the feed entry (L.4 #11, E04).
+
+*W3. Exact UID match* [`?UID=`]: `ev basic2.ics pcb-m4-basic-2 'pcb-m4 basic 2' 'DTSTART;TZID=Europe/Paris:20270105T100000' 'DTEND;TZID=Europe/Paris:20270105T110000'; put pcb-m4-basic-2.ics basic2.ics -H 'If-None-Match: *'` → 201; then W4 edits `pcb-m4-basic`: a 204 there shows Proton does not match `pcb-m4-basic` as a prefix of `pcb-m4-basic-2` (a prefix match gives 503, as in W1).
+
+*W4. Text-only edit without a SEQUENCE bump* [L.4 #2, R4, decisive]:
 ```sh
-pcb serve
+sed -i 's/^SUMMARY:pcb-m4 basic\r$/SUMMARY:pcb-m4 basic renamed\r/' "$LIVE/basic.ics"
+put pcb-m4-basic.ics basic.ics -H "If-Match: $(etag pcb-m4-basic.ics)"   # 204
+get pcb-m4-basic.ics | grep -E '^(SUMMARY|SEQUENCE)'                      # SUMMARY:pcb-m4 basic renamed, SEQUENCE:0
 ```
-Expect, on stdout, `Thunderbird URL: http://localhost:1080/` and, over TLS, also `TLS certificate SHA-256 fingerprint: AA:BB:...:FF (check it in Thunderbird's certificate exception dialog)`; logs go to stderr (IDs only). It refuses to start logged out (exit 10, `pcb login`) or while `pcb sync` runs (exit 20).
+If instead 503 with `a write is not confirmed by the rows read back` in the log and the old title in `get`: Proton dropped the unbumped edit (carbonate's and caloxide's reading of research A.4). Record it; R4 must change (bump on every edit) before Thunderbird edits titles (code change, test first); skip W5–W6 and every text edit of 6.3.
 
-**6.2 Local, plain HTTP (author).** In Thunderbird: Calendar > New Calendar > On the Network. Location `http://localhost:1080/`, username anything (the account email works), password from 6.1, then "Find Calendars". Expect every calendar of the test account listed, each with its name and colour; subscribe to all. Events appear within seconds. Before the dialog, the agent can check the two entry points with curl (any username):
+*W5. Time edit, the client does not bump* [R4]: `sed -i 's/T100000\r$/T103000\r/; s/T110000\r$/T113000\r/' "$LIVE/basic.ics"; put pcb-m4-basic.ics basic.ics -H "If-Match: $(etag pcb-m4-basic.ics)"` → 204; `get pcb-m4-basic.ics | grep -E '^(DTSTART|SEQUENCE)'` → `DTSTART;TZID=Europe/Paris:20270104T103000`, `SEQUENCE:1` (pcb bumped it). pcb never sends an unbumped time edit, so whether Proton drops one is not reachable with these tools; if W4 showed text edits kept, record "unbumped time edit: not tested (pcb bumps)".
+
+*W6. Alarm-only edits* [research D, tri-state]: `sed -i 's/TRIGGER:-PT15M/TRIGGER:-PT30M/' "$LIVE/basic.ics"`, PUT with If-Match → 204, `get` shows `TRIGGER:-PT30M`, `raw pcb-m4-basic | jq -c .Notifications` → `[{"Type":1,"Trigger":"-PT30M"}]`, SEQUENCE still 1. Then remove the five VALARM lines (`sed -i '/VALARM\|ACTION:\|TRIGGER:\|DESCRIPTION:r/d'`), PUT → 204, `get` has no VALARM, `.Notifications` is `[]`.
+
+*W7. Unknown and extra properties* [L.4 #7, E13]:
 ```sh
-curl -si -u me:PASSWORD http://localhost:1080/.well-known/caldav | head -3   # 308, Location: /dav/principals/me/
-curl -si -u me:PASSWORD -X PROPFIND -H 'Depth: 0' http://localhost:1080/ | head -1   # HTTP/1.1 207
-curl -si -X PROPFIND http://localhost:1080/ | head -1                            # HTTP/1.1 401, WWW-Authenticate: Basic realm="pcb"
+ev props.ics pcb-m4-props 'pcb-m4 props' 'DTSTART;TZID=Europe/Paris:20270105T140000' 'DTEND;TZID=Europe/Paris:20270105T150000' \
+  'X-MOZ-GENERATION:3' 'X-MOZ-LASTACK:20261201T000000Z' 'X-PCB-M4-TEST;X-P=1:kept' 'CLASS:PRIVATE' 'CATEGORIES:pcb,m4' \
+  'URL:https://example.org/pcb-m4' 'ATTACH:https://example.org/pcb-m4.txt' 'GEO:48.85;2.35' 'PRIORITY:5' 'RESOURCES:Projector' \
+  'CONTACT:pcb test' 'RELATED-TO:pcb-m4-basic' 'COMMENT:calendar comment' 'TRANSP:TRANSPARENT' 'STATUS:TENTATIVE' 'COLOR:red'
+put pcb-m4-props.ics props.ics -H 'If-None-Match: *'   # 201
+get pcb-m4-props.ics   # every line above back byte for byte (in part order, not the order sent), except: X-PCB-M4-TEST (pcb strips X-PCB-*), STATUS:TENTATIVE (dropped), COLOR (ignored)
+raw pcb-m4-props | jq -r '.CalendarEvents[] | "\(.Type) \(.Data|.[0:30])"'   # a Type 2 part (UID, DTSTAMP, TRANSP) and a Type 3 part (COMMENT)
+raw pcb-m4-props | jq -r '.SharedEvents[] | select(.Type==2) | .Data'         # still only UID, DTSTAMP, DTSTART, DTEND, SEQUENCE
 ```
-Then repeat the Thunderbird dialog once with the bare URL and once with `http://localhost:1080/.well-known/caldav`: both must find the same calendars.
+`X-PCB-M4-TEST` is the bridge's own stripping rule, not Proton's; the E13 question is about the others. 6.3 C1 edits this event in the web app; 6.4.1 reads what survives.
 
-**6.3 Over the network, TLS (agent, then author).** Stop `pcb serve`, set in `config.toml` (`$XDG_CONFIG_HOME/pcb/config.toml`, else `~/.config/pcb/config.toml`), section `[caldav]`: `listen = "0.0.0.0:8443"` and `hostnames = ["<the host's LAN name>"]`, run `pcb serve` again (`pcb serve --listen 0.0.0.0:8443` replaces the `listen` edit; `hostnames` still needs the file). Expect `Thunderbird URL: https://<hostname>:8443/` and the fingerprint line. `pcb doctor` shows the same fingerprint. On the other machine, repeat 6.2 with that URL. Thunderbird shows the certificate exception dialog: **compare the SHA-256 fingerprint in the dialog with the one `pcb serve` printed, character by character; confirm the exception only if they match.** Record: whether the dialog appears in the creation flow or the certificate had to be added first under Settings > Certificates, and whether the IP-literal URL works (E08 §2.3).
+*W8. Recurrence forms* [L.4 #6, E12]. Each a create with `-H 'If-None-Match: *'`, then `get NAME | grep RRULE`, `rows UID`:
 
-**6.4 Round trips (author edits in the web app on the test account, agent notes the time).**
-1. Edit an event's title in the web app: it shows in Thunderbird within one refresh (`pcb serve` syncs every 30 s; Thunderbird's own poll is 30 min by default, so use right-click > Synchronize Calendars [claim: from E08's source reading, the menu path was not checked]).
-2. Delete an event in the web app: it disappears in Thunderbird after the same refresh.
-3. **Post-M4 check** (dismissing an alarm makes Thunderbird PUT `X-MOZ-LASTACK`, which M3 refuses with 403): edit the same event again after Thunderbird showed an alarm for it, dismiss the alarm, refresh: it must not re-fire (E08 AVOID normalising). On an M3-only server, skip it and say so.
-4. Stop `pcb serve`, restart Thunderbird: the calendars still show their cached events; start `pcb serve`, refresh: no error, no duplicated calendar.
-5. In Thunderbird, try to edit an event: M3 refuses with a generic error (403); after M4 this step becomes a real edit and the web app must show it.
+| Name / UID | DTSTART–DTEND (Europe/Paris) | RRULE sent | Expect |
+|---|---|---|---|
+| `pcb-m4-weekdays` | 20270104T090000–T093000 (Mon) | `FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;COUNT=10` | 201, served `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10` (R12) |
+| `pcb-m4-2tu` | 20270112T140000–T150000 (2nd Tue) | `FREQ=MONTHLY;BYDAY=2TU;COUNT=6` | 201, served `FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2;COUNT=6` (R5) |
+| `pcb-m4-lastfr` | 20270129T160000–T170000 (last Fri) | `FREQ=MONTHLY;BYDAY=-1FR;COUNT=3` | 201, served `FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;COUNT=3` |
+| `pcb-m4-notfirst` | 20270106T120000–T130000 (Wed) | `FREQ=WEEKLY;BYDAY=MO;COUNT=3` | pcb does not check that DTSTART is an occurrence: record Proton's answer (201, or 403 `pcb:proton-refused` with a code) and, in 6.3, what the web app and Thunderbird show |
+| `pcb-m4-count49` | 20270201T080000–T081500 | `FREQ=WEEKLY;COUNT=49` | 201 |
+| `pcb-m4-until` | all-day `DTSTART;VALUE=DATE:20270202`, `DTEND;VALUE=DATE:20270203` | `FREQ=YEARLY;UNTIL=20371231` | 201 |
+| `pcb-m4-duration` [L.4 #8] | 20270108T090000, and `DURATION:PT45M` passed in place of the DTEND line | none | 201, served `DTEND;TZID=Europe/Paris:20270108T094500` and no DURATION |
 
-**6.5 Revoked client (agent).** `pcb client remove Thunderbird`, then in Thunderbird refresh: the calendars report an authentication failure and ask for a password (401); the `curl -si -u me:PASSWORD http://localhost:1080/ -X PROPFIND` of 6.2 now answers `401`. `pcb client add Thunderbird` again gives a new password; the old one stays refused. `pcb client list` never prints a password.
+e.g. `ev weekdays.ics pcb-m4-weekdays 'pcb-m4 weekdays' 'DTSTART;TZID=Europe/Paris:20270104T090000' 'DTEND;TZID=Europe/Paris:20270104T093000' 'RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;COUNT=10'; put pcb-m4-weekdays.ics weekdays.ics -H 'If-None-Match: *'`.
 
-**6.6 What to record (agent writes it up in `E08-thunderbird-caldav.md`, "Live results").** One line each, with [verified: live] or what differed:
-1. Detection through `/.well-known/caldav` (308), `/` and the principal; whether Basic credentials are sent preemptively.
-2. `sync-collection` end to end: empty token, delta, a deletion, and a 403 `valid-sync-token` reset (stop `pcb serve`, remove `pcb.db`, `pcb.db-wal` and `pcb.db-shm` from the state directory, run `pcb sync --full`, restart: a new epoch).
-3. Multiget with a UID containing `@`, space or non-ASCII.
-4. `readOnly`: with M4 enabled, whether Thunderbird writes after M3-era subscriptions (E08 §5).
-5. The self-signed exception flow and the certificate validity (825 days) accepted.
-6. Real data: non-IANA TZIDs, orphan exceptions, duplicate masters, placeholder events (`pcb serve` logs their counts in a `render counters` line after each pass; `pcb status` does not show them); whether any of the test account's own events carries `X-PCB-INTEGRITY:unverified` (`unverified` above 0 in that line): it should not, else E10's signing-key assumption is wrong.
-7. Alarms from `Notifications`: shown once, no re-fire after a refresh.
-8. First-sync time and memory with the test data set (E09 live half), Thunderbird's startup refresh.
-9. `getcontenttype` with `;component=vevent`, and a calendar rename or recolour not reaching an existing subscription (E08 §1.3).
-10. Another member's shared calendar: signatures, and invites keyed by address key (needs a second test account, otherwise skipped and said so).
+Refused by pcb, no write reaches Proton. Make each with `ev refused.ics pcb-m4-refused 'pcb-m4 refused' <DTSTART line> <DTEND line> <the line>` and `put pcb-m4-refused.ics refused.ics -H 'If-None-Match: *'`; each answers 403 with its body, and `rows pcb-m4-refused` stays empty. `RRULE:FREQ=WEEKLY;COUNT=50` → `<D:error xmlns:D="DAV:"><pcb:unsupported-recurrence xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">RRULE COUNT above 49</pcb:reason></D:error>`; `RRULE:FREQ=HOURLY` → `unsupported-recurrence`; `RRULE:FREQ=MONTHLY;BYDAY=TU;BYSETPOS=5` → `unsupported-recurrence`; an `RDATE;TZID=Europe/Paris:20270110T100000` line → `pcb:rdate`; DTSTART `DTSTART:20270104T100000` (floating) → `pcb:floating-time`; `DTSTART;TZID=Mars/Olympus:20270104T100000` → `pcb:unknown-tzid`; an `ATTENDEE:mailto:pcb-m4-attendee@example.org` line → `pcb:attendee-change` (refused after the refresh, a GET; the body-level ones above are refused before any request). Whether **Proton** enforces these limits itself (COUNT 50, UNTIL 2038, BYSETPOS 5, HOURLY, INTERVAL bounds) is not reachable through pcb, which refuses first: record "not tested (the bridge gatekeeps)".
+
+*W9. A series with exceptions, mixed batches* [L.4 #4, E12, research E.2]. Write `series.ics` with the master only:
+```sh
+ics series.ics <<'EOF'
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//pcb m4 live//EN
+BEGIN:VEVENT
+UID:pcb-m4-series
+DTSTAMP:20261201T000000Z
+SUMMARY:pcb-m4 series
+DTSTART;TZID=Europe/Paris:20270118T080000
+DTEND;TZID=Europe/Paris:20270118T083000
+RRULE:FREQ=DAILY;COUNT=5
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+EOF
+put pcb-m4-series.ics series.ics -H 'If-None-Match: *'   # 201; rows: 1
+```
+Then, each with `-H "If-Match: $(etag pcb-m4-series.ics)"`, edit `series.ics` (an exception VEVENT goes before `END:VCALENDAR`):
+1. Add an exception for the 3rd occurrence (`RECURRENCE-ID;TZID=Europe/Paris:20270120T080000`, DTSTART/DTEND 09:00–09:30, `SUMMARY:pcb-m4 series moved`, same UID, `SEQUENCE:0`) → 204, rows: 2 (one with a recurrence_id), `get` shows both VEVENTs and the exception's `SEQUENCE` at least the master's. (One create.)
+2. Add `EXDATE;TZID=Europe/Paris:20270121T080000` to the master → 204, rows: 2; `get` shows the EXDATE and the master at `SEQUENCE:1` (bumped: shared signed change), the exception at `SEQUENCE:1` too (raised to the master's); `raw pcb-m4-series | jq -r '.CalendarEvents[] | select(.Type==2) | .Data'` holds the EXDATE (both signed parts). (Two updates in one call.)
+3. Remove the exception VEVENT and add `EXDATE;TZID=Europe/Paris:20270120T080000` to the master → 204, rows: 1, master `SEQUENCE:2`. (Update + delete in **one** call.)
+4. Add an exception for the 5th occurrence (`…20270122T080000`, 09:00–09:30) → 204, rows 2, its `SEQUENCE:2`. Then, in one PUT: rename the master `SUMMARY:pcb-m4 series renamed`, remove the 5th-occurrence exception, add one for the 2nd (`RECURRENCE-ID;TZID=Europe/Paris:20270119T080000`, 09:00–09:30) → 204 (update + create + delete in one call), rows 2, master still `SEQUENCE:2` (a text edit). If Proton refuses a mixed batch: 403 `pcb:proton-refused` (code in `serve.log`'s `Proton refused a write … code=`), or 412 if the read-back saw a partial apply; record which entries it applied (`rows`, `get`). Never move a master's time in this check: Thunderbird rewrites RECURRENCE-IDs and EXDATEs when it does, which hand-written bodies would not.
+
+*W10. Escaped UID* [UID escaping, SPEC §5.3]: `ev esc.ics 'pcb-m4-a\,b' 'pcb-m4 escaped' 'DTSTART;TZID=Europe/Paris:20270107T100000' 'DTEND;TZID=Europe/Paris:20270107T110000'; put pcb-m4-escaped.ics esc.ics -H 'If-None-Match: *'`. Then `sqlite3 -readonly "$DB" "select uid from events where uid like 'pcb-m4-a%'"`:
+- 201 and the column is `pcb-m4-a\,b`: Proton keeps the escaped text; nothing to change.
+- 503 (`not confirmed`), and after the next pass the column is `pcb-m4-a,b`: Proton unescapes. The event exists in Proton but pcb cannot confirm or edit it (its write check binds to the UID as written). Record; the fix (compare unescaped UIDs) is a code change. The event is served at a `~`-encoded name: delete it in the web app at 6.6.
+
+*W11. Names, conflicts, preconditions (no Proton write)* [E08 MUST 9–11]:
+```sh
+ev alias.ics pcb-m4-alias@example.org 'pcb-m4 alias' 'DTSTART;TZID=Europe/Paris:20270108T100000' 'DTEND;TZID=Europe/Paris:20270108T110000'
+put pcb-m4-alias_example.org.ics alias.ics -H 'If-None-Match: *'   # 201 (Thunderbird's sanitised name, kept as an alias)
+"${C[@]}" -o /dev/null -w '%{http_code}\n' "$BASE/pcb-m4-alias@example.org.ics"   # 404: an aliased UID is served at its alias only
+put pcb-m4-alias_example.org.ics alias.ics -H 'If-None-Match: *'   # 412
+put other-name.ics alias.ics                                       # 409, <C:no-uid-conflict><D:href>…/pcb-m4-alias_example.org.ics</D:href>
+put pcb-m4-props.ics props.ics -H 'If-Match: "v1-stale"'          # 412
+del pcb-m4-nothing.ics                                             # 404
+```
+
+*W12. Delete* [L.4 #1]: `del pcb-m4-basic-2.ics -H "If-Match: $(etag pcb-m4-basic-2.ics)"` → 204; `rows pcb-m4-basic-2` empty; `get pcb-m4-basic-2.ics` empty (404).
+
+*W13. 429* [E06]: do not provoke one. If any 429 shows anywhere in the session, record the request, Proton's `Retry-After`, and what pcb answered (a write: 503 with Proton's `Retry-After`, never retried; a sync pass: its backoff).
+
+**6.3 The author sitting (Thunderbird and the web app; the agent watches `serve.log` and runs the check after each item).** Use a fresh Thunderbird profile, so no earlier calendar or certificate exception interferes. The agent notes the UTC time of each item. If Thunderbird offers to send invitations or updates, always choose not to send.
+
+*A. Subscribe (local, plain HTTP).* Calendar > New Calendar > On the Network. Location `http://localhost:1080/`, username anything, the Thunderbird password from 6.1, "Find Calendars". Expect every calendar of the test account, each with its name and colour; subscribe to all. Before the dialog the agent checks, with the `m4-curl` netrc: `"${C[@]}" -si http://localhost:1080/.well-known/caldav | head -3` (308, `Location: /dav/principals/me/`), `"${C[@]}" -si -X PROPFIND -H 'Depth: 0' http://localhost:1080/ | head -1` (`HTTP/1.1 207`), and without credentials `curl -si -X PROPFIND http://localhost:1080/ | head -1` (`HTTP/1.1 401`, `WWW-Authenticate: Basic realm="pcb"`). Then repeat the dialog once with `http://localhost:1080/.well-known/caldav`: same calendars found. Thunderbird must show the default calendar writable and holidays/subscribed ones read only (calendar properties, "Read Only").
+
+*B. Look (no edit).* In Thunderbird and in the web app, side by side, check each event of 6.2 and say what differs:
+1. `pcb-m4 basic renamed` on Mon 4 Jan 2027 10:30–11:30, with its description and location, no reminder; `pcb-m4 props` on Tue 5 Jan 14:00–15:00, shown as free (TRANSP); in the web app, both open without an error.
+2. `pcb-m4 weekdays`: 10 occurrences, 4–15 Jan, weekdays only; `pcb-m4 2tu`: second Tuesdays from 12 Jan, 6 times; `pcb-m4 lastfr`: last Fridays from 29 Jan, 3 times; `pcb-m4 count49`, `pcb-m4 until`: shown (open one occurrence far out).
+3. `pcb-m4 notfirst`: which days each app shows (Wed 6 Jan and/or Mondays 11, 18, 25 Jan).
+4. `pcb-m4 series renamed`: 18 Jan 08:00, 19 Jan 09:00 (the exception), 20 and 21 Jan missing, 22 Jan 08:00.
+5. `pcb-m4 alias`, and (if W10 gave 201) `pcb-m4 escaped`.
+Any event the web app cannot open or shows wrongly is an L.4 #1 failure: record it with the time.
+
+*C. Web-app edits (on the test account).*
+1. Rename `pcb-m4 props` to `pcb-m4 props web` (E13: what Proton's own client keeps; 6.4 reads it).
+2. Create `pcb-m4 web defaults` (Fri 8 Jan 2027 14:00–15:00), leaving the calendar's default notifications as they are.
+3. Create `pcb-m4 meeting`, daily, 3 times from Mon 11 Jan 2027 10:00–10:30, with one participant `pcb-m4-attendee@example.org` (a reserved domain: nothing is delivered).
+4. Delete `pcb-m4 lastfr`.
+The agent then runs, after one `pcb serve` pass (30 s): Thunderbird right-click > Synchronize Calendars; expect the renamed event, the two new ones and `lastfr` gone. Agent checks: `raw <uid> | jq -c '{Notifications, P: (.PersonalEvents // [] | length)}'` for `pcb-m4 web defaults` (its UID: `newest 4` lists the latest edits; it is the one without RRULE that is not `pcb-m4-props`; `get <uid>.ics | grep SUMMARY` confirms): expect `Notifications` `null` (defaults); note `P`.
+
+*D. Thunderbird writes.* After each item the agent checks `serve.log` (no `not confirmed`, no `refusing`), and the author checks the web app (refresh the page).
+1. New event `pcb-m4 tb new`, Tue 5 Jan 2027 16:00–17:00, reminder 15 minutes before. Expect it in the web app with a 15-minute notification. Agent: its UID (`newest 1`), `rows <uid>`, and `sqlite3 -readonly "$DB" "select name, uid from aliases where calendar_id='$CAL_ID'"` shows no alias for it (Thunderbird's name `<uuid>.ics` is the canonical one).
+2. Rename it `pcb-m4 tb renamed` → web app shows it (an unbumped text edit, as W4).
+3. Drag it to 17:00–18:00 → web app shows the new time; agent: `get <uid>.ics | grep SEQUENCE` → bumped.
+4. Rename `pcb-m4 web defaults` to `pcb-m4 web defaults tb` → agent: its `Notifications` still `null` (`TestUnchangedDefaultAlarmsKeepNull` live), and `P` compared with its value at C (L.4 #10: what a sync update that sends no personal part does to one).
+5. New event `pcb-m4 tb weekdays`, Mon 1 Feb 2027 09:00–09:30, Repeat: every weekday, 10 times → web app shows weekdays only; agent: `get` shows `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=10` (whatever form Thunderbird sent, R12).
+6. New event `pcb-m4 tb monthly`, Tue 9 Feb 2027 11:00–12:00, Repeat: custom, monthly, the second Tuesday, 3 times → web app shows second Tuesdays; agent: `BYDAY=TU;BYSETPOS=2` (R5).
+7. In `pcb-m4 tb weekdays`, move the Wed 3 Feb occurrence to 10:00 ("this occurrence only") → web app shows it moved; agent: `rows` 2.
+8. Delete the Thu 4 Feb occurrence ("this occurrence only") → web app shows it gone; agent: `get` shows an EXDATE.
+9. In `pcb-m4 meeting`, move the Tue 12 Jan occurrence to 11:00 ("this occurrence only") [Task 7a M6: X-PM-TOKEN and attendee statuses reused on a new exception row] → expect success and the web app showing the moved occurrence with its participant; a 403 in Thunderbird (agent: `Proton refused a write … code=` in the log) means Proton refuses tokens reused on another row: record the code. If Thunderbird will not edit the event (with no mail identity it may take it for someone else's invitation), the agent sends the same change: `get <uid>.ics > "$LIVE/meeting.ics"`, append before `END:VCALENDAR` a VEVENT with the master's UID, `RECURRENCE-ID;TZID=Europe/Paris:20270112T100000`, DTSTART/DTEND 11:00–11:30 on 12 Jan, the master's ORGANIZER and ATTENDEE lines, `SUMMARY:pcb-m4 meeting moved`; `sed -i 's/$/\r/' "$LIVE/meeting.ics"`; `put <uid>.ics meeting.ics -H "If-Match: $(etag <uid>.ics)"` → 204.
+10. "This and all future occurrences" on `pcb-m4 tb weekdays` from Mon 8 Feb (change the time) [L.4 #12] → record what Thunderbird sent: agent runs `newest 2` (a new UID next to the old one, whose `get` now ends with an UNTIL: Thunderbird truncated the series and made a new one) and reads `serve.log` (a caldav 403 for `recurrence-range` would mean Thunderbird sent RANGE, refused). Record what each app shows.
+11. Alarm [E08 §6.2, research F]: create `pcb-m4 alarm` starting 4 minutes from now (today: the one event outside January–February 2027), reminder 1 minute before; when the alarm shows, dismiss it; refresh (Synchronize Calendars) twice, 30 s apart: it must not show again. Agent: `get` of it shows a VEVENT-level `X-MOZ-LASTACK` and the VALARM regenerated without one.
+12. Conflict [L.4 #12, E08 §4.2]: rename `pcb-m4 tb renamed` to `pcb-m4 web side` in the web app; **without** synchronising Thunderbird, rename it to `pcb-m4 tb side` in Thunderbird → Thunderbird's conflict dialog (pcb answered 412). Choose to overwrite → web app shows `pcb-m4 tb side`. Record the dialog's wording.
+13. UID conflict [L.4 #12, 409]: the agent writes `$LIVE/conflict.ics` with the UID of `pcb-m4 web defaults tb` (`ev conflict.ics '<its uid>' 'pcb-m4 import' 'DTSTART;TZID=Europe/Paris:20270108T140000' 'DTEND;TZID=Europe/Paris:20270108T150000'`) and hands the file to the author, who imports it into the default calendar (Calendar > Import) → Thunderbird PUTs it at `<the UID with [^A-Za-z0-9_.-] made _>.ics`. A web-app UID holds an `@` [inferred], so that name differs from pcb's href and pcb answers 409 naming `<uid>.ics`; with no `@`, the names coincide and pcb answers 412 (Thunderbird reads both as a UID conflict, E08 §4.2). Record which, what Thunderbird shows, and what it holds after a Synchronize (it should keep the server copy).
+14. A refused write [README, E08 §3.8]: add a participant `pcb-m4-attendee@example.org` to `pcb-m4 tb side` and save → pcb answers 403 `pcb:attendee-change`. Record what Thunderbird shows (a cached calendar retries silently). Then remove the participant in Thunderbird and save: the event must be saved again (204), and the web app must show no participant.
+15. Delete `pcb-m4 tb side`, `pcb-m4 web defaults tb`, `pcb-m4 meeting` (the whole series; send no cancellation), `pcb-m4 alarm` in Thunderbird → gone in the web app.
+16. Stop `pcb serve` (agent, Ctrl-C), quit and restart Thunderbird: cached events still shown; start `pcb serve` (agent), Synchronize: no error, no duplicated calendar.
+
+*E. Over the network, TLS (agent, then author).* Stop `pcb serve`, set in `$XDG_CONFIG_HOME/pcb/config.toml`, section `[caldav]`: `listen = "0.0.0.0:8443"` and `hostnames = ["<the host's LAN name>"]`, run `pcb serve` again. Expect `Thunderbird URL: https://<hostname>:8443/` and the fingerprint line; `pcb doctor` shows the same fingerprint. On another machine, repeat A with that URL. Thunderbird shows the certificate exception dialog: **compare the SHA-256 fingerprint in the dialog with the one `pcb serve` printed, character by character; confirm only if they match.** Record: whether the dialog appears in the creation flow or the certificate had to be added first under Settings > Certificates, and whether an IP-literal URL works (E08 §2.3). Then restore `listen` (remove the two lines) and restart `pcb serve`.
+
+*F. Revoked client (agent, then author).* `bin/pcb client remove Thunderbird`; the author synchronises: Thunderbird reports an authentication failure and asks for a password (401). `bin/pcb client add Thunderbird` gives a new password; the old one stays refused. `bin/pcb client list` never prints a password.
+
+**6.4 After the sitting (agent).**
+1. E13: `get pcb-m4-props.ics` after the web-app rename: list which of W7's lines are still there (one line each: kept, changed, gone).
+2. Key packets never rewritten [R30/R35]: no row of the cache may hold other key packets than its pin (prints nothing when none does):
+   ```sh
+   sqlite3 -readonly "$DB" <<'SQL'
+   SELECT e.calendar_id, e.id,
+     coalesce(json_extract(CAST(e.raw AS TEXT), '$.SharedKeyPacket'), '')   = p.shared   AS shared_same,
+     coalesce(json_extract(CAST(e.raw AS TEXT), '$.CalendarKeyPacket'), '') = p.calendar AS calendar_same,
+     coalesce(json_extract(CAST(e.raw AS TEXT), '$.AddressKeyPacket'), '')  = p.address  AS address_same
+   FROM events e JOIN pins p ON p.calendar_id = e.calendar_id AND p.id = e.id
+   WHERE NOT (shared_same AND calendar_same AND address_same);
+   SQL
+   ```
+   A listed row: decode both spellings (`base64 -d`, whitespace and padding aside) before concluding; pcb compares decoded bytes. Different bytes after a web-app edit (C1) mean Proton's client rewrote key packets: that event is read only for pcb from then on (403 `pcb:untrusted-key`), as R30 accepts; record which edit did it.
+3. Stability [L.4 #11]: `sqlite3 -readonly "$DB" "select max(seq) from events where calendar_id='$CAL_ID'"`, wait 70 s with no edit anywhere, again: unchanged.
+4. Integrity [E10]: `grep 'render counters' "$LIVE/serve.log" | tail -3`: no `unverified` above 0 (our own rows, including the web app's, verify with our address key); placeholders and their count recorded.
+5. Logs: `grep -E 'level=(WARN|ERROR)' "$LIVE/serve.log"` — every line explained by a step above (pcb's own 403s and 412s are not logged; what is: Proton refusals, unconfirmed writes, concurrent changes, refused key packets, and each 503).
+
+**6.5 What to record (agent).** One line each, `[verified: live]` or what differed, with the step's UTC time:
+- in `E08-thunderbird-caldav.md`, "Live results": detection through `/.well-known/caldav`, `/` and the principal, preemptive Basic or not (A); sync-collection end to end, including a deletion (C4) and, optionally, a `valid-sync-token` reset (stop `pcb serve`, remove `pcb.db`, `pcb.db-wal`, `pcb.db-shm`, `pcb sync --full`, restart: a new epoch); multiget of a UID with `@` (W11); `readOnly` of each calendar (A); the TLS exception flow and the 825-day certificate (E); real data: non-IANA TZIDs, orphan exceptions, duplicate masters, placeholders (render counters); alarms from `Notifications` shown once and not re-firing (D11); first-sync time and memory (E09 live half); `getcontenttype` with `;component=vevent`; a calendar rename or recolour not reaching an existing subscription; every write of D with its status; the conflict dialog (D12), the 409 import (D13), the refused write (D14), "this and future" (D10); another member's shared calendar: skipped (needs a second account);
+- in `E10-signatures.md`: 6.1.4, W1 (sigclass, one PKESK), 6.4.4;
+- in `E12-recurrence-forms.md`: W8, W9, B2–B4, D5–D10;
+- in `E13-unknown-properties.md`: W7, 6.4.1;
+- in `E14-member-permissions.md`: 6.1.4;
+- in `E07-row-changes.md` and research L.4: W2, W4, W5, W10, C4/D4 (`PersonalEvents`), D9, 6.4.2, 6.4.3;
+- then turn the matching markers of SPEC §5.3, §5.4, §8.1, §9 and §17, `mapping.md` and `OPEN.md`; any Proton behaviour that differs from what the code assumes is fixed test first, in its own commit, before the write-up commit `🧪 M4 live session against the test account`.
+
+**6.6 Clean up (agent).** Delete what is left of 6.2 with `del NAME -H "If-Match: $(etag NAME)"` (`pcb-m4-basic.ics`, `pcb-m4-props.ics`, `pcb-m4-weekdays.ics`, `pcb-m4-2tu.ics`, `pcb-m4-notfirst.ics`, `pcb-m4-count49.ics`, `pcb-m4-until.ics`, `pcb-m4-duration.ics`, `pcb-m4-series.ics`, `pcb-m4-alias_example.org.ics`, `pcb-m4-escaped.ics`), each 204; the author deletes in the web app anything titled `pcb-m4` still there (search "pcb-m4"). `bin/pcb client remove m4-curl`; `rm -rf "$LIVE"`. Keep the M1/M2 dirs if more live work follows, else `bin/pcb logout --json` and `rm -rf ~/.local/share/pcb-m1-live`.
 
 ## M1 live session (after steps 1 to 5; agent-run except three author actions)
 
