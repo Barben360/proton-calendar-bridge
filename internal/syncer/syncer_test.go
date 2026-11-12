@@ -15,7 +15,6 @@ import (
 	_ "modernc.org/sqlite" // the "sqlite" driver, to plant a failing trigger
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
-	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
@@ -24,19 +23,12 @@ import (
 
 var t0 = time.Unix(1_800_000_000, 0)
 
-// setup logs in once on a fresh fake (calendar.List needs a real session)
+// setup takes a live session on a fresh fake (calendar.List needs a real one)
 // and opens an empty cache. The client never sleeps between retries.
 func setup(t *testing.T) (*protontest.Fake, *api.Client, *cache.Cache) {
 	t.Helper()
 	f := protontest.New(t, protontest.Options{})
-	m := auth.NewManager(f.URL, "Other")
-	t.Cleanup(m.Close)
-	p, err := auth.Begin(t.Context(), m, f.Username, []byte(f.Password), "")
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	t.Cleanup(p.Close)
-	c := api.New(p.Tokens, api.Options{
+	c := api.New(f.Login(t, f.Username), api.Options{
 		BaseURL: f.URL,
 		Limiter: rate.NewLimiter(rate.Inf, 1),
 		HTTP:    &http.Client{Timeout: 5 * time.Second},

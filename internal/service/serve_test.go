@@ -39,7 +39,7 @@ func TestServeCallsReadyOnlyOnceItRuns(t *testing.T) {
 		t.Fatalf("Ready called %d times while logged out", n)
 	}
 
-	e.login(t, e.req())
+	e.signIn(t)
 	if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func newIdleRig(t *testing.T) *idleRig {
 	t.Helper()
 	e := newEnv(t, protontest.Options{})
 	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	e.login(t, e.req())
+	e.signIn(t)
 	r := &idleRig{env: e, idle: make(chan struct{}), passes: make(chan atPass), resume: make(chan struct{}), release: make(chan struct{}), work: work}
 	svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: func(ctx context.Context, d time.Duration) error {
 		if d == service.IdleInterval || (r.hold.Load() && d != service.ActiveInterval) {
@@ -537,7 +537,7 @@ func TestServeWaitsForALogin(t *testing.T) {
 	}
 	checks := r.polls.Load()
 
-	r.login(t, r.req())
+	r.signIn(t)
 	r.wantState(t, service.ServeServing)
 	if p := r.wantPass(t); p.Err != nil || len(p.Result.Calendars) != 1 {
 		t.Fatalf("first pass after the login: %+v", p)
@@ -626,7 +626,7 @@ func TestServeNoticesALoginFromAnotherProcess(t *testing.T) {
 func TestSessionEndWaitsInsteadOfExiting(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
@@ -662,7 +662,7 @@ func TestServeWithoutTheFlagKeepsM3(t *testing.T) {
 		t.Fatalf("Ready called %d times while logged out", n)
 	}
 
-	r.login(t, r.req())
+	r.signIn(t)
 	done, _ := r.serve(t, service.ServeOptions{})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
@@ -692,7 +692,7 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 	t.Run("waits", func(t *testing.T) {
 		t.Parallel()
 		r := newWaitRig(t)
-		r.login(t, r.req())
+		r.signIn(t)
 		done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 		r.wantState(t, service.ServeServing)
 		r.wantPass(t)
@@ -725,7 +725,7 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 
 		// The next login serves again.
 		r.clk.advance(time.Minute)
-		r.login(t, r.req())
+		r.signIn(t)
 		r.wantState(t, service.ServeServing)
 		if p := r.wantPass(t); p.Err != nil {
 			t.Errorf("pass after the new login: %v", p.Err)
@@ -734,7 +734,7 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 	t.Run("returns without the flag", func(t *testing.T) {
 		t.Parallel()
 		r := newWaitRig(t)
-		r.login(t, r.req())
+		r.signIn(t)
 		done, _ := r.serve(t, service.ServeOptions{})
 		r.wantState(t, service.ServeServing)
 		r.wantPass(t)
@@ -790,7 +790,7 @@ func TestLoginFixableStopsWait(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := newWaitRig(t)
-			r.login(t, r.req())
+			r.signIn(t)
 			done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 			r.wantState(t, service.ServeServing)
 			r.wantPass(t)
@@ -811,7 +811,7 @@ func TestLoginFixableStopsWait(t *testing.T) {
 func TestDamagedCacheEndsServeUnderTheFlag(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +846,7 @@ func TestDamagedCacheEndsServeUnderTheFlag(t *testing.T) {
 func TestUnknownCalendarIsPendingUntilTheFirstPassAfterALogin(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
@@ -856,7 +856,7 @@ func TestUnknownCalendarIsPendingUntilTheFirstPassAfterALogin(t *testing.T) {
 	r.wantState(t, service.ServeWaitingForLogin)
 	r.f.FailNext(http.MethodGet, "/calendar/v1", http.StatusServiceUnavailable, 0, 0)
 	r.clk.advance(time.Minute)
-	r.login(t, r.req())
+	r.signIn(t)
 	r.wantState(t, service.ServeServing) // the pass waits in the listing's retry (tick)
 	_, _, err := r.svc.Objects(t.Context(), r.work)
 	if !errors.Is(err, service.ErrCalendarPending) || exitcode.From(err) != exitcode.Blocked {
@@ -924,7 +924,7 @@ func (r *waitRig) noServing(t *testing.T) {
 func TestServeRefusesWhileALogoutWipes(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	release := holdWipe(t, r.svc)
 	done, _ := r.serve(t, service.ServeOptions{})
 	select {
@@ -950,7 +950,7 @@ func TestServeRefusesWhileALogoutWipes(t *testing.T) {
 func TestLogoutBetweenTheCheckAndServingRefusesIt(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	var once sync.Once
 	r.svc.BeforeServe(func() {
 		once.Do(func() {
@@ -973,7 +973,7 @@ func TestLogoutBetweenTheCheckAndServingRefusesIt(t *testing.T) {
 func TestWaitIgnoresTheLoginWhileALogoutWipes(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	checks := make(chan struct{}, 64)
 	r.svc.OnLoginCheck(func() {
 		r.polls.Add(1)
@@ -1010,7 +1010,7 @@ func TestWaitIgnoresTheLoginWhileALogoutWipes(t *testing.T) {
 func TestWaitBeginsBeforeTheHandleIsCleared(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	var held atomic.Int32 // 1: held at the wait, 2: not held
 	served := false
 	r.atState = func(s service.ServeState) {
@@ -1057,7 +1057,7 @@ func TestUnfixableStoredLoginEndsServe(t *testing.T) {
 			}
 		}},
 		{"key file missing", "restore it from a backup", func(t *testing.T, r *waitRig) {
-			r.login(t, r.req())
+			r.signIn(t)
 			if err := os.Remove(r.cfg.Secrets.KeyFile); err != nil {
 				t.Fatal(err)
 			}
@@ -1092,7 +1092,7 @@ func TestUnfixableStoredLoginEndsServe(t *testing.T) {
 func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.login(t, r.req())
+	r.signIn(t)
 	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Millisecond})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)

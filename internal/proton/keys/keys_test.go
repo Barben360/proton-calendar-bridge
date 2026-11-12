@@ -37,12 +37,7 @@ func login(t *testing.T, o protontest.Options) (*protontest.Fake, *api.Client, *
 	f := protontest.New(t, o)
 	m := auth.NewManager(f.URL, "Other")
 	t.Cleanup(m.Close)
-	p, err := auth.Begin(t.Context(), m, f.Username, []byte(f.Password), "")
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	t.Cleanup(p.Close)
-	return f, newClient(f, p.Tokens), m
+	return f, newClient(f, f.Login(t, f.Username)), m
 }
 
 // counting is an Elevator that counts calls around a real auth.Scope.

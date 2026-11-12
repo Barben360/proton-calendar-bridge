@@ -277,6 +277,27 @@ func TestAbortRevokesThePendingSession(t *testing.T) {
 	}
 }
 
+func TestResumeAdoptsASessionWithoutSRP(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	m := manager(t, f)
+	p := begin(t, f, m)
+	tok, id := p.Tokens, p.UserID
+	p.Close()
+	logins := f.Calls("POST", "/auth/")
+	r := auth.Resume(m, tok, id)
+	if r.Tokens != tok || r.UserID != id || r.NeedsTOTP {
+		t.Fatalf("Resume = {%v %q %v}, want the session's tokens and user, no 2FA", r.Tokens == tok, r.UserID, r.NeedsTOTP)
+	}
+	if n := f.Calls("POST", "/auth/"); n != logins {
+		t.Fatalf("Resume sent %d auth calls, want none", n-logins)
+	}
+	r.Abort(t.Context())
+	if err := client(f, tok).Get(t.Context(), "/core/v4/users", nil, nil); !errors.Is(err, api.ErrSessionEnded) {
+		t.Fatalf("the resumed session survived Abort: %v", err)
+	}
+}
+
 func TestRefreshRotates(t *testing.T) {
 	t.Parallel()
 	f := protontest.New(t, protontest.Options{})

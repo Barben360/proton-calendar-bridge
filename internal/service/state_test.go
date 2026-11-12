@@ -21,7 +21,7 @@ import (
 func TestNewerStateSaysUpgrade(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	path := filepath.Join(e.dirs.State, "state.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -50,7 +50,7 @@ func TestNewerStateSaysUpgrade(t *testing.T) {
 func TestLoginOverAStoreThisPcbCannotRead(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	e.login(t, e.req())
+	e.signIn(t)
 	if err := os.WriteFile(e.secrets().Path, []byte(`{"version":3,"sealer":"keyfile","data":""}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestLogoutSaysWhenAnotherProcessSyncs(t *testing.T) {
 	t.Parallel()
 	for _, held := range []bool{false, true} {
 		e := newEnv(t, protontest.Options{})
-		e.login(t, e.req())
+		e.signIn(t)
 		if _, err := e.svc.Sync(t.Context(), service.SyncRequest{}); err != nil {
 			t.Fatal(err)
 		}

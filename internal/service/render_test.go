@@ -77,7 +77,7 @@ func TestObjectChanges(t *testing.T) {
 	// Other's first listed key opens with no passphrase (until reactivated).
 	other := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Other", ExtraLockedKey: true})
 	e.f.AddEvent(other, protontest.Event{UID: "o1@x", Start: base, End: base + 60})
-	e.login(t, e.req())
+	e.signIn(t)
 	e.sync(t, false)
 	etags0, tok0 := e.listing(t, work)
 	top := t // a service opened in a subtest lives for the whole test
@@ -297,7 +297,7 @@ func TestObjectChanges(t *testing.T) {
 		_, err := e.svc.ObjectsByUID(t.Context(), work, []string{"s@x"})
 		_ = wantExit(t, err, exitcode.MustAct)
 		e.clk.advance(61 * time.Second) // the login guard
-		e.login(t, e.req())
+		e.signIn(t)
 		e.sync(t, false)
 		boots, decrypts := e.f.Calls("GET", "/calendar/v2/"+work+"/bootstrap"), e.svc.Decrypts()
 		contains(t, "s@x", e.objects(t, work, "s@x")["s@x"].Data, "SUMMARY:Standup\r\n")

@@ -191,16 +191,8 @@ func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte
 	if err != nil {
 		return nil, loginError(cctx, err)
 	}
-	p := &Pending{
-		Tokens:    api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken},
-		UserID:    a.UserID,
-		NeedsTOTP: a.TwoFA.Enabled&gpa.HasTOTP != 0,
-		c:         c,
-	}
-	c.AddAuthHandler(func(r gpa.Auth) {
-		p.Tokens.AccessToken, p.Tokens.RefreshToken = r.AccessToken, r.RefreshToken
-	})
-	c.AddDeauthHandler(func() { p.ended = true })
+	p := pending(c, api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken}, a.UserID)
+	p.NeedsTOTP = a.TwoFA.Enabled&gpa.HasTOTP != 0
 	var refused error
 	switch {
 	case a.PasswordMode == gpa.TwoPasswordMode:
@@ -215,6 +207,23 @@ func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte
 	}
 	p.Close()
 	return nil, refused
+}
+
+// Resume is a Pending for a session that already passed SRP (tok, of the
+// account userID), without any call: tests use it to skip SRP's cost and
+// still run what follows it. It needs no 2FA.
+func Resume(m *gpa.Manager, tok api.Tokens, userID string) *Pending {
+	return pending(m.NewClient(tok.UID, tok.AccessToken, tok.RefreshToken), tok, userID)
+}
+
+// pending is the Pending of c's session; its Tokens follow c's rotations.
+func pending(c *gpa.Client, tok api.Tokens, userID string) *Pending {
+	p := &Pending{Tokens: tok, UserID: userID, c: c}
+	c.AddAuthHandler(func(r gpa.Auth) {
+		p.Tokens.AccessToken, p.Tokens.RefreshToken = r.AccessToken, r.RefreshToken
+	})
+	c.AddDeauthHandler(func() { p.ended = true })
+	return p
 }
 
 // revoke deletes the session, even when ctx is cancelled.
