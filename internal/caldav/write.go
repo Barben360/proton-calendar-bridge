@@ -97,19 +97,26 @@ func calendarBody(contentType string) bool {
 }
 
 // precondition reads If-Match (an ETag compared as an exact string, or
-// "*") and If-None-Match: *. An If-None-Match naming ETags is not one the
-// service evaluates: false, and the request is answered 412 without being
-// tried (it fails closed: Thunderbird never sends one, E08 §4.1).
+// "*") and If-None-Match: "*", or the ETags it names (the service compares
+// them weakly with the object's, and a missing object passes, RFC 9110
+// §13.1.2). An If-None-Match with no ETag in it is false: the request is
+// answered 412 without being tried.
 func precondition(r *http.Request) (service.Precondition, bool) {
 	cond := service.Precondition{IfMatch: strings.TrimSpace(r.Header.Get("If-Match"))}
-	switch inm := strings.TrimSpace(r.Header.Get("If-None-Match")); inm {
-	case "":
-	case "*":
+	inm := strings.TrimSpace(strings.Join(r.Header.Values("If-None-Match"), ","))
+	if inm == "*" {
 		cond.IfNoneMatchAny = true
-	default:
-		return cond, false
+		return cond, true
 	}
-	return cond, true
+	if inm == "" {
+		return cond, true
+	}
+	for _, e := range strings.Split(inm, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			cond.IfNoneMatch = append(cond.IfNoneMatch, e)
+		}
+	}
+	return cond, len(cond.IfNoneMatch) > 0
 }
 
 // writeFail answers a failed write per the service's error contract

@@ -208,7 +208,6 @@ func (r *renderer) has(ids []string) bool {
 	return true
 }
 
-// calKeys returns calendar id's keys, nil when they were not loaded.
 // noteGates records the decided gates of cals, installed for account; kmu
 // held for writing.
 func (r *renderer) noteGates(account string, cals map[string]*calKeys) {
@@ -222,17 +221,23 @@ func (r *renderer) noteGates(account string, cals map[string]*calKeys) {
 	}
 }
 
-// advertisedWritable is whether calendar id is advertised writable: its
-// gate when decided, else the last decided one (false before any).
-func (r *renderer) advertisedWritable(id string, ck *calKeys) bool {
+// advertised is the privileges calendar id is advertised with (rulings
+// M4-R39, M4-R40): its gate when decided, else the last decided one;
+// known is false while none was ever decided.
+func (r *renderer) advertised(id string, ck *calKeys) (writable, known bool) {
 	if ck.gate != calendar.GateUndecided {
-		return ck.gate == calendar.GateOpen
+		return ck.gate == calendar.GateOpen, true
 	}
 	r.kmu.RLock()
 	defer r.kmu.RUnlock()
-	return r.ks != nil && r.decided[r.ks.account+"\x00"+id]
+	if r.ks == nil {
+		return false, false
+	}
+	writable, known = r.decided[r.ks.account+"\x00"+id]
+	return writable, known
 }
 
+// calKeys returns calendar id's keys, nil when they were not loaded.
 func (r *renderer) calKeys(id string) *calKeys {
 	r.kmu.RLock()
 	defer r.kmu.RUnlock()

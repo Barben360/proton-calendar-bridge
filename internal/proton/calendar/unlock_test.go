@@ -546,3 +546,64 @@ func TestAnomalousPrimaryFlagsFailClosed(t *testing.T) {
 		})
 	}
 }
+
+// Ruling M4-R39: the passphrase signature is checked only with our
+// member's address keyring unlocked. When it is not (here the member's
+// address is one whose keys did not unlock, the passphrase opening with
+// another of ours), nothing was checked: the gate is undecided, never
+// closed (a write then answers 503, not 403).
+func TestUnverifiableSignatureLeavesTheGateUndecided(t *testing.T) {
+	t.Parallel()
+	f, c, u := session(t)
+	f.AddCalendar(f.Username, protontest.Calendar{})
+	cal := firstCalendar(t, c)
+	if cal.MemberID == "" {
+		t.Fatal("test bug: the listing names no member, Unlock would look it up")
+	}
+	cal.AddressID = "an-address-whose-keys-are-locked"
+	a, err := calendar.Unlock(t.Context(), c, u, cal)
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	defer a.Close()
+	if a.PassphraseChecked || a.PassphraseVerified {
+		t.Errorf("checked %v, verified %v; want neither", a.PassphraseChecked, a.PassphraseVerified)
+	}
+	if g := a.Gate(calendar.Normal); g != calendar.GateUndecided {
+		t.Errorf("Gate = %v, want undecided", g)
+	}
+}
+
+// Would fail if Gate confused its three verdicts.
+func TestGateVerdicts(t *testing.T) {
+	t.Parallel()
+	open := func() *calendar.Access {
+		return &calendar.Access{Type: calendar.Normal, Permissions: 127, PassphraseChecked: true, PassphraseVerified: true,
+			Primary: &crypto.KeyRing{}, Signer: &crypto.KeyRing{}}
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(a *calendar.Access)
+		typ  calendar.Type
+		want calendar.Gate
+	}{
+		{"writable", func(*calendar.Access) {}, calendar.Normal, calendar.GateOpen},
+		{"holidays", func(*calendar.Access) {}, calendar.ParseType("holidays"), calendar.GateClosed},
+		{"no Write bit", func(a *calendar.Access) { a.Permissions = 2 | 4 }, calendar.Normal, calendar.GateClosed},
+		{"checked, bad", func(a *calendar.Access) { a.PassphraseVerified = false }, calendar.Normal, calendar.GateClosed},
+		{"not checked", func(a *calendar.Access) { a.PassphraseChecked, a.PassphraseVerified = false, false }, calendar.Normal, calendar.GateUndecided},
+		{"no write key", func(a *calendar.Access) { a.Primary = nil }, calendar.Normal, calendar.GateUndecided},
+	} {
+		a := open()
+		tc.edit(a)
+		if got := a.Gate(tc.typ); got != tc.want {
+			t.Errorf("%s: Gate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got := (*calendar.Access)(nil).Gate(calendar.Normal); got != calendar.GateUndecided {
+		t.Errorf("no keys: Gate = %v, want undecided", got)
+	}
+	if got := (*calendar.Access)(nil).Gate(calendar.ParseType("subscribed")); got != calendar.GateClosed {
+		t.Errorf("no keys, subscribed: Gate = %v, want closed", got)
+	}
+}

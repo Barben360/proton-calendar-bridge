@@ -1924,6 +1924,10 @@ func TestWriteGateDecidedOrUndecided(t *testing.T) {
 				t.Errorf("%d requests reached the sync endpoint", n)
 			}
 			c := r.collection(t, r.cal)
+			undecided := errors.Is(tc.cause, service.ErrGateUndecided)
+			if c.PrivilegesUnknown != undecided { // never decided (ruling M4-R40)
+				t.Errorf("collection PrivilegesUnknown %v, want %v", c.PrivilegesUnknown, undecided)
+			}
 			if !c.ReadOnly || c.WriteGateUndecided != errors.Is(tc.cause, service.ErrGateUndecided) {
 				t.Errorf("collection ReadOnly %v, WriteGateUndecided %v; want read only, undecided %v",
 					c.ReadOnly, c.WriteGateUndecided, errors.Is(tc.cause, service.ErrGateUndecided))
@@ -1943,17 +1947,17 @@ func TestUndecidedGateKeepsTheLastDecision(t *testing.T) {
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+fresh+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
 	e.login(t, e.req())
 	e.sync(t, false)
-	if c := e.collection(t, work); c.ReadOnly || c.WriteGateUndecided {
+	if c := e.collection(t, work); c.ReadOnly || c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Fatalf("precondition: Work is decided writable, got %+v", c)
 	}
-	if c := e.collection(t, fresh); !c.ReadOnly || !c.WriteGateUndecided {
-		t.Errorf("a calendar never decided: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
+	if c := e.collection(t, fresh); !c.ReadOnly || !c.WriteGateUndecided || !c.PrivilegesUnknown {
+		t.Errorf("a calendar never decided: ReadOnly %v, undecided %v, unknown %v; want all", c.ReadOnly, c.WriteGateUndecided, c.PrivilegesUnknown)
 	}
 	// A new login drops the keys; Work's bootstrap then fails.
 	e.clk.advance(2 * time.Minute)
 	e.login(t, e.req())
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+work+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
-	if c := e.collection(t, work); c.ReadOnly || !c.WriteGateUndecided {
+	if c := e.collection(t, work); c.ReadOnly || !c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Errorf("Work undecided after a decision: ReadOnly %v, undecided %v; want the last decision (writable), undecided", c.ReadOnly, c.WriteGateUndecided)
 	}
 }
@@ -1981,7 +1985,7 @@ func TestRefreshedGateIsTheLastDecision(t *testing.T) {
 	e.clk.advance(2 * time.Minute)
 	e.login(t, e.req())
 	e.f.FailNext(http.MethodGet, "/calendar/v2/"+id+"/bootstrap", http.StatusUnprocessableEntity, 2501, 0)
-	if c := e.collection(t, id); !c.ReadOnly || !c.WriteGateUndecided {
+	if c := e.collection(t, id); !c.ReadOnly || !c.WriteGateUndecided || c.PrivilegesUnknown {
 		t.Errorf("undecided after the refresh's decision: ReadOnly %v, undecided %v; want read only, undecided", c.ReadOnly, c.WriteGateUndecided)
 	}
 }

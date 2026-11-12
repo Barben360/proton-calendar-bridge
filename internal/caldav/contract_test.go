@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -978,6 +979,24 @@ func TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T) {
 	}
 }
 
+// An aliased object deleted between the change list and the render of its
+// calendar-data is a deletion at its alias, the only href a client knows.
+func TestSyncWithCalendarDataReportsAVanishedAliasAtItsAlias(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.aliases[workID] = map[string]string{"vanished@x": "my event.ics"}
+	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: "vanished@x", ETag: `"v1-vanished"`}}, Deleted: dels(), Token: "tok-2"}
+	h := caldav.Handler(s, caldav.Options{})
+	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><sync-level>1</sync-level><prop><getetag/><C:calendar-data/></prop></sync-collection>`
+	ms := parseMS(t, do(h, "REPORT", calPath(workID), body, "Depth", "1"))
+	if len(ms.responses) != 1 {
+		t.Fatalf("%d responses:\n%s", len(ms.responses), ms.raw)
+	}
+	if r := ms.get(t, calPath(workID)+"my event.ics"); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+		t.Errorf("the vanished alias: %+v", r)
+	}
+}
+
 // An object the service answers under another name than the href asked is
 // never served at that href: the href is a 404.
 func TestMultigetServesAnObjectOnlyAtItsOwnName(t *testing.T) {
@@ -1115,9 +1134,28 @@ func TestMust10PutIs201Or204WithoutAnETag(t *testing.T) {
 		}
 		w := s.writeCalls()
 		if len(w) != 1 || w[0].method != http.MethodPut || w[0].calID != workID || w[0].name != "3f2a1c9e-new one.ics" ||
-			string(w[0].body) != body || w[0].cond != tc.cond {
+			string(w[0].body) != body || !reflect.DeepEqual(w[0].cond, tc.cond) {
 			t.Errorf("%s: the service got %+v", tc.name, w)
 		}
+	}
+}
+
+// An If-None-Match naming ETags reaches the service as the list of them
+// (RFC 9110 §13.1.2: the service compares them with the object's, and a
+// missing object passes), from one header or several.
+func TestIfNoneMatchETagsReachTheService(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	req := authed(call(http.MethodPut, objPath(workID, "new@x"), "x", "Content-Type", "text/calendar"))
+	req.Header.Add("If-None-Match", `"v1-a", W/"v1-b"`)
+	req.Header.Add("If-None-Match", `"v1-c"`)
+	wantStatus(t, serve(h, req), http.StatusNoContent)
+	wantStatus(t, do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-None-Match", ` "v1-d" `), http.StatusNoContent)
+	w := s.writeCalls()
+	if len(w) != 2 || !slices.Equal(w[0].cond.IfNoneMatch, []string{`"v1-a"`, `W/"v1-b"`, `"v1-c"`}) || w[0].cond.IfNoneMatchAny ||
+		!slices.Equal(w[1].cond.IfNoneMatch, []string{`"v1-d"`}) {
+		t.Errorf("the service got %+v", w)
 	}
 }
 
@@ -1158,7 +1196,7 @@ func TestMust11DeleteIs204Or404Or412AndHeadAnswers(t *testing.T) {
 	wantStatus(t, rec, http.StatusNoContent)
 	wantBody(t, rec, "")
 	if w := s.writeCalls(); len(w) != 1 || w[0].method != http.MethodDelete || w[0].name != objName(plainUID) ||
-		w[0].cond != (service.Precondition{IfMatch: `"v1-plain"`}) {
+		!reflect.DeepEqual(w[0].cond, service.Precondition{IfMatch: `"v1-plain"`}) {
 		t.Errorf("the service got %+v", w)
 	}
 	for _, tc := range []struct {
@@ -1210,6 +1248,30 @@ func TestWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T) {
 	rec = do(h, http.MethodDelete, objPath(workID, plainUID), "")
 	wantStatus(t, rec, http.StatusForbidden)
 	wantBody(t, rec, fmt.Sprintf(delBody, calPath(workID)))
+}
+
+// Ruling M4-R40: a calendar whose gate was never decided advertises no
+// privileges: current-user-privilege-set is in a 404 propstat (E08: no
+// decision; Thunderbird keeps a read-only flag for good), in a Depth 0 and
+// a Depth 1 PROPFIND, and allprop leaves it out.
+func TestUndecidedPrivilegesAreA404Propstat(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	s.colls[1].ReadOnly, s.colls[1].PrivilegesUnknown, s.colls[1].WriteGateUndecided = true, true, true
+	h := caldav.Handler(s, caldav.Options{})
+	hs := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
+	one := parseMS(t, do(h, "PROPFIND", calPath(holID), tbServerInfo, "Depth", "0"))
+	for _, r := range []response{hs.get(t, calPath(holID)), one.get(t, calPath(holID))} {
+		if _, ok := r.props[n(nsD, "current-user-privilege-set")]; ok || !r.missing[n(nsD, "current-user-privilege-set")] {
+			t.Errorf("an undecided calendar: privileges %v, missing %v; want a 404 propstat", r.props[n(nsD, "current-user-privilege-set")], r.missing)
+		}
+	}
+	wantNames(t, "a decided calendar", privileges(t, hs.get(t, calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
+		n(nsD, "read"), n(nsD, "write"), n(nsD, "write-content"), n(nsD, "bind"), n(nsD, "unbind"))
+	all := parseMS(t, do(h, "PROPFIND", calPath(holID), "", "Depth", "0")).get(t, calPath(holID))
+	if _, ok := all.props[n(nsD, "current-user-privilege-set")]; ok || len(all.missing) != 0 {
+		t.Errorf("allprop of an undecided calendar: %+v", all)
+	}
 }
 
 // Ruling M4-R39: a calendar advertised read only whose gate is undecided
@@ -1268,8 +1330,8 @@ func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
 }
 
 // The adapter's own refusals, before the service: a PUT body that is not
-// text/calendar is 415, over 8 MiB 413, an If-None-Match naming ETags 412
-// (fails closed: the service evaluates only "*"); PUT or DELETE on a
+// text/calendar is 415, over 8 MiB 413, an If-None-Match that names no
+// ETag 412; PUT or DELETE on a
 // collection 405, on no resource 404. None reaches the service.
 func TestPutRequestChecksComeFirst(t *testing.T) {
 	t.Parallel()
@@ -1286,8 +1348,8 @@ func TestPutRequestChecksComeFirst(t *testing.T) {
 		{"application/xml", http.MethodPut, obj, "x", []string{"Content-Type", "application/xml"}, http.StatusUnsupportedMediaType},
 		{"broken Content-Type", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar; ="}, http.StatusUnsupportedMediaType},
 		{"over 8 MiB", http.MethodPut, obj, strings.Repeat("x", 8<<20+1), []string{"Content-Type", "text/calendar"}, http.StatusRequestEntityTooLarge},
-		{"If-None-Match ETag", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-None-Match", `"v1-plain"`}, http.StatusPreconditionFailed},
-		{"DELETE If-None-Match ETag", http.MethodDelete, obj, "", []string{"If-None-Match", `"v1-plain"`}, http.StatusPreconditionFailed},
+		{"If-None-Match without an ETag", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-None-Match", ","}, http.StatusPreconditionFailed},
+		{"DELETE If-None-Match without an ETag", http.MethodDelete, obj, "", []string{"If-None-Match", " , "}, http.StatusPreconditionFailed},
 		{"PUT a calendar", http.MethodPut, calPath(workID), "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
 		{"DELETE a calendar", http.MethodDelete, calPath(workID), "", nil, http.StatusMethodNotAllowed},
 		{"PUT the home set", http.MethodPut, home, "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},

@@ -176,8 +176,9 @@ func homeResource() *resource {
 }
 
 // The privileges a calendar advertises: read and write when the write gate
-// lets us write it (ruling M4-R1: Collection.ReadOnly), else read alone; a
-// write to a read-only one is 403 need-privileges (write.go).
+// lets us write it (ruling M4-R1: Collection.ReadOnly), else read alone,
+// none before the gate was ever decided (M4-R40); a write to a calendar
+// decided read only is 403 need-privileges (write.go).
 const (
 	readPrivileges  = "<D:privilege><D:read/></D:privilege>"
 	writePrivileges = readPrivileges + "<D:privilege><D:write/></D:privilege><D:privilege><D:write-content/></D:privilege>" +
@@ -200,11 +201,16 @@ func calendarResource(c service.Collection) *resource {
 	res.add(caldav("supported-calendar-data"), `<C:calendar-data content-type="text/calendar" version="2.0"/>`)
 	res.add(dav("supported-report-set"), "<D:supported-report><D:report><D:sync-collection/></D:report></D:supported-report>"+
 		"<D:supported-report><D:report><C:calendar-multiget/></D:report></D:supported-report>")
-	privileges := writePrivileges
-	if c.ReadOnly {
-		privileges = readPrivileges
+	// No decision yet (ruling M4-R40): no set, so a request for it gets it
+	// in a 404 propstat, E08's "no decision" (Thunderbird persists a
+	// read-only flag and never clears it).
+	if !c.PrivilegesUnknown {
+		privileges := writePrivileges
+		if c.ReadOnly {
+			privileges = readPrivileges
+		}
+		res.add(dav("current-user-privilege-set"), privileges)
 	}
-	res.add(dav("current-user-privilege-set"), privileges)
 	res.add(xml.Name{Space: nsCS, Local: "getctag"}, text(c.CTag))
 	res.addHidden(dav("sync-token"), text(c.SyncToken)) // RFC 6578 §4: not in allprop
 	res.add(dav("owner"), principalHref)

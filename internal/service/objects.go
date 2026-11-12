@@ -292,11 +292,13 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 			if ck == nil {
 				return errKeysDropped()
 			}
-			// The write gate (rulings M4-R1, M4-R39): when it cannot be
-			// decided now (keys that did not unlock, a passphrase signature
-			// not checkable), the last decided privileges, read only before
-			// any.
-			coll.ReadOnly = !l.r.advertisedWritable(c.ID, ck)
+			// The write gate (rulings M4-R1, M4-R39, M4-R40): when it cannot
+			// be decided now (keys that did not unlock, a passphrase
+			// signature not checkable), the last decided privileges; none
+			// before any decision (PrivilegesUnknown, ReadOnly true).
+			writable, known := l.r.advertised(c.ID, ck)
+			coll.ReadOnly = !writable
+			coll.PrivilegesUnknown = !known
 			coll.WriteGateUndecided = ck.gate == calendar.GateUndecided
 			var epoch string
 			var seq int64

@@ -39,10 +39,18 @@ import (
 // Precondition is a write's HTTP precondition. IfMatch is the If-Match
 // value: an ETag as the read API returns it (quoted), compared as an exact
 // string, or "*" for "the object exists"; "" for none. IfNoneMatchAny is
-// If-None-Match: * (the object must not exist).
+// If-None-Match: * (the object must not exist); IfNoneMatch is an
+// If-None-Match naming ETags: the object, if it exists, must have none of
+// them (weak comparison, RFC 9110 §13.1.2; a missing object passes).
 type Precondition struct {
-	IfMatch        string `json:"if_match,omitempty"`
-	IfNoneMatchAny bool   `json:"if_none_match_any,omitempty"`
+	IfMatch        string   `json:"if_match,omitempty"`
+	IfNoneMatchAny bool     `json:"if_none_match_any,omitempty"`
+	IfNoneMatch    []string `json:"if_none_match,omitempty"`
+}
+
+// weakEqual compares two entity tags weakly: W/ ignored.
+func weakEqual(a, b string) bool {
+	return strings.TrimPrefix(a, "W/") == strings.TrimPrefix(b, "W/")
 }
 
 // PutResult is a successful PUT: Created when the event is new (CalDAV
@@ -223,14 +231,32 @@ func plainUID(uid string) bool {
 	return true
 }
 
-// validName reports whether a client-chosen resource name can name an
-// object: 1 to maxNameBytes bytes of UTF-8, no "/", no control character,
-// not "." or "..".
+// validName reports whether a client-chosen resource name can be recorded
+// as an alias: 1 to maxNameBytes bytes of UTF-8, no "/", no control
+// character, not "." or "..".
 func validName(name string) bool {
-	if name == "" || len(name) > maxNameBytes || name == "." || name == ".." || !utf8.ValidString(name) {
+	return len(name) <= maxNameBytes && wellFormedName(name)
+}
+
+// wellFormedName is validName without the length bound: what any name a
+// write targets must be. A name a UID is served at (canonical or
+// alternative) may be longer than maxNameBytes and is always well formed;
+// the bound applies only to a name about to become an alias.
+func wellFormedName(name string) bool {
+	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) {
 		return false
 	}
 	return !strings.ContainsFunc(name, func(r rune) bool { return r == '/' || r < 0x20 || r == 0x7f })
+}
+
+// derivedName reports whether name is the canonical or the alternative
+// name of some UID: a name pcb derives, which may be served (any length).
+func derivedName(name string) bool {
+	if _, ok := UIDOfName(name); ok {
+		return true
+	}
+	_, ok := uidOfAlternativeName(name)
+	return ok
 }
 
 // calLocks serialises, per calendar, the writes and the syncer's pass of
@@ -353,6 +379,21 @@ type objectState struct {
 	nameUID  string // the UID the requested name stands for, "" if none
 	nameLive bool   // nameUID has rows
 	names    nameIndex
+	// moved is the UID served at its alternative name because the read
+	// UID's alias holds its canonical name, when that UID has rows or a
+	// tombstone (a client knows its href); "" if none (ruling M4-R41).
+	moved string
+}
+
+// displacedBy returns the aliases to record beside uid's new alias at name
+// so that no other object's href moves (ruling M4-R41): when uid's alias
+// moves from the canonical name of a UID served at its alternative name
+// because of it, that UID keeps its alternative name as its own alias.
+func (s objectState) displacedBy(uid, name string) map[string]string {
+	if s.moved == "" || s.names.alias[uid] == name {
+		return nil
+	}
+	return map[string]string{s.moved: alternativeName(s.moved)}
 }
 
 // hrefOf is the name a UID is served at (names.served).
@@ -378,8 +419,11 @@ func (l *Local) read(ctx context.Context, w *write, uid, name string) (objectSta
 			st.names = newNames(aliases)
 			st.nameUID = st.names.standsFor(name)
 			if st.nameUID != "" {
-				_, st.nameLive, err = v.Group(st.nameUID)
+				if _, st.nameLive, err = v.Group(st.nameUID); err != nil {
+					return err
+				}
 			}
+			st.moved, err = movedBy(v, st.names, uid)
 			return err
 		}))
 	})
@@ -387,6 +431,31 @@ func (l *Local) read(ctx context.Context, w *write, uid, name string) (objectSta
 		st.group = cache.Group{UID: uid}
 	}
 	return st, err
+}
+
+// movedBy is the UID that the alias of uid keeps at its alternative name:
+// the UID whose canonical name that alias is, with no alias of its own,
+// known to a client (rows or a tombstone); "" if none.
+func movedBy(v cache.View, n nameIndex, uid string) (string, error) {
+	held, ok := n.alias[uid]
+	if !ok {
+		return "", nil
+	}
+	x, ok := UIDOfName(held)
+	if !ok || x == uid {
+		return "", nil
+	}
+	if _, aliased := n.alias[x]; aliased {
+		return "", nil
+	}
+	if _, live, err := v.Group(x); err != nil || live {
+		return x, err
+	}
+	_, deleted, err := v.ChangedSince(0)
+	if err != nil || !slices.Contains(deleted, x) {
+		return "", err
+	}
+	return x, nil
 }
 
 // listRows reads uid's rows from Proton (ListByUID), on the session of
@@ -560,6 +629,8 @@ func checkPrecondition(cond Precondition, exists bool, etag string) error {
 	switch {
 	case cond.IfNoneMatchAny && exists:
 		return preconditionFailed()
+	case exists && slices.ContainsFunc(cond.IfNoneMatch, func(e string) bool { return weakEqual(e, etag) }):
+		return preconditionFailed()
 	case cond.IfMatch == "":
 		return nil
 	case !exists, cond.IfMatch != "*" && cond.IfMatch != etag:
@@ -576,7 +647,11 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return PutResult{}, err
 	}
-	if !validName(name) {
+	// A long name is refused here only when it cannot be a served name (it
+	// could only become an alias); one that decodes as a UID's canonical
+	// or alternative name goes on, and the bound applies if it is about to
+	// be recorded as an alias.
+	if !wellFormedName(name) || !validName(name) && !derivedName(name) {
 		return PutResult{}, refusal(refused(RefuseBadName, "the resource name cannot name an event"))
 	}
 	in, err := ical.ParseWrite(body)
@@ -646,10 +721,16 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 		return PutResult{}, nil
 	}
 	if p.Created && st.hrefOf(in.UID) != name {
+		if !validName(name) {
+			return PutResult{}, refusal(refused(RefuseBadName, "the resource name cannot name an event"))
+		}
 		// Before the write: a create that reaches Proton is then served at
-		// the client's name, whatever happens to the answer.
+		// the client's name, whatever happens to the answer. A UID served
+		// at its alternative name because of the alias this create moves
+		// keeps that name (ruling M4-R41).
+		keep := st.displacedBy(in.UID, name)
 		err := l.onWriter(func(db *cache.Cache, _ *served) error {
-			return l.cacheFail(db.PutAlias(ctx, calID, name, in.UID))
+			return l.cacheFail(db.PutAliasKeeping(ctx, calID, name, in.UID, keep))
 		})
 		if err != nil {
 			return PutResult{}, err
@@ -669,9 +750,8 @@ func (l *Local) DeleteObject(ctx context.Context, calID, name string, cond Preco
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return err
 	}
-	if !validName(name) {
-		return noSuchObject()
-	}
+	// No check of the name: it is only looked up, any length (a served
+	// name may be longer than an alias may).
 	w, err := l.beginWrite(ctx, calID)
 	if err != nil {
 		return err

@@ -797,15 +797,36 @@ func (w *writer) idsOf(uid string) ([]string, error) {
 // and so is another UID's claim on the same name. Aliases outlive the UID's
 // deletion and die with the calendar or the epoch (ruling M4-R22).
 func (c *Cache) PutAlias(ctx context.Context, calID, name, uid string) error {
+	return c.PutAliasKeeping(ctx, calID, name, uid, nil)
+}
+
+// PutAliasKeeping is PutAlias that also records keep (UID to name) in the
+// same transaction: the alternative names of UIDs whose href the new alias
+// would otherwise move (ruling M4-R41). A keep entry replaces any alias of
+// its UID or name, as PutAlias does.
+func (c *Cache) PutAliasKeeping(ctx context.Context, calID, name, uid string, keep map[string]string) error {
 	if calID == "" || name == "" || uid == "" {
 		return errors.New("cache: empty calendar ID, alias name or UID")
 	}
+	for u, n := range keep {
+		if u == "" || n == "" || u == uid || n == name {
+			return errors.New("cache: a kept alias is empty or collides with the new one")
+		}
+	}
 	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM aliases WHERE calendar_id = ?1 AND (uid = ?2 OR name = ?3)`, calID, uid, name); err != nil {
+		put := func(name, uid string) error {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM aliases WHERE calendar_id = ?1 AND (uid = ?2 OR name = ?3)`, calID, uid, name); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `INSERT INTO aliases (calendar_id, name, uid) VALUES (?, ?, ?)`, calID, name, uid)
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO aliases (calendar_id, name, uid) VALUES (?, ?, ?)`, calID, name, uid)
-		return err
+		for u, n := range keep {
+			if err := put(n, u); err != nil {
+				return err
+			}
+		}
+		return put(name, uid)
 	}))
 }
 

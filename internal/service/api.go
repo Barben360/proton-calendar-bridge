@@ -316,6 +316,11 @@ type Collection struct {
 	// first pass is on its way to it, or it failed): no CTag, no sync token,
 	// and its reads return ErrCalendarPending (ruling M3-R25).
 	Pending bool `json:"pending,omitempty"`
+	// PrivilegesUnknown: the gate was never decided for this calendar
+	// (ruling M4-R40): no privileges are advertised (ReadOnly is true for
+	// callers that need a value). Thunderbird keeps a read-only flag for
+	// good, so one failed bootstrap must not set it.
+	PrivilegesUnknown bool `json:"privileges_unknown,omitempty"`
 	// WriteGateUndecided: the gate cannot be decided now (ruling M4-R39:
 	// the keys did not unlock, the passphrase signature cannot be checked):
 	// ReadOnly is the last decided value, and a write answers unavailable

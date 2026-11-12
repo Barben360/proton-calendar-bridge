@@ -64,8 +64,13 @@ func newServingRig(t *testing.T, setup func(f *protontest.Fake)) *servingRig {
 	}()
 	t.Cleanup(func() {
 		cancel()
-		if err := <-s.done; err != nil {
-			t.Errorf("Serve = %v, want nil after the test cancelled it", err)
+		select {
+		case err := <-s.done:
+			if err != nil {
+				t.Errorf("Serve = %v, want nil after the test cancelled it", err)
+			}
+		case <-time.After(waitLimit):
+			t.Error("Serve did not return within the wait limit after the test cancelled it")
 		}
 	})
 	s.take(t)
@@ -241,8 +246,7 @@ func TestStaleIfMatchIs412AndWritesNothing(t *testing.T) {
 // Every refusal the adapter or the service decides alone is answered
 // without a request to Proton's write endpoint, and those decided before
 // the service writes without any Proton request at all: a body that is not
-// iCalendar (415), too large (413), an If-None-Match the service does not
-// evaluate (412), a read-only calendar (403 need-privileges), a body the
+// iCalendar (415), too large (413), an If-None-Match naming nothing (412), a read-only calendar (403 need-privileges), a body the
 // bridge refuses (403 with its precondition), a collection (405). The
 // calendars stay as they were.
 func TestRefusedWritesNeverReachProton(t *testing.T) {
@@ -268,7 +272,7 @@ func TestRefusedWritesNeverReachProton(t *testing.T) {
 		{"no Content-Type", r.do(http.MethodPut, calPath(work)+"new@x.ics", ok), http.StatusUnsupportedMediaType, ""},
 		{"text/plain", r.do(http.MethodPut, calPath(work)+"new@x.ics", ok, "Content-Type", "text/plain"), http.StatusUnsupportedMediaType, ""},
 		{"over 8 MiB", r.put(calPath(work)+"new@x.ics", ok+strings.Repeat("X", 8<<20)), http.StatusRequestEntityTooLarge, ""},
-		{"If-None-Match an ETag", r.put(calPath(work)+"new@x.ics", ok, "If-None-Match", `"v1-x"`), http.StatusPreconditionFailed, ""},
+		{"If-None-Match without an ETag", r.put(calPath(work)+"new@x.ics", ok, "If-None-Match", ","), http.StatusPreconditionFailed, ""},
 		{"holidays PUT", r.put(calPath(hol)+"new@x.ics", ok), http.StatusForbidden, "need-privileges"},
 		{"holidays DELETE", r.do(http.MethodDelete, calPath(hol)+"ny@x.ics", ""), http.StatusForbidden, "need-privileges"},
 		{"no write permission PUT", r.put(calPath(shared)+"s@x.ics", thunderbird("s@x", "Mine now")), http.StatusForbidden, "need-privileges"},
@@ -674,7 +678,8 @@ func TestGoWebdavClientWritesAndReadsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), waitLimit)
+	defer cancel()
 	p := calPath(cal) + "gowebdav.ics"
 	event := func(summary string) *ical.Calendar {
 		ev := ical.NewEvent()
@@ -761,8 +766,11 @@ func TestUndecidedWriteGateIs503(t *testing.T) {
 	})
 	ms := parseMS(t, r.do("PROPFIND", home, tbHomeSet, "Depth", "1"))
 	for id, what := range undecided {
-		// Never decided: advertised read only, but a write is retried, not refused.
-		wantNames(t, what, privileges(t, ms.get(t, calPath(id)).prop(t, nsD, "current-user-privilege-set")), n(nsD, "read"))
+		// Never decided: no privileges (a 404 propstat, ruling M4-R40), and
+		// a write is retried, not refused.
+		if rs := ms.get(t, calPath(id)); !rs.missing[n(nsD, "current-user-privilege-set")] {
+			t.Errorf("%s: privileges %+v, want a 404 propstat", what, rs.props[n(nsD, "current-user-privilege-set")])
+		}
 		for _, rec := range []*httptest.ResponseRecorder{
 			r.put(objPath(id, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"),
 			r.put(objPath(id, "a@x"), thunderbird("a@x", "Edited")),
@@ -773,10 +781,136 @@ func TestUndecidedWriteGateIs503(t *testing.T) {
 			}
 		}
 	}
+	wantNames(t, "the Write bit off: decided read only", privileges(t, ms.get(t, calPath(decided)).prop(t, nsD, "current-user-privilege-set")), n(nsD, "read"))
 	wantNeedPrivileges(t, "PUT, Write bit off", r.put(objPath(decided, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"))
 	wantNeedPrivileges(t, "DELETE, Write bit off", r.do(http.MethodDelete, objPath(decided, "a@x"), ""))
 	wantNeedPrivileges(t, "PUT, holidays without keys", r.put(objPath(holidays, "n@x"), thunderbird("n@x", "New"), "If-None-Match", "*"))
 	if n := r.sent(); n != 0 {
 		t.Errorf("%d requests reached Proton's write endpoint", n)
+	}
+}
+
+// A UID whose served name is longer than an alias may be (255 bytes: a
+// non-plain UID of 194 bytes, a plain one over 200, both served at "~" and
+// their base64url) is reached on every method: created at its canonical
+// name, read, updated and deleted there (the bound applies only to a name
+// about to become an alias).
+func TestLongServedNamesWorkOnEveryMethod(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	for _, uid := range []string{strings.Repeat("u", 190) + " x@y", strings.Repeat("p", 210)} {
+		href := objPath(cal, uid)
+		if name := strings.TrimPrefix(href, calPath(cal)); len(name) <= 255 || name[0] != '~' {
+			t.Fatalf("test bug: %d-byte UID served at a %d-byte name %q", len(uid), len(name), name[:8])
+		}
+		wantStatus(t, r.put(href, thunderbird(uid, "Long"), "If-None-Match", "*"), http.StatusCreated)
+		if b := r.body(t, href); !strings.Contains(b, "SUMMARY:Long\r\n") {
+			t.Errorf("%d-byte UID: GET:\n%s", len(uid), b)
+		}
+		wantStatus(t, r.put(href, thunderbird(uid, "Longer"), "If-Match", r.etag(t, href)), http.StatusNoContent)
+		if b := r.body(t, href); !strings.Contains(b, "SUMMARY:Longer\r\n") {
+			t.Errorf("%d-byte UID after the update:\n%s", len(uid), b)
+		}
+		wantStatus(t, r.do(http.MethodDelete, href, "", "If-Match", r.etag(t, href)), http.StatusNoContent)
+		wantStatus(t, r.do(http.MethodGet, href, ""), http.StatusNotFound)
+	}
+	// A name about to become an alias is still bounded: one that can only
+	// be an alias, and the long canonical name of a UID with no rows taken
+	// by another UID's create.
+	for _, name := range []string{strings.Repeat("n", 252) + ".ics", strings.TrimPrefix(objPath(cal, strings.Repeat("q", 210)), calPath(cal))} {
+		if got := precondition403(t, r.put(calPath(cal)+name, thunderbird("n@x", "N"), "If-None-Match", "*")); got != "bad-resource-name" {
+			t.Errorf("a %d-byte alias: pcb precondition %q", len(name), got)
+		}
+	}
+	if n := r.sent(); n != 6 {
+		t.Errorf("%d requests reached Proton's write endpoint, want 6", n)
+	}
+}
+
+// An If-None-Match naming ETags (RFC 9110 §13.1.2) holds when the target
+// does not exist or has none of them: a create goes on, an update under
+// another ETag goes on, one under the object's own ETag is a 412 and
+// nothing is sent.
+func TestIfNoneMatchETagsHoldUnlessTheObjectHasOne(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	href := objPath(cal, "inm@x")
+	wantStatus(t, r.put(href, thunderbird("inm@x", "One"), "If-None-Match", `"v1-anything"`), http.StatusCreated)
+	etag := r.etag(t, href)
+	sent := r.sent()
+	wantStatus(t, r.put(href, thunderbird("inm@x", "Two"), "If-None-Match", `"v1-other", W/`+etag), http.StatusPreconditionFailed)
+	wantStatus(t, r.do(http.MethodDelete, href, "", "If-None-Match", etag), http.StatusPreconditionFailed)
+	if r.sent() != sent {
+		t.Error("a write under its own ETag in If-None-Match reached Proton")
+	}
+	wantStatus(t, r.put(href, thunderbird("inm@x", "Two"), "If-None-Match", `"v1-other"`), http.StatusNoContent)
+	if b := r.body(t, href); !strings.Contains(b, "SUMMARY:Two\r\n") {
+		t.Errorf("after the update:\n%s", b)
+	}
+}
+
+// Ruling M4-R41: an alias that moves never moves another object's href.
+// y@x is created at x@x.ics; x@x arrives and is served at its alternative
+// name; y@x is deleted and created again at y@x.ics. x@x stays where the
+// client knows it, and no delta mentions it.
+func TestAMovedAliasLeavesTheDisplacedObjectWhereItIs(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	held, alt := objPath(cal, "x@x"), calPath(cal)+altName("x@x")
+	if alt != calPath(cal)+"~~eEB4.ics" {
+		t.Fatalf("test bug: x@x's alternative name is %s", alt)
+	}
+	wantStatus(t, r.put(held, thunderbird("y@x", "Mine"), "If-None-Match", "*"), http.StatusCreated)
+	r.f.AddEvent(cal, protontest.Event{UID: "x@x", Start: base, End: base + 3600, Color: green, Card: card("x@x", "From the web", base)})
+	r.next(t)
+	before, _ := listed(t, r.syncReport(t, cal, ""))
+	if before[alt] == "" {
+		t.Fatalf("precondition: x@x at %s, listed %v", alt, before)
+	}
+	tok := *r.syncReport(t, cal, "").token
+
+	wantStatus(t, r.do(http.MethodDelete, held, ""), http.StatusNoContent)
+	wantStatus(t, r.put(objPath(cal, "y@x"), thunderbird("y@x", "Again"), "If-None-Match", "*"), http.StatusCreated)
+
+	now, _ := listed(t, r.syncReport(t, cal, ""))
+	if len(now) != 2 || now[alt] != before[alt] || now[objPath(cal, "y@x")] == "" {
+		t.Errorf("after y@x moved: listed %v; want x@x still at %s with its ETag, and y@x.ics", now, alt)
+	}
+	// y@x was re-created in the window: it is a change at its new name
+	// (an alias moves only on re-create, accepted in Task 8); x@x is not
+	// in the delta at all.
+	changed, deleted := listed(t, r.syncReport(t, cal, tok))
+	if len(changed) != 1 || changed[objPath(cal, "y@x")] == "" || len(deleted) != 0 {
+		t.Errorf("the delta: changed %v, deleted %v; want y@x.ics changed alone", changed, deleted)
+	}
+	if b := r.body(t, alt); !strings.Contains(b, "UID:x@x\r\n") {
+		t.Errorf("x@x at its alternative name:\n%s", b)
+	}
+	wantStatus(t, r.do(http.MethodGet, held, ""), http.StatusNotFound)
+}
+
+// Ruling M4-R41 with a deleted displaced object: x@x, served at its
+// alternative name, is deleted in the web app; y@x then moves its alias
+// away from x@x.ics. The deletion of x@x is still reported where the client
+// knew it.
+func TestAMovedAliasLeavesADeletedObjectsHrefToo(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	held, alt := objPath(cal, "x@x"), calPath(cal)+altName("x@x")
+	wantStatus(t, r.put(held, thunderbird("y@x", "Mine"), "If-None-Match", "*"), http.StatusCreated)
+	id := r.f.AddEvent(cal, protontest.Event{UID: "x@x", Start: base, End: base + 3600, Color: green, Card: card("x@x", "From the web", base)})
+	r.next(t)
+	tok := *r.syncReport(t, cal, "").token
+	r.f.DeleteEvent(cal, id)
+	r.next(t)
+	wantStatus(t, r.do(http.MethodDelete, held, ""), http.StatusNoContent)
+	wantStatus(t, r.put(objPath(cal, "y@x"), thunderbird("y@x", "Again"), "If-None-Match", "*"), http.StatusCreated)
+	changed, deleted := listed(t, r.syncReport(t, cal, tok))
+	if len(changed) != 1 || changed[objPath(cal, "y@x")] == "" || len(deleted) != 1 || deleted[0] != alt {
+		t.Errorf("the delta: changed %v, deleted %v; want y@x.ics changed and x@x deleted at %s", changed, deleted, alt)
 	}
 }

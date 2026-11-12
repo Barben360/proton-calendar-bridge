@@ -225,6 +225,33 @@ func TestAliasesAreOneNamePerUID(t *testing.T) {
 	}
 }
 
+// PutAliasKeeping records the kept aliases with the new one, in one
+// transaction (ruling M4-R41): all or none.
+func TestPutAliasKeepingRecordsBoth(t *testing.T) {
+	c, _ := openNew(t)
+	if err := c.PutAlias(bg, "cal", "n1.ics", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutAliasKeeping(bg, "cal", "n2.ics", "u1", map[string]string{"u2": "~~dTI.ics"}); err != nil {
+		t.Fatal(err)
+	}
+	byUID, byName := aliases(t, c, "cal")
+	if len(byUID) != 2 || byUID["u1"] != "n2.ics" || byUID["u2"] != "~~dTI.ics" {
+		t.Errorf("AliasesFor = %v, want u1->n2.ics and u2 kept at ~~dTI.ics", byUID)
+	}
+	if _, ok := byName["n1.ics"]; ok {
+		t.Errorf("the moved alias n1.ics remains: %v", byName)
+	}
+	for _, keep := range []map[string]string{{"u1": "x.ics"}, {"u3": "n3.ics"}, {"": "x.ics"}, {"u3": ""}} {
+		if err := c.PutAliasKeeping(bg, "cal", "n3.ics", "u1", keep); err == nil {
+			t.Errorf("PutAliasKeeping with keep %v accepted", keep)
+		}
+	}
+	if byUID, _ := aliases(t, c, "cal"); byUID["u1"] != "n2.ics" || len(byUID) != 2 {
+		t.Errorf("a refused PutAliasKeeping changed the aliases: %v", byUID)
+	}
+}
+
 func TestAliasesSurviveReopenAndDieWithTheEpoch(t *testing.T) {
 	c, path := openNew(t)
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{wrow("a", "u1", 1)}, time.Unix(100, 0)); err != nil {

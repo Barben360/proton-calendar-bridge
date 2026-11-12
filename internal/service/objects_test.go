@@ -678,8 +678,8 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 			}
 			// Only the calendar whose keys do not unlock is undecided (ruling
 			// M4-R39); the others are decided from their type and bits.
-			if c.WriteGateUndecided != (id == locked) {
-				t.Errorf("calendar %s: WriteGateUndecided = %v", id, c.WriteGateUndecided)
+			if c.WriteGateUndecided != (id == locked) || c.PrivilegesUnknown != (id == locked) {
+				t.Errorf("calendar %s: WriteGateUndecided = %v, PrivilegesUnknown = %v", id, c.WriteGateUndecided, c.PrivilegesUnknown)
 			}
 		}
 		// The CLI listing follows the same gate, row by row.
