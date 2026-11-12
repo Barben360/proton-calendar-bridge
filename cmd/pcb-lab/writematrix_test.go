@@ -82,8 +82,8 @@ func TestProbeWriteMatrix(t *testing.T) {
 	d, _ := env["data"].(map[string]any)
 	hint, _ := e["hint"].(string)
 	cleanup, _ := d["cleanup"].(string)
-	if !strings.Contains(hint, "pcb-lab-wm-") || !strings.Contains(cleanup, "HTTP 500") || !strings.Contains(cleanup, "left 10:") || !strings.Contains(cleanup, "-second-master") {
-		t.Errorf("failed cleanup: hint %q, cleanup %q; want the prefix hint and the rows left named", hint, cleanup)
+	if !strings.Contains(hint, "pcb-lab-wm-") || strings.Contains(hint, "Retry-After") || !strings.Contains(cleanup, "HTTP 500") || !strings.Contains(cleanup, "left 10:") || !strings.Contains(cleanup, "-second-master") {
+		t.Errorf("failed cleanup: hint %q, cleanup %q; want the prefix hint without Retry-After (no 429) and the rows left named", hint, cleanup)
 	}
 
 	f.Backend.FailNext("PUT", "/calendar/v1/"+cal+"/events/sync", 429, 429, 30)
@@ -91,8 +91,8 @@ func TestProbeWriteMatrix(t *testing.T) {
 	if code != exitcode.Partial {
 		t.Fatalf("code %d, envelope %v; want partial after a 429", code, env)
 	}
-	if hint, _ := env["error"].(map[string]any)["hint"].(string); !strings.Contains(hint, "pcb-lab-wm-") {
-		t.Errorf("hint %q: want the UID prefix of what is left", hint)
+	if hint, _ := env["error"].(map[string]any)["hint"].(string); !strings.Contains(hint, "pcb-lab-wm-") || !strings.Contains(hint, "Retry-After") {
+		t.Errorf("hint %q: want Retry-After honoured and the UID prefix of what is left", hint)
 	}
 	b, _ := json.Marshal(env)
 	for _, secret := range append(f.Backend.AccessTokens(), labtest.Pass) {

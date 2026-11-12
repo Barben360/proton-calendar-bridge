@@ -88,6 +88,8 @@ type MatrixResult struct {
 	CleanupFailed bool   `json:"cleanup_failed,omitempty"`
 	Writes        int    `json:"writes"`
 	Stopped       string `json:"stopped,omitempty"` // why no further write was sent
+	// RateLimited: the stop was a 429 (wait out its Retry-After).
+	RateLimited bool `json:"rate_limited,omitempty"`
 }
 
 // CaseResult is one case: each write's answer and what the read-back shows.
@@ -206,7 +208,7 @@ func WriteMatrix(ctx context.Context, s *session.Session, o MatrixOptions) (Matr
 		r.Line += "read-back: " + r.ReadBack
 		res.Cases = append(res.Cases, r)
 	}
-	res.Stopped = m.stopped
+	res.Stopped, res.RateLimited = m.stopped, m.rateLimited
 	switch {
 	case m.stopped != "":
 		res.Cleanup = "not tried (writes stopped): the rows whose UID starts with " + m.prefix + " are left"
@@ -265,6 +267,7 @@ type matrix struct {
 	writes                int
 	uids                  []string
 	stopped               string
+	rateLimited           bool
 }
 
 // entry is one sync entry: a create (no id), an update or a delete (no body).
@@ -352,6 +355,7 @@ func (m *matrix) sync(ctx context.Context, entries ...entry) []Answer {
 		switch {
 		case errors.As(err, &ae) && ae.Status == http.StatusTooManyRequests:
 			m.stopped = fmt.Sprintf("Proton answered 429 (Retry-After %s)", ae.RetryAfter)
+			m.rateLimited = true
 		case errors.Is(err, api.ErrSessionEnded):
 			m.stopped = "the session ended"
 		case ctx.Err() != nil:

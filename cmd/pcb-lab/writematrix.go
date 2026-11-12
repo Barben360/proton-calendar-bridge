@@ -70,7 +70,10 @@ func writeMatrixCmd() *cobra.Command {
 				b.WriteString("\n" + cs.Line)
 			}
 			fmt.Fprintf(&b, "\ncleanup: %s\n%d write(s)", res.Cleanup, res.Writes)
-			hint := "wait (honour Retry-After), then delete the events whose UID starts with " + res.UIDPrefix + " in the web app (or the whole pcb-lab calendar)"
+			hint := "delete the events whose UID starts with " + res.UIDPrefix + " in the web app (or the whole pcb-lab calendar)"
+			if res.RateLimited {
+				hint = "wait (honour Retry-After), then " + hint
+			}
 			switch {
 			case res.Stopped != "":
 				fmt.Fprintf(&b, "; stopped: %s", res.Stopped)
