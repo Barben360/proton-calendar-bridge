@@ -31,8 +31,9 @@ func (a *app) newDoctor() *cobra.Command {
 			if !JSONMode(cmd) {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
-			results := doctor.Run(cmd.Context(), doctorChecks(a.Env), stream)
-			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, a.daemonResults(cmd.Context())...) {
+			daemon := a.askDaemon(cmd.Context())
+			results := doctor.Run(cmd.Context(), doctorChecks(a.Env, daemon.live()), stream)
+			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, daemon.results()...) {
 				if stream != nil {
 					stream(r)
 				}
@@ -47,21 +48,46 @@ func (a *app) newDoctor() *cobra.Command {
 	}
 }
 
-// daemonResults are what a running pcb serve reports: "daemon", then one
+// doctorDaemon is what the doctor learnt from the control socket, asked
+// once: the CalDAV checks use its listener, the daemon results its state.
+type doctorDaemon struct {
+	st       ctl.Status
+	ok       bool
+	err      error
+	unplaced bool // the control socket cannot be located
+}
+
+func (a *app) askDaemon(ctx context.Context) doctorDaemon {
+	dirs, err := paths.Resolve(a.Env)
+	if err != nil { // the directory checks report it
+		return doctorDaemon{unplaced: true}
+	}
+	st, ok, err := a.daemonStatus(ctx, dirs.Socket())
+	return doctorDaemon{st: st, ok: ok, err: err}
+}
+
+// live is the running daemon's listener; nil without one.
+func (d doctorDaemon) live() *doctor.Live {
+	l := d.st.Listener
+	if !d.ok || l == nil {
+		return nil
+	}
+	return &doctor.Live{Addr: l.Addr, URL: l.URL, TLS: l.TLS, Fingerprint: l.Fingerprint, NotAfter: l.CertNotAfter}
+}
+
+// results are what a running pcb serve reports: "daemon", then one
 // result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
 // a warning warns). With no daemon, "daemon" is skipped: offline checks
 // only.
-func (a *app) daemonResults(ctx context.Context) []doctor.Result {
+func (d doctorDaemon) results() []doctor.Result {
 	const name = "daemon"
-	dirs, err := paths.Resolve(a.Env)
-	if err != nil { // the directory checks report it
-		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
-	}
-	st, ok, err := a.daemonStatus(ctx, dirs.Socket())
+	st := d.st
 	switch {
-	case err != nil:
-		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: err.Error(), Fix: exitcode.HintOf(err)}}
-	case !ok:
+	case d.unplaced:
+		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
+	case d.err != nil:
+		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: d.err.Error(), Fix: exitcode.HintOf(d.err)}}
+	case !d.ok:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}
 	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonState(st)}}
@@ -80,8 +106,8 @@ func (a *app) daemonResults(ctx context.Context) []doctor.Result {
 
 // doctorChecks lists the checks, with one failing check per directory when
 // the user directories cannot be located. env looks up an environment
-// variable.
-func doctorChecks(env func(string) string) []doctor.Check {
+// variable; live is the running daemon's listener (nil: none).
+func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(env)
 	if err != nil {
@@ -102,12 +128,12 @@ func doctorChecks(env func(string) string) []doctor.Check {
 	}
 	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
 	return append(checks,
-		doctor.FileModeCheck{Label: "key file", Path: cfg.Secrets.KeyFile, Want: 0o600},
+		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
 		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
 		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile},
 		doctor.CacheCheck{StateDir: dirs.State},
-		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind},
-		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind},
+		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
+		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
 		doctor.ClientsCheck{StateDir: dirs.State})
 }
 

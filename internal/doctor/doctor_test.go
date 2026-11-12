@@ -2,8 +2,10 @@ package doctor_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +216,50 @@ func TestFileModeCheckFlagsGroupReadable(t *testing.T) {
 	}
 	if got := (doctor.FileModeCheck{Label: "key file", Path: path, Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusOK {
 		t.Fatalf("0600: %+v", got)
+	}
+}
+
+// M5-R15 C3: the key file check reads the key, as pcb does: a 0600 key
+// this user cannot read (a container secret left host-owned) fails with
+// the cause, and so does one of the wrong size.
+func TestKeyFileCheckReadsTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "secrets.key")
+	check := doctor.KeyFileCheck{Path: path}
+	if got := check.Run(ctx); got.Status != doctor.StatusSkip || got.Name != "key file" {
+		t.Errorf("missing: %+v", got)
+	}
+	if err := os.WriteFile(path, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusOK || !strings.Contains(got.Message, "32 bytes") {
+		t.Errorf("readable: %+v", got)
+	}
+	if err := os.WriteFile(path, make([]byte, 31), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusError || !strings.Contains(got.Message, "not a 32-byte key") || got.Fix == "" {
+		t.Errorf("31 bytes: %+v", got)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	got := check.Run(ctx)
+	want := fmt.Sprintf("not readable by this user (uid %d): permission denied", os.Geteuid())
+	if got.Status != doctor.StatusError || !strings.Contains(got.Message, want) || !strings.Contains(got.Fix, "chown") {
+		t.Errorf("mode 0000: %+v, want %q and a chown fix", got, want)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusError || got.Fix != "chmod 600 "+path {
+		t.Errorf("mode 0644: %+v", got)
 	}
 }
 

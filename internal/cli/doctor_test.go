@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -203,5 +204,24 @@ func TestDoctorListsAlerts(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("results lack the needs-login alert: %+v", data.Results)
+	}
+}
+
+// M5-R15 C4: the CalDAV checks use the running daemon's listener (here
+// 0.0.0.0 over TLS while config.toml says the loopback default).
+func TestDoctorUsesTheDaemonsListener(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	notAfter := time.Now().Add(365 * 24 * time.Hour).UTC()
+	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "ready"}},
+		&ctl.Listener{Addr: "0.0.0.0:1080", URL: "https://pcb.lan:1080/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
+	r.want(exitcode.OK, "doctor")
+	for _, want := range []string{
+		"✓  caldav listener: 0.0.0.0:1080, TLS (the running daemon; URL https://pcb.lan:1080/)\n",
+		"✓  tls certificate: served by the running daemon, expires on " + notAfter.Format(time.DateOnly) + ", SHA-256 fingerprint AB:CD\n",
+	} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+		}
 	}
 }

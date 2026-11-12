@@ -71,6 +71,15 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
+// Check reads the key as Seal and Open do, without creating it: nil when
+// the key file is usable, else why not (fs.ErrNotExist, a *fs.PathError,
+// a *KeyModeError, ErrCorrupt for a wrong size). The key is not kept.
+func (k *KeyFile) Check() error {
+	key, err := k.read()
+	clear(key)
+	return err
+}
+
 // key reads the key, creating it first when create is set and it is absent.
 func (k *KeyFile) key(create bool) ([]byte, error) {
 	key, err := k.read()
