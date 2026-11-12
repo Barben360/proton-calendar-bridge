@@ -326,6 +326,13 @@ func TestPutCreatesAndReadsBack(t *testing.T) {
 	if cs := calSync(t, p.Result, r.cal); cs.Added+cs.Updated+cs.Deleted != 0 {
 		t.Errorf("the pass after the create changed %+v: the read-back row is not the feed's", cs)
 	}
+
+	// No DTSTAMP: the write time, from the service's clock (ruling M4-R8).
+	stampless := vcal([]string{"UID:nostamp@x", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600), "SUMMARY:Stampless"})
+	if _, err := r.put(t, "nostamp@x.ics", stampless, service.Precondition{IfNoneMatchAny: true}); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, "the object", r.object(t, "nostamp@x").Data, "DTSTAMP:"+t0.UTC().Format("20060102T150405Z"))
 }
 
 // An update is visible in the next Changes, with Proton's row, before any
@@ -343,8 +350,13 @@ func TestPutUpdateIsVisibleInTheNextChanges(t *testing.T) {
 	if err != nil || res.Created {
 		t.Fatalf("PutObject = %+v, %v; want an update", res, err)
 	}
-	if calls := r.f.SyncCalls(); len(calls) != 1 || len(calls[0].Body.Events) != 1 || calls[0].Body.Events[0].ID != id {
+	calls := r.f.SyncCalls()
+	if len(calls) != 1 || len(calls[0].Body.Events) != 1 || calls[0].Body.Events[0].ID != id || calls[0].Body.Events[0].Event == nil {
 		t.Fatalf("sync calls %+v, want one update of %s", calls, id)
+	}
+	// The alarms sent back are the calendar's defaults: the row keeps null.
+	if n := string(calls[0].Body.Events[0].Event.Notifications); n != "null" {
+		t.Errorf("Notifications sent %s, want null", n)
 	}
 	cs := r.changes(t, tok)
 	now, _ := r.listing(t, r.cal)
@@ -441,6 +453,9 @@ func TestProton5xxIs503AndNeverRetried(t *testing.T) {
 	before = r.sendCalls()
 	_, err = r.put(t, "a@x.ics", body, service.Precondition{IfMatch: obj.ETag})
 	wantRefused(t, err, service.RefuseProtonRefused)
+	if strings.Contains(err.Error(), "fake") || strings.Contains(err.Error(), "member") {
+		t.Errorf("the refusal quotes Proton: %v", err)
+	}
 	if n := r.sendCalls() - before; n != 1 {
 		t.Errorf("403: %d requests, want 1", n)
 	}
@@ -548,6 +563,20 @@ func TestAmbiguousFailureReadsBack(t *testing.T) {
 		defer r.tr.set(nil)
 		_, _ = r.svc.PutObject(ctx, r.cal, "b@x.ics", edit(t, obj.Data, "SUMMARY:Gym", "SUMMARY:Swim"), service.Precondition{IfMatch: obj.ETag})
 		contains(t, "the object", r.object(t, "b@x").Data, "SUMMARY:Swim")
+	})
+	t.Run("AmbiguousDeleteNotAppliedIs503", func(t *testing.T) {
+		r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+			if r.isSync(req) {
+				return nil, errReset
+			}
+			return send()
+		})
+		defer r.tr.set(nil)
+		err := r.svc.DeleteObject(t.Context(), r.cal, "b@x.ics", service.Precondition{})
+		wantUnconfirmed(t, err)
+		if r.object(t, "b@x").Missing || len(r.proton(t, "b@x")) != 1 {
+			t.Error("b@x is gone")
+		}
 	})
 	t.Run("AmbiguousDeleteIsReadBack", func(t *testing.T) {
 		r.tr.set(lost)
@@ -875,6 +904,15 @@ func TestChangedKeyPacketRefusesTheWrite(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the log holds %q:\n%s", secret, logs)
 		}
+	}
+
+	// A delete encrypts nothing: the owner may remove the event (ruling
+	// M4-R27).
+	if err := r.svc.DeleteObject(t.Context(), r.cal, "a@x.ics", service.Precondition{}); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+	if len(r.proton(t, "a@x")) != 0 || !r.object(t, "a@x").Missing {
+		t.Error("the delete did not happen")
 	}
 }
 
