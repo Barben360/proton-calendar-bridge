@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -272,12 +273,15 @@ type entry struct {
 
 // Patch writes an incoming VEVENT over the current parts of its row
 // (the decrypted fragments by kind, as Proton stores them), line by line:
-//   - a line whose identity (see identity) is stored keeps its part(s)
-//     and its stored bytes; lines compare as multisets, so a line sent n
-//     times keeps n stored copies per part;
-//   - a single-valued property with another value replaces the stored
-//     line in place, in every part holding it (DTSTAMP everywhere, a
-//     SUMMARY where it is, even off-table);
+//   - a multi-valued line whose identity (see identity) is stored keeps
+//     its part(s) and its stored bytes; lines compare as multisets, so a
+//     line sent n times keeps n stored copies per part;
+//   - a single-valued property is compared with the copy the client was
+//     served, the first stored one in part order (MergeEvent's rule): the
+//     same, every stored copy stays as it is, even one that differs in
+//     another part (DTSTAMP per part); another value replaces the first
+//     copy in place in every part holding one (DTSTAMP everywhere, a
+//     SUMMARY where it is, even off-table), further copies go;
 //   - a stored line the event no longer carries is removed, from every
 //     part (an EXDATE from both signed parts), except nested components
 //     and COLOR lines, another client's data that an incoming event never
@@ -326,22 +330,48 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 		return nil
 	}
 	placed := make([]bool, len(in))
-	for i, p := range in { // unchanged: kept where stored
-		key := identity(p)
+	for i, p := range in { // single-valued: the client saw the first stored copy
+		name, key := strings.ToUpper(p.Name), identity(p)
+		if !singleValued[name] {
+			continue
+		}
+		var served *entry
 		for _, k := range partKinds {
-			if e := free(k, func(e *entry) bool { return e.key == key }); e != nil {
-				e.keep, placed[i] = true, true
+			for _, e := range stored[k] {
+				if served == nil && !e.block && e.name == name {
+					served = e
+				}
+			}
+		}
+		if served == nil {
+			continue
+		}
+		placed[i] = true
+		for _, k := range partKinds {
+			for _, e := range stored[k] {
+				if !e.block && e.name == name && served.key == key {
+					e.keep = true // unedited: every copy stays, with its bytes
+				}
+			}
+			if served.key == key {
+				continue
+			}
+			if e := free(k, func(e *entry) bool { return e.name == name }); e != nil {
+				e.keep = true // edited: replaced in place, wherever it lives
+				if e.key != key {
+					e.repl = folded(p.Line())
+				}
 			}
 		}
 	}
-	for i, p := range in { // changed single-valued: replaced in place
-		name := strings.ToUpper(p.Name)
-		if placed[i] || !singleValued[name] {
+	for i, p := range in { // multi-valued: kept where stored, as a multiset
+		key := identity(p)
+		if singleValued[strings.ToUpper(p.Name)] {
 			continue
 		}
 		for _, k := range partKinds {
-			if e := free(k, func(e *entry) bool { return e.name == name }); e != nil {
-				e.keep, e.repl, placed[i] = true, folded(p.Line()), true
+			if e := free(k, func(e *entry) bool { return e.key == key }); e != nil {
+				e.keep, placed[i] = true, true
 			}
 		}
 	}
@@ -474,11 +504,13 @@ func AttendeeChanges(current map[PartKind][]byte, incoming Component) (added, re
 
 // IsSharedSignedChange reports whether the incoming event changes the
 // shared signed content that decides a SEQUENCE bump (ruling M4-R4):
-// DTSTART, DTEND, RRULE, EXDATE or RECURRENCE-ID, by meaning. A stored
-// DURATION counts as the DTEND it means; RRULE parts compare in any order;
-// EXDATE values compare as a set of (parameters, date), however they are
-// split into lines. DTSTAMP, SEQUENCE, ORGANIZER, text and alarms do not
-// count.
+// DTSTART, DTEND, RRULE, EXDATE or RECURRENCE-ID, by meaning. DTSTART,
+// DTEND and RECURRENCE-ID compare as a DATE, or as an instant with its zone
+// (UTC or the TZID); EXDATE values as a set of DATEs or instants, whatever
+// the zone they are written in or the lines they are split into; a stored
+// DURATION counts as the DTEND it means; RRULE parts compare in any order,
+// INTERVAL=1 as absent. DTSTAMP, SEQUENCE, ORGANIZER, text and alarms do
+// not count.
 func IsSharedSignedChange(stored, incoming Component) bool {
 	return !slices.Equal(signedKeys(stored), signedKeys(incoming))
 }
@@ -490,15 +522,17 @@ func signedKeys(c Component) []string {
 	for _, p := range c.Props() {
 		name := strings.ToUpper(p.Name)
 		switch name {
-		case "DTSTART", "DTEND", "DURATION", "RECURRENCE-ID":
+		case "DTSTART", "DTEND", "RECURRENCE-ID":
+			out = append(out, name+":"+instantKey(p, p.Value, true))
+		case "DURATION":
 			out = append(out, identity(p))
 		case "RRULE":
-			parts := strings.Split(strings.ToUpper(p.Value), ";")
+			parts := slices.DeleteFunc(strings.Split(strings.ToUpper(p.Value), ";"), func(s string) bool { return s == "INTERVAL=1" })
 			slices.Sort(parts)
 			out = append(out, "RRULE:"+strings.Join(parts, ";"))
 		case "EXDATE":
 			for v := range strings.SplitSeq(p.Value, ",") {
-				key := "EXDATE" + canonParams(p.Params) + ":" + v
+				key := "EXDATE:" + instantKey(p, v, false)
 				if !slices.Contains(out, key) {
 					out = append(out, key)
 				}
@@ -507,4 +541,56 @@ func signedKeys(c Component) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// instantKey is a time value's meaning: a DATE as written, else its Unix
+// instant, with the zone (UTC or the IANA name) when withZone. A value that
+// does not parse compares as written.
+func instantKey(p Property, v string, withZone bool) string {
+	w, r := parseWhen(&p, v, nil)
+	switch {
+	case r != nil:
+		return "?" + canonParams(p.Params) + ":" + v
+	case w.date:
+		return "DATE:" + v
+	case withZone && w.loc != nil:
+		return "TZ:" + w.tzid + ":" + strconv.FormatInt(w.t.Unix(), 10)
+	case withZone:
+		return "UTC:" + strconv.FormatInt(w.t.Unix(), 10)
+	}
+	return "AT:" + strconv.FormatInt(w.t.Unix(), 10)
+}
+
+// AttendeeEdits names (by address, case-folded) the attendees the
+// incoming event keeps with other parameters than we served them: the
+// first stored line of the address as ApplyRow renders it (X-PM-TOKEN
+// consumed, PARTSTAT from statuses, by token), against the incoming line
+// without X-PM-TOKEN, parameters compared as in identity. Ruling M4-R9:
+// v1 does not write such edits (ROLE, CN, PARTSTAT, RSVP): Patch keeps the
+// stored line and the planner logs these at debug.
+func AttendeeEdits(current map[PartKind][]byte, incoming Component, statuses map[string]int) ([]string, error) {
+	stored, err := storedEntries(current)
+	if err != nil {
+		return nil, err
+	}
+	served := map[string]string{}
+	for _, k := range partKinds {
+		for _, e := range stored[k] {
+			if a := attendeeAddress(e.prop.Value); e.name == "ATTENDEE" && served[a] == "" {
+				served[a] = canonParams(joinStatus(e.prop.Params, statuses))
+			}
+		}
+	}
+	var edits []string
+	for _, p := range incoming.Props() {
+		if !strings.EqualFold(p.Name, "ATTENDEE") {
+			continue
+		}
+		a := attendeeAddress(p.Value)
+		params, _ := dropParam(p.Params, "X-PM-TOKEN")
+		if was, ok := served[a]; ok && was != canonParams(params) && !slices.Contains(edits, a) {
+			edits = append(edits, a)
+		}
+	}
+	return edits, nil
 }

@@ -285,12 +285,100 @@ func TestPatchExdateInBothSignedParts(t *testing.T) {
 
 func TestPatchDTStampReplacedInEveryPart(t *testing.T) {
 	cur := stored()
-	got, _ := mustPatch(t, cur, set(t, served(t, cur), "DTSTAMP", "DTSTAMP:20261111T111111Z"))
+	got, changed := mustPatch(t, cur, set(t, served(t, cur), "DTSTAMP", "DTSTAMP:20261111T111111Z"))
+	want := map[PartKind][]byte{}
 	for _, k := range partKinds {
-		want := bytes.Replace(cur[k], []byte(stampLine), []byte("DTSTAMP:20261111T111111Z"), 1)
-		if !bytes.Equal(got[k], want) {
-			t.Errorf("%s:\n got %q\nwant %q", k, got[k], want)
+		want[k] = bytes.Replace(cur[k], []byte(stampLine), []byte("DTSTAMP:20261111T111111Z"), 1)
+	}
+	expectParts(t, got, changed, want, partKinds...)
+}
+
+// A single-valued property stored in several parts with different values:
+// the client saw the first (MergeEvent's rule). Sent back unedited, every
+// part keeps its own copy; edited, the new value replaces each copy in place.
+func TestPatchSingleValuedInSeveralParts(t *testing.T) {
+	const otherStamp = "DTSTAMP:20261001T000000Z"
+	cur := stored()
+	cur[CalendarSigned] = frag(uidLine, otherStamp, exdate1, "STATUS:CONFIRMED", "TRANSP:OPAQUE")
+	cur[Attendees] = frag(uidLine, otherStamp, annStored)
+	got, changed := mustPatch(t, cur, served(t, cur))
+	expectParts(t, got, changed, cur)
+
+	got, changed = mustPatch(t, cur, set(t, served(t, cur), "DTSTAMP", "DTSTAMP:20261111T111111Z"))
+	want := map[PartKind][]byte{}
+	for k, b := range cur {
+		b = bytes.Replace(b, []byte(stampLine), []byte("DTSTAMP:20261111T111111Z"), 1)
+		want[k] = bytes.Replace(b, []byte(otherStamp), []byte("DTSTAMP:20261111T111111Z"), 1)
+	}
+	expectParts(t, got, changed, want, partKinds...)
+
+	two := map[PartKind][]byte{
+		SharedSigned:      frag(uidLine, stampLine, "DTSTART:20261105T100000Z"),
+		SharedEncrypted:   frag(uidLine, stampLine, "LOCATION:A", "SUMMARY:s"),
+		CalendarSigned:    frag(uidLine, stampLine),
+		CalendarEncrypted: frag(uidLine, stampLine, "LOCATION:B", "COMMENT:c"),
+	}
+	base := served(t, two)
+	if got := values(base, "LOCATION"); len(got) != 1 || got[0] != ":A" {
+		t.Fatalf("served LOCATION %v, want the first part's", got)
+	}
+	got, changed = mustPatch(t, two, base)
+	expectParts(t, got, changed, two)
+
+	got, changed = mustPatch(t, two, set(t, base, "LOCATION", "LOCATION:C"))
+	want = maps.Clone(two)
+	want[SharedEncrypted] = frag(uidLine, stampLine, "LOCATION:C", "SUMMARY:s")
+	want[CalendarEncrypted] = frag(uidLine, stampLine, "LOCATION:C", "COMMENT:c")
+	expectParts(t, got, changed, want, SharedEncrypted, CalendarEncrypted)
+
+	// Edited to the value another part already holds: that copy keeps its
+	// bytes (folded oddly here), the served one is replaced.
+	two[CalendarEncrypted] = frag(uidLine, stampLine, "LOCATION:Bb\r\n bb", "COMMENT:c")
+	got, changed = mustPatch(t, two, set(t, base, "LOCATION", "LOCATION:Bbbb"))
+	want = maps.Clone(two)
+	want[SharedEncrypted] = frag(uidLine, stampLine, "LOCATION:Bbbb", "SUMMARY:s")
+	expectParts(t, got, changed, want, SharedEncrypted)
+
+	want = maps.Clone(two)
+	got, changed = mustPatch(t, two, without(base, named("LOCATION")))
+	want[SharedEncrypted] = frag(uidLine, stampLine, "SUMMARY:s")
+	want[CalendarEncrypted] = frag(uidLine, stampLine, "COMMENT:c")
+	expectParts(t, got, changed, want, SharedEncrypted, CalendarEncrypted)
+}
+
+// Ruling M4-R9: an existing attendee's parameters (ROLE, CN, PARTSTAT,
+// RSVP) are not written in v1: the parts do not change, and AttendeeEdits
+// names the attendee for a debug log.
+func TestAttendeeParamEditsAreIgnoredAndReported(t *testing.T) {
+	cur := stored()
+	statuses := map[string]int{"tok1": 3}
+	base := served(t, cur)
+	edits, err := AttendeeEdits(cur, base, statuses)
+	if err != nil || len(edits) != 0 {
+		t.Fatalf("unedited: %v, %v", edits, err)
+	}
+	reordered := set(t, base, "ATTENDEE", "ATTENDEE;PARTSTAT=accepted;CN=\"Ann\":mailto:ANN@example.com")
+	if edits, err := AttendeeEdits(cur, reordered, statuses); err != nil || len(edits) != 0 {
+		t.Fatalf("same parameters in another order: %v, %v", edits, err)
+	}
+	for _, line := range []string{
+		"ATTENDEE;CN=Ann;PARTSTAT=DECLINED:mailto:ann@example.com",
+		"ATTENDEE;CN=Ann B;PARTSTAT=ACCEPTED:mailto:ann@example.com",
+		"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;ROLE=OPT-PARTICIPANT:mailto:ann@example.com",
+		"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:ann@example.com",
+	} {
+		in := set(t, base, "ATTENDEE", line)
+		got, changed := mustPatch(t, cur, in)
+		expectParts(t, got, changed, stored())
+		edits, err := AttendeeEdits(cur, in, statuses)
+		if err != nil || !slices.Equal(edits, []string{"mailto:ann@example.com"}) {
+			t.Errorf("%s: edits %v, %v", line, edits, err)
 		}
+	}
+	in := base.Clone()
+	in.addProp(Property{Name: "ATTENDEE", Value: "mailto:new@example.com"})
+	if edits, err := AttendeeEdits(cur, in, statuses); err != nil || len(edits) != 0 {
+		t.Fatalf("an added attendee is not an edit: %v, %v", edits, err)
 	}
 }
 
@@ -452,6 +540,15 @@ func TestIsSharedSignedChange(t *testing.T) {
 	if IsSharedSignedChange(old, same) {
 		t.Fatalf("text, DTSTAMP, SEQUENCE, alarm, RRULE part order, EXDATE split and DURATION→DTEND count as a time change")
 	}
+	// Equivalent forms (review M5): INTERVAL=1, an EXDATE in UTC for the
+	// same instant, an explicit VALUE=DATE-TIME.
+	equivalent := set(t, same, "RRULE", "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;COUNT=5")
+	equivalent = without(equivalent, named("EXDATE"))
+	equivalent.addProp(Property{Name: "EXDATE", Value: "20261112T090000Z,20261119T090000Z"})
+	equivalent = set(t, equivalent, "DTSTART", "DTSTART;VALUE=DATE-TIME;TZID=Europe/Paris:20261105T100000")
+	if IsSharedSignedChange(old, equivalent) {
+		t.Fatalf("INTERVAL=1, EXDATE in UTC and VALUE=DATE-TIME count as a time change")
+	}
 	for name, edit := range map[string]func(Component) Component{
 		"DTSTART":       func(c Component) Component { return set(t, c, "DTSTART", "DTSTART;TZID=Europe/Paris:20261105T090000") },
 		"DTEND":         func(c Component) Component { return set(t, c, "DTEND", "DTEND;TZID=Europe/Paris:20261105T120000") },
@@ -461,6 +558,16 @@ func TestIsSharedSignedChange(t *testing.T) {
 		"EXDATE added":  func(c Component) Component { return set(t, c, "X-NONE", "EXDATE;TZID=Europe/Paris:20261126T100000") },
 		"EXDATE gone":   func(c Component) Component { return without(c, named("EXDATE")) },
 		"RECURRENCE-ID": func(c Component) Component { return set(t, c, "X-NONE", "RECURRENCE-ID:20261105T090000Z") },
+		"INTERVAL=2": func(c Component) Component {
+			return set(t, c, "RRULE", "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TH;COUNT=5")
+		},
+		"EXDATE an hour off in UTC": func(c Component) Component {
+			c = without(c, named("EXDATE"))
+			c.addProp(Property{Name: "EXDATE", Value: "20261112T100000Z,20261119T090000Z"})
+			return c
+		},
+		"same instant in UTC": func(c Component) Component { return set(t, c, "DTSTART", "DTSTART:20261105T090000Z") },
+		"DATE start":          func(c Component) Component { return set(t, c, "DTSTART", "DTSTART;VALUE=DATE:20261105") },
 	} {
 		if !IsSharedSignedChange(old, edit(same)) {
 			t.Errorf("%s edit not seen as a shared signed change", name)

@@ -7,10 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	// Go's own zone database: a TZID resolves the same on every host, and
-	// the write side refuses what it cannot resolve (constraints: tzdata is
-	// embedded in internal/ical only, from this file).
+	// Go's zone database, embedded: every zone of the IANA database resolves
+	// even on a host without one. time.LoadLocation reads ZONEINFO and the
+	// host's database first, so a host may resolve a few more names
+	// (posixrules, Factory); the write side refuses what does not resolve
+	// (constraints: tzdata is embedded in internal/ical only, from this file).
 	_ "time/tzdata"
 )
 
@@ -54,6 +57,7 @@ const (
 	noteToken     = "X-PM-TOKEN dropped from ATTENDEE"
 	noteDuration  = "DURATION converted to DTEND"
 	noteMozilla   = "Mozilla TZID mapped to its IANA name"
+	noteFaked     = "Thunderbird's faked master dropped"
 	noteMonthly   = "MONTHLY BYDAY ordinal written as BYSETPOS"
 )
 
@@ -101,6 +105,9 @@ func (n *notes) add(s string) {
 // Each VEVENT is validated and normalised (see WriteEvent). Errors are
 // *Refusal.
 func ParseWrite(body []byte) (Incoming, error) {
+	if !utf8.Valid(body) {
+		return Incoming{}, refuse(BadData, "not valid UTF-8")
+	}
 	comps, err := Parse(body)
 	if err != nil {
 		var pe *ParseError
@@ -112,6 +119,7 @@ func ParseWrite(body []byte) (Incoming, error) {
 	if len(comps) != 1 || !strings.EqualFold(comps[0].Name, "VCALENDAR") {
 		return Incoming{}, refuse(BadData, "the body is not one VCALENDAR")
 	}
+	var n notes
 	var events []Component
 	for _, it := range comps[0].Items {
 		if it.Comp == nil {
@@ -119,6 +127,10 @@ func ParseWrite(body []byte) (Incoming, error) {
 		}
 		switch strings.ToUpper(it.Comp.Name) {
 		case "VEVENT":
+			if fakedMaster(*it.Comp) {
+				n.add(noteFaked)
+				continue
+			}
 			events = append(events, *it.Comp)
 		case "VTIMEZONE":
 		default:
@@ -148,26 +160,39 @@ func ParseWrite(body []byte) (Incoming, error) {
 			return Incoming{}, refuse(NotOneUID, "VEVENTs of more than one UID")
 		}
 	}
-	var n notes
+	ridDate := map[int64]bool{}
 	for _, ev := range events {
-		we, recID, isException, r := normalise(ev, &n)
+		we, rid, r := normalise(ev, &n)
 		if r != nil {
 			return Incoming{}, r
 		}
 		switch {
-		case !isException && in.Master != nil:
+		case rid == nil && in.Master != nil:
 			return Incoming{}, refuse(BadData, "two VEVENTs without RECURRENCE-ID")
-		case !isException:
+		case rid == nil:
 			in.Master = &we
 		default:
-			if _, dup := in.Exceptions[recID]; dup {
+			key := rid.t.Unix()
+			if _, dup := in.Exceptions[key]; dup {
 				return Incoming{}, refuse(BadData, "two VEVENTs with the same RECURRENCE-ID")
 			}
-			in.Exceptions[recID] = we
+			in.Exceptions[key], ridDate[key] = we, rid.date
+		}
+	}
+	for _, date := range ridDate {
+		if in.Master != nil && date != in.Master.AllDay {
+			return Incoming{}, refuse(BadData, "a RECURRENCE-ID of another value type than the master's DTSTART")
 		}
 	}
 	in.Notes = n.list
 	return in, nil
+}
+
+// fakedMaster: Thunderbird's stand-in master for an orphan exception
+// (E08 §6.4), X-MOZ-FAKED-MASTER:1, never a real event (ruling M4-R11).
+func fakedMaster(ev Component) bool {
+	p, ok := ev.Get("X-MOZ-FAKED-MASTER")
+	return ok && strings.TrimSpace(p.Value) == "1"
 }
 
 // vcalendarLevel are properties of the VCALENDAR, never of a VEVENT.
@@ -195,15 +220,15 @@ func hasControl(s string) bool {
 	return false
 }
 
-// normalise validates and normalises one VEVENT. isException is true when
-// it has a RECURRENCE-ID, recID being its Unix time.
-func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException bool, r *Refusal) {
+// normalise validates and normalises one VEVENT. rid is its RECURRENCE-ID,
+// nil for a master.
+func normalise(c Component, n *notes) (we WriteEvent, rid *when, r *Refusal) {
 	out := Component{Name: "VEVENT"}
 	seen := map[string]bool{}
 	for _, it := range c.Items {
 		if it.Comp != nil {
 			if !strings.EqualFold(it.Comp.Name, "VALARM") {
-				return we, 0, false, refuse(BadData, "a VEVENT holds a component other than VALARM")
+				return we, nil, refuse(BadData, "a VEVENT holds a component other than VALARM")
 			}
 			we.Alarms = append(we.Alarms, it.Comp.Clone())
 			continue
@@ -212,13 +237,13 @@ func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException b
 		name := strings.ToUpper(p.Name)
 		switch {
 		case !validName(name) || name == "BEGIN" || name == "END":
-			return we, 0, false, refuse(BadData, "a property name that is not valid")
+			return we, nil, refuse(BadData, "a property name that is not valid")
 		case hasControl(p.Params) || hasControl(p.Value):
-			return we, 0, false, refuse(BadData, "a control character in a property")
+			return we, nil, refuse(BadData, "a control character in a property")
 		case name == "RDATE":
-			return we, 0, false, refuse(RDate, "RDATE has no Proton equivalent")
+			return we, nil, refuse(RDate, "RDATE has no Proton equivalent")
 		case name == "EXRULE":
-			return we, 0, false, refuse(ExRule, "EXRULE has no Proton equivalent")
+			return we, nil, refuse(ExRule, "EXRULE has no Proton equivalent")
 		case name == "COLOR":
 			n.add(noteColor)
 			continue
@@ -238,7 +263,7 @@ func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException b
 		}
 		if singleValued[name] {
 			if seen[name] {
-				return we, 0, false, refuse(BadData, name+" appears more than once")
+				return we, nil, refuse(BadData, name+" appears more than once")
 			}
 			seen[name] = true
 		}
@@ -246,16 +271,17 @@ func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException b
 	}
 	start, r := checkTimes(&out, n)
 	if r != nil {
-		return we, 0, false, r
+		return we, nil, r
 	}
 	we.AllDay = start.date
 	if i := indexOf(out, "RECURRENCE-ID"); i >= 0 {
-		rid, _ := parseWhen(&out.Items[i].Prop, out.Items[i].Prop.Value, nil)
-		recID, isException = rid.t.Unix(), true
+		w, _ := parseWhen(&out.Items[i].Prop, out.Items[i].Prop.Value, nil)
+		rid = &w
 	}
+	isException := rid != nil
 	if i := indexOf(out, "RRULE"); i >= 0 {
 		if isException {
-			return we, 0, false, refuse(UnsupportedRecurrence, "an exception with RRULE")
+			return we, nil, refuse(UnsupportedRecurrence, "an exception with RRULE")
 		}
 		rule := &out.Items[i].Prop
 		if v, ok := monthlyOrdinal(rule.Value); ok {
@@ -263,17 +289,17 @@ func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException b
 			n.add(noteMonthly)
 		}
 		if r := checkRRule(rule.Value, start); r != nil {
-			return we, 0, false, r
+			return we, nil, r
 		}
 	}
 	if _, ok := out.Get("EXDATE"); ok && isException {
-		return we, 0, false, refuse(UnsupportedRecurrence, "an exception with EXDATE")
+		return we, nil, refuse(UnsupportedRecurrence, "an exception with EXDATE")
 	}
 	if seq, ok := out.Get("SEQUENCE"); ok && !isCount(seq.Value) {
-		return we, 0, false, refuse(BadData, "SEQUENCE is not a number")
+		return we, nil, refuse(BadData, "SEQUENCE is not a number")
 	}
 	we.Comp = out
-	return we, recID, isException, nil
+	return we, rid, nil
 }
 
 func indexOf(c Component, name string) int {
@@ -557,10 +583,12 @@ var (
 
 // checkRRule refuses an RRULE outside Proton's supported set: FREQ DAILY,
 // WEEKLY, MONTHLY or YEARLY; COUNT ≤ 49; UNTIL on or before 2037-12-31 (the
-// date in DTSTART's zone); not both COUNT and UNTIL; MONTHLY with no BY
-// part, one BYMONTHDAY, or one plain BYDAY weekday with one BYSETPOS in
-// {-1,1,2,3,4}; YEARLY BYMONTHDAY with BYMONTH; INTERVAL ≤ 999 daily, 4999
-// weekly, 99 yearly. A malformed rule is BadData.
+// date in DTSTART's zone); not both COUNT and UNTIL; INTERVAL ≤ 999 daily,
+// 4999 weekly, 99 yearly; besides FREQ, INTERVAL, COUNT, UNTIL and WKST
+// (a weekday), only these parts (ruling M4-R10): WEEKLY BYDAY of plain
+// weekdays; MONTHLY one BYMONTHDAY, or one plain BYDAY weekday with one
+// BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY. A
+// malformed rule is BadData.
 func checkRRule(rule string, start when) *Refusal {
 	parts := map[string]string{}
 	for kv := range strings.SplitSeq(rule, ";") {
@@ -613,19 +641,63 @@ func checkRRule(rule string, start when) *Refusal {
 			return refuse(UnsupportedRecurrence, "RRULE UNTIL after 2037-12-31")
 		}
 	}
+	for k := range parts {
+		if !allowedParts[freq][k] {
+			return refuse(UnsupportedRecurrence, "an RRULE part Proton does not support for this FREQ")
+		}
+	}
+	if v, ok := parts["WKST"]; ok && !weekdays[strings.ToUpper(v)] {
+		return refuse(UnsupportedRecurrence, "RRULE WKST is not a weekday")
+	}
 	switch freq {
+	case "WEEKLY":
+		if v, ok := parts["BYDAY"]; ok {
+			for d := range strings.SplitSeq(v, ",") {
+				if !weekdays[strings.ToUpper(d)] {
+					return refuse(UnsupportedRecurrence, "WEEKLY RRULE BYDAY other than plain weekdays")
+				}
+			}
+		}
 	case "MONTHLY":
 		if !monthlyShape(parts) {
 			return refuse(UnsupportedRecurrence, "MONTHLY RRULE other than one BYMONTHDAY or one BYDAY with one BYSETPOS")
 		}
 	case "YEARLY":
-		_, day := parts["BYMONTHDAY"]
-		_, month := parts["BYMONTH"]
-		if day && !month {
-			return refuse(UnsupportedRecurrence, "YEARLY RRULE with BYMONTHDAY but no BYMONTH")
+		month, okMonth := parts["BYMONTH"]
+		day, okDay := parts["BYMONTHDAY"]
+		if okMonth != okDay || okMonth && (!inRange(month, 1, 12) || !monthDay(day)) {
+			return refuse(UnsupportedRecurrence, "YEARLY RRULE other than none or one BYMONTH with one BYMONTHDAY")
 		}
 	}
 	return nil
+}
+
+// allowedParts are the RRULE parts Proton supports per FREQ (ruling
+// M4-R10); checkRRule checks their values.
+var allowedParts = func() map[string]map[string]bool {
+	set := func(extra ...string) map[string]bool {
+		m := map[string]bool{"FREQ": true, "INTERVAL": true, "COUNT": true, "UNTIL": true, "WKST": true}
+		for _, k := range extra {
+			m[k] = true
+		}
+		return m
+	}
+	return map[string]map[string]bool{
+		"DAILY":   set(),
+		"WEEKLY":  set("BYDAY"),
+		"MONTHLY": set("BYDAY", "BYSETPOS", "BYMONTHDAY"),
+		"YEARLY":  set("BYMONTH", "BYMONTHDAY"),
+	}
+}()
+
+// inRange: one integer from lo to hi (no sign, no list).
+func inRange(v string, lo, hi int) bool {
+	return isCount(v) && atoi(v) >= lo && atoi(v) <= hi
+}
+
+// monthDay: one day of the month, 1 to 31 or -31 to -1.
+func monthDay(v string) bool {
+	return inRange(strings.TrimPrefix(v, "-"), 1, 31)
 }
 
 // monthlyOrdinal writes a MONTHLY rule's BYDAY=<n><DAY> (n in 1..4 or -1,
@@ -673,7 +745,7 @@ func atoi(s string) int {
 	return v
 }
 
-// monthlyShape: no BY part; BYMONTHDAY alone with one value; or BYDAY with
+// monthlyShape: no BY part; BYMONTHDAY alone with one day; or BYDAY with
 // one plain weekday and BYSETPOS with one allowed value, alone.
 func monthlyShape(parts map[string]string) bool {
 	by := 0
@@ -682,16 +754,16 @@ func monthlyShape(parts map[string]string) bool {
 			by++
 		}
 	}
-	day, okDay := parts["BYDAY"]
+	weekday, okDay := parts["BYDAY"]
 	pos, okPos := parts["BYSETPOS"]
-	monthDay, okMonthDay := parts["BYMONTHDAY"]
+	day, okMonthDay := parts["BYMONTHDAY"]
 	switch {
 	case by == 0:
 		return true
 	case by == 1 && okMonthDay:
-		return !strings.Contains(monthDay, ",")
+		return monthDay(day)
 	case by == 2 && okDay && okPos:
-		return weekdays[strings.ToUpper(day)] && setPos[pos]
+		return weekdays[strings.ToUpper(weekday)] && setPos[pos]
 	}
 	return false
 }

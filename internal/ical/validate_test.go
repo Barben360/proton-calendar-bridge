@@ -121,6 +121,13 @@ func TestRefusals(t *testing.T) {
 		{"a timed DURATION on a DATE", wcal(wev(slices.Concat(head, []string{"DTSTART;VALUE=DATE:20261105", "DURATION:PT1H"})...)), BadData},
 		{"a bare CR in a value", wcal(timed("X-A:one\rtwo")), BadData},
 		{"a NUL in a parameter", wcal(timed("X-A;P=a\x00b:v")), BadData},
+		{"a DEL in a value", wcal(timed("X-A:a\x7fb")), BadData},
+		{"invalid UTF-8", wcal(timed("X-A:caf\xe9")), BadData},
+		{"a DATE RECURRENCE-ID on a timed series", wcal(timed("RRULE:FREQ=DAILY"),
+			wev(slices.Concat(head, []string{"RECURRENCE-ID;VALUE=DATE:20261106", "DTSTART;VALUE=DATE:20261106"})...)), BadData},
+		{"a timed RECURRENCE-ID on an all-day series", wcal(wev(slices.Concat(head, []string{"DTSTART;VALUE=DATE:20261105", "RRULE:FREQ=DAILY"})...),
+			exception("20261106T100000")), BadData},
+		{"a faked master that is not Thunderbird's", wcal(wev(slices.Concat(head, []string{"DTSTART:20261106T090000Z", "RDATE:20261106T090000Z", "X-MOZ-FAKED-MASTER:0"})...)), RDate},
 		{"a malformed DURATION", wcal(wev(slices.Concat(head, []string{"DTSTART:20261105T100000Z", "DURATION:1H"})...)), BadData},
 	}
 	for _, c := range cases {
@@ -178,7 +185,32 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=MONTHLY;BYDAY=1TH,2FR", "", false},        // M4-R5: one day only
 		{"FREQ=MONTHLY;BYDAY=1TH,FR", "", false},         // M4-R5: one day only
 		{"FREQ=MONTHLY;BYDAY=1TH;BYSETPOS=1", "", false}, // an ordinal with BYSETPOS is not rewritten
-		{"FREQ=WEEKLY;BYDAY=1TH", "", true},              // the rewrite is MONTHLY's only (WEEKLY is not restricted)
+		{"FREQ=WEEKLY;BYDAY=1TH", "", false},             // M4-R10: WEEKLY takes plain days only
+		{"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;WKST=MO", "", true},
+		{"FREQ=WEEKLY;BYSETPOS=1;BYDAY=MO", "", false},
+		{"FREQ=DAILY;WKST=SU;INTERVAL=2", "", true},
+		{"FREQ=DAILY;WKST=XX", "", false},
+		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "", false}, // M4-R10: DAILY takes no BY part
+		{"FREQ=DAILY;BYHOUR=3,4", "", false},
+		{"FREQ=WEEKLY;BYHOUR=3", "", false},
+		{"FREQ=DAILY;BYMINUTE=5", "", false},
+		{"FREQ=DAILY;BYSECOND=5", "", false},
+		{"FREQ=DAILY;BYMONTH=3", "", false},
+		{"FREQ=YEARLY;BYYEARDAY=100", "", false},
+		{"FREQ=YEARLY;BYWEEKNO=10", "", false},
+		{"FREQ=YEARLY;BYMONTH=3;BYDAY=2TU", "", false},
+		{"FREQ=YEARLY;BYDAY=MO", "", false},
+		{"FREQ=YEARLY;BYMONTH=3", "", false},
+		{"FREQ=YEARLY;BYMONTH=3,4;BYMONTHDAY=5", "", false},
+		{"FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=5,6", "", false},
+		{"FREQ=YEARLY;BYMONTH=13;BYMONTHDAY=5", "", false},
+		{"FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=32", "", false},
+		{"FREQ=YEARLY;BYMONTH=12;BYMONTHDAY=-1", "", true},
+		{"FREQ=MONTHLY;BYMONTHDAY=0", "", false},
+		{"FREQ=MONTHLY;BYMONTHDAY=-31", "", true},
+		{"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;WKST=MO", "", true},
+		{"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;BYHOUR=3", "", false},
+		{"FREQ=MONTHLY;X-NAME=1", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=1;BYMONTHDAY=5", "", false},
 		{"FREQ=MONTHLY;BYMONTH=3", "", false},
 		{"FREQ=YEARLY;BYMONTHDAY=5", "", false},
@@ -429,7 +461,6 @@ func TestMonthlyOrdinalBydayIsRewritten(t *testing.T) {
 		{"freq=monthly;byday=2tu", "freq=monthly;BYDAY=TU;BYSETPOS=2"},
 		// Already Proton's form, or not MONTHLY: as sent.
 		{"FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"},
-		{"FREQ=WEEKLY;BYDAY=2TU", "FREQ=WEEKLY;BYDAY=2TU"},
 	}
 	for _, c := range cases {
 		t.Run(c.rule, func(t *testing.T) {
@@ -441,5 +472,25 @@ func TestMonthlyOrdinalBydayIsRewritten(t *testing.T) {
 				t.Fatalf("notes %q, rewritten %v", in.Notes, rewritten)
 			}
 		})
+	}
+}
+
+// Ruling M4-R11: Thunderbird's faked master of an orphan exception
+// (E08 §6.4) is dropped; the body is then exceptions only.
+func TestThunderbirdFakedMasterIsDropped(t *testing.T) {
+	fake := wev(slices.Concat(head, []string{"DTSTART;TZID=Europe/Paris:20261106T100000",
+		"RDATE;TZID=Europe/Paris:20261106T100000", "X-MOZ-FAKED-MASTER:1"})...)
+	in := mustParseWrite(t, wcal(fake, exception("20261106T100000", "SUMMARY2:moved")))
+	if in.Master != nil {
+		t.Fatalf("the faked master was kept as a master")
+	}
+	if got := keys(in.Exceptions); !slices.Equal(got, []int64{1793955600}) {
+		t.Fatalf("exceptions %v", got)
+	}
+	if !slices.Contains(in.Notes, noteFaked) {
+		t.Errorf("notes %q lack %q", in.Notes, noteFaked)
+	}
+	if r := refusalOf(t, wcal(fake)); r.Code != BadData {
+		t.Fatalf("a faked master alone: code %q, want %q (no VEVENT left)", r.Code, BadData)
 	}
 }
