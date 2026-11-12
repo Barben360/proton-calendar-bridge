@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -34,6 +35,28 @@ type Config struct {
 	Proton  Proton  `toml:"proton"`
 	Secrets Secrets `toml:"secrets"`
 	CalDAV  CalDAV  `toml:"caldav"`
+	Log     Log     `toml:"log"`
+}
+
+// Log is the logging of pcb serve.
+type Log struct {
+	Level string `toml:"level"` // debug, info, warn or error (default info); pcb serve --log-level overrides it
+}
+
+// ParseLevel maps a level name (lower case only) to its slog level. The
+// error never echoes s.
+func ParseLevel(s string) (slog.Level, error) {
+	switch s {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return 0, errors.New("must be one of debug, info, warn, error")
 }
 
 // CalDAV is the listener of pcb serve. A loopback bind serves plain HTTP;
@@ -67,6 +90,7 @@ func Defaults(d paths.Dirs) Config {
 		Proton:  Proton{BaseURL: DefaultBaseURL, AppVersion: DefaultAppVersion},
 		Secrets: Secrets{KeyFile: filepath.Join(d.Config, "secrets.key")},
 		CalDAV:  CalDAV{Listen: DefaultListen},
+		Log:     Log{Level: "info"},
 	}
 }
 
@@ -141,6 +165,9 @@ func (c Config) validate() error {
 	}
 	if !filepath.IsAbs(c.Secrets.KeyFile) {
 		return errors.New("secrets.key_file must be an absolute path")
+	}
+	if _, err := ParseLevel(c.Log.Level); err != nil {
+		return fmt.Errorf("log.level %w", err)
 	}
 	return c.CalDAV.validate()
 }

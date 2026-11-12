@@ -127,11 +127,13 @@ func TestDoctorTextShowsFix(t *testing.T) {
 func TestDoctorReportsUnresolvableDirs(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("PCB_CONFIG_DIR", "")
+	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("HOME", "")
 	code, out, _ := run("doctor")
 	if code != exitcode.Blocked || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
-		!strings.Contains(out, "fix: set HOME or XDG_CONFIG_HOME to an absolute path") ||
-		!strings.Contains(out, "fix: set HOME or XDG_STATE_HOME to an absolute path") {
+		!strings.Contains(out, "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path") ||
+		!strings.Contains(out, "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path") {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }

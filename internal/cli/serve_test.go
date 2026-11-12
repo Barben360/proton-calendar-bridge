@@ -768,3 +768,66 @@ func TestServeWarnsAboutCertificatesToCheck(t *testing.T) {
 		}
 	})
 }
+
+// Ruling M5-Rpre8: [log] level and --log-level pick what pcb serve logs; the
+// flag wins. "listener started" is an info line.
+func TestServeHonoursTheLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, config string
+		args         []string
+		wantInfo     bool
+	}{
+		{"default is info", "", nil, true},
+		{"flag warn", "", []string{"--log-level", "warn"}, false},
+		{"config warn", "[log]\nlevel = \"warn\"\n", nil, false},
+		{"flag warn over config debug", "[log]\nlevel = \"debug\"\n", []string{"--log-level", "warn"}, false},
+		{"flag info over config warn", "[log]\nlevel = \"warn\"\n", []string{"--log-level", "info"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := newServeStub()
+			r := stubRig(t, &stub.stubAPI)
+			r.svc = stub
+			if tc.config != "" {
+				f, err := os.OpenFile(config.Path(r.dirs), os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.WriteString("\n" + tc.config); err != nil {
+					t.Fatal(err)
+				}
+				_ = f.Close()
+			}
+			s := startServe(t, r, nil, tc.args...)
+			s.listening()
+			s.stop()
+			if code := s.exit(); code != exitcode.OK {
+				t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+			}
+			logs := s.errb.String()
+			if got := strings.Contains(logs, "listener started"); got != tc.wantInfo {
+				t.Errorf("\"listener started\" logged = %v, want %v:\n%s", got, tc.wantInfo, logs)
+			}
+		})
+	}
+}
+
+func TestServeRefusesABadLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, level := range []string{"loud", "INFO", ""} {
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, nil, "--log-level", level)
+		if code := s.exit(); code != exitcode.Usage {
+			t.Errorf("--log-level %q: exit %d, want 2", level, code)
+		}
+		s.neverListened()
+		select {
+		case <-stub.served:
+			t.Errorf("--log-level %q: the service ran before the usage error", level)
+		default:
+		}
+	}
+}

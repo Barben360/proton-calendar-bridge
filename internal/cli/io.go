@@ -63,7 +63,7 @@ func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
 	dirs, err := paths.Resolve(env)
 	if err != nil {
 		return paths.Dirs{}, config.Config{}, &exitcode.Error{Code: exitcode.Blocked, Err: err,
-			Hint: "set HOME, or XDG_CONFIG_HOME and XDG_STATE_HOME to absolute paths"}
+			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
 	}
 	cfg, err := config.Load(config.Path(dirs), dirs)
 	if err != nil {

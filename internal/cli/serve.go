@@ -40,7 +40,7 @@ const (
 )
 
 func (a *app) newServe() *cobra.Command {
-	var listen string
+	var listen, logLevel string
 	c := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the calendars over CalDAV and keep them in sync",
@@ -62,9 +62,18 @@ func (a *app) newServe() *cobra.Command {
 						Hint: "use HOST:PORT, such as 127.0.0.1:1080 or 0.0.0.0:8443"}
 				}
 			}
+			if cmd.Flags().Changed("log-level") {
+				if _, err := config.ParseLevel(logLevel); err != nil {
+					return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("--log-level %w", err),
+						Hint: "use debug, info, warn or error"}
+				}
+			}
 			dirs, cfg, err := loadConfig(a.Env)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("log-level") {
+				cfg.Log.Level = logLevel
 			}
 			if cmd.Flags().Changed("listen") {
 				cfg.CalDAV.Listen = listen
@@ -74,10 +83,11 @@ func (a *app) newServe() *cobra.Command {
 				return err
 			}
 			defer a.closeService(svc)
-			return a.serve(cmd, svc, filepath.Join(dirs.State, "tls"), cfg.CalDAV)
+			return a.serve(cmd, svc, filepath.Join(dirs.State, "tls"), cfg.CalDAV, cfg.Log.Level)
 		},
 	}
 	c.Flags().StringVar(&listen, "listen", "", "HOST:PORT to listen on, over [caldav] listen (default "+config.DefaultListen+")")
+	c.Flags().StringVar(&logLevel, "log-level", "", "debug, info, warn or error, over [log] level (default info)")
 	return c
 }
 
@@ -85,9 +95,13 @@ func (a *app) newServe() *cobra.Command {
 // login, the listener (a refused start never binds). A signal (the end of
 // cmd's context) drains the listener and ends with exit 0; the sync loop
 // stopping on an error drains it and ends with that error.
-func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc config.CalDAV) error {
+func (a *app) serve(cmd *cobra.Command, svc service.API, tlsDir string, cc config.CalDAV, level string) error {
 	ctx := cmd.Context()
-	log := slog.New(slog.NewTextHandler(a.Stderr, nil))
+	lvl, err := config.ParseLevel(level)
+	if err != nil { // Load validated it; this is for a caller that did not
+		return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("log level %w", err), Hint: "use debug, info, warn or error"}
+	}
+	log := slog.New(slog.NewTextHandler(a.Stderr, &slog.HandlerOptions{Level: lvl}))
 	// The sync loop outlives a signal until the listener is drained, so the
 	// requests in flight still read its cache handle.
 	syncCtx, stopSync := context.WithCancel(context.WithoutCancel(ctx))

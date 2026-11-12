@@ -46,10 +46,12 @@ func doctorChecks() []doctor.Check {
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(os.Getenv)
 	if err != nil {
-		fix := func(env string) string { return "set HOME or " + env + " to an absolute path" }
+		fix := func(override, xdg string) string {
+			return "set HOME, " + override + " or " + xdg + " to an absolute path"
+		}
 		return append(checks,
-			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix("XDG_CONFIG_HOME")},
-			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix("XDG_STATE_HOME")})
+			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix(paths.EnvConfigDir, "XDG_CONFIG_HOME")},
+			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix(paths.EnvStateDir, "XDG_STATE_HOME")})
 	}
 	checks = append(checks,
 		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
