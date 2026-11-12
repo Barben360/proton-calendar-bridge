@@ -688,3 +688,143 @@ func TestListByUIDSendsTheUID(t *testing.T) {
 		t.Errorf("queries = %q", got)
 	}
 }
+
+// refreshing is a client with a Refresh that counts its calls.
+func refreshing(base string, refreshes *atomic.Int32) *api.Client {
+	return api.New(api.Tokens{UID: "u", AccessToken: "a", RefreshToken: "r"}, api.Options{
+		BaseURL: base, HTTP: &http.Client{Timeout: 5 * time.Second}, Limiter: rate.NewLimiter(rate.Inf, 1),
+		Sleep: func(context.Context, time.Duration) error { return nil },
+		Refresh: func(_ context.Context, t api.Tokens) (api.Tokens, error) {
+			refreshes.Add(1)
+			t.AccessToken = "a2"
+			return t, nil
+		},
+	})
+}
+
+// authServer answers by request number n (1-based) with h(n).
+func authServer(t *testing.T, h func(n int, w http.ResponseWriter, r *http.Request)) (string, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = readAll(r)
+		h(int(n.Add(1)), w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &n
+}
+
+// Ruling M4-R23: a 401 is answered before processing, so one resend after a
+// refresh is allowed.
+func TestSyncResendsOnceAfterA401Refresh(t *testing.T) {
+	t.Parallel()
+	var tokens []string
+	base, n := authServer(t, func(n int, w http.ResponseWriter, r *http.Request) {
+		tokens = append(tokens, r.Header.Get("Authorization"))
+		if n == 1 {
+			reply(w, 401, `{"Code":401,"Error":"x"}`)
+			return
+		}
+		reply(w, 200, `{"Code":1001,"Responses":[{"Index":0,"Response":{"Code":1000}}]}`)
+	})
+	var refreshes atomic.Int32
+	res, err := events.Sync(t.Context(), refreshing(base, &refreshes), "cal", "m", oneUpdate)
+	if err != nil || len(res) != 1 || res[0].Err != nil {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if n.Load() != 2 || refreshes.Load() != 1 {
+		t.Errorf("%d requests and %d refreshes, want 2 and 1", n.Load(), refreshes.Load())
+	}
+	if len(tokens) != 2 || tokens[0] == tokens[1] {
+		t.Errorf("the resend did not carry the new token: %v", tokens)
+	}
+}
+
+func TestResendAfter401ThenResetIsAmbiguous(t *testing.T) {
+	t.Parallel()
+	base, n := authServer(t, func(n int, w http.ResponseWriter, _ *http.Request) {
+		if n == 1 {
+			reply(w, 401, `{"Code":401,"Error":"x"}`)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	})
+	var refreshes atomic.Int32
+	res, err := events.Sync(t.Context(), refreshing(base, &refreshes), "cal", "m", oneUpdate)
+	if res != nil || !errors.Is(err, events.ErrAmbiguous) {
+		t.Errorf("res=%v err=%v, want ErrAmbiguous: the resend may have been applied", res, err)
+	}
+	if n.Load() != 2 {
+		t.Errorf("%d requests, want 2", n.Load())
+	}
+}
+
+func TestSecond401GivesNoThirdRequest(t *testing.T) {
+	t.Parallel()
+	base, n := authServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) { reply(w, 401, `{"Code":401,"Error":"x"}`) })
+	var refreshes atomic.Int32
+	_, err := events.Sync(t.Context(), refreshing(base, &refreshes), "cal", "m", oneUpdate)
+	if !errors.Is(err, api.ErrSessionEnded) || errors.Is(err, events.ErrAmbiguous) {
+		t.Errorf("err = %v, want session ended, not ambiguous", err)
+	}
+	if n.Load() != 2 || refreshes.Load() != 1 {
+		t.Errorf("%d requests and %d refreshes, want 2 and 1", n.Load(), refreshes.Load())
+	}
+}
+
+func TestCancelledBeforeSyncSendsNothing(t *testing.T) {
+	t.Parallel()
+	c, n := scripted(t, func(w http.ResponseWriter, _ *http.Request) { reply(w, 200, `{"Code":1001}`) })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := events.Sync(ctx, c, "cal", "m", oneUpdate)
+	if err == nil || errors.Is(err, events.ErrAmbiguous) || n.Load() != 0 {
+		t.Errorf("err=%v after %d requests, want a non-ambiguous failure and none sent", err, n.Load())
+	}
+}
+
+func TestUnresolvableHostIsNotAmbiguous(t *testing.T) {
+	t.Parallel()
+	_, err := events.Sync(t.Context(), scriptedClient("http://nx.invalid", nil), "cal", "m", oneUpdate)
+	if err == nil || errors.Is(err, events.ErrAmbiguous) {
+		t.Errorf("err = %v, want a dial failure that is not ambiguous", err)
+	}
+}
+
+func TestTLSFailureIsAmbiguousOnPurpose(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { n.Add(1) }))
+	t.Cleanup(srv.Close)
+	// The client does not trust the test certificate: the handshake fails.
+	_, err := events.Sync(t.Context(), scriptedClient(srv.URL, nil), "cal", "m", oneUpdate)
+	if !errors.Is(err, events.ErrAmbiguous) {
+		t.Errorf("err = %v, want ErrAmbiguous (the safe direction)", err)
+	}
+	if n.Load() != 0 {
+		t.Errorf("the handler ran %d times", n.Load())
+	}
+}
+
+func TestRedirectIsNotFollowed(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{307, 308} {
+		var hits atomic.Int32
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1) }))
+		t.Cleanup(target.Close)
+		c, n := scripted(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+"/elsewhere", status)
+		})
+		_, err := events.Sync(t.Context(), c, "cal", "m", oneUpdate)
+		var ae *api.Error
+		if !errors.As(err, &ae) || ae.Status != status || errors.Is(err, events.ErrAmbiguous) {
+			t.Errorf("%d: err = %v, want an *api.Error that is not ambiguous", status, err)
+		}
+		if n.Load() != 1 || hits.Load() != 0 {
+			t.Errorf("%d: %d requests, %d at the target, want 1 and 0", status, n.Load(), hits.Load())
+		}
+	}
+}

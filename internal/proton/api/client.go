@@ -115,8 +115,9 @@ func (c *Client) Put(ctx context.Context, path string, body, out any) error {
 // PutOnce sends a PUT with a JSON body that must never be sent twice: a write
 // without an idempotency key. It behaves as Put except that a 429 is
 // returned at once, not waited out and retried; the caller decides whether
-// and when to send again. (A 401 still refreshes the tokens and re-sends
-// once: Proton rejected the request before processing it.) 5xx and network
+// and when to send again. A 401 still refreshes the tokens and re-sends the
+// body exactly once (ruling M4-R23): Proton answers 401 at authentication,
+// before processing, so the first send cannot have been applied. 5xx and network
 // errors are never retried for a PUT. Errors that happened before anything
 // could have reached Proton satisfy errors.Is(err, ErrNotSent).
 func (c *Client) PutOnce(ctx context.Context, path string, body, out any) error {
@@ -190,6 +191,8 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		perr := parse(method, path, status, hdr, data)
 		switch {
 		case status == http.StatusUnauthorized:
+			// Ruling M4-R23: even for PutOnce, one resend after a refresh is
+			// allowed: a 401 is answered before the request is processed.
 			if refreshed {
 				return fmt.Errorf("%s: %w: %w", where, ErrSessionEnded, perr)
 			}

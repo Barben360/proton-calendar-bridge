@@ -193,9 +193,10 @@ var (
 	// ErrNotFound: code 2061, an ID or member Proton does not know.
 	ErrNotFound = errors.New("proton does not know the event")
 	// ErrRefused: any other refusal, including code 2001. Code 2001 is both
-	// a bad signature and an exception SEQUENCE below the master's, and its
-	// message cannot tell them apart (research A.4), so the two stay one
-	// error: callers check the SEQUENCE themselves.
+	// a bad signature and an exception SEQUENCE below the master's. Research
+	// A.4 records two different messages, but we deliberately do not parse
+	// Proton's text (ruling M4-R24): the two stay one error, and the caller
+	// checks the SEQUENCE before sending.
 	ErrRefused = errors.New("proton refused the write")
 	// ErrAmbiguous: the request may have reached Proton without a usable
 	// answer (timeout or reset after the body was sent, a 5xx, an answer
@@ -355,6 +356,10 @@ func Sync(ctx context.Context, c *api.Client, calID, memberID string, ops []Op) 
 // (429 included: rejected before processing). Yes for a 5xx or an unexpected
 // 2xx, and for any transport failure once the request could have left:
 // timeout, reset, read error, caller cancelled, an answer that does not decode.
+// A TLS handshake failure and a Client.Timeout that fires while dialling are
+// classed ambiguous on purpose although nothing was sent: they cannot be told
+// from a failure after the send, and ambiguous is the safe direction (read
+// back, then 503). Do not "fix" them to not-ambiguous.
 func ambiguous(err error) bool {
 	if errors.Is(err, api.ErrNotSent) {
 		return false
