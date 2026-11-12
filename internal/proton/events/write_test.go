@@ -762,11 +762,22 @@ func TestResendAfter401ThenResetIsAmbiguous(t *testing.T) {
 	}
 }
 
+// A second 401 ends the session: no third request. Should the guard
+// regress, the third request is answered (and the call bounded), so the
+// test fails on its assertions instead of hanging in a refresh loop.
 func TestSecond401GivesNoThirdRequest(t *testing.T) {
 	t.Parallel()
-	base, n := authServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) { reply(w, 401, `{"Code":401,"Error":"x"}`) })
+	base, n := authServer(t, func(n int, w http.ResponseWriter, _ *http.Request) {
+		if n > 2 {
+			reply(w, 200, `{"Code":1001,"Responses":[]}`)
+			return
+		}
+		reply(w, 401, `{"Code":401,"Error":"x"}`)
+	})
 	var refreshes atomic.Int32
-	_, err := events.Sync(t.Context(), refreshing(base, &refreshes), "cal", "m", oneUpdate)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := events.Sync(ctx, refreshing(base, &refreshes), "cal", "m", oneUpdate)
 	if !errors.Is(err, api.ErrSessionEnded) || errors.Is(err, events.ErrAmbiguous) {
 		t.Errorf("err = %v, want session ended, not ambiguous", err)
 	}

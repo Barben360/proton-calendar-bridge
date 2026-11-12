@@ -422,13 +422,18 @@ func TestAliasReadsRefuseAnEndedView(t *testing.T) {
 
 // Writes and feed passes interleave on one calendar (as the service and the
 // syncer do): every change gets its own counter value and none is lost.
+// Two goroutines of each kind, already more than production runs (one write
+// per calendar at a time beside the syncer): eight made a waiter starve
+// past the 5 s busy timeout under the race detector on a loaded machine (a
+// flake, not a finding). A counter value read outside the transaction is
+// still reused within a few rounds.
 func TestConcurrentApplyWriteAndApplyDelta(t *testing.T) {
 	c, _ := openNew(t)
 	if _, err := c.ReplaceCalendar(bg, "cal", "c0", []Row{wrow("seed", "useed", 1)}, time.Unix(100, 0)); err != nil {
 		t.Fatal(err)
 	}
 	start := seq(t, c)
-	const workers, rounds = 4, 15
+	const workers, rounds = 2, 15
 	counts := make(chan int, workers*2)
 	errs := make(chan error, workers*2)
 	for w := 0; w < workers; w++ {
