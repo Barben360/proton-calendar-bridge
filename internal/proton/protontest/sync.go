@@ -52,6 +52,30 @@ type WriteOptions struct {
 	// (research A.5 [unknown]). Default: each entry stands alone, the 1001
 	// envelope carrying a code per entry.
 	AllOrNothing bool
+	// Lab, when set, chooses the answer to each create and update entry, by
+	// the UID of its shared signed part and whether it is an update, before
+	// the fake's own checks: it stands in for each answer Proton may give
+	// where the research cannot predict it (the pcb-lab write-matrix probe's
+	// tests, ruling L5). Nil: the fake answers alone.
+	Lab func(uid string, update bool) LabAnswer
+}
+
+// LabAnswer is WriteOptions.Lab's choice for one entry.
+type LabAnswer struct {
+	// Code, when not zero, refuses the entry with it.
+	Code int
+	// Lenient stores what the fake would refuse on its own reading of the
+	// research: properties outside the routing table (DURATION), floating
+	// times and TZIDs outside the tz database (stored as UTC, the TZID as
+	// sent), STATUS:TENTATIVE, a PersonalEventContent part (served as the
+	// row's PersonalEvents), and an update's key packet for a session key
+	// the row already has (taken, the parts read under it). Signatures,
+	// decryption and the fragment form are still checked.
+	Lenient bool
+	// Edit, when set, changes the row as stored and served once the entry
+	// succeeds: its JSON fields, which override the columns (a Proton that
+	// rewrites what it stores).
+	Edit func(row map[string]any)
 }
 
 // Proton codes of the sync endpoint (research A.4).
@@ -120,6 +144,10 @@ type SyncEvent struct {
 	Notifications, Color               json.RawMessage
 	// Invitations are out of M4's scope: anything but null or [] is refused.
 	AddedProtonAttendees, RemovedAttendeeAddresses json.RawMessage
+	// PersonalEventContent is a personal part (the field name is not
+	// verified, research A.2): refused (2001) unless a lenient LabAnswer
+	// takes it.
+	PersonalEventContent json.RawMessage
 }
 
 // SyncPart is a card part as sent: Type 2 clear and signed, 3 encrypted and
@@ -295,18 +323,47 @@ func (tx *syncTx) commit() {
 }
 
 func (tx *syncTx) apply(e SyncEntry) entryResult {
+	var lab LabAnswer
+	if e.Event != nil && tx.f.o.Write.Lab != nil {
+		lab = tx.f.o.Write.Lab(sharedSignedUID(*e.Event), e.ID != "")
+		if lab.Code != 0 {
+			return failed(lab.Code, "fake: the lab's answer")
+		}
+	}
+	var res entryResult
 	switch {
 	case e.ID == "" && e.Event != nil:
 		if e.Overwrite != nil && *e.Overwrite != 0 {
 			return failed(codeInvalid, "fake: Overwrite %d has no known meaning (research A.1)", *e.Overwrite)
 		}
-		return tx.create(*e.Event)
+		res = tx.create(*e.Event, lab.Lenient)
 	case e.ID != "" && e.Event != nil:
-		return tx.update(e.ID, *e.Event)
+		res = tx.update(e.ID, *e.Event, lab.Lenient)
 	case e.ID != "":
 		return tx.remove(e.ID)
+	default:
+		return failed(codeInvalid, "fake: an entry needs an ID, an Event or both")
 	}
-	return failed(codeInvalid, "fake: an entry needs an ID, an Event or both")
+	if res.code == codeOK && res.row != nil && lab.Edit != nil {
+		lab.Edit(res.row.parts)
+	}
+	return res
+}
+
+// sharedSignedUID is the UID line's value in ev's shared signed part, "" if
+// none.
+func sharedSignedUID(ev SyncEvent) string {
+	for _, p := range ev.SharedEventContent {
+		if p.Type != 2 {
+			continue
+		}
+		for _, l := range strings.Split(p.Data, "\r\n") {
+			if v, ok := strings.CutPrefix(l, "UID:"); ok {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // find returns the index of row id, or -1 and the failure to answer.
@@ -336,7 +393,7 @@ func (tx *syncTx) remove(id string) entryResult {
 // calendar encrypted part.
 type sessionKeys struct{ shared, cal *crypto.SessionKey }
 
-func (tx *syncTx) create(ev SyncEvent) entryResult {
+func (tx *syncTx) create(ev SyncEvent, lenient bool) entryResult {
 	if ev.SharedKeyPacket == nil {
 		return failed(codeInvalid, "fake: a create needs a SharedKeyPacket")
 	}
@@ -350,7 +407,7 @@ func (tx *syncTx) create(ev SyncEvent) entryResult {
 			return failed(codeInvalid, "fake: CalendarKeyPacket: %v", err)
 		}
 	}
-	row, res := tx.build(ev, nil, keys)
+	row, res := tx.build(ev, nil, keys, lenient)
 	if row == nil {
 		return res
 	}
@@ -367,7 +424,7 @@ func (tx *syncTx) create(ev SyncEvent) entryResult {
 	return entryResult{code: codeOK, row: row}
 }
 
-func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
+func (tx *syncTx) update(id string, ev SyncEvent, lenient bool) entryResult {
 	i, res := tx.find(id)
 	if i < 0 {
 		return res
@@ -384,9 +441,15 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 	if ev.SharedKeyPacket != nil && tx.f.o.Write.RefuseNewKeyPacketsOnUpdate {
 		return failed(codeInvalid, "fake: an update cannot replace the row's shared key packet")
 	}
+	if ev.SharedKeyPacket != nil && lenient {
+		if keys.shared, err = tx.newKeyPacket(*ev.SharedKeyPacket); err != nil {
+			return failed(codeInvalid, "fake: SharedKeyPacket: %v", err)
+		}
+		sharedPacket = *ev.SharedKeyPacket
+	}
 	if ev.CalendarKeyPacket != nil {
 		switch {
-		case keys.cal == nil:
+		case keys.cal == nil || lenient:
 			if keys.cal, err = tx.newKeyPacket(*ev.CalendarKeyPacket); err != nil {
 				return failed(codeInvalid, "fake: CalendarKeyPacket: %v", err)
 			}
@@ -395,7 +458,7 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 			return failed(codeInvalid, "fake: an update cannot replace the row's calendar key packet")
 		}
 	}
-	row, res := tx.build(ev, old, keys)
+	row, res := tx.build(ev, old, keys, lenient)
 	if row == nil {
 		return res
 	}
@@ -407,6 +470,9 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 	}
 	row.id, row.sharedID, row.createTime = old.id, old.sharedID, old.createTime
 	for _, k := range []string{"AddressKeyPacket", "AddressID", "PersonalEvents"} {
+		if k == "PersonalEvents" && len(bytes.TrimSpace(ev.PersonalEventContent)) > 0 {
+			continue // a lenient update's own, from build
+		}
 		row.parts[k] = old.parts[k] // kept; for personal parts, research L.4.10 [unknown]
 	}
 	row.parts["SharedKeyPacket"], row.parts["CalendarKeyPacket"] = sharedPacket, calPacket
@@ -418,7 +484,7 @@ func (tx *syncTx) update(id string, ev SyncEvent) entryResult {
 
 // build checks ev (old: the row it updates, nil on a create) and returns
 // the row it makes, with new IDs, or nil and the failure.
-func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRec, entryResult) {
+func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys, lenient bool) (*eventRec, entryResult) {
 	if ev.Permissions == nil { // assumption: every bridge sends it (research A.2)
 		return nil, failed(codeInvalid, "fake: Permissions is missing")
 	}
@@ -427,11 +493,19 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRe
 			return nil, failed(codeInvalid, "fake: invitations are out of scope")
 		}
 	}
-	card, err := tx.openCard(ev, keys)
+	var personal []SyncPart
+	if s := string(bytes.TrimSpace(ev.PersonalEventContent)); s != "" && s != "null" {
+		var p SyncPart
+		if !lenient || json.Unmarshal(ev.PersonalEventContent, &p) != nil {
+			return nil, failed(codeInvalid, "fake: PersonalEventContent is not a field the research knows")
+		}
+		personal = []SyncPart{p}
+	}
+	card, err := tx.openCard(ev, keys, lenient)
 	if err != nil {
 		return nil, failed(codeInvalid, "fake: %v", err)
 	}
-	cols, err := parseColumns(card[slotSharedSigned])
+	cols, err := parseColumns(card[slotSharedSigned], lenient)
 	if err != nil {
 		return nil, failed(codeInvalid, "fake: shared signed part: %v", err)
 	}
@@ -443,7 +517,7 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRe
 		return nil, failed(codeNotAllowed, "These properties are not supported: RECURRENCE-ID with RRULE")
 	}
 	for _, p := range card[slotCalendarSigned] {
-		if p.name == "STATUS" && strings.EqualFold(p.value, "TENTATIVE") {
+		if p.name == "STATUS" && strings.EqualFold(p.value, "TENTATIVE") && !lenient {
 			return nil, failed(codeBadValue, "fake: STATUS:TENTATIVE is refused")
 		}
 	}
@@ -472,6 +546,9 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys) (*eventRe
 		"SharedEvents":    servedParts(ev.SharedEventContent, author),
 		"CalendarEvents":  servedParts(ev.CalendarEventContent, author),
 		"AttendeesEvents": servedParts(ev.AttendeesEventContent, author),
+	}
+	if personal != nil {
+		row.parts["PersonalEvents"] = servedParts(personal, author)
 	}
 	return row, entryResult{}
 }
@@ -629,7 +706,7 @@ type partGroup struct {
 // plaintext of an encrypted one), each
 // decryption under its session key, the fragment form, the routing, one UID
 // across parts and the same EXDATEs in both signed parts.
-func (tx *syncTx) openCard(ev SyncEvent, keys sessionKeys) (map[slot][]property, error) {
+func (tx *syncTx) openCard(ev SyncEvent, keys sessionKeys, lenient bool) (map[slot][]property, error) {
 	addrKR, err := memberKey(tx.cal)
 	if err != nil {
 		return nil, err
@@ -659,7 +736,7 @@ func (tx *syncTx) openCard(ev SyncEvent, keys sessionKeys) (map[slot][]property,
 			if !verifies(text, p.Signature, addrKR) {
 				return nil, fmt.Errorf("%s: Provide data signed using the address key", s)
 			}
-			if card[s], err = partProperties(s, string(text)); err != nil {
+			if card[s], err = partProperties(s, string(text), lenient); err != nil {
 				return nil, fmt.Errorf("%s: %w", s, err)
 			}
 		}
@@ -718,7 +795,7 @@ func verifies(text []byte, armoredSig string, kr *crypto.KeyRing) bool {
 // (constraints: one VEVENT alone in a VCALENDAR, CRLF, lines of at most 75
 // octets, no CRLF after the last line) holding one UID, one DTSTAMP and only
 // what the routing table gives slot s, and returns its properties.
-func partProperties(s slot, text string) ([]property, error) {
+func partProperties(s slot, text string, lenient bool) ([]property, error) {
 	if strings.HasSuffix(text, "\r\n") {
 		return nil, errors.New("a CRLF after the last line")
 	}
@@ -749,7 +826,7 @@ func partProperties(s slot, text string) ([]property, error) {
 		if p.name == "BEGIN" || p.name == "END" {
 			return nil, errors.New("a nested component")
 		}
-		if !routedTo(s, p.name) {
+		if !routedTo(s, p.name) && !lenient {
 			return nil, fmt.Errorf("%s does not belong here", p.name)
 		}
 		props = append(props, p)
@@ -776,7 +853,7 @@ func propValues(props []property, name string) []string {
 // day at midnight UTC), the zones from their TZID, RRULE verbatim,
 // RECURRENCE-ID and EXDATE as unix seconds. SEQUENCE is a bare integer
 // (research A.4).
-func parseColumns(props []property) (columns, error) {
+func parseColumns(props []property, lenient bool) (columns, error) {
 	var c columns
 	var hasStart, hasEnd, endDate bool
 	for _, p := range props {
@@ -786,11 +863,11 @@ func parseColumns(props []property) (columns, error) {
 			c.UID = p.value
 		case "DTSTART":
 			var t time.Time
-			t, c.FullDay, c.StartTZ, err = instant(p, p.value)
+			t, c.FullDay, c.StartTZ, err = instantOf(p, lenient)
 			c.Start, hasStart = t.Unix(), true
 		case "DTEND":
 			var t time.Time
-			t, endDate, c.EndTZ, err = instant(p, p.value)
+			t, endDate, c.EndTZ, err = instantOf(p, lenient)
 			c.End, hasEnd = t.Unix(), true
 		case "RRULE":
 			c.RRule = p.value
@@ -824,6 +901,18 @@ func parseColumns(props []property) (columns, error) {
 		c.End, c.EndTZ = c.Start, c.StartTZ
 	}
 	return c, nil
+}
+
+// instantOf is instant on p's value; lenient, a floating time or a TZID
+// outside the tz database is read as UTC and keeps the TZID as sent.
+func instantOf(p property, lenient bool) (time.Time, bool, string, error) {
+	t, date, zone, err := instant(p, p.value)
+	if err != nil && lenient {
+		if lt, lerr := time.Parse(localLayout, p.value); lerr == nil {
+			return lt, false, p.params["TZID"], nil
+		}
+	}
+	return t, date, zone, err
 }
 
 // colorOf reads an entry's Color: absent or null keeps the row's on update

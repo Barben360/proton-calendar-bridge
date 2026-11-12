@@ -46,6 +46,11 @@ type Front struct {
 	Replies   map[string]Reply // key "METHOD /path": answered instead of the backend
 	Log       []Seen
 	URL       string
+	// Options shape the fake behind the front (its Username, Password and
+	// TwoFA are the front's own); Backend is that fake, for calendars and
+	// its records.
+	Options protontest.Options
+	Backend *protontest.Fake
 }
 
 // NewFront starts the fake with one user (User, Pass). It is a lab-specific
@@ -54,7 +59,10 @@ type Front struct {
 // response shape.
 func NewFront(t *testing.T, f *Front) *Front {
 	t.Helper()
-	fake := protontest.New(t, protontest.Options{TwoFA: f.TwoFA, Username: User, Password: Pass})
+	o := f.Options
+	o.TwoFA, o.Username, o.Password = f.TwoFA, User, Pass
+	fake := protontest.New(t, o)
+	f.Backend = fake
 	target, err := url.Parse(fake.URL)
 	if err != nil {
 		t.Fatal(err)
