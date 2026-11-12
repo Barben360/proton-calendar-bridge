@@ -64,7 +64,14 @@ type served struct {
 	log     *slog.Logger
 }
 
-func notSynced() error { return mustAct("no events are cached yet", "run pcb sync") }
+// notSynced is the answer when no cache exists: logged out, the step is the
+// login (pcb sync would only say "not logged in"), else a sync.
+func (l *Local) notSynced() error {
+	if st, err := store.LoadState(l.o.Dirs.State); err == nil && (st.Phase == store.PhaseLoggedOut || st.Phase == store.PhaseNeedsLogin) {
+		return mustAct("no events are cached yet: not logged in", "run pcb login")
+	}
+	return mustAct("no events are cached yet", "run pcb sync")
+}
 
 // readCache returns the cache to read and the function releasing it: Serve's
 // handle while Serve runs (for the account it serves only), else a read-only
@@ -117,7 +124,7 @@ func (l *Local) withCache(fn func(*cache.Cache) error) error {
 	}
 	defer release()
 	if db == nil {
-		return notSynced()
+		return l.notSynced()
 	}
 	return fn(db)
 }
@@ -291,7 +298,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		return nil, err
 	}
 	if len(known) == 0 {
-		return nil, notSynced()
+		return nil, l.notSynced()
 	}
 	if len(ids) > 0 {
 		if err := l.ensureKeys(ctx, ids); err != nil {

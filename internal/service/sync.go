@@ -360,7 +360,7 @@ func (l *Local) Events(ctx context.Context, req EventsRequest) ([]Event, error) 
 			return l.fail(cacheError(err))
 		}
 		if len(cals) == 0 {
-			return notSynced()
+			return l.notSynced()
 		}
 		if cal, err = pickCalendar(cals, req.Calendar); err != nil {
 			return err

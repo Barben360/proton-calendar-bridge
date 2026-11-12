@@ -21,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -834,5 +835,32 @@ func TestStatusNamesAClientsFileThatCannotBeLoaded(t *testing.T) {
 	}
 	if st, err = svc.Status(t.Context()); err != nil || st.ClientsFile != file {
 		t.Fatalf("corrupt clients file: ClientsFile %q, %v, want %q", st.ClientsFile, err, file)
+	}
+}
+
+// pcb event list with no cache while logged out says to log in (pcb sync
+// would only answer "not logged in"); once logged in it says to sync (A12).
+func TestEventsWithNoCacheNameTheLoginWhenLoggedOut(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	_, err = svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	wantCode(t, err, exitcode.MustAct)
+	if h := exitcode.HintOf(err); h != "run pcb login" {
+		t.Errorf("logged out: %v, hint %q, want run pcb login", err, h)
+	}
+	if err := store.SaveState(dirs.State, store.State{Phase: store.PhaseReady}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	if h := exitcode.HintOf(err); h != "run pcb sync" {
+		t.Errorf("logged in, no cache: %v, hint %q, want run pcb sync", err, h)
 	}
 }
