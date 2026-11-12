@@ -86,6 +86,31 @@ func TestProbeWriteMatrix(t *testing.T) {
 		t.Errorf("failed cleanup: hint %q, cleanup %q; want the prefix hint without Retry-After (no 429) and the rows left named", hint, cleanup)
 	}
 
+	// A 429 on the cleanup's own deletes: the hint must say to wait it out.
+	f.Mu.Lock()
+	f.Intercept = func(method, path string, body []byte) (labtest.Reply, bool) {
+		var req struct {
+			Events []struct{ Event json.RawMessage }
+		}
+		if method != "PUT" || !strings.HasSuffix(path, "/events/sync") || json.Unmarshal(body, &req) != nil {
+			return labtest.Reply{}, false
+		}
+		for _, e := range req.Events {
+			if len(e.Event) > 0 {
+				return labtest.Reply{}, false
+			}
+		}
+		return labtest.R(429, `{"Code":429,"Error":"slow down"}`), true
+	}
+	f.Mu.Unlock()
+	code, env = run(t, "probe", "write-matrix", "--state-dir", dir, "--calendar", cal, "--interval", "0s")
+	f.Mu.Lock()
+	f.Intercept = nil
+	f.Mu.Unlock()
+	if hint, _ := env["error"].(map[string]any)["hint"].(string); code != exitcode.Partial || !strings.Contains(hint, "pcb-lab-wm-") || !strings.Contains(hint, "Retry-After") {
+		t.Errorf("429 during the cleanup: code %d, hint %q; want partial and Retry-After honoured", code, hint)
+	}
+
 	f.Backend.FailNext("PUT", "/calendar/v1/"+cal+"/events/sync", 429, 429, 30)
 	code, env = run(t, "probe", "write-matrix", "--state-dir", dir, "--calendar", cal, "--interval", "0s")
 	if code != exitcode.Partial {

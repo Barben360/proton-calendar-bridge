@@ -208,7 +208,6 @@ func WriteMatrix(ctx context.Context, s *session.Session, o MatrixOptions) (Matr
 		r.Line += "read-back: " + r.ReadBack
 		res.Cases = append(res.Cases, r)
 	}
-	res.Stopped, res.RateLimited = m.stopped, m.rateLimited
 	switch {
 	case m.stopped != "":
 		res.Cleanup = "not tried (writes stopped): the rows whose UID starts with " + m.prefix + " are left"
@@ -219,6 +218,8 @@ func WriteMatrix(ctx context.Context, s *session.Session, o MatrixOptions) (Matr
 		res.Cleanup, ok = m.cleanup(ctx)
 		res.CleanupFailed = !ok
 	}
+	// After the cleanup, which can itself be stopped (a 429 on its deletes).
+	res.Stopped, res.RateLimited = m.stopped, m.rateLimited
 	res.Writes = m.writes
 	return res, nil
 }
