@@ -51,8 +51,9 @@ const (
 	// UID column is not the event's (the proof binds to the UID Open read).
 	// The executor's key-packet pinning (M4-R17) uses it too.
 	RefuseUntrustedKey = "pcb:untrusted-key"
-	// RefuseAttendeeChange: the body adds or removes an attendee, or a new
-	// row would carry attendees (invitations are out of scope).
+	// RefuseAttendeeChange: the body adds or removes an attendee, a new
+	// event carries attendees, or a new exception has another attendee set
+	// than its master (invitations are out of scope; ruling M4-R28).
 	RefuseAttendeeChange = "pcb:attendee-change"
 	// RefuseUnsupportedChange: a change v1 cannot write: one needing a
 	// session key the row lacks (cards.ErrNeedsNewSessionKey, rulings
@@ -282,17 +283,26 @@ func checkGroup(g Group) ([]*row, error) {
 
 // PlanDelete plans the DELETE of the whole object: every row of the group,
 // in one call (deleting a master alone would orphan its exceptions,
-// research E.2), after the group checks. An empty group is a fault: the
-// executor answers 404 first.
+// research E.2). A delete re-signs and re-encrypts nothing, so the trust
+// checks of a PUT (placeholder, undecryptable, unverified, not ours) do not
+// apply: one can delete an event one cannot read (ruling M4-R27). Someone
+// else's invitation (a row with an AddressKeyPacket) is still refused, read
+// from the row as received, whether it opens or not; a row that is not
+// readable JSON cannot be told apart from one and is refused too. An empty
+// group is a fault: the executor answers 404 first.
 func PlanDelete(current Group) (WritePlan, error) {
 	if len(current.Rows) == 0 {
 		return WritePlan{}, errors.New("planning a delete: the event has no rows")
 	}
-	if _, err := checkGroup(current); err != nil {
-		return WritePlan{}, err
-	}
 	p := WritePlan{Ops: make([]events.Op, len(current.Rows))}
 	for i, r := range current.Rows {
+		var meta rowMeta
+		switch {
+		case json.Unmarshal(r.Raw, &meta) != nil:
+			return WritePlan{}, refused(RefusePlaceholder, "a row of the event cannot be read")
+		case meta.AddressKeyPacket != "":
+			return WritePlan{}, refused(RefuseInvitation, "the event is an invitation from someone else")
+		}
 		p.Ops[i] = events.Op{Delete: &events.Delete{ID: r.ID}}
 	}
 	return p, nil
@@ -316,7 +326,8 @@ func PlanDelete(current Group) (WritePlan, error) {
 // Each row is patched in place (ical.Patch) after ruling M4-R8's defaults
 // (DTSTAMP the write time, DTEND from DTSTART); an attendee added or removed
 // is refused, edits of an existing attendee's parameters are ignored (ruling
-// M4-R9). SEQUENCE is max(incoming, stored), stored+1 when the shared signed
+// M4-R9), a new exception takes its master's attendees when it has the same
+// set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming, stored), stored+1 when the shared signed
 // content changes and the client did not bump it, and an exception's is at
 // least its master's (ruling M4-R4). Notifications follow the tri-state
 // (research D). An update re-sends the row's Color (null when it has none),
@@ -353,7 +364,7 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if in.Master == nil {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "an event cannot be created without its master")
 		}
-		seq, op, err := pl.create(*in.Master, 0, events.Null[string]())
+		seq, op, err := pl.create(*in.Master, 0, nil)
 		if err != nil {
 			return WritePlan{}, err
 		}
@@ -381,7 +392,7 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "a new exception needs its series' master")
 		default:
 			var created events.Op
-			_, created, err = pl.create(we, minSeq, masterColor(master))
+			_, created, err = pl.create(we, minSeq, master)
 			op = &created
 		}
 		if err != nil {
@@ -414,8 +425,9 @@ func sortedKeys[V any](m map[int64]V) []int64 {
 	return keys
 }
 
-// masterColor is the Color a new exception takes: its master's, so that it
-// looks like the rest of the series in Proton's apps; null without one.
+// masterColor is the Color of a new row: null for a new event (master nil),
+// its master's for a new exception, so that it looks like the rest of the
+// series in Proton's apps (ruling M4-R29).
 func masterColor(master *row) events.Optional[string] {
 	if master == nil {
 		return events.Null[string]()
@@ -499,20 +511,31 @@ func setSequence(c *ical.Component, n int) {
 	c.Items = append(c.Items, ical.Item{Prop: p})
 }
 
-// create plans a new row from we: SEQUENCE at least minSeq, Notifications
-// null when they equal the defaults, else the alarms ([] for none). It
-// returns the row's SEQUENCE.
-func (pl *planner) create(we ical.WriteEvent, minSeq int, color events.Optional[string]) (int, events.Op, error) {
+// create plans a new row from we: a new event (master nil), or a new
+// exception of master. SEQUENCE is at least minSeq; Notifications are null
+// when they equal the defaults, else the alarms ([] for none); Color is null
+// for a new event, the master's for an exception. A new event with attendees
+// is refused (invitations are out of scope); a new exception must carry its
+// master's attendee set, by address as AttendeeChanges compares them (ruling
+// M4-R28), and then takes the master's attendee lines (their X-PM-TOKEN
+// included) and statuses, so the RSVPs stay as stored. It returns the row's
+// SEQUENCE.
+func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, events.Op, error) {
 	c, err := pl.prepared(we)
 	if err != nil {
 		return 0, events.Op{}, err
 	}
-	added, _, err := ical.AttendeeChanges(nil, c)
-	if err != nil {
-		return 0, events.Op{}, asRefusal(err)
-	}
-	if len(added) > 0 {
-		return 0, events.Op{}, refused(RefuseAttendeeChange, "a new event or occurrence with attendees is not supported")
+	var attendees events.AttendeeList
+	if master == nil {
+		added, _, err := ical.AttendeeChanges(nil, c)
+		if err != nil {
+			return 0, events.Op{}, asRefusal(err)
+		}
+		if len(added) > 0 {
+			return 0, events.Op{}, refused(RefuseAttendeeChange, "a new event with attendees is not supported")
+		}
+	} else if attendees, err = pl.masterAttendees(master, &c); err != nil {
+		return 0, events.Op{}, err
 	}
 	seq, has := sequence(c)
 	if seq = max(seq, minSeq); has || seq > 0 {
@@ -531,7 +554,50 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, color events.Optional[
 	if err != nil {
 		return 0, events.Op{}, asRefusal(err)
 	}
-	return seq, events.Op{Create: &events.Body{WireEvent: sealed, Notifications: notifications, Color: color}}, nil
+	body := events.Body{WireEvent: sealed, Notifications: notifications, Color: masterColor(master), Attendees: attendees}
+	return seq, events.Op{Create: &body}, nil
+}
+
+// masterAttendees checks that c, a new exception of master, has its
+// master's attendee set (ruling M4-R28) and makes c's ATTENDEE lines the
+// master's, as stored: the client's carry no X-PM-TOKEN (ParseWrite drops
+// it) and may differ in parameters, which v1 does not write (ruling M4-R9).
+// It returns the master's attendee statuses, for the new row (none when the
+// master has no attendee).
+func (pl *planner) masterAttendees(master *row, c *ical.Component) (events.AttendeeList, error) {
+	added, removed, err := ical.AttendeeChanges(master.parts, *c)
+	if err != nil {
+		return nil, asRefusal(err)
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		return nil, refused(RefuseAttendeeChange, "a new occurrence must have its series' attendees")
+	}
+	edits, err := ical.AttendeeEdits(master.parts, *c, master.statuses())
+	if err != nil {
+		return nil, asRefusal(err)
+	}
+	if len(edits) > 0 {
+		pl.note(noteAttendeeEdit)
+	}
+	var lines []ical.Item
+	for _, p := range master.stored.Props() {
+		if strings.EqualFold(p.Name, "ATTENDEE") {
+			lines = append(lines, ical.Item{Prop: p})
+		}
+	}
+	if len(lines) == 0 { // no attendee on either side: no statuses either
+		return nil, nil
+	}
+	kept := c.Items[:0:0]
+	for _, it := range c.Items {
+		if it.Comp == nil && strings.EqualFold(it.Prop.Name, "ATTENDEE") {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	kept = append(kept, lines...)
+	c.Items = kept
+	return master.attendees(), nil
 }
 
 // update plans row r's update to we (nil when nothing changes) and returns
@@ -548,11 +614,7 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if len(added) > 0 || len(removed) > 0 {
 		return 0, nil, refused(RefuseAttendeeChange, "adding or removing attendees is not supported")
 	}
-	statuses := make(map[string]int, len(r.Event.Attendees))
-	for _, a := range r.Event.Attendees {
-		statuses[a.Token] = a.Status
-	}
-	edits, err := ical.AttendeeEdits(r.parts, c, statuses)
+	edits, err := ical.AttendeeEdits(r.parts, c, r.statuses())
 	if err != nil {
 		return 0, nil, asRefusal(err)
 	}
@@ -591,15 +653,30 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if sealed.SharedKeyPacket != "" || sealed.CalendarKeyPacket != "" { // Seal never makes one on an update
 		return 0, nil, errors.New("planning a write: an update would carry a key packet")
 	}
-	attendees := make(events.AttendeeList, len(r.meta.Attendees))
-	for i, a := range r.meta.Attendees {
-		attendees[i] = events.Attendee{Token: a.Token, Status: a.Status, Comment: a.Comment}
-	}
 	body := events.Body{
-		WireEvent: sealed, Attendees: attendees, Notifications: notifications, Color: rowColor(r),
+		WireEvent: sealed, Attendees: r.attendees(), Notifications: notifications, Color: rowColor(r),
 		IsOrganizer: r.meta.IsOrganizer,
 	}
 	return seq, &events.Op{Update: &events.Update{ID: r.ID, Body: body}}, nil
+}
+
+// statuses are the row's attendee statuses by token.
+func (r *row) statuses() map[string]int {
+	out := make(map[string]int, len(r.Event.Attendees))
+	for _, a := range r.Event.Attendees {
+		out[a.Token] = a.Status
+	}
+	return out
+}
+
+// attendees are the row's attendee statuses as received, for re-sending
+// (research A.2: a [] would wipe the RSVPs).
+func (r *row) attendees() events.AttendeeList {
+	out := make(events.AttendeeList, len(r.meta.Attendees))
+	for i, a := range r.meta.Attendees {
+		out[i] = events.Attendee{Token: a.Token, Status: a.Status, Comment: a.Comment}
+	}
+	return out
 }
 
 func mapValues(m map[ical.PartKind]bool) []bool {

@@ -127,8 +127,9 @@ type seed struct {
 	// otherCal seals the key packets to another calendar key: nothing opens.
 	otherCal bool
 	// invitation wraps the shared session key to our address key
-	// (AddressKeyPacket) instead of the calendar key.
-	invitation bool
+	// (AddressKeyPacket) instead of the calendar key; strangerInvitation to
+	// the stranger's, so that the row does not open.
+	invitation, strangerInvitation bool
 	// personal adds a personal part: "own-unsigned" (ours, unsigned, opens)
 	// or "undecryptable" (encrypted to the stranger).
 	personal                        string
@@ -236,7 +237,7 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 		}
 		r[list] = out
 	}
-	if s.invitation {
+	if s.invitation || s.strangerInvitation {
 		kp, err := base64.StdEncoding.DecodeString(we.SharedKeyPacket)
 		if err != nil {
 			t.Fatal(err)
@@ -245,7 +246,11 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wrapped, err := me.EncryptSessionKey(sk)
+		to := me
+		if s.strangerInvitation {
+			to = stranger
+		}
+		wrapped, err := to.EncryptSessionKey(sk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -807,9 +812,9 @@ func attendeeBody() []string {
 	return append(masterBody(), "ORGANIZER;CN=Me:mailto:"+meEmail, "ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ann@x.test")
 }
 
-// Constraints, SPEC §8.4: adding or removing an attendee, or creating an
-// event or an occurrence with attendees, is refused (invitations are out of
-// scope).
+// Constraints, SPEC §8.4: adding or removing an attendee, creating an
+// event with attendees, or an occurrence with another attendee set than its
+// master's (ruling M4-R28), is refused (invitations are out of scope).
 func TestAttendeeChangeIsRefused(t *testing.T) {
 	g := group(t, seed{id: "row-m", parts: attendeeParts(), attendees: annStatus})
 	for _, c := range []struct {
@@ -820,7 +825,11 @@ func TestAttendeeChangeIsRefused(t *testing.T) {
 		{"an attendee added", g, cal(append(attendeeBody(), "ATTENDEE;CN=Bob:mailto:bob@x.test"))},
 		{"an attendee removed", g, cal(with(t, attendeeBody(), map[string]string{"ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ann@x.test": ""}))},
 		{"a create with organizer and attendee", Group{UID: planUID}, cal(attendeeBody())},
-		{"an occurrence with attendees", g, cal(attendeeBody(), append(exceptionBody(22, "SEQUENCE:2"), "ATTENDEE;CN=Ann:mailto:ann@x.test"))},
+		{"an occurrence with another attendee", g, cal(attendeeBody(), append(exceptionBody(22, "SEQUENCE:2"),
+			"ORGANIZER;CN=Me:mailto:"+meEmail, "ATTENDEE;CN=Ann:mailto:ann@x.test", "ATTENDEE;CN=Bob:mailto:bob@x.test"))},
+		{"an occurrence without the series' attendee", g, cal(attendeeBody(), append(exceptionBody(22, "SEQUENCE:2"),
+			"ORGANIZER;CN=Me:mailto:"+meEmail, "ATTENDEE;CN=Bob:mailto:bob@x.test"))},
+		{"an occurrence without attendees", g, cal(attendeeBody(), exceptionBody(22, "SEQUENCE:2"))},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Plan(c.g, parse(t, c.body), planDefaults(t))
@@ -845,11 +854,21 @@ func TestInvitationRowIsRefused(t *testing.T) {
 	refusedWith(t, err, RefuseInvitation)
 	_, err = PlanDelete(g)
 	refusedWith(t, err, RefuseInvitation)
+	t.Run("an invitation that does not open", func(t *testing.T) {
+		// Ruling M4-R27: a delete skips the trust checks, never this one.
+		g := group(t, seed{id: "row-m", parts: masterParts()}, seed{id: "row-b", parts: masterParts(), strangerInvitation: true})
+		if !g.Rows[1].Placeholder {
+			t.Fatal("precondition: the invitation row opens")
+		}
+		_, err := PlanDelete(g)
+		refusedWith(t, err, RefuseInvitation)
+	})
 }
 
 // Ruling M3-R4, OPEN.md: a group the service serves as a placeholder (keys
 // that failed, a row that does not decrypt, notifications that do not read)
-// is refused; the X-PCB-PLACEHOLDER property decides nothing.
+// is refused; the X-PCB-PLACEHOLDER property decides nothing. Deleting it is
+// planned (ruling M4-R27).
 func TestPlaceholderGroupIsRefused(t *testing.T) {
 	body := cal(with(t, masterBody(), map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}))
 	noKeys := groupKeys(t)
@@ -871,8 +890,7 @@ func TestPlaceholderGroupIsRefused(t *testing.T) {
 			}
 			_, err := Plan(c.g, parse(t, b), planDefaults(t))
 			refusedWith(t, err, RefusePlaceholder)
-			_, err = PlanDelete(c.g)
-			refusedWith(t, err, RefusePlaceholder)
+			deletesEveryRow(t, c.g)
 		})
 	}
 	t.Run("a readable event that carries the marker", func(t *testing.T) {
@@ -935,6 +953,23 @@ func titleEdit(t *testing.T) string {
 	return cal(with(t, masterBody(), map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}))
 }
 
+// deletesEveryRow asserts that PlanDelete plans the deletion of g's rows,
+// in order (ruling M4-R27: a delete skips the trust checks).
+func deletesEveryRow(t *testing.T, g Group) {
+	t.Helper()
+	p, err := PlanDelete(g)
+	if err != nil {
+		t.Fatalf("PlanDelete: %v", err)
+	}
+	var want []string
+	for _, r := range g.Rows {
+		want = append(want, "delete:"+r.ID)
+	}
+	if got := describe(p); got != "["+strings.Join(want, " ")+"]" {
+		t.Errorf("delete ops = %s, want %v", got, want)
+	}
+}
+
 // The refusals of Patch, Seal and SessionKeys, reached through Plan.
 func TestPlanRefusalsFromPatchSealAndKeys(t *testing.T) {
 	t.Run("a stored signed part holding an encrypted-only line", func(t *testing.T) {
@@ -985,7 +1020,8 @@ func fullParts() map[ical.PartKind]string {
 // attendees and personal parts included, unlike the render's marker) or
 // failing its signature, a part that does not decrypt, a row of another
 // UID. The body adds an attendee, which planning would refuse otherwise
-// (the control case): the group's refusal comes first, for a delete too.
+// (the control case): the group's refusal comes first. A delete re-signs
+// nothing and skips these checks (ruling M4-R27): it is planned.
 func TestGroupChecksComeBeforePlanning(t *testing.T) {
 	body := parse(t, cal(append(with(t, masterBody(), map[string]string{"SEQUENCE:2": ""}), "SEQUENCE:2", "COMMENT:bring slides",
 		"ORGANIZER;CN=Me:mailto:"+meEmail, "ATTENDEE;CN=Ann:mailto:ann@x.test", "ATTENDEE;CN=Bob:mailto:bob@x.test")))
@@ -1024,8 +1060,7 @@ func TestGroupChecksComeBeforePlanning(t *testing.T) {
 			if len(p.Ops) != 0 {
 				t.Errorf("a refused plan has ops %s", describe(p))
 			}
-			_, err = PlanDelete(g)
-			refusedWith(t, err, f.code)
+			deletesEveryRow(t, g)
 		})
 	}
 	t.Run("two exception rows for one occurrence", func(t *testing.T) {
@@ -1121,8 +1156,12 @@ func TestRowFieldsOnCreateAndUpdate(t *testing.T) {
 			t.Errorf("update %s = %s, want %s", name, got, want)
 		}
 	}
-	if got := open(t, p.Ops[1], nil).field("Color"); got != `"#3CBB3A"` {
+	exc := open(t, p.Ops[1], nil)
+	if got := exc.field("Color"); got != `"#3CBB3A"` {
 		t.Errorf("new exception Color = %s, want the master's", got)
+	}
+	if got := exc.field("Attendees"); got != "[]" {
+		t.Errorf("new exception Attendees = %s, want [] (its master has no attendee line)", got)
 	}
 	t.Run("a row without colour", func(t *testing.T) {
 		plain := seed{id: "row-p", parts: masterParts()}.row(t)
@@ -1267,5 +1306,32 @@ func TestCreateDeleteAndDuplicateMasters(t *testing.T) {
 func TestPlanNeedsTheGroupsUID(t *testing.T) {
 	if _, err := Plan(Group{UID: "another@pcb.test"}, parse(t, cal(masterBody())), planDefaults(t)); err == nil {
 		t.Error("Plan accepted a body of another UID")
+	}
+}
+
+// Ruling M4-R28: Thunderbird copies the master's attendees into a new
+// exception. The same set, by address (scheme and case folded), is allowed:
+// the new row takes the master's attendee lines as stored, X-PM-TOKEN
+// included, and its statuses, so the RSVPs stay as they are.
+func TestNewExceptionTakesTheMastersAttendees(t *testing.T) {
+	parts := attendeeParts()
+	parts[ical.SharedSigned] = frag("UID:"+planUID, stamp, "DTSTART;TZID=Europe/Paris:20261115T100000",
+		"DTEND;TZID=Europe/Paris:20261115T110000", "RRULE:FREQ=WEEKLY;COUNT=10", "SEQUENCE:2", "ORGANIZER;CN=Me:mailto:"+meEmail)
+	g := group(t, seed{id: "row-m", parts: parts, attendees: annStatus})
+	master := append(seriesBody("SEQUENCE:2"), "ORGANIZER;CN=Me:mailto:"+meEmail,
+		"ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ann@x.test")
+	exception := append(exceptionBody(22, "SEQUENCE:2"), "ORGANIZER;CN=Me:mailto:"+meEmail,
+		"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED:MAILTO:Ann@X.test")
+	p := plan(t, g, cal(master, exception))
+	got := open(t, onlyCreate(t, p), nil)
+	want := frag("UID:"+planUID, stamp, "ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;X-PM-TOKEN=tok1:mailto:ann@x.test")
+	if got.parts[ical.Attendees] != want {
+		t.Errorf("attendees part =\n%q\nwant\n%q", got.parts[ical.Attendees], want)
+	}
+	if a := got.field("Attendees"); a != `[{"Token":"tok1","Status":3,"Comment":{"Message":"see you","Type":0}}]` {
+		t.Errorf("Attendees = %s, want the master's", a)
+	}
+	if l := lineOf(got.parts[ical.SharedSigned], "RECURRENCE-ID"); l != "RECURRENCE-ID;TZID=Europe/Paris:20261122T100000" {
+		t.Errorf("RECURRENCE-ID = %q", l)
 	}
 }
