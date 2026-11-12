@@ -129,21 +129,38 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 	if allowed, wait := l.limiter.Allow(remote); !allowed {
 		return false, wait
 	}
-	c, found, err := l.clients.Verify(password)
+	found, err := l.VerifyClient(ctx, password)
 	if err != nil {
 		// Not the client's fault: a state that can pass, so a 503 and no
 		// limiter charge (audit surface-I2).
-		l.noteClientsLoad(err)
 		return false, clientsRetry
 	}
-	l.noteClientsLoad(nil)
 	if !found {
 		l.limiter.Fail(remote)
 		return false, 0
 	}
-	l.touch(c.ID)
-	l.noteActivity()
 	return true, 0
+}
+
+// VerifyClient reports whether password is a CalDAV app password of this
+// account, without the limiter (the caller owns it: a Hub tries each account
+// and charges one failure). A match touches the client and notes activity.
+// err is set when clients.json cannot be loaded (logged once per failure).
+func (l *Local) VerifyClient(_ context.Context, password string) (found bool, err error) {
+	if l.closed.Load() {
+		return false, nil
+	}
+	c, found, err := l.clients.Verify(password)
+	if err != nil {
+		l.noteClientsLoad(err)
+		return false, err
+	}
+	l.noteClientsLoad(nil)
+	if found {
+		l.touch(c.ID)
+		l.noteActivity()
+	}
+	return found, nil
 }
 
 // clientsRetry is the wait a request is given while clients.json cannot be

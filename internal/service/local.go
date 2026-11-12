@@ -42,8 +42,13 @@ func errClosed() error { return blocked("service closed", "start a new session")
 // passed, unless stop (true: it will not run) came first; it ends a login
 // left waiting for its 2FA code (pendingTTL). Logger gets what the service
 // says outside Serve (Serve's own logger wins while it runs); nil discards
-// it.
+// it. Dirs.State is the account's own directory. GuardDir holds the login
+// guard (login.lock, last-login) and is shared by every account of a
+// process; empty, it is Dirs.State. Limiter counts failed CalDAV password
+// checks per remote IP and is shared likewise; nil, the service gets its own.
 type Options struct {
+	GuardDir  string
+	Limiter   *access.Limiter
 	Dirs      paths.Dirs
 	Config    config.Config
 	Sealer    seal.Sealer
@@ -164,12 +169,18 @@ func NewLocal(o Options) (*Local, error) {
 	if o.AfterFunc == nil {
 		o.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 	}
+	if o.GuardDir == "" {
+		o.GuardDir = o.Dirs.State
+	}
+	if o.Limiter == nil {
+		o.Limiter = access.NewLimiter(o.Now)
+	}
 	l := &Local{
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
 		clients: access.NewStore(o.Dirs.State, o.Now),
-		limiter: access.NewLimiter(o.Now),
+		limiter: o.Limiter,
 
 		touching:     map[string]bool{},
 		touchTimeout: defaultTouchTimeout,
@@ -352,7 +363,11 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	// Seeded with the wiped generation + 1: over an unreadable state.json
 	// (the reset logout is) the mirror write failed and SaveState cannot
 	// read the old one, so the mirror must not restart at 0.
-	if err := store.SaveStateContext(wipe, l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next}); err != nil {
+	// The address, the CalDAV switch and the creation time are not login
+	// fields: they stay. A state.json too damaged to read loses them.
+	kept, _ := store.LoadState(l.o.Dirs.State)
+	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, Created: kept.Created}
+	if err := store.SaveStateContext(wipe, l.o.Dirs.State, reset); err != nil {
 		return LogoutResult{}, l.stateWriteError(err)
 	}
 	return res, nil
@@ -392,6 +407,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Secrets:    "none",
 		KeyFile:    l.keyFile(),
 		Unattended: st.Unattended,
+		Address:    st.Address,
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL

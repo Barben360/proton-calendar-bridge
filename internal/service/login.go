@@ -218,19 +218,19 @@ func (l *Local) dropPending(ctx context.Context) {
 // waited for Proton's challenge, so a TooSoon is waited out instead of
 // refused; the returned time is the one the attempt is stamped with.
 func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), time.Time, error) {
-	if err := os.MkdirAll(l.o.Dirs.State, 0o700); err != nil {
-		return nil, now, acquireError(err, l.o.Dirs.State)
+	if err := os.MkdirAll(l.o.GuardDir, 0o700); err != nil {
+		return nil, now, acquireError(err, l.o.GuardDir)
 	}
-	release, err := loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now, l.log())
+	release, err := loginguard.Acquire(l.o.GuardDir, loginguard.MinInterval, now, l.log())
 	if d, ok := loginguard.WaitFor(err); ok && wait {
 		if err := l.o.Sleep(ctx, d); err != nil {
 			return nil, now, l.fail(err)
 		}
 		now = now.Add(d)
-		release, err = loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now, l.log())
+		release, err = loginguard.Acquire(l.o.GuardDir, loginguard.MinInterval, now, l.log())
 	}
 	if err != nil {
-		return nil, now, acquireError(err, l.o.Dirs.State)
+		return nil, now, acquireError(err, l.o.GuardDir)
 	}
 	return release, now, nil
 }
@@ -244,11 +244,22 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 		Unattended:  last.Unattended,
 		LastLogin:   last.LastLogin,
 		LastRelogin: last.LastRelogin,
+		Address:     username,
+		CalDAV:      last.CalDAV,
+		Created:     createdOr(last, now),
 	}
 	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
 		return LoginResult{}, l.stateWriteError(err)
 	}
 	return captchaResult(ce, username), nil
+}
+
+// createdOr is when the account was added: last's, else now.
+func createdOr(last store.State, now time.Time) time.Time {
+	if last.Created.IsZero() {
+		return now
+	}
+	return last.Created
 }
 
 func captchaResult(ce *auth.CaptchaError, username string) LoginResult {
@@ -345,6 +356,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	st := store.State{
 		AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 		LastLogin: now, LastRelogin: pl.last.LastRelogin,
+		Address: pl.username, CalDAV: pl.last.CalDAV, Created: createdOr(pl.last, now),
 	}
 	if pl.relogin {
 		st.LastLogin, st.LastRelogin = pl.last.LastLogin, now

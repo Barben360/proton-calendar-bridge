@@ -208,9 +208,12 @@ type LogoutResult struct {
 // names which) or "rolled-back" (secrets.sealed older than the last one pcb
 // wrote).
 type Status struct {
-	Phase       string     `json:"phase"`
-	Reason      string     `json:"reason,omitempty"`
-	Username    string     `json:"username,omitempty"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason,omitempty"`
+	Username string `json:"username,omitempty"`
+	// Address is the account's Proton address from state.json, shown logged
+	// out too.
+	Address     string     `json:"address,omitempty"`
 	AccountID   string     `json:"account_id,omitempty"`
 	Secrets     string     `json:"secrets"`
 	KeyFile     string     `json:"key_file"`
