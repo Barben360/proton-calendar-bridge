@@ -135,6 +135,10 @@ type seed struct {
 	personal                        string
 	notifications, color, attendees string // raw JSON; "" is null, null, []
 	isOrganizer                     *int
+	// dup serves the part of each kind twice; fields set (or, nil, drop)
+	// top-level fields of the row last.
+	dup    []ical.PartKind
+	fields map[string]any
 }
 
 // kindOf is the kind of a sealed part, from its list and Type.
@@ -234,6 +238,9 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 				e["Signature"] = sign(t, me, append(append([]byte(nil), text...), 'x'))
 			}
 			out = append(out, e)
+			if has(s.dup, k) {
+				out = append(out, e)
+			}
 		}
 		r[list] = out
 	}
@@ -270,6 +277,13 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 			t.Fatal(err)
 		}
 		r["PersonalEvents"] = []map[string]any{{"Type": 1, "Data": armored, "Signature": "", "Author": author}}
+	}
+	for k, v := range s.fields {
+		if v == nil {
+			delete(r, k)
+			continue
+		}
+		r[k] = v
 	}
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -558,6 +572,21 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 			t.Errorf("Notifications = %s", got.field("Notifications"))
 		}
 	})
+	t.Run("a row without Notifications", func(t *testing.T) {
+		// The render serves the parts' VALARMs (none here) and the update
+		// leaves the field out, so the row keeps its own (review M3).
+		bare := seed{id: "row-n", parts: masterParts(), fields: map[string]any{"Notifications": nil}}.row(t)
+		gn := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
+		if p := plan(t, gn, cal(noAlarm)); len(p.Ops) != 0 {
+			t.Errorf("unchanged body: ops = %s, want none", describe(p))
+		}
+		if got := open(t, onlyUpdate(t, plan(t, gn, cal(with(t, noAlarm, title))), "row-n"), &bare); got.field("Notifications") != "<absent>" {
+			t.Errorf("title edit: Notifications = %s, want it left out", got.field("Notifications"))
+		}
+		if got := open(t, onlyUpdate(t, plan(t, gn, cal(masterBody())), "row-n"), &bare); got.field("Notifications") != `[{"Type":1,"Trigger":"-PT15M"}]` {
+			t.Errorf("an alarm added: Notifications = %s", got.field("Notifications"))
+		}
+	})
 	t.Run("a custom list read back is kept as stored", func(t *testing.T) {
 		custom := seed{id: "row-c", parts: masterParts(), notifications: `[{"Type":0,"Trigger":"-PT1H"}]`}.row(t)
 		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
@@ -612,6 +641,10 @@ func TestTimeEditBumpsSequence(t *testing.T) {
 		{"moved, sent lower", withSeq("SEQUENCE:0", moved), "SEQUENCE:3"},
 		{"moved, bumped by the client", withSeq("SEQUENCE:7", moved), "SEQUENCE:7"},
 		{"moved, no SEQUENCE sent", withSeq("", moved), "SEQUENCE:3"},
+		{"same instants in another zone", withSeq("SEQUENCE:2", map[string]string{
+			"DTSTART;TZID=Europe/Paris:20261115T100000": "DTSTART;TZID=Europe/Berlin:20261115T100000",
+			"DTEND;TZID=Europe/Paris:20261115T110000":   "DTEND;TZID=Europe/Berlin:20261115T110000",
+		}), "SEQUENCE:3"},
 		{"title only", withSeq("SEQUENCE:2", map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}), "SEQUENCE:2"},
 		{"title only, sent lower", withSeq("SEQUENCE:1", map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}), "SEQUENCE:2"},
 		{"title only, no SEQUENCE sent", withSeq("", map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}), "SEQUENCE:2"},
@@ -1048,6 +1081,7 @@ func TestGroupChecksComeBeforePlanning(t *testing.T) {
 		fault{"an unsigned personal part of ours", func() seed { s := base(); s.personal = "own-unsigned"; return s }, RefuseUnverified},
 		fault{"a personal part that does not decrypt", func() seed { s := base(); s.personal = "undecryptable"; return s }, RefuseUndecryptable},
 		fault{"a row of another UID", func() seed { s := base(); s.uidColumn = "other@pcb.test"; return s }, RefuseUntrustedKey},
+		fault{"two shared encrypted parts", func() seed { s := base(); s.dup = []ical.PartKind{ical.SharedEncrypted}; return s }, RefuseUnsupportedChange},
 	)
 	for _, f := range faults {
 		t.Run(f.name, func(t *testing.T) {
@@ -1162,6 +1196,9 @@ func TestRowFieldsOnCreateAndUpdate(t *testing.T) {
 	}
 	if got := exc.field("Attendees"); got != "[]" {
 		t.Errorf("new exception Attendees = %s, want [] (its master has no attendee line)", got)
+	}
+	if got := exc.field("IsOrganizer"); got != "1" {
+		t.Errorf("new exception IsOrganizer = %s, want the master's", got)
 	}
 	t.Run("a row without colour", func(t *testing.T) {
 		plain := seed{id: "row-p", parts: masterParts()}.row(t)
@@ -1317,7 +1354,8 @@ func TestNewExceptionTakesTheMastersAttendees(t *testing.T) {
 	parts := attendeeParts()
 	parts[ical.SharedSigned] = frag("UID:"+planUID, stamp, "DTSTART;TZID=Europe/Paris:20261115T100000",
 		"DTEND;TZID=Europe/Paris:20261115T110000", "RRULE:FREQ=WEEKLY;COUNT=10", "SEQUENCE:2", "ORGANIZER;CN=Me:mailto:"+meEmail)
-	g := group(t, seed{id: "row-m", parts: parts, attendees: annStatus})
+	one := 1
+	g := group(t, seed{id: "row-m", parts: parts, attendees: annStatus, isOrganizer: &one})
 	master := append(seriesBody("SEQUENCE:2"), "ORGANIZER;CN=Me:mailto:"+meEmail,
 		"ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ann@x.test")
 	exception := append(exceptionBody(22, "SEQUENCE:2"), "ORGANIZER;CN=Me:mailto:"+meEmail,
@@ -1334,4 +1372,142 @@ func TestNewExceptionTakesTheMastersAttendees(t *testing.T) {
 	if l := lineOf(got.parts[ical.SharedSigned], "RECURRENCE-ID"); l != "RECURRENCE-ID;TZID=Europe/Paris:20261122T100000" {
 		t.Errorf("RECURRENCE-ID = %q", l)
 	}
+	if v := got.field("IsOrganizer"); v != "1" {
+		t.Errorf("IsOrganizer = %s, want the master's", v)
+	}
+	// The organizer goes with the attendees: the master's line, whether the
+	// client's names it otherwise or leaves it out; another address is
+	// refused (review M5).
+	ann := "ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED:mailto:ann@x.test"
+	for name, organizer := range map[string][]string{
+		"the same organizer spelt otherwise": {"ORGANIZER:MAILTO:ME@PCB.TEST"},
+		"no organizer":                       nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := open(t, onlyCreate(t, plan(t, g, cal(master, append(append(exceptionBody(22, "SEQUENCE:2"), organizer...), ann)))), nil)
+			if l := lineOf(got.parts[ical.SharedSigned], "ORGANIZER"); l != "ORGANIZER;CN=Me:mailto:"+meEmail {
+				t.Errorf("ORGANIZER = %q, want the master's line", l)
+			}
+		})
+	}
+	t.Run("another organizer", func(t *testing.T) {
+		_, err := Plan(g, parse(t, cal(master, append(exceptionBody(22, "SEQUENCE:2"), "ORGANIZER:mailto:bob@x.test", ann))), planDefaults(t))
+		refusedWith(t, err, RefuseAttendeeChange)
+	})
+}
+
+// Review M1: the row's fields the render never reads are read only when
+// re-sent. A shape we cannot re-send is a fault, never a placeholder, and
+// never blocks a delete; a row the render cannot open is a placeholder for
+// a PUT and deleted all the same.
+func TestOddRowShapes(t *testing.T) {
+	t.Run("IsOrganizer of another type", func(t *testing.T) {
+		g := group(t, seed{id: "row-m", parts: masterParts(), fields: map[string]any{"IsOrganizer": true}})
+		if g.Rows[0].Placeholder {
+			t.Fatal("precondition: the render cannot open the row")
+		}
+		deletesEveryRow(t, g)
+		if p := plan(t, g, cal(masterBody())); len(p.Ops) != 0 { // nothing re-sent: no fault
+			t.Errorf("ops = %s, want none", describe(p))
+		}
+		_, err := Plan(g, parse(t, titleEdit(t)), planDefaults(t))
+		var r *WriteRefusal
+		if err == nil || errors.As(err, &r) {
+			t.Errorf("err = %v, want a fault", err)
+		}
+	})
+	t.Run("an attendee status that is not a number", func(t *testing.T) {
+		g := group(t, seed{id: "row-m", parts: masterParts(), attendees: `[{"ID":"a1","Token":"tok1","Status":"3"}]`})
+		if !g.Rows[0].Placeholder {
+			t.Fatal("precondition: the render opens the row")
+		}
+		_, err := Plan(g, parse(t, titleEdit(t)), planDefaults(t))
+		refusedWith(t, err, RefusePlaceholder)
+		deletesEveryRow(t, g)
+	})
+	t.Run("an address key packet of another type", func(t *testing.T) {
+		g := group(t, seed{id: "row-m", parts: masterParts(), fields: map[string]any{"AddressKeyPacket": map[string]int{"x": 1}}})
+		_, err := PlanDelete(g)
+		refusedWith(t, err, RefuseInvitation)
+	})
+	t.Run("a row that is not JSON", func(t *testing.T) {
+		g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{{ID: "row-m", UID: planUID, Raw: []byte("not json")}}}, groupKeys(t))
+		_, err := PlanDelete(g)
+		var r *WriteRefusal
+		if err == nil || errors.As(err, &r) {
+			t.Errorf("err = %v, want a fault", err)
+		}
+	})
+}
+
+// 7b must pass the write time: a zero one would stamp year 1.
+func TestPlanNeedsTheWriteTime(t *testing.T) {
+	d := planDefaults(t)
+	d.Now = time.Time{}
+	_, err := Plan(Group{UID: planUID}, parse(t, cal(masterBody())), d)
+	var r *WriteRefusal
+	if err == nil || errors.As(err, &r) {
+		t.Errorf("err = %v, want a fault", err)
+	}
+}
+
+// Review M4: edge cases of matching and SEQUENCE.
+func TestSeriesEdgeCases(t *testing.T) {
+	t.Run("an all-day series exception is updated in place", func(t *testing.T) {
+		// ParseWrite keys a DATE RECURRENCE-ID at midnight UTC, as Proton's
+		// RecurrenceID column: the row is matched, not deleted and re-created.
+		day := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC).Unix()
+		mp := map[ical.PartKind]string{
+			ical.SharedSigned:    frag("UID:"+planUID, stamp, "DTSTART;VALUE=DATE:20261115", "DTEND;VALUE=DATE:20261116", "RRULE:FREQ=WEEKLY;COUNT=10", "SEQUENCE:1"),
+			ical.SharedEncrypted: frag("UID:"+planUID, stamp, "SUMMARY:Holiday"),
+			ical.CalendarSigned:  frag("UID:"+planUID, stamp, "STATUS:CONFIRMED"),
+		}
+		xp := map[ical.PartKind]string{
+			ical.SharedSigned:    frag("UID:"+planUID, stamp, "RECURRENCE-ID;VALUE=DATE:20261122", "DTSTART;VALUE=DATE:20261123", "DTEND;VALUE=DATE:20261124", "SEQUENCE:1"),
+			ical.SharedEncrypted: frag("UID:"+planUID, stamp, "SUMMARY:Holiday moved"),
+			ical.CalendarSigned:  frag("UID:"+planUID, stamp, "STATUS:CONFIRMED"),
+		}
+		x := seed{id: "row-x", rid: &day, fullDay: true, parts: xp}.row(t)
+		g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{seed{id: "row-m", fullDay: true, parts: mp}.row(t), x}}, groupKeys(t))
+		alarm := []string{"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT15H", "END:VALARM"}
+		master := append([]string{"UID:" + planUID, stamp, "DTSTART;VALUE=DATE:20261115", "DTEND;VALUE=DATE:20261116",
+			"RRULE:FREQ=WEEKLY;COUNT=10", "SEQUENCE:1", "SUMMARY:Holiday", "STATUS:CONFIRMED"}, alarm...)
+		exc := append([]string{"UID:" + planUID, stamp, "RECURRENCE-ID;VALUE=DATE:20261122", "DTSTART;VALUE=DATE:20261123",
+			"DTEND;VALUE=DATE:20261124", "SEQUENCE:1", "SUMMARY:Holiday moved again", "STATUS:CONFIRMED"}, alarm...)
+		got := open(t, onlyUpdate(t, plan(t, g, cal(master, exc)), "row-x"), &x)
+		if !strings.Contains(got.parts[ical.SharedEncrypted], "SUMMARY:Holiday moved again") {
+			t.Error("the edit is not written")
+		}
+	})
+	t.Run("an RRULE change raises a kept exception with its master", func(t *testing.T) {
+		stored := seed{id: "row-m", parts: seriesParts("SEQUENCE:1")}.row(t)
+		x22 := seed{id: "row-x22", rid: rid(22), parts: exceptionParts(22, "SEQUENCE:1")}.row(t)
+		g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored, x22}}, groupKeys(t))
+		master := with(t, seriesBody("SEQUENCE:1"), map[string]string{"RRULE:FREQ=WEEKLY;COUNT=10": "RRULE:FREQ=WEEKLY;COUNT=12"})
+		p := plan(t, g, cal(master, exceptionBody(22, "SEQUENCE:1")))
+		if got := describe(p); got != "[update:row-m update:row-x22]" {
+			t.Fatalf("ops = %s", got)
+		}
+		for i, r := range []*cache.StoredRow{&stored, &x22} {
+			if l := lineOf(open(t, p.Ops[i], r).parts[ical.SharedSigned], "SEQUENCE"); l != "SEQUENCE:2" {
+				t.Errorf("%s SEQUENCE = %q, want SEQUENCE:2", r.ID, l)
+			}
+		}
+	})
+	t.Run("an exception without attendees under a master with some stays editable", func(t *testing.T) {
+		// Ruling M4-R28 applies to new exceptions; an existing row is
+		// compared with its own attendees (none).
+		parts := attendeeParts()
+		parts[ical.SharedSigned] = frag("UID:"+planUID, stamp, "DTSTART;TZID=Europe/Paris:20261115T100000",
+			"DTEND;TZID=Europe/Paris:20261115T110000", "RRULE:FREQ=WEEKLY;COUNT=10", "SEQUENCE:2", "ORGANIZER;CN=Me:mailto:"+meEmail)
+		x22 := seed{id: "row-x22", rid: rid(22), parts: exceptionParts(22, "SEQUENCE:2")}.row(t)
+		g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{seed{id: "row-m", parts: parts, attendees: annStatus}.row(t), x22}}, groupKeys(t))
+		master := append(seriesBody("SEQUENCE:2"), "ORGANIZER;CN=Me:mailto:"+meEmail,
+			"ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:ann@x.test")
+		exc := with(t, exceptionBody(22, "SEQUENCE:2"), map[string]string{"SUMMARY:Standup moved": "SUMMARY:Standup moved again"})
+		got := open(t, onlyUpdate(t, plan(t, g, cal(master, exc)), "row-x22"), &x22)
+		if !strings.Contains(got.parts[ical.SharedEncrypted], "SUMMARY:Standup moved again") {
+			t.Error("the edit is not written")
+		}
+	})
 }

@@ -212,16 +212,24 @@ type row struct {
 }
 
 // rowMeta is what the planner reads from the row as received: the columns
-// cards.Open does not return.
+// cards.Open does not return. Only UID is typed (Open read it as a string);
+// the others stay raw, so that a shape the render never reads (an
+// IsOrganizer of another type, say) neither makes the row unreadable nor
+// blocks a delete. They are interpreted only when re-sent, and a value that
+// cannot be is a fault (rowFields), not a refusal.
 type rowMeta struct {
-	UID              string
-	AddressKeyPacket string
-	IsOrganizer      *int
-	Attendees        []struct {
-		Token   string
-		Status  int
-		Comment json.RawMessage
+	UID                                      string
+	AddressKeyPacket, IsOrganizer, Attendees json.RawMessage
+}
+
+// invitation reports whether a row's raw AddressKeyPacket wraps its key to
+// one of our addresses: anything but absent, null or "" counts.
+func invitation(raw json.RawMessage) bool {
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", `""`:
+		return false
 	}
+	return true
 }
 
 // checkGroup applies the group rules before any planning (rulings M4-R18,
@@ -235,12 +243,15 @@ func checkGroup(g Group) ([]*row, error) {
 	seen := map[int64]bool{}
 	for i := range g.Rows {
 		gr := &g.Rows[i]
-		var meta rowMeta
-		if gr.Placeholder || json.Unmarshal(gr.Raw, &meta) != nil {
+		if gr.Placeholder {
 			return nil, refused(RefusePlaceholder, "the event does not decrypt or cannot be read")
 		}
+		var meta rowMeta
+		if err := json.Unmarshal(gr.Raw, &meta); err != nil { // Open read it: a Group built otherwise
+			return nil, errors.New("planning a write: a row is not an event row")
+		}
 		switch {
-		case meta.AddressKeyPacket != "":
+		case invitation(meta.AddressKeyPacket):
 			return nil, refused(RefuseInvitation, "the event is an invitation from someone else")
 		case meta.UID != g.UID:
 			// The key proof binds to the row's UID (ical.ProvesKey): it
@@ -287,20 +298,21 @@ func checkGroup(g Group) ([]*row, error) {
 // checks of a PUT (placeholder, undecryptable, unverified, not ours) do not
 // apply: one can delete an event one cannot read (ruling M4-R27). Someone
 // else's invitation (a row with an AddressKeyPacket) is still refused, read
-// from the row as received, whether it opens or not; a row that is not
-// readable JSON cannot be told apart from one and is refused too. An empty
-// group is a fault: the executor answers 404 first.
+// from the row as received (that field alone, whatever the others hold),
+// whether it opens or not. A row that is not a JSON object, which the cache
+// never holds, and an empty group (the executor answers 404 first) are
+// faults.
 func PlanDelete(current Group) (WritePlan, error) {
 	if len(current.Rows) == 0 {
 		return WritePlan{}, errors.New("planning a delete: the event has no rows")
 	}
 	p := WritePlan{Ops: make([]events.Op, len(current.Rows))}
 	for i, r := range current.Rows {
-		var meta rowMeta
+		var meta struct{ AddressKeyPacket json.RawMessage }
 		switch {
 		case json.Unmarshal(r.Raw, &meta) != nil:
-			return WritePlan{}, refused(RefusePlaceholder, "a row of the event cannot be read")
-		case meta.AddressKeyPacket != "":
+			return WritePlan{}, errors.New("planning a delete: a row is not an event row")
+		case invitation(meta.AddressKeyPacket):
 			return WritePlan{}, refused(RefuseInvitation, "the event is an invitation from someone else")
 		}
 		p.Ops[i] = events.Op{Delete: &events.Delete{ID: r.ID}}
@@ -338,6 +350,9 @@ func PlanDelete(current Group) (WritePlan, error) {
 func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	if in.UID == "" || in.UID != current.UID {
 		return WritePlan{}, errors.New("planning a write: the body's UID is not the event's")
+	}
+	if d.Now.IsZero() {
+		return WritePlan{}, errors.New("planning a write: no write time")
 	}
 	rows, err := checkGroup(current)
 	if err != nil {
@@ -526,6 +541,7 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 		return 0, events.Op{}, err
 	}
 	var attendees events.AttendeeList
+	var isOrganizer *int
 	if master == nil {
 		added, _, err := ical.AttendeeChanges(nil, c)
 		if err != nil {
@@ -534,8 +550,13 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 		if len(added) > 0 {
 			return 0, events.Op{}, refused(RefuseAttendeeChange, "a new event with attendees is not supported")
 		}
-	} else if attendees, err = pl.masterAttendees(master, &c); err != nil {
-		return 0, events.Op{}, err
+	} else {
+		if attendees, err = pl.masterAttendees(master, &c); err != nil {
+			return 0, events.Op{}, err
+		}
+		if _, isOrganizer, err = master.rowFields(); err != nil {
+			return 0, events.Op{}, err
+		}
 	}
 	seq, has := sequence(c)
 	if seq = max(seq, minSeq); has || seq > 0 {
@@ -554,7 +575,7 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 	if err != nil {
 		return 0, events.Op{}, asRefusal(err)
 	}
-	body := events.Body{WireEvent: sealed, Notifications: notifications, Color: masterColor(master), Attendees: attendees}
+	body := events.Body{WireEvent: sealed, Notifications: notifications, Color: masterColor(master), Attendees: attendees, IsOrganizer: isOrganizer}
 	return seq, events.Op{Create: &body}, nil
 }
 
@@ -562,6 +583,8 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 // master's attendee set (ruling M4-R28) and makes c's ATTENDEE lines the
 // master's, as stored: the client's carry no X-PM-TOKEN (ParseWrite drops
 // it) and may differ in parameters, which v1 does not write (ruling M4-R9).
+// With attendees comes the master's ORGANIZER line; a client ORGANIZER of
+// another address is refused.
 // It returns the master's attendee statuses, for the new row (none when the
 // master has no attendee).
 func (pl *planner) masterAttendees(master *row, c *ical.Component) (events.AttendeeList, error) {
@@ -588,16 +611,33 @@ func (pl *planner) masterAttendees(master *row, c *ical.Component) (events.Atten
 	if len(lines) == 0 { // no attendee on either side: no statuses either
 		return nil, nil
 	}
+	// The organizer goes with the attendees (Proton refuses attendees
+	// without one, research A.4): the master's line, when the client's
+	// names the same address or is absent; another one is refused.
+	organizer, hasOrganizer := master.stored.Get("ORGANIZER")
+	if p, ok := c.Get("ORGANIZER"); ok && (!hasOrganizer || !sameAddress(p.Value, organizer.Value)) {
+		return nil, refused(RefuseAttendeeChange, "a new occurrence must have its series' organizer")
+	}
 	kept := c.Items[:0:0]
 	for _, it := range c.Items {
-		if it.Comp == nil && strings.EqualFold(it.Prop.Name, "ATTENDEE") {
+		if it.Comp == nil && (strings.EqualFold(it.Prop.Name, "ATTENDEE") || strings.EqualFold(it.Prop.Name, "ORGANIZER")) {
 			continue
 		}
 		kept = append(kept, it)
 	}
+	if hasOrganizer {
+		kept = append(kept, ical.Item{Prop: organizer})
+	}
 	kept = append(kept, lines...)
 	c.Items = kept
-	return master.attendees(), nil
+	statuses, _, err := master.rowFields()
+	return statuses, err
+}
+
+// sameAddress compares two calendar addresses as AttendeeChanges does:
+// trimmed and case-folded, scheme included.
+func sameAddress(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // update plans row r's update to we (nil when nothing changes) and returns
@@ -653,9 +693,13 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if sealed.SharedKeyPacket != "" || sealed.CalendarKeyPacket != "" { // Seal never makes one on an update
 		return 0, nil, errors.New("planning a write: an update would carry a key packet")
 	}
+	attendees, isOrganizer, err := r.rowFields()
+	if err != nil {
+		return 0, nil, err
+	}
 	body := events.Body{
-		WireEvent: sealed, Attendees: r.attendees(), Notifications: notifications, Color: rowColor(r),
-		IsOrganizer: r.meta.IsOrganizer,
+		WireEvent: sealed, Attendees: attendees, Notifications: notifications, Color: rowColor(r),
+		IsOrganizer: isOrganizer,
 	}
 	return seq, &events.Op{Update: &events.Update{ID: r.ID, Body: body}}, nil
 }
@@ -669,14 +713,34 @@ func (r *row) statuses() map[string]int {
 	return out
 }
 
-// attendees are the row's attendee statuses as received, for re-sending
-// (research A.2: a [] would wipe the RSVPs).
-func (r *row) attendees() events.AttendeeList {
-	out := make(events.AttendeeList, len(r.meta.Attendees))
-	for i, a := range r.meta.Attendees {
+// rowFields are the row's fields an update re-sends, and a new exception
+// takes from its master: the attendee statuses as received (research A.2:
+// a [] would wipe the RSVPs) and IsOrganizer (nil when absent or null). A
+// value of another shape than Proton's (Attendees: Token string, Status
+// number, Comment anything, as cards.Open reads them; IsOrganizer: a
+// number) is a fault: we do not guess what to send back.
+func (r *row) rowFields() (events.AttendeeList, *int, error) {
+	var list []struct {
+		Token   string
+		Status  int
+		Comment json.RawMessage
+	}
+	if raw := strings.TrimSpace(string(r.meta.Attendees)); raw != "" && raw != "null" {
+		if err := json.Unmarshal(r.meta.Attendees, &list); err != nil {
+			return nil, nil, errors.New("planning a write: a row's Attendees cannot be re-sent")
+		}
+	}
+	out := make(events.AttendeeList, len(list))
+	for i, a := range list {
 		out[i] = events.Attendee{Token: a.Token, Status: a.Status, Comment: a.Comment}
 	}
-	return out
+	var isOrganizer *int
+	if raw := strings.TrimSpace(string(r.meta.IsOrganizer)); raw != "" && raw != "null" {
+		if err := json.Unmarshal(r.meta.IsOrganizer, &isOrganizer); err != nil {
+			return nil, nil, errors.New("planning a write: a row's IsOrganizer cannot be re-sent")
+		}
+	}
+	return out, isOrganizer, nil
 }
 
 func mapValues(m map[ical.PartKind]bool) []bool {
