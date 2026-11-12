@@ -272,6 +272,7 @@ type syncAnswer struct {
 	token  string
 	etags  map[string]string // href → ETag of the changed objects
 	hrefs  int               // every response, deletions included
+	body   string
 }
 
 func syncCollection(t *testing.T, base, calPath, password, token string) syncAnswer {
@@ -301,7 +302,7 @@ func syncCollection(t *testing.T, base, calPath, password, token string) syncAns
 	if err := xml.Unmarshal(body, &ms); err != nil {
 		t.Fatalf("sync-collection answered %d with %q: %v", resp.StatusCode, body, err)
 	}
-	out := syncAnswer{status: resp.StatusCode, token: ms.Token, etags: map[string]string{}, hrefs: len(ms.Responses)}
+	out := syncAnswer{status: resp.StatusCode, token: ms.Token, etags: map[string]string{}, hrefs: len(ms.Responses), body: string(body)}
 	for _, r := range ms.Responses {
 		for _, p := range r.Propstat {
 			if p.ETag != "" {
@@ -317,9 +318,11 @@ func TestMigratedThunderbirdKeepsItsTokens(t *testing.T) {
 	e, offset := clockEnv(t)
 	seed(e.f, e.f.Username, "Work", "w1@x", "w2@x")
 
-	// An M5 install: one Local on the state root, which is M5's layout
-	// (state.json, secrets.sealed, clients.json and pcb.db at the root). M5
-	// never wrote the address to state.json.
+	// An M5 install, imitated: M6's Local run on the state root, which is
+	// M5's layout (state.json, secrets.sealed, clients.json and pcb.db at
+	// the root). Its state.json is not quite M5's: the address M5 never
+	// wrote is stripped below, but "created", which M5 never wrote either,
+	// stays. Step 8 of spec/HUMAN-CHECKS.md upgrades a real M5 state.
 	l, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg,
 		Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
 	if err != nil {
@@ -384,9 +387,20 @@ func TestMigratedThunderbirdKeepsItsTokens(t *testing.T) {
 	if after.status != http.StatusMultiStatus || after.hrefs != 0 {
 		t.Errorf("sync-collection with the M5 token after the upgrade = %+v, want 207 and the empty delta", after)
 	}
-	// The empty delta is the token's doing: a token nobody issued is refused.
-	if bogus := syncCollection(t, r.info.Base, calPath, sec.Password, "http://pcb/sync/bogus"); bogus.status == http.StatusMultiStatus {
-		t.Errorf("a made-up token answered %+v, want a refusal", bogus)
+	// The empty delta is the token's doing: the same token but for its
+	// epoch (another life of the cache) is refused, 403 valid-sync-token.
+	rest, ok := strings.CutPrefix(before.token, "urn:pcb:sync:1:")
+	parts := strings.Split(rest, ":")
+	if !ok || len(parts) != 3 {
+		t.Fatalf("the M5 token %q is not urn:pcb:sync:1:<epoch>:<seq>:<gen>", before.token)
+	}
+	other := strings.Repeat("0", len(parts[0]))
+	if other == parts[0] {
+		other = strings.Repeat("f", len(parts[0]))
+	}
+	foreign := "urn:pcb:sync:1:" + other + ":" + parts[1] + ":" + parts[2]
+	if got := syncCollection(t, r.info.Base, calPath, sec.Password, foreign); got.status != http.StatusForbidden || !strings.Contains(got.body, "valid-sync-token") {
+		t.Errorf("a token of another epoch answered %d %q, want 403 valid-sync-token", got.status, got.body)
 	}
 	fresh := syncCollection(t, r.info.Base, calPath, sec.Password, "")
 	if !maps.Equal(fresh.etags, before.etags) {
