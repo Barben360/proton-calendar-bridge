@@ -73,6 +73,13 @@ func ErrorClass(err error) string { return errorClass(err) }
 // its class, as a pass's failure does.
 func MapError(err error) error { return mapError(err, "") }
 
+// WakePending reports whether a wake waits in Serve's channel, not yet taken
+// by the loop.
+func (l *Local) WakePending() bool {
+	v := l.liveState()
+	return v != nil && len(v.wake) > 0
+}
+
 // WakesSent counts the wakes Serve's loop was sent (a request that found it idle).
 func (l *Local) WakesSent() int64 {
 	if v := l.liveState(); v != nil {

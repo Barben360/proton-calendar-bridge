@@ -2,8 +2,10 @@ package service_test
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,6 +78,14 @@ type idleRig struct {
 	passes chan atPass
 	resume chan struct{}
 	pw     string // a CalDAV client's password
+	work   string // the calendar Work
+	// hold makes every sleep but the active one wait like the idle sleep,
+	// until its context ends or release is sent; held is its length and
+	// cut whether its context had ended when it returned.
+	hold    atomic.Bool
+	release chan struct{}
+	held    atomic.Int64
+	cut     atomic.Bool
 }
 
 // atPass is a pass and the fake time its callback ran at.
@@ -87,18 +97,25 @@ type atPass struct {
 func newIdleRig(t *testing.T) *idleRig {
 	t.Helper()
 	e := newEnv(t, protontest.Options{})
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
 	e.login(t, e.req())
-	r := &idleRig{env: e, idle: make(chan struct{}), passes: make(chan atPass), resume: make(chan struct{})}
+	r := &idleRig{env: e, idle: make(chan struct{}), passes: make(chan atPass), resume: make(chan struct{}), release: make(chan struct{}), work: work}
 	svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: func(ctx context.Context, d time.Duration) error {
-		if d == service.IdleInterval {
+		if d == service.IdleInterval || (r.hold.Load() && d != service.ActiveInterval) {
+			r.held.Store(int64(d))
 			select {
 			case r.idle <- struct{}{}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-			<-ctx.Done()
-			return ctx.Err()
+			select {
+			case <-ctx.Done():
+				r.cut.Store(true)
+				return ctx.Err()
+			case <-r.release:
+				r.cut.Store(ctx.Err() != nil)
+				return nil
+			}
 		}
 		e.clk.advance(d)
 		return nil
@@ -277,5 +294,109 @@ func TestRefusedPasswordIsNotActivity(t *testing.T) {
 	}
 	if h, err := r.svc.Health(t.Context()); err != nil || !h.Idle {
 		t.Errorf("Health after refusals: %+v, %v; want still idle", h, err)
+	}
+}
+
+// waitWakeTaken waits for the loop to take the wake sent to it, failing the
+// test past waitLimit.
+func (r *idleRig) waitWakeTaken(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(waitLimit)
+	for r.svc.WakePending() {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop never took the wake")
+		}
+		runtime.Gosched()
+	}
+}
+
+// failEvents makes the next n listings of calendar id's events answer 400.
+func (r *idleRig) failEvents(id string, n int) {
+	for range n {
+		r.f.FailNext(http.MethodGet, "/calendar/v1/"+id+"/events", http.StatusBadRequest, 2000, 0)
+	}
+}
+
+// Ruling M5-R1: a pass where some calendar synced and another failed keeps
+// the cadence: it goes idle after 35 minutes, and a request wakes it.
+func TestPartialPassKeepsTheCadence(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	bad := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Bad"})
+	r.failEvents(bad, 30)
+	stop := r.serve(t, service.ServeOptions{})
+	defer stop()
+	p := r.waitPass(t)
+	if exitcode.From(p.Err) != exitcode.Partial || p.Next != service.ActiveInterval {
+		t.Fatalf("first pass err %v next %v; want partial and %v", p.Err, p.Next, service.ActiveInterval)
+	}
+	r.clk.advance(service.IdleAfter - time.Minute)
+	r.resume <- struct{}{}
+	for p = r.waitPass(t); p.Next != service.IdleInterval; p = r.waitPass(t) {
+		if exitcode.From(p.Err) != exitcode.Partial || p.Next != service.ActiveInterval {
+			t.Fatalf("pass err %v next %v; want a partial pass at %v until idle", p.Err, p.Next, service.ActiveInterval)
+		}
+		r.resume <- struct{}{}
+	}
+	if exitcode.From(p.Err) != exitcode.Partial {
+		t.Fatalf("idle pass err %v, want partial", p.Err)
+	}
+	r.resume <- struct{}{}
+	r.waitIdle(t)
+	if ok, _ := r.svc.CheckClient(t.Context(), r.pw, "192.0.2.1:1000"); !ok {
+		t.Fatal("the client was refused")
+	}
+	p = r.waitPass(t) // the wake started it
+	if exitcode.From(p.Err) != exitcode.Partial || p.Next != service.ActiveInterval {
+		t.Errorf("pass after the wake: err %v next %v; want partial and %v", p.Err, p.Next, service.ActiveInterval)
+	}
+}
+
+// A pass where no calendar synced backs off (doubling), and a wake, even
+// one that finds the loop idle, does not shorten the back-off.
+func TestWakeDuringBackOffDoesNotShortenIt(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	r.failEvents(r.work, 30)
+	stop := r.serve(t, service.ServeOptions{})
+	defer stop()
+	p1 := r.waitPass(t)
+	if exitcode.From(p1.Err) != exitcode.Partial || p1.Next < 27*time.Second || p1.Next > 33*time.Second {
+		t.Fatalf("pass 1 err %v next %v; want the only calendar failing and a 30 s back-off ±10%%", p1.Err, p1.Next)
+	}
+	r.clk.advance(service.IdleAfter - time.Minute)
+	r.resume <- struct{}{}
+	p2 := r.waitPass(t)
+	if p2.Next < 54*time.Second || p2.Next > 66*time.Second {
+		t.Fatalf("pass 2 waits %v, want the doubled back-off (60 s ±10%%)", p2.Next)
+	}
+	r.clk.advance(time.Minute) // past the idle time
+	r.hold.Store(true)
+	r.resume <- struct{}{}
+	r.waitIdle(t) // asleep in the back-off
+	if got := time.Duration(r.held.Load()); got != p2.Next {
+		t.Fatalf("slept %v, want the reported %v", got, p2.Next)
+	}
+	if ok, _ := r.svc.CheckClient(t.Context(), r.pw, "192.0.2.1:1000"); !ok {
+		t.Fatal("the client was refused")
+	}
+	if n := r.svc.WakesSent(); n != 1 {
+		t.Fatalf("%d wakes sent, want 1: the loop was idle", n)
+	}
+	r.waitWakeTaken(t)
+	// A second wake, sent once idle again, is taken only if the loop is still
+	// listening after the first one: a loop that ended its sleep on the first
+	// no longer takes any.
+	r.clk.advance(service.IdleAfter)
+	if ok, _ := r.svc.CheckClient(t.Context(), r.pw, "192.0.2.1:1001"); !ok {
+		t.Fatal("the client was refused")
+	}
+	r.waitWakeTaken(t)
+	r.release <- struct{}{} // the back-off ends by itself
+	if r.cut.Load() {
+		t.Error("the wake ended the back-off")
+	}
+	if p3 := r.waitPass(t); p3.Next < 108*time.Second || p3.Next > 132*time.Second {
+		t.Errorf("pass 3 waits %v, want the back-off to go on doubling (120 s ±10%%)", p3.Next)
 	}
 }

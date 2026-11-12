@@ -459,10 +459,12 @@ func TestWatchRunsPassesUntilCancelled(t *testing.T) {
 }
 
 // A partial pass is reported but is no session-wide failure: the watch
-// does not back off, so the calendars that sync keep their interval.
+// does not back off, so the calendars that sync keep their interval (ruling
+// M5-R1: with a calendar that synced; a pass where none did backs off).
 func TestWatchKeepsGoingAfterPartial(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Good"})
 	bad := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Bad"})
 	e.login(t, e.req())
 	for range 2 {

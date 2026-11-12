@@ -299,3 +299,27 @@ func (s *serving) nextAny(t *testing.T, first bool) service.WatchPass {
 	}
 	return service.WatchPass{}
 }
+
+// A pass that got through clears the sync verification even when it was
+// partial: here another calendar fails with a plain refusal, no 9001, and
+// LastPass says OK.
+func TestSyncVerificationClearsOnAPartialPass(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	second := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Second"})
+	path := "/calendar/v1/" + second + "/events"
+	r.f.FailNext(http.MethodGet, path, http.StatusUnprocessableEntity, api.CodeHumanVerification, 0)
+	r.f.FailNext(http.MethodGet, path, http.StatusBadRequest, 2000, 0)
+	r.s.nextAny(t, false)
+	if got := r.health(t).HumanVerification; len(got) != 1 || got[0].Source != "sync" {
+		t.Fatalf("human verification %+v, want one from a pass", got)
+	}
+	p := r.s.nextAny(t, false) // partial again, with a 400
+	if exitcode.From(p.Err) != exitcode.Partial {
+		t.Fatalf("pass err %v, want partial", p.Err)
+	}
+	h := r.health(t)
+	if len(h.HumanVerification) != 0 || h.LastPass == nil || !h.LastPass.OK {
+		t.Errorf("after a partial pass without a 9001: %+v, last pass %+v; want it cleared", h.HumanVerification, h.LastPass)
+	}
+}

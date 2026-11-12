@@ -110,9 +110,11 @@ func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Durati
 	)
 	err := syncer.Watch(ctx, func(ctx context.Context) (syncer.Report, error) {
 		last, lastErr = pass(ctx, SyncRequest{Full: full})
-		if lastErr == nil || exitcode.From(lastErr) == exitcode.Partial {
+		if lastErr == nil || (exitcode.From(lastErr) == exitcode.Partial && anySynced(last)) {
 			// The pass got through: --full is done, and a partial pass is
-			// no session-wide failure (no back-off for the other calendars).
+			// no session-wide failure (ruling M5-R1: some calendar synced,
+			// so no back-off, the idle rule applies and a wake counts).
+			// A pass where no calendar synced backs off, as any failure.
 			full = false
 			return syncer.Report{}, nil
 		}
@@ -134,6 +136,11 @@ func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Durati
 		return nil // the caller stopped the watch: a normal end
 	}
 	return l.fail(err)
+}
+
+// anySynced reports whether a calendar of the pass synced.
+func anySynced(res SyncResult) bool {
+	return slices.ContainsFunc(res.Calendars, func(c CalendarSync) bool { return c.Error == "" })
 }
 
 // watchError is err without the "retry in X" hint of a rate limit: the
