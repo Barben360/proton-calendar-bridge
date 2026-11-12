@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
@@ -306,12 +307,24 @@ func (h *Hub) startLoop(sv *hubServe, a *hubAccount) {
 	go h.runLoop(ctx, sv, a, run)
 }
 
+// syncLockRetry is how long a loop whose account's sync.lock another
+// holds (an offline pcb sync --account, a watch) waits before it tries
+// again (ruling R23): that is not a park.
+const syncLockRetry = 30 * time.Second
+
 // runLoop runs a's Local.Serve until ctx ends or it stops on its own; then
-// a stop its context did not cause parks a.
+// a stop its context did not cause parks a. A sync.lock held elsewhere is
+// tried again every syncLockRetry, logged once per distinct cause.
+//
+// The loop's end reports ServeStopped first, then parks a and clears
+// a.loop in one critical section (lmu, then mu): a Restart or a login
+// after it finds a parked account with no loop and starts one; one
+// before it finds the loop still there and leaves it, and the park
+// follows.
 func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *accountLoop) {
 	defer sv.wg.Done()
 	o := sv.o
-	err := a.local.Serve(ctx, ServeOptions{
+	opts := ServeOptions{
 		Interval:     o.Interval,
 		LoginPoll:    o.LoginPoll,
 		Logger:       sv.log.With("account", a.id),
@@ -328,25 +341,49 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 			a.waitErr, a.stopSeq = cause, h.stops
 			h.mu.Unlock()
 		},
-	})
+	}
+	var err error
+	logged := ""
+	for {
+		err = a.local.Serve(ctx, opts)
+		if ctx.Err() != nil || !errors.Is(err, ErrSyncRunning) {
+			break
+		}
+		if msg := err.Error(); msg != logged {
+			sv.log.Warn("account not served yet: another pcb holds its sync lock", "account", a.id,
+				"reason", msg, "hint", exitcode.HintOf(err), "retry", syncLockRetry.String())
+			logged = msg
+		}
+		if a.local.o.Sleep(ctx, syncLockRetry) != nil {
+			break
+		}
+	}
 	cancelled := ctx.Err() != nil
 	run.cancel()
-	if !cancelled && err != nil {
-		h.mu.Lock()
+	park := !cancelled && err != nil
+	h.loopState(sv, a, ServeStopped)
+	a.lmu.Lock()
+	h.mu.Lock()
+	if park {
 		a.stopped = &StopInfo{Code: int(exitcode.From(err)), Message: err.Error(), Hint: exitcode.HintOf(err), At: h.o.Now()}
 		a.stopErr = err
 		h.stops++
 		a.stopSeq = h.stops
-		h.mu.Unlock()
-		sv.parked.Store(true)
-		sv.log.Error("account stopped", "account", a.id, "reason", err.Error(), "hint", exitcode.HintOf(err))
 	}
-	a.lmu.Lock()
 	if a.loop == run {
 		a.loop = nil
 	}
+	hook := h.onPark
+	h.mu.Unlock()
 	a.lmu.Unlock()
-	h.loopState(sv, a, ServeStopped)
+	if park {
+		if hook != nil {
+			hook(a.id)
+		}
+		sv.log.Error("account stopped", "account", a.id, "reason", err.Error(), "hint", exitcode.HintOf(err))
+		sv.parked.Store(true)
+		sv.poke()
+	}
 	close(run.done)
 }
 

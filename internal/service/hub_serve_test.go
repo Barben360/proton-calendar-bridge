@@ -354,7 +354,12 @@ func parkBoth(t *testing.T, e *hubEnv, h *service.Hub, a, b string) (r *serveRig
 	t.Helper()
 	e.damageCache(t, a)
 	hold := make(chan struct{})
-	h.LocalOf(b).BeforeServe(func() { <-hold })
+	h.LocalOf(b).BeforeServe(func() {
+		select {
+		case <-hold:
+		case <-t.Context().Done():
+		}
+	})
 	return newServeRig(h), func() {
 		path := cache.Path(store.AccountDir(e.dirs.State, b))
 		if err := os.RemoveAll(path); err != nil {
@@ -697,6 +702,7 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
 		t.Fatal(err)
 	}
+	setAddress(t, e, a, "A@x")
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("Calendars after the relogin: %v", err)
@@ -705,8 +711,9 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseReady || st.LastRelogin.IsZero() {
-		t.Errorf("state = caldav %v, phase %q, last relogin %v; want CalDAV off kept by a completed relogin", st.CalDAV, st.Phase, st.LastRelogin)
+	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseReady || st.LastRelogin.IsZero() || st.Address != "A@x" {
+		t.Errorf("state = caldav %v, phase %q, last relogin %v, address %q; want CalDAV off and the address A@x kept by a completed relogin",
+			st.CalDAV, st.Phase, st.LastRelogin, st.Address)
 	}
 }
 
@@ -763,14 +770,15 @@ func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
 		t.Fatal(err)
 	}
+	setAddress(t, e, a, "A@x")
 	free()
 	_ = wantExit(t, <-done, exitcode.MustAct)
 	st, err := store.LoadState(store.AccountDir(e.dirs.State, a))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseNeedsCaptcha {
-		t.Errorf("state = caldav %v, phase %q; want CalDAV off kept by the CAPTCHA relogin", st.CalDAV, st.Phase)
+	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseNeedsCaptcha || st.Address != "A@x" {
+		t.Errorf("state = caldav %v, phase %q, address %q; want CalDAV off and the address A@x kept by the CAPTCHA relogin", st.CalDAV, st.Phase, st.Address)
 	}
 }
 
@@ -797,5 +805,130 @@ func TestServeWithoutTheFlagExitsWhenTheOnlyAccountNeedsALogin(t *testing.T) {
 	}
 	if info := accountInfo(t, h, a); info.Stopped != nil {
 		t.Errorf("a.Stopped = %+v, want nil: a login fixes it", info.Stopped)
+	}
+}
+
+// setAddress writes the account's address into its state.json, as a
+// backfill or another casing would.
+func setAddress(t *testing.T, e *hubEnv, id, address string) {
+	t.Helper()
+	if err := store.UpdateState(store.AccountDir(e.dirs.State, id), func(s *store.State) error {
+		s.Address = address
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A Restart that lands while a loop ends on a park, once the park is
+// published, starts a new loop: the account serves again, not parked.
+func TestRestartWhileALoopParksServesAgain(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	h := e.open(t)
+	a, _ := e.loginBoth(t, h)
+	path := e.damageCache(t, a)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.OnPark(func(id string) {
+		if id != a {
+			return
+		}
+		once.Do(func() {
+			close(entered)
+			select {
+			case <-release:
+			case <-t.Context().Done():
+			}
+		})
+	})
+	r := newServeRig(h)
+	r.serve(t, r.options(true))
+	select {
+	case <-entered:
+	case <-time.After(waitLimit):
+		t.Fatal("a's loop never parked")
+	}
+	r.mu.Lock()
+	last := r.last(a)
+	r.mu.Unlock()
+	if last != service.ServeStopped {
+		// Reported later, it could follow the new loop's serving.
+		t.Errorf("a's last state at its park = %q, want stopped reported before the park", last)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.Restart(t.Context(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if got.Stopped != nil {
+		t.Errorf("Restart(a) = %+v, want not stopped", got)
+	}
+	r.waitPassed(t, a, 0)
+	if info := accountInfo(t, h, a); info.Stopped != nil {
+		t.Errorf("a.Stopped = %+v after the Restart, want nil", info.Stopped)
+	}
+	r.waitFor(t, "a serving after the Restart", func() bool { return r.last(a) == service.ServeServing })
+}
+
+// Ruling R23: another pcb holding an account's sync.lock (an offline sync
+// or a watch) is no park: the loop takes it again every SyncLockRetry and
+// serves once it is free.
+func TestHeldSyncLockIsRetriedNotParked(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	waiting, retry := make(chan struct{}, 1), make(chan struct{})
+	e.sleep = func(ctx context.Context, d time.Duration) error {
+		if d == service.SyncLockRetry {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+			select {
+			case <-retry:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return blockSleep(ctx, d)
+	}
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	unlock, ok, err := filelock.TryLock(syncLock(e, a))
+	if err != nil || !ok {
+		t.Fatalf("TryLock(a's sync.lock) = %v, %v", ok, err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+	r := newServeRig(h)
+	done, _ := r.serve(t, r.options(false))
+	select {
+	case <-waiting:
+	case <-time.After(waitLimit):
+		t.Fatal("the loop never waited to take the sync.lock again")
+	}
+	if info := accountInfo(t, h, a); info.Stopped != nil {
+		t.Fatalf("a.Stopped = %+v while another holds its sync.lock, want nil", info.Stopped)
+	}
+	running(t, done)
+	unlock()
+	locked = false
+	select {
+	case retry <- struct{}{}:
+	case <-time.After(waitLimit):
+		t.Fatal("the retry wait ended before it was released")
+	}
+	r.waitPassed(t, a, 0)
+	if info := accountInfo(t, h, a); info.Stopped != nil {
+		t.Errorf("a.Stopped = %+v once served, want nil", info.Stopped)
 	}
 }

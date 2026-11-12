@@ -237,7 +237,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 	var ce *auth.CaptchaError
 	switch {
 	case errors.As(err, &ce):
-		if _, err := l.needsCaptcha(ctx, ce, st, now, acc.Username); err != nil {
+		if _, err := l.needsCaptcha(ctx, ce, st, now, acc.Username, true); err != nil {
 			return err
 		}
 		return phaseError(store.State{Phase: store.PhaseNeedsCaptcha, Captcha: &store.Captcha{URL: ce.URL, Token: ce.Token}})

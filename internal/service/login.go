@@ -155,7 +155,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 			// and its token, and state.json stays as it was (state-I4).
 			return captchaResult(ce, req.Username), nil
 		case errors.As(err, &ce):
-			return l.needsCaptcha(ctx, ce, last, now, req.Username)
+			return l.needsCaptcha(ctx, ce, last, now, req.Username, false)
 		}
 		return LoginResult{}, l.fail(err)
 	}
@@ -244,7 +244,9 @@ func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), 
 	return release, now, nil
 }
 
-func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last store.State, now time.Time, username string) (LoginResult, error) {
+// needsCaptcha marks the login needs-captcha; relogin: an unattended
+// relogin's, not a person's (the address rule of loginAddress).
+func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last store.State, now time.Time, username string, relogin bool) (LoginResult, error) {
 	err := l.writeLogin(ctx, last, func(cur store.State) store.State {
 		return store.State{
 			AccountID:   last.AccountID,
@@ -254,7 +256,7 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 			Unattended:  last.Unattended,
 			LastLogin:   last.LastLogin,
 			LastRelogin: last.LastRelogin,
-			Address:     username,
+			Address:     loginAddress(cur, username, relogin),
 			CalDAV:      cur.CalDAV,
 			Created:     createdOr(cur, now),
 		}
@@ -288,6 +290,17 @@ func (l *Local) writeLogin(ctx context.Context, last store.State, next func(cur 
 		return l.stateWriteError(err)
 	}
 	return nil
+}
+
+// loginAddress is the address a login writes into state.json, cur being
+// the file as it is: a person's login writes the username given; an
+// unattended relogin keeps the address the account shows, else the stored
+// username.
+func loginAddress(cur store.State, username string, relogin bool) string {
+	if relogin && cur.Address != "" {
+		return cur.Address
+	}
+	return username
 }
 
 // createdOr is when the account was added: last's, else now.
@@ -393,13 +406,10 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		st := store.State{
 			AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 			LastLogin: now, LastRelogin: pl.last.LastRelogin,
-			Address: pl.username, CalDAV: cur.CalDAV, Created: createdOr(cur, now),
+			Address: loginAddress(cur, pl.username, pl.relogin), CalDAV: cur.CalDAV, Created: createdOr(cur, now),
 		}
 		if pl.relogin {
 			st.LastLogin, st.LastRelogin = pl.last.LastLogin, now
-			if cur.Address != "" {
-				st.Address = cur.Address // a relogin keeps the address the account shows
-			}
 		}
 		return st
 	})

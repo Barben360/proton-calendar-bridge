@@ -162,3 +162,16 @@ func (h *Hub) LocalOf(id string) *Local {
 	}
 	return nil
 }
+
+// OnPark makes f run each time a serve loop parked its account (after
+// a.loop is cleared, before the loop's end is signalled). Set it before
+// Serve.
+func (h *Hub) OnPark(f func(id string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onPark = f
+}
+
+// SyncLockRetry is how long a loop waits before it takes a held sync.lock
+// again.
+const SyncLockRetry = syncLockRetry

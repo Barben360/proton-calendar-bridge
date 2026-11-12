@@ -54,12 +54,13 @@ type Hub struct {
 	logins atomic.Bool // a Login or SubmitTOTP runs: another is refused
 	ops    sync.Mutex  // serialises what changes the accounts: logins, sign-outs, removals, switches, sweeps
 
-	mu       sync.Mutex // guards accounts, closed, changes and onOpen; never held across a Local call
+	mu       sync.Mutex // guards accounts, closed, changes, onOpen, stops and onPark; never held across a Local call
 	accounts map[string]*hubAccount
 	closed   bool
 	changes  []func()
-	onOpen   func(*Local) // tests only: runs on every Local the Hub opens
-	stops    uint64       // the parks and waits of the serve loops so far, in order
+	onOpen   func(*Local)    // tests only: runs on every Local the Hub opens
+	stops    uint64          // the parks and waits of the serve loops so far, in order
+	onPark   func(id string) // tests only: runs once a loop parked its account and cleared its loop
 
 	// srv serialises the start and the stop of the serve loops (loops,
 	// Serve's start and end). Taken after ops, before mu; never held by a
@@ -90,7 +91,7 @@ type hubAccount struct {
 	gate    sync.RWMutex
 	removed bool // the account is gone: calls through its API fail; written under gate
 
-	lmu      sync.Mutex                  // guards removing, long and loop
+	lmu      sync.Mutex                  // guards removing, long and loop; taken before Hub.mu when both are held
 	removing bool                        // retire has begun: a long call starts already ended, no loop starts
 	long     map[*int]context.CancelFunc // the long calls in flight (Serve, WatchSync), ended by retire
 	loop     *accountLoop                // the Hub's serve loop of the account, nil when none runs
