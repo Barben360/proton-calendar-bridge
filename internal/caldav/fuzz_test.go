@@ -18,7 +18,7 @@ import (
 func fuzzBody(t *testing.T, method, depth string, body []byte) {
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
-	rec := do(caldav.Handler(s, caldav.Options{}), method, calPath(workID), string(body), "Depth", depth)
+	rec := do(handler(s, caldav.Options{}), method, calPath(workID), string(body), "Depth", depth)
 	switch rec.Code {
 	case http.StatusMultiStatus:
 		d := xml.NewDecoder(bytes.NewReader(rec.Body.Bytes()))

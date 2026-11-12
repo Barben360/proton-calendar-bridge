@@ -164,7 +164,7 @@ func (s *server) writeFail(w http.ResponseWriter, r *http.Request, c service.Col
 	case errors.Is(err, service.ErrPreconditionFailed):
 		s.refuse(w, r, c.ID, preconditionRefusal())
 	case errors.As(err, &conflict):
-		s.refuse(w, r, c.ID, conflictRefusal(c.ID, conflict.Href))
+		s.refuse(w, r, c.ID, conflictRefusal(s.ns, c.ID, conflict.Href))
 	case errors.Is(err, service.ErrNotWritable):
 		s.refuse(w, r, c.ID, privilegesRefusal(r))
 	case errors.As(err, &refusal):
@@ -219,13 +219,13 @@ func preconditionRefusal() writeRefusal {
 }
 
 // conflictRefusal: the UID lives at another name of calendar calID, or the
-// name holds another UID: 409 with the no-uid-conflict naming href, the
-// object that holds it (RFC 4791 §5.3.2.1).
-func conflictRefusal(calID, href string) writeRefusal {
+// name holds another UID: 409 with the no-uid-conflict naming href in
+// namespace sp, the object that holds it (RFC 4791 §5.3.2.1).
+func conflictRefusal(sp space, calID, href string) writeRefusal {
 	return writeRefusal{status: http.StatusConflict,
 		body: `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:no-uid-conflict>` +
-			hrefXML(objectHref(calID, href)) + "</C:no-uid-conflict></D:error>",
-		code: "no-uid-conflict", reason: "the UID or the name belongs to another object of the calendar", conflict: objectHref(calID, href)}
+			hrefXML(sp.objectHref(calID, href)) + "</C:no-uid-conflict></D:error>",
+		code: "no-uid-conflict", reason: "the UID or the name belongs to another object of the calendar", conflict: sp.objectHref(calID, href)}
 }
 
 // privilegesRefusal answers a write to a read-only calendar: 403 with the

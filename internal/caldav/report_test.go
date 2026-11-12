@@ -84,7 +84,7 @@ func buildRig(ctx context.Context, tb testing.TB, root string, setup func(f *pro
 		return nil, err
 	}
 	r.pass = sec.Password
-	r.h = caldav.Handler(svc, caldav.Options{})
+	r.h = handler(svc, caldav.Options{})
 	return r, nil
 }
 

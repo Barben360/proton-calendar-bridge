@@ -288,7 +288,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		CertNotAfter: certNotAfter(tlsConf)})
 
 	srv := &http.Server{
-		Handler:           caldav.Handler(svc, caldav.Options{Logger: log}),
+		Handler:           caldav.Handler(oneAccount{svc}, caldav.Options{Logger: log}),
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -321,6 +321,21 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		return err
 	}
 	return finish(result)
+}
+
+// oneAccount routes every CalDAV request on the compatibility URLs to api,
+// the one account pcb serve serves until it serves a Hub (M6 Task 8); an
+// account URL names none of its accounts (401).
+type oneAccount struct{ api service.API }
+
+func (o oneAccount) Route(ctx context.Context, accountID, password, remote string) (service.API, string, time.Duration, error) {
+	if accountID != "" {
+		return nil, "", 0, nil
+	}
+	if ok, wait := o.api.CheckClient(ctx, password, remote); !ok {
+		return nil, "", wait, nil
+	}
+	return o.api, "", 0, nil
 }
 
 // causeError is msg, then the operating system's reason for err (such as

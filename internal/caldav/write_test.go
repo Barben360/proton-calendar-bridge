@@ -956,7 +956,7 @@ func TestRefusedWritesAreLogged(t *testing.T) {
 			Card: card("p@x", "Quarterly numbers", base, alarm...)})
 	})
 	logs := &syncLog{}
-	r.h = caldav.Handler(r.svc, caldav.Options{Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	r.h = handler(r.svc, caldav.Options{Logger: slog.New(slog.NewTextHandler(logs, nil))})
 
 	invite := thunderbird("new@x", "Secret board meeting", "ORGANIZER:mailto:user@proton.me", "ATTENDEE;CN=Ann Example:mailto:ann@example.org")
 	if got := precondition403(t, r.put(calPath(cal)+"new@x.ics", invite, "If-None-Match", "*")); got != "attendee-change" {

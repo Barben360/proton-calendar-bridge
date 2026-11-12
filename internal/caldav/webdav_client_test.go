@@ -1,7 +1,8 @@
 package caldav_test
 
 // An independent client: go-webdav's caldav.Client (test-only dependency,
-// ruling M3-R5) discovers and reads the calendars over real HTTP.
+// ruling M3-R5) discovers and reads the calendars over real HTTP, from /
+// to the account's own URLs.
 
 import (
 	"net/http/httptest"
@@ -34,12 +35,13 @@ func TestGoWebdavClientDiscoversAndReads(t *testing.T) {
 	}
 	ctx := t.Context()
 
+	// Discovery from / ends on the account's own URLs (design §4.4).
 	p, err := c.FindCurrentUserPrincipal(ctx)
-	if err != nil || p != principal {
+	if err != nil || p != account.principal {
 		t.Fatalf("FindCurrentUserPrincipal = %q, %v", p, err)
 	}
 	hs, err := c.FindCalendarHomeSet(ctx, p)
-	if err != nil || hs != home {
+	if err != nil || hs != account.home {
 		t.Fatalf("FindCalendarHomeSet = %q, %v", hs, err)
 	}
 	cals, err := c.FindCalendars(ctx, hs)
@@ -50,14 +52,14 @@ func TestGoWebdavClientDiscoversAndReads(t *testing.T) {
 	for _, cal := range cals {
 		byPath[cal.Path] = cal
 	}
-	w, h := byPath[calPath(work)], byPath[calPath(hol)]
+	w, h := byPath[account.calPath(work)], byPath[account.calPath(hol)]
 	if len(cals) != 2 || w.Name != "Work" || w.Description != "Team" || h.Name != "Holidays" ||
 		!slices.Equal(w.SupportedComponentSet, []string{"VEVENT"}) {
 		t.Fatalf("FindCalendars = %+v", cals)
 	}
 
 	objs, err := c.MultiGetCalendar(ctx, w.Path, &webdavcaldav.CalendarMultiGet{
-		Paths:       []string{objPath(work, "a@x"), objPath(work, "b c/é")},
+		Paths:       []string{account.objPath(work, "a@x"), account.objPath(work, "b c/é")},
 		CompRequest: webdavcaldav.CalendarCompRequest{Name: "VCALENDAR", AllProps: true, AllComps: true},
 	})
 	if err != nil {
@@ -70,11 +72,11 @@ func TestGoWebdavClientDiscoversAndReads(t *testing.T) {
 		}
 		summaries[o.Path] = summary(t, o.Data)
 	}
-	if len(objs) != 2 || summaries[objPath(work, "a@x")] != "Alpha" || summaries[objPath(work, "b c/é")] != "Beta" {
+	if len(objs) != 2 || summaries[account.objPath(work, "a@x")] != "Alpha" || summaries[account.objPath(work, "b c/é")] != "Beta" {
 		t.Errorf("MultiGetCalendar = %v", summaries)
 	}
 
-	got, err := c.GetCalendarObject(ctx, objPath(hol, "ny@x"))
+	got, err := c.GetCalendarObject(ctx, account.objPath(hol, "ny@x"))
 	if err != nil || summary(t, got.Data) != "New year" || got.ETag == "" {
 		t.Fatalf("GetCalendarObject = %+v, %v", got, err)
 	}
