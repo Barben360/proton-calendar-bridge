@@ -36,9 +36,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two heaviest packages (real SRP logins under -race) run apart
-        # from the rest; together the shards cover ./... (checked below).
-        shard: [service-cli, rest]
+        # The two heaviest packages (real SRP logins under -race) each get a
+        # runner of their own: together on one 4-core runner, service alone
+        # took 578 s of the 600 s go test default. The shards cover ./...
+        shard: [service, cli, rest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,11 +50,11 @@ jobs:
       - name: Race tests
         run: |
           heavy='internal/(service|cli)$'
-          if [ "${{ matrix.shard }}" = service-cli ]; then
-            pkgs=$(go list ./... | grep -E "$heavy" | tr "\n" " ")
-          else
-            pkgs=$(go list ./... | grep -vE "$heavy" | tr "\n" " ")
-          fi
+          case "${{ matrix.shard }}" in
+            service) pkgs=$(go list ./internal/service) ;;
+            cli) pkgs=$(go list ./internal/cli) ;;
+            *) pkgs=$(go list ./... | grep -vE "$heavy" | tr "\n" " ") ;;
+          esac
           test -n "$pkgs"
           make test PKGS="$pkgs"
   # pcb install --user and --system in a Debian container with systemd as

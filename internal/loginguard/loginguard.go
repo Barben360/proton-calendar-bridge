@@ -6,6 +6,7 @@ package loginguard
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,11 @@ import (
 
 // MinInterval is the shortest time between two login attempts.
 const MinInterval = 60 * time.Second
+
+// maxSkew is how far ahead of now a stamp may be and still count: beyond,
+// the clock was stepped back (VM restore, NTP step, an RTC at boot) and the
+// stamp is stale.
+const maxSkew = 5 * time.Minute
 
 const (
 	lockFile  = "login.lock"
@@ -47,8 +53,10 @@ func WaitFor(err error) (time.Duration, bool) {
 // refusal is a Blocked *exitcode.Error: another login holds the lock, the
 // stamp is malformed (fail closed: a manual delete costs less than a login
 // storm), or the previous attempt is younger than min (the stamp is then
-// left untouched).
-func Acquire(dir string, min time.Duration, now time.Time) (release func(), err error) {
+// left untouched). A stamp more than maxSkew ahead of now never blocks: it
+// is logged to log (nil discards it) and replaced by now, so it is logged
+// once.
+func Acquire(dir string, min time.Duration, now time.Time, log *slog.Logger) (release func(), err error) {
 	unlock, ok, err := filelock.TryLock(filepath.Join(dir, lockFile))
 	if err != nil {
 		return nil, err
@@ -56,7 +64,7 @@ func Acquire(dir string, min time.Duration, now time.Time) (release func(), err 
 	if !ok {
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("another login is running"), Hint: "wait for it to finish"}
 	}
-	if err := check(dir, min, now); err != nil {
+	if err := check(dir, min, now, log); err != nil {
 		unlock()
 		return nil, err
 	}
@@ -69,7 +77,7 @@ func Acquire(dir string, min time.Duration, now time.Time) (release func(), err 
 	return unlock, nil
 }
 
-func check(dir string, min time.Duration, now time.Time) error {
+func check(dir string, min time.Duration, now time.Time, log *slog.Logger) error {
 	path := filepath.Join(dir, stampFile)
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -85,6 +93,13 @@ func check(dir string, min time.Duration, now time.Time) error {
 			Err:  fmt.Errorf("cannot read the last login time in %s", stampFile),
 			Hint: "wait a minute, then delete " + path,
 		}
+	}
+	if last.After(now.Add(maxSkew)) {
+		if log != nil {
+			log.Warn("the last login time is in the future: the clock was set back; ignoring it",
+				"file", path, "last_login", last.UTC(), "now", now.UTC())
+		}
+		return nil
 	}
 	if wait := min - now.Sub(last); wait > 0 {
 		return &exitcode.Error{

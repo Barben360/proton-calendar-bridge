@@ -113,7 +113,7 @@ func liveStatusText(s ctl.Status) string {
 		for _, c := range h.Calendars {
 			line("calendar: %s", calendarHealthText(c))
 		}
-		line("render: undecryptable %d, unverified %d, duplicate masters %d", h.Render.Undecryptable, h.Render.Unverified, h.Render.DuplicateMasters)
+		line("render: undecryptable %d, unverified %d, duplicate masters %d, dropped alarms %d", h.Render.Undecryptable, h.Render.Unverified, h.Render.DuplicateMasters, h.Render.DroppedAlarms)
 	}
 	for _, al := range s.Alerts {
 		line("alert: %s %s: %s (fix: %s)", al.Severity, al.Code, al.Message, al.Fix)

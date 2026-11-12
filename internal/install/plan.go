@@ -161,7 +161,8 @@ func planUser(h Host) ([]Step, error) {
 	}
 	params := UnitParams{Exec: exe, ConfigDir: dirs.Config, StateDir: dirs.State}
 	if err := checkUnitParams(params); err != nil {
-		return nil, blocked(err, "set PCB_CONFIG_DIR and PCB_STATE_DIR, or move the binary, to such paths")
+		// A person picks other paths: exit 10, a plan included (ux Minor).
+		return nil, &exitcode.Error{Code: exitcode.MustAct, Err: err, Hint: "set PCB_CONFIG_DIR and PCB_STATE_DIR, or move the binary, to such paths"}
 	}
 	return planFiles(h, []fileSpec{
 		{kind: KindDir, path: dirs.Config, mode: 0o700},

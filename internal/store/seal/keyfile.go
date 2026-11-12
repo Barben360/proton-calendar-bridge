@@ -112,7 +112,7 @@ func (k *KeyFile) read() ([]byte, error) {
 	key := make([]byte, keySize+1)
 	n, err := f.Read(key)
 	if n != keySize {
-		return nil, fmt.Errorf("%w: key file %s is not %d bytes", ErrCorrupt, k.Path, keySize)
+		return nil, &KeySizeError{Path: k.Path, Size: info.Size()}
 	}
 	if err != nil {
 		return nil, err

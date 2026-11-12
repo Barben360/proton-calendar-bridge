@@ -117,3 +117,7 @@ func (l *Local) ServingHandle() bool {
 	defer l.smu.RUnlock()
 	return l.served != nil
 }
+
+// SetKeyPassHook makes fn see the key passphrase a login derives, before it
+// is sealed (to check that it is zeroed after). Set it before Login.
+func (l *Local) SetKeyPassHook(fn func(keyPass []byte)) { l.keyPassHook = fn }

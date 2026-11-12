@@ -117,10 +117,21 @@ out=$(docker exec -e PCB_STATE_DIR=/tmp/no-daemon "$container" pcb status --json
 jq -e '.error.hint | startswith("restart the container")' <<<"$out" >/dev/null || fail "unexpected hint: $out"
 
 step "7c. pcb doctor reports the daemon's listener (all interfaces, TLS) and reads the key"
-doc=$(docker exec "$container" pcb doctor) || true # exit 20: the needs-login alert
+# Exit 0: the needs-login alert of a daemon waiting for a login is a
+# warning (ux-I2).
+doc=$(docker exec "$container" pcb doctor) || fail "pcb doctor failed ($?) while the daemon waits for a login: $doc"
+grep -q '^!  alert needs-login: not logged in to Proton$' <<<"$doc" || fail "doctor's needs-login line: $doc"
 # 0.0.0.0 binds dual stack, which Go names [::].
 grep -Eq '^✓  caldav listener: (0\.0\.0\.0|\[::\]):1080, TLS \(the running daemon; URL https://' <<<"$doc" || fail "doctor's listener is not the daemon's: $doc"
 grep -q '^✓  key file: /data/config/secrets.key 600, 32 bytes$' <<<"$doc" || fail "doctor's key file line: $doc"
+
+step "7d. logged out, pcb sync says to log in (exit 10); a second pcb serve names the running one (exit 20)"
+code=0
+out=$(docker exec "$container" pcb sync 2>&1) || code=$?
+[ "$code" = 10 ] && grep -q '^Hint: run pcb login$' <<<"$out" || fail "pcb sync: exit $code: $out"
+code=0
+out=$(docker exec "$container" pcb serve 2>&1) || code=$?
+[ "$code" = 20 ] && grep -q '^Error: pcb serve is already running$' <<<"$out" || fail "a second pcb serve: exit $code: $out"
 
 step "8. /data: config and state 0700 65532, no secrets.sealed"
 listing=$(docker cp "$container:/data" - | tar --numeric-owner -tvf -)

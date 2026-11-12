@@ -61,7 +61,8 @@ Goals: CalDAV read/write for owned calendars; read-only for subscribed and
 holidays calendars; login with password, or password + TOTP [decided
 0010]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); a container
-image; Linux amd64 and arm64.
+image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
+Windows only build, and the CLI there runs offline (§13, "Platforms").
 
 Not planned (not designed here): REST API, MCP, `.ics` feeds, event
 commands in the CLI (Thunderbird is the client), GUIs, updates/signed
@@ -133,7 +134,11 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
 - One token-bucket rate limiter per account, shared by all callers; honour
   `Retry-After`; exponential backoff with jitter on 429/5xx; a circuit
   breaker that pauses sync and raises a status alert after repeated
-  failures [call; Proton's limits → E06].
+  failures [call; Proton's limits → E06]. `Retry-After` is read as delay-seconds
+  or an HTTP date, clamped to 1 h, and a past date or a malformed value counts as
+  none; a login 429 names the wait ("retry in 2m0s") instead of "a few minutes"
+  [verified: `TestParseRetryAfter`, `TestRetryAfterDateHonoured`,
+  `TestBeginKeepsRetryAfter`, `TestLoginRateLimitedNamesRetryAfter`].
 
 ### 5.2 Authentication
 State machine (persisted in C2):
@@ -166,6 +171,23 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   secrets only from a terminal prompt, a file descriptor (`--password-fd`),
   or environment (`PCB_PASSWORD`, `PCB_TOTP`, … for `pass-cli run`); never
   argv [call].
+- Login robustness (initial-version audit, `spec/audits/2026-11-12-initial-version.md`):
+  - Each login call (`Begin`: AuthInfo and the SRP proof; the 2FA submit; the locked-scope
+    unlock: AuthInfo and proof) has its own 30 s deadline, so a stalled Proton cannot hold the
+    login lock; a timeout is exit 20 "the operation was cancelled or timed out" [verified:
+    `TestLoginCallsHaveADeadline`, `TestLoginDeadlineIsBlocked`].
+  - Only Proton code 8002 on a 422 means "wrong Proton username or password"; any other 422 is
+    "Proton refused the request (code N)" and exit 20 [verified: `TestBeginOther422IsNotBadCredentials`,
+    `TestLoginOther422IsNotWrongPassword`].
+  - Code 9001 on an authenticated read is a human verification, like on a write: alert
+    `human-verification`, hint "open the Proton web app from this machine's network and complete
+    the verification" (exit 20; `pcb serve` keeps retrying) [verified: `TestReadHumanVerificationIsTyped`].
+  - The login guard's stamp more than 5 min in the future (a clock set back) is stale: logged once at
+    warning level, rewritten with now, never blocks; a stamp less than 5 min ahead still counts [verified:
+    `TestFutureStampIsStale`, `TestStampSkewBoundary`].
+  - An interactive login that meets a CAPTCHA while the stored login is `ready` leaves the
+    stored state as it was [verified: `TestLoginCaptchaWhileReadyKeepsState`]; the key passphrase is
+    zeroed once the login completes [verified: `TestLoginZeroesTheKeyPassphrase`].
 
 ### 5.3 Keys
 User keys → address keys → calendar passphrase (per member) → calendar key;
@@ -310,7 +332,14 @@ PRODID or CALSCALE, a misrouted line stored in a signed part, a change that
 needs a session key the row lacks (a first COMMENT on a row without a
 calendar part, 403 `pcb:unsupported-change`, M4-R13), and (to be confirmed
 live, `HUMAN-CHECKS.md` §6 W10) a UID containing `,`, `;` or `\` if Proton's
-column holds it unescaped.
+column holds it unescaped: the write path then compares UIDs unescaped, so such an
+event's own edit is 503 `the event's UID is stored by Proton in another form than its
+text` (never a 409 naming itself), and the same UID at another name is a 409
+[verified: `TestAnEscapedUIDIsNeverItsOwnConflict`]; and a row that holds a personal part
+(per-user data such as alarms stored before they moved to `Notifications`): 403
+`pcb:personal-part`, because an update never re-sends that part and what Proton does to
+an omitted one is live check L.4 #10; a DELETE is unaffected [verified:
+`TestARowWithAPersonalPartIsNotUpdated`].
 
 The full fix (`OPEN.md`): fresh session keys and their key packets on every
 update, once live check L.4 #3 (research L.4) shows Proton accepts new key
@@ -460,6 +489,15 @@ M5 additions:
   `TestServeRefusesATooLongSocketPath`, `TestServeRefusesAnOpenStateDir`,
   `TestStaleSocketIsReplaced`, `TestNonSocketFileIsRefused`].
 - `state.lock` is the leaf lock held by every writer of `state.json` (§7.3, R10m).
+- Root guard (initial-version audit): a command that opens the state, run as root (euid 0) while the state
+  directory belongs to another user (a system install), exits 10 `the state directory belongs to <user>: run
+  pcb as that user`, hint `sudo -u <user> pcb …`, instead of leaving root-owned files the `pcb` user cannot
+  read. A missing directory passes; `pcb doctor` (read only) and `install`/`uninstall` are not guarded
+  [verified: `TestRootRefusesAnotherUsersState`].
+- Stale files: at each start, regular `.tmp-*` and `.key-*` files older than 1 h left by a crash in the state
+  and config directories (and `.key-*` only in a key file's own directory) are removed; links are never followed
+  [verified: `TestRemoveStaleRemovesOnlyOldTemporaryFiles`, `TestRemoveStaleNeverFollowsSymlinks`,
+  `TestOpenRemovesStaleTemporaryFiles`, `TestOpenSweepsOnlyKeyFilesInTheKeyDirectory`].
 
 ### 7.2 What is cached [call]
 What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 2 in
@@ -494,8 +532,19 @@ cache records its account in `meta` and is emptied when opened for another):
   and E09 (decrypt cost per 1 000 events, cold start) moved to M3 (M2-R1).
   E09's offline measurement (0.2 to 0.4 ms per event, signatures checked
   [verified: `BenchmarkOpen`]) says no sealed decrypted index is needed.
-  Rendered objects live in an in-memory LRU (2 000 by default), rebuilt on
-  demand; the live cold-start figure is pending.
+  Rendered objects live in an in-memory LRU rebuilt on demand: **fixed at 2 000
+  entries** (`lruCapacity`, not configurable), counted by objects not bytes and shared by
+  every calendar, so a long DESCRIPTION or a large series costs more than a short event, and
+  accounts holding more than 2 000 UIDs in all re-render on a full resync (read-M6, accepted: the render is
+  0.2 to 0.4 ms per event); the live cold-start figure is pending.
+- Durability (initial-version audit): `PRAGMA synchronous=FULL`, so a power cut cannot roll the
+  change counter back inside an epoch (cost measured on 5 calendars of 1 000 events: an incremental pass
+  18 to 23 ms with NORMAL, 22 to 33 ms with FULL; the initial pass is unchanged); the 1 → 2 migration (DDL,
+  `user_version`, the pins backfill) is one transaction, and a v2 file that has rows and an empty
+  `pins` table is backfilled when opened; `pcb.db` and its `-wal`/`-shm` are chmodded 0600 on open; the directory
+  is fsynced after the cache file or `secrets.sealed` is removed [verified: `TestOpenSyncsEveryCommit`,
+  `TestMigrationStoppedHalfWayIsRedone`, `TestOpenBackfillsAnEmptyPinsTable`, `TestOpenRepairsTheFileModes`,
+  `TestRemoveSyncsTheDirectory`, `TestWipeSyncsTheDirectory`].
 - Read-only opens (`pcb status`, `pcb event list`) never create or migrate
   the file; with no `-wal` present they read it as `immutable=1`, which may
   return a stale or inconsistent snapshot if a writer starts meanwhile. Fine
@@ -536,6 +585,21 @@ survive them; only `pcb uninstall --delete-data` removes the key (§13) [verifie
 `pcb logout` then `pcb login`), because minting a key would turn "key missing" into "secrets corrupt" [verified:
 `TestClientsRefuseToMintAKeyWhileTheSessionsKeyIsMissing`]; the stat-then-seal window (a key deleted between the check
 and the seal) is accepted (`spec/OPEN.md`, "Parked by M5").
+A `secrets.sealed` this pcb cannot open is told apart from a damaged one (initial-version audit): written by a
+newer pcb (envelope version above 2) or sealed by another sealer. `Status.Secrets` is then `unsupported`
+with the cause as its reason, every command that reads it exits 10 with hint `upgrade pcb`, and `pcb serve` stops
+with 10. `state.json` with a field this pcb does not know is "written by a newer pcb" (exit 10, `upgrade pcb`, not
+"logout"); the decoding stays strict. `pcb logout` cannot revoke a store it cannot read, so it refuses
+(exit 10, nothing touched) and says `end the session in the Proton web app (Settings → Security → Sessions), then
+run pcb logout --yes`; on a terminal it asks to type `discard`, and `--yes` discards the local files without
+asking. The logout also removes the event cache under `sync.lock` taken without waiting; when another process holds
+it (a one-shot `pcb sync`, or a serve that is not this process) the logout still completes and says so
+(`sync_running` in `--json`: run `pcb logout` again once it stops) [verified: `TestUnsupportedStoreNamesTheCause`,
+`TestStateWithUnknownFieldsIsNewer`, `TestNewerStateSaysUpgrade`, `TestLogoutOfAStoreItCannotReadNeedsConfirmation`,
+`TestLogoutOfAStoreItCannotReadAsksOnATerminal`, `TestLogoutRefusalKeepsAPendingLogin`, `TestLoginOverAStoreThisPcbCannotRead`,
+`TestLogoutKeepsAStoreItCannotRead`, `TestLogoutSaysWhenAnotherProcessSyncs`]. The control socket's
+`POST /v1/logout` takes an optional body `{"discard": bool}`; an empty body is the zero request, so an older pcb
+still works (§15).
 M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAndIsMirrored`, `TestRestoredOlderSecretsAreRefused`,
 `TestFileRemovedByLogoutIsRefusedIfRestored`, `TestV1FileIsReadAndUpgraded`, `TestSealedAheadOfMirrorIsAccepted`,
 `TestEditedVersionFieldDoesNotDowngrade`, `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`,
@@ -627,9 +691,14 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
      are stored (`ApplyWrite`: the change counter moves, the feed cursor does
      not).
   5. Conflicts and the precondition, on that fresh state: the UID served at
-     another name, or the name serving another live UID → 409; `If-Match`
-     (exact string, or `*`) and `If-None-Match` (`*`, or ETags compared
-     weakly) on the fresh object ETag → 412.
+     another name, or the name serving another live UID → 409 (UIDs compared
+     unescaped: the same event at its own name is never a 409 against itself, it is
+     503 `ErrUIDStoredOtherwise`, §5.3); `If-Match` (`*`, or a comma-separated
+     list, several headers being one list, compared strongly: a weak `W/` tag never
+     matches; present but blank → 412 before the service is asked) and
+     `If-None-Match` (`*`, or ETags compared weakly) on the fresh object ETag → 412
+     [verified: `TestIfMatchListsCompareStrongly`, `TestIfMatchListsReachTheService`,
+     `TestPutRequestChecksComeFirst`].
   6. Plan the row operations (`Plan`, `PlanDelete`; refusals are 403 with a
      pcb precondition, `spec/mapping.md` §8) and seal them. A plan with no
      operation answers 204 without calling Proton. A create at a name that is
@@ -693,7 +762,7 @@ version, bumped when our rendering changes so clients re-download.
 
 An object's ETag (the CalDAV resource, one per UID) hashes the render version,
 its rows' IDs and row ETags and the calendar settings used (§9). Writes (M4)
-evaluate `If-Match` (exact string) and `If-None-Match` on that ETag
+evaluate `If-Match` (a list, strong comparison, `*`; §8.1 step 5) and `If-None-Match` on that ETag
 **after** refreshing the UID's rows from Proton (§8.1), never on a stale
 cache: a mismatch is 412 (Thunderbird then opens its conflict dialog and
 refetches, E08 §4.2), never a blind overwrite. A write without a
@@ -734,7 +803,10 @@ ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
   undecryptable or unverified parts, parts of another author, someone else's
   invitation, untrusted session keys, a change needing a key the row lacks
   (`spec/mapping.md` §8);
-- writes to read-only calendars (`DAV:need-privileges`).
+- writes to read-only calendars (`DAV:need-privileges`);
+- edits of a row that holds a personal part (`pcb:personal-part`, until live check L.4 #10; a DELETE is not refused).
+Each refusal (every 403, 409 and 412 of a write) is logged at warning level: `refused a CalDAV write`
+(§15), the same code and href at most once per 10 minutes (the next line after the window carries `repeated=N`, the refusals swallowed; at most 1 000 distinct refusals are remembered) [verified: `TestEachRefusedWriteLogsOneWarning`, `TestRefusedWritesAreLogged`, `TestRepeatedRefusalsAreLoggedOncePerWindow`, `TestRefusalLogMemoryIsBounded`].
 A Thunderbird calendar with offline support keeps a refused change locally
 and retries it silently (E08 §3.8, §4.2): refusals are few and logged. One
 without offline support shows an error and is disabled until the user
@@ -807,12 +879,12 @@ writes (PUT, DELETE) since M4.
   |---|---|
   | 201, no body, no `ETag` | a PUT created the event |
   | 204, no body, no `ETag` | a PUT replaced it, or changed nothing; a DELETE removed every row of the UID |
-  | 412 | `If-Match` or `If-None-Match` does not hold on the refreshed object; a concurrent change Proton showed during the write (M4-R34); an `If-None-Match` naming no ETag |
-  | 409 + `<C:no-uid-conflict><D:href>…</D:href>` | the UID lives at another name, or the name holds another UID |
+  | 412 | `If-Match` or `If-None-Match` does not hold on the refreshed object (a blank `If-Match` header never holds); a concurrent change Proton showed during the write (M4-R34); an `If-None-Match` naming no ETag |
+  | 409 + `<C:no-uid-conflict><D:href>…</D:href>` | the UID lives at another name, or the name holds a genuinely different UID (compared unescaped; the same event at its own name is a 503, never this) |
   | 403 `<D:need-privileges>` | the write gate is closed, decided from good data (write-content on the object for a PUT, unbind on the calendar for a DELETE) |
-  | 403 `<pcb:CODE xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">…</pcb:reason>` | the bridge refuses the change, or Proton refused it (`pcb:proton-refused`, its code only); the reason is a fixed text of ours, never event content or Proton's text (Thunderbird never shows it, E08 §4.2; it is for curl and logs) |
+  | 403 `<pcb:CODE xmlns:pcb="urn:pcb"/><pcb:reason xmlns:pcb="urn:pcb">…</pcb:reason>` | the bridge refuses the change (among others `pcb:personal-part`: the row holds a personal part pcb cannot rewrite yet), or Proton refused it (`pcb:proton-refused`, its code only); the reason is a fixed text of ours, never event content or Proton's text (Thunderbird never shows it, E08 §4.2; it is for curl and logs) |
   | 404 | a DELETE of a name that serves nothing (Thunderbird: success) |
-  | 503 + `Retry-After` | anything else: not serving, a pending calendar, an undecided write gate (M4-R39), Proton unavailable or rate limiting (its own `Retry-After` on a 429), a write not confirmed by the read-back; never a 4xx for a state that may pass (M3-R22) |
+  | 503 + `Retry-After` | anything else: not serving, a pending calendar, an undecided write gate (M4-R39), Proton unavailable or rate limiting (its own `Retry-After` on a 429), a write not confirmed by the read-back, an event whose UID Proton stores in another form than its text, a `clients.json` that cannot be read; never a 4xx for a state that may pass (M3-R22) |
 
   [verified: `TestMust10PutIs201Or204WithoutAnETag`,
   `TestMust10PreconditionsAre412AndUIDConflictsAre409`,
@@ -859,16 +931,19 @@ writes (PUT, DELETE) since M4.
   `TestShowClientMadeBeforeSealingIsNotRecoverable`, `TestClientCredentialsRedactThemselves`, `TestNoPasswordInLogs`,
   `TestClientShowJSONHidesThePasswordWithoutReveal`]. 401 with
   `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"`; 5 failures per minute per IP
-  (IPv4 /32, IPv6 /64) then 503. OPTIONS is answered without auth (M3-R23)
+  (IPv4 /32, IPv6 /64) then 503. A `clients.json` that cannot be read or parsed is not a wrong password: the
+  request answers 503 with `Retry-After: 30`, charges no limiter slot, and `pcb serve` logs the load error at
+  error level once per distinct failure (path and cause, no content; a repaired file works at once) [verified:
+  `TestCorruptClientsFileAnswersARetryLogsOnceAndChargesNoLimiter`]. OPTIONS is answered without auth (M3-R23)
   [verified: `TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge`; the client
   store and limiter: `internal/access` tests, e.g. `TestAddedPasswordChecksAndIsNeverStored`, `TestRemovedClientIsRefused`].
-- Limits: request bodies 8 MiB, XML names and attributes capped, multiget 1 000 hrefs,
+- Limits: PUT bodies 8 MiB, PROPFIND and REPORT bodies 1 MiB, a requested property name or namespace 256 bytes, XML names and attributes capped, multiget 1 000 hrefs,
   `calendar-data` in a PROPFIND Depth 1 or a sync-collection rendered for the first
   1 000 objects only (the others keep `getetag` and get `calendar-data` in a 404
-  propstat, M3-R35), `ReadHeaderTimeout` 10 s, no error text, Proton text or other
+  propstat, M3-R35), a name or namespace over 256 bytes refused 400 before any work, no cap on concurrent connections (parked, `OPEN.md`), `ReadHeaderTimeout` 10 s, no error text, Proton text or other
   users' IDs in bodies (a write refusal's `pcb:reason` is a fixed text of ours)
-  [verified: `TestBodiesOver8MiBAre413`,
-  `TestPropertyListsOver64NamesAre400`, `TestCalendarDataInListingsIsCapped`,
+  [verified: `TestPropfindAndReportBodiesOver1MiBAre413`,
+  `TestPropertyNamesAndNamespacesOver256BytesAre400`, `TestPropertyListsOver64NamesAre400`, `TestCalendarDataInListingsIsCapped`,
   `TestAvoidErrorTextInBodies`].
 - Library (E17, M3-R5): our own server. emersion/go-webdav v0.7.0 has no server-side
   sync-collection, `getctag` or `supported-report-set`, hard-codes privileges and
@@ -876,7 +951,7 @@ writes (PUT, DELETE) since M4.
   **test client only**, never in the binary [verified: `go version -m` of a build lists
   no go-webdav; `TestGoWebdavAndGoICalAreTestOnly`;
   `spec/experiments/E17-go-webdav-audit.md`].
-- Listener: `127.0.0.1:1080` by default; TLS (self-signed generated or user
+- Listener: `127.0.0.1:1080` by default; an IPv4 literal binds `tcp4` only (`0.0.0.0` does not also listen on `[::]`; `[::]` stays dual stack) [verified: `TestListenNetworkIsTCP4OnlyForIPv4Literals`]; a failed TLS handshake (a port scan) is logged at debug, not warning [verified: `TestServerErrorLogPutsFailedTLSHandshakesAtDebug`]; a stored certificate that is replaced by a new one logs a warning naming the old and the new fingerprint (the first generation and a reuse stay silent) [verified: `TestListenerTLSWarnsWhenAStoredCertificateIsReplaced`]; TLS (self-signed generated or user
   certificate) required for any non-loopback bind, decided on the resolved bind address;
   built in `pcb serve`, `[caldav]` in §14: TLS 1.2 or later; the generated certificate
   is ECDSA P-256, 825 days, in `<state>/tls/` (directory 0700, key 0600, checked at each
@@ -909,8 +984,9 @@ default, agents never on the control socket, audit log of every call.
 
 ## 13. A5 — CLI and ops
 
-Conventions (as backsight) [call]: every command has `--json` (one
-envelope `{schema_version, command, ok, data | error}`); state-changing
+Conventions (as backsight) [call]: every command has `--json` except `serve` and `service logs`, which refuse it (exit 2) (one
+envelope `{schema_version, command, ok, data | error}`; the four keys are always present, and `data` and `error` may both be set,
+see "Initial-version audit behaviour" below); state-changing
 setup commands have `--plan`; `--non-interactive` never prompts and exits 10
 naming what is missing; exit codes `0` done, `2` bad invocation, `10` you
 must act, `20` blocked by the machine, `30` failed and rolled back, `40`
@@ -925,7 +1001,7 @@ pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level L]   # sync loop 
 pcb service start|stop|restart|status|logs [-f] [--system|--user]   # M5: systemctl and journalctl, scope from what is installed
 pcb login [--username U] [--password-fd N] [--unattended-relogin]   # M5: through the running daemon when there is one
 pcb login resume (--captcha-token T | --totp)   # --totp takes no value: the 2FA code of the login the daemon holds comes from PCB_TOTP or a prompt, never argv (M5-P11)
-pcb logout
+pcb logout [--yes]                          # revokes the session; --yes discards a store pcb cannot read, without the confirmation (§7.3)
 pcb status [--daemon]                       # login state; with a daemon: its live state, listener, per-calendar sync and write gate, render counters, alerts (§15); --daemon exits 20 when none answers
 pcb calendar list                           # what Thunderbird will see; read_only is the write gate (M4-R1: false only for a normal calendar with the Write bit and a verified passphrase signature)
 pcb sync [--full] [--watch [--interval 30s]] # M2: fill/refresh the event cache (--watch not with --json)
@@ -940,6 +1016,44 @@ One account per daemon in v1 [call]; the data model keeps an account ID so a
 second one is an addition, not a migration.
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
+
+Initial-version audit behaviour (`spec/audits/2026-11-12-initial-version.md`; `internal/cli`, `internal/service`, `internal/doctor`):
+- Exit codes, one per failure in every command (`2` usage, `10` the user must act, `20` transient or no daemon): a key file that is
+  missing, of the wrong size, refused for its mode or unreadable by this user, a `secrets.sealed` that does not open or that a newer pcb wrote
+  (§7.3), an unreadable (`the login state file <path> cannot be read by this user`, naming owner and mode, hint `make it readable by <user> (or run pcb as its owner)`; only malformed JSON hints `pcb logout`), malformed or newer `state.json`, the root guard (§7.1) and a unit-unsafe path under `pcb install` (also under `--plan`) are all `10`;
+  another cause of a store failure (a full disk) stays `20`. `pcb status` is the exception: it reports a key fault (`secrets: unreadable`) and exits 0,
+  since it is the diagnosis command (an unreadable `state.json` still fails it, 10); `pcb logout` of a store it cannot read is the way out
+  [verified: `TestKeyAndStateFaultsAreExit10InEveryCommand`, `TestInstallPlanRefusesAPathAUnitCannotHoldWithExit10`].
+- `pcb sync` (and `--watch`) checks the login before it takes `sync.lock`: logged out it is exit 10 `not logged in to Proton` /
+  `run pcb login`. While `pcb serve` holds the lock and answers on its control socket, `pcb sync` is not needed and exits **0** with
+  `pcb serve is running and already syncs: see pcb status`; `--json` data is `{"calendars":[],"daemon_syncs":true}`. A holder that is not a
+  daemon (`pcb sync --watch`) keeps `a sync is already running` / `wait for it or stop pcb sync --watch` (exit 20). A second `pcb serve` is exit 20 `pcb serve is already running` / `run pcb status to see it` [verified:
+  `TestSyncAndASecondServeNameTheRunningDaemon`, `TestSyncChecksTheLoginBeforeTheRunningDaemon`, `TestServeRefusesWhileSyncRuns`].
+- Messages: one sentence for the cause, then `Hint:` with one runnable step; no Go error chain (a flag value that does not parse says
+  `invalid value "x" for --password-fd: it takes a whole number`, hint `run pcb login --help`; a port in use says `cannot listen on A: address already in use`);
+  an empty `pcb client list`, `calendar list` or `event list` says so and names the next step (`No CalDAV client yet.`, `No calendar yet.`, `No event cached for this calendar.` /
+  `No cached event in that range.`; the JSON is unchanged); Ctrl-D at a prompt ends the prompt line before the error; `login --help` shows
+  `--password-fd N` and `--username NAME` without a sentinel default [verified: `TestBadFlagValueSaysWhatTheFlagTakes`, `TestServePortInUseSaysWhyOnce`,
+  `TestEmptyListsSaySo`, `TestOSTerminalEndOfInputEndsThePromptLine`, `TestHelpOffersOnlyWhatTheCommandTakes`].
+- Commands that open the service print its warnings on **stderr** as `Warning: MESSAGE (key: value, …)` (and `Hint: …` when the record carries one;
+  `Error:` for an error record; nothing below warning), in text and in `--json` mode alike, so stdout stays one envelope. An `error` attribute prints
+  the message of a pcb error, else only the innermost cause, never the Go chain [verified: `TestCommandsPrintTheServiceWarningsOnStderr`,
+  `TestNoteLoggerPrintsWarningsInPcbsStyle`, `TestNoteLoggerPrintsNoGoChain`].
+- The JSON envelope: `data` carries what happened and `error` what stopped it, so both may be present: a CAPTCHA puts `captcha_token` and `captcha_url` in
+  `data` and the CAPTCHA error in `error` (`HUMAN-CHECKS.md` M1.3 reads `.data.captcha_token`), and a partial `pcb sync` (exit 40) carries its counts beside its error.
+  A usage failure before a command is resolved reports `"command": "pcb"`. A consumer reads `ok` first, then `error` when present, and uses `data` when present.
+- `pcb doctor` exit code: 0 when no result is an error (warnings never change it); otherwise 20 only when every error is transient (today only the `daemon` result when the control
+  socket cannot be dialled or answers badly), else 10. A control socket pcb refuses (a file that is not a socket, a symlink, another user's socket) is 10. The summary is `pcb doctor found N error(s)` with
+  hint `fix what the failed checks name (marked ✗), then run pcb doctor again`. The `needs-login` alert is a warning (`!`) while the daemon waits for a login, an
+  error otherwise; a bad `config.toml` is 10; per CalDAV client whose sealed password the key no longer opens, a warning `caldav client NAME: password cannot be shown`, fix
+  `pcb client rotate NAME` (not shown when the key file cannot be read or is missing beside `secrets.sealed`: the key file and secrets checks report that)
+  [verified: `TestDoctorExitCode`, `TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning`, `TestDoctorTransientDaemonErrorIsExit20`, `TestDoctorRefusedControlSocketIsExit10`,
+  `TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens`, `TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens`].
+- Platforms: **Linux amd64 and arm64 are supported** (§3). macOS (amd64, arm64) and Windows (amd64) build [verified: `GOOS=darwin go build ./cmd/pcb`, `GOOS=windows go build ./cmd/pcb`; CI vets
+  Windows] but are untested and unsupported (`pcb doctor` says `platform: GOOS/GOARCH: runs, unsupported`). Off Unix there is no file lock and no control socket, so the CLI runs
+  offline there: `version`, `status`, `doctor` and `client add`/`list` ran under wine in the audit, while `login`, `sync` and `serve` exit 20 (`login locking needs a Unix system`, `sync locking needs a Unix
+  system`, hint `run pcb on Linux or macOS`) [source: `filelock_other.go`, `listen_other.go`, the ux audit's wine run; no test runs off Linux]. macOS has the Unix lock and socket code but no service management:
+  `install` and `service` need systemd (exit 20, `systemd is not running here`), and the control socket path limit is 103 bytes there [source: §7.1; not run on macOS].
 
 M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 to R7, P16 to P19, P23):
 - `make install` puts `bin/pcb` at `$(PREFIX)/bin/pcb` (`PREFIX ?= $(HOME)/.local`).
@@ -996,8 +1110,9 @@ commit e5faeb8; the CI jobs have not run until the branch is pushed. Real system
 reboot and a real login are [assumed → step 7].]
 
 Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
-the container image locally (`make image`; the GHCR package `proton-calendar-bridge` is pushed by CI on main and stays
-private, so it is not pullable without credentials; the model is the author's headless Proton Mail Bridge container:
+the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
+and `:sha-<12 hex>`, first success 2026-11-12) and stays private, confirmed Private by the author on 2026-11-12 (`HUMAN-CHECKS.md` 7.8): pulling it needs
+`docker login ghcr.io` with a token that can read packages, and everyone else builds it with `make image`; the model is the author's headless Proton Mail Bridge container:
 one volume, `docker exec -it`). Updates and signed releases are not planned yet.
 
 Later, when public: `install.sh` downloads a signed release (minisign, as
@@ -1030,7 +1145,7 @@ Structured text logs on stderr (`log/slog` key=value lines, M3 `pcb serve`;
 no event content, no secrets; IDs only). `pcb serve` logs one `render counters`
 line per sync pass while a counter is non-zero, and once more when they change:
 `undecryptable` (placeholders served), `unverified` (rows marked
-`X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out) and
+`X-PCB-INTEGRITY:unverified`, §5.3), `duplicate_masters` (left out), `dropped_alarms` (malformed reminders left out) and
 `keys_error_ids` (calendars whose keys failed). Writes (M4) log warnings with
 IDs, fields and Proton codes only, never content: `refusing a write: a row's
 key packet changed since pcb first stored it` (calendar, row, field),
@@ -1038,14 +1153,33 @@ key packet changed since pcb first stored it` (calendar, row, field),
 concurrent change of its event`, `a write is not confirmed by the rows read
 back`, `a write is not confirmed: a row came back under other key packets`,
 `a write could not be read back`, and the adapter's `caldav: the service
-could not answer` for each 503. What a write normalised is logged at debug
+could not answer` for each 503. Every refused write (each 403, 409 and 412) logs one
+`refused a CalDAV write` warning (the same code and href at most once per 10 minutes, then with `repeated=N`) with `method`, `status`, `code` (`pcb:<code>`, `need-privileges`,
+`no-uid-conflict`, `precondition-failed`), `calendar`, `href` and a fixed `reason`, plus `conflict` (the other href) on a 409: never a body, summary, attendee or
+password; the adapter's early 412 (an `If-None-Match` naming no ETag, a blank `If-Match`) is decided before any service call, so its `calendar` is empty. The
+diagnostic warnings above still fire beside it for the same refusals (`HUMAN-CHECKS.md` greps them as stop conditions) [verified:
+`TestEachRefusedWriteLogsOneWarning`, `TestRefusedWritesAreLogged`]. CLI commands that open the service print its warnings on stderr (§13). A
+`clients.json` that cannot be loaded logs an error once per distinct failure (§9), and a failed
+`state.json` mirror write logs a warning with a pcb-worded `cause`, never the Go chain [verified: `TestFailedMirrorWriteIsLogged`]. What a write normalised is logged at debug
 (`write normalised`); `[log] level` or `pcb serve --log-level debug` (§14) prints it. Only the serving process holds
 the render counters, so since M5 `pcb status` and `pcb doctor` read them from the daemon's control socket (M3-R34, below)
 [verified: `TestServeLogsTheRenderCounters`, `TestServePassesCarryTheRenderCounters`].
 
+Render counters and the read path (initial-version audit; `internal/service/render.go`, `internal/ical`):
+- The status JSON's `render` object has five keys: `undecryptable`, `unverified`, `duplicate_masters`, `dropped_alarms`, `keys_errors`. The marks behind the first
+  four are per row, pruned to the rows of the listing (a deleted row stops counting at once, also in an incremental `Changes`; another calendar's rows are never pruned)
+  [verified: `TestRenderCountsFollowDeletedRows`, `TestRenderCountsFollowDeletedRowsInChanges`].
+- Two exception rows with one RECURRENCE-ID: the most recently edited is served, the others count in `duplicate_masters` [verified: `TestDuplicateExceptionMostRecentWins`].
+- C0 controls except HTAB (and DEL) are dropped from every served value, parameter and nested component; a property whose name holds one is dropped whole (TEXT `\n` escapes are untouched)
+  [verified: `TestMergeEventDropsControls`; `FuzzMergeEvent` asserts no control but CRLF line ends and HTAB].
+- A placeholder for a recurring timed row (RRULE or RECURRENCE-ID) is `DTSTART;TZID=<zone>:<local>` in the row's own zone when it is a tzdata zone, else UTC as before
+  [verified: `TestPlaceholderRecurringUsesTheRowZone`].
+- One malformed reminder (no Type, a Trigger that is not a duration) is dropped and counted in `dropped_alarms`; the event is still served, whereas the write path's validation stays strict
+  [verified: `TestApplyNotificationsDropsMalformedReminders`].
+
 Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v1/`, internal and versioned:
-  `GET /v1/status`, `POST /v1/login`, `POST /v1/login/totp`, `POST /v1/logout`. Each answer is one `output.Envelope`:
+  `GET /v1/status`, `POST /v1/login`, `POST /v1/login/totp`, `POST /v1/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request). Each answer is one `output.Envelope`:
   200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
   are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
   dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.
@@ -1073,13 +1207,14 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb status` keeps `service.Status`'s fields flat at the top level of its JSON (M5-P4) and adds `daemon` (null
   offline), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
   with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
-  Text lines: `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`, `listener:`, one `calendar:` line
+  Text lines: first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
+  (offline: `daemon: not running (offline view)`), `listener:`, one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
   the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the
   host: `pcb service start` where a unit is installed, the container's restart where `/.dockerenv` or `/run/.containerenv`
   exists, else `pcb serve` (final review M2) [verified: `TestStatusDaemonHintFitsTheHost`]. `pcb doctor` adds a `service`
   result (the installed unit's state) and a `daemon` result and lists the alerts when a daemon answers; offline it shows
-  none (a fresh, logged-out install must not exit 20). With a daemon answering, its `caldav listener` and `tls certificate`
+  none (a fresh, logged-out install must not exit 20); with a daemon waiting for a login it still exits 0, `needs-login` being a warning then (exit rule: §13) [verified: `TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning`]. With a daemon answering, its `caldav listener` and `tls certificate`
   report the daemon's listener (address, TLS, fingerprint, certificate end) rather than what `config.toml` predicts, and warn
   when the daemon serves another certificate than the one on disk (M5-R15 C4) [verified: `TestDoctorUsesTheDaemonsListener`,
   `TestCalDAVChecksPreferTheDaemonsListener`]. Its `key file` check opens and reads the key as pcb does: a key this user cannot
@@ -1094,8 +1229,8 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   (stable): `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
   Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
-  and why: closes the M4-R39 note), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
-  [verified: `TestAlerts`, `TestAlertsAreOrdered`].
+  and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. Testing
@@ -1180,6 +1315,8 @@ raw results (redacted), conclusion, and the decision it feeds.
 
 Nothing after M5 is planned [decided 0007].
 
+Initial-version audit (2026-11-12, main at 557fe84): six read-only auditors, 0 Critical, 17 Important, about 48 Minor findings; the Important ones and the Minors worth their cost are fixed on branch `audit-fixes`, the rest parked in `OPEN.md` ("Parked by the initial-version audit") or accepted, each with its reason in `spec/audits/2026-11-12-initial-version.md`.
+
 M2 delivered (2026-11-11): the SQLite cache (`internal/store/cache`, ciphertext rows only), the syncer (initial, feed-driven incremental, fallbacks), `pcb sync [--full] [--watch]`, `pcb event list`, the doctor cache check and `pcb-lab probe feed`. Partial: partial sync = exit 40 (M2-R11). Deferred: the live session against Proton (settles E04, E05, E07; `spec/HUMAN-CHECKS.md`); the core event loop (M2-R2, until E05); event decryption, the JSCalendar model (dropped, 0012), the iCalendar codec and E09 (M3, M2-R1); the daemon-side watch with idle slow-down (M5). Rulings recorded: M2-R1 decrypt/E09 to M3; M2-R2 no core loop; M2-R3 Action ignored; M2-R4 ETag over the canonical row; M2-R8 a refused row read makes the calendar resync in full; M2-R10 fallback gap 5 min; M2-R11 deferred counts as partial; M2-R12 Ctrl-C of watch exits 0; M2-R13 cache error classes.
 
 M3 delivered (2026-11-11, branch m3-caldav-read): event decryption and the iCalendar merge (`internal/proton/cards`, `internal/ical`), the render and sync-token layer in `service.Local.Serve`, `internal/caldav` (read-only CalDAV), `pcb client`, `pcb serve` with generated or user TLS, the doctor checks for listener, certificate and clients, E08 contract tests, E09 (offline), E17. Deferred: the live Thunderbird session and the live halves of E08/E09/E11 (after M4); writes (M4); the daemon behaviours (M5). Rulings recorded: M3-R1 privileges read+write on owned calendars, live session after M4; R2 iCalendar-native (decision 0012); R3 duplicate masters; R4 placeholders; R5 own server; R6 serve reads on the writer's handle; R9 to R12, R16 tokens and ETags; R15 writability from member permissions parked to M4; R17 to R21 client store and limiter; R22 to R26, R30 503 rather than 4xx; R28 to R32 `pcb serve` and TLS.
@@ -1237,6 +1374,8 @@ M5 additions:
   score printed by `systemd-analyze security` was 1.4 locally (not asserted).
 - Image: distroless static, UID 65532, no shell, one volume `/data` with 0700 directories [verified: `make container-smoke`
   steps 7 and 8]; the key file belongs on another mount (README, "Run in a container") [call].
+- Audit hardening (`spec/audits/2026-11-12-initial-version.md`): a corrupt `clients.json` fails closed (503, logged), request bodies and property names are bounded (§9), an IPv4 bind stays IPv4 only, a
+  replaced certificate is a warning, login calls have deadlines (§5.2), `synchronous=FULL` and a single-transaction migration keep the cache durable (§7.2), and a pcb run as root refuses another user's state (§7.1).
 - Decision 0013: whoever can read the state directory and the key file can recover the CalDAV passwords; the same
   access already exposes the Proton session, which is more sensitive.
 - Residual (documented): restoring the whole state directory, `state.json` included, defeats the rollback check (§7.3);

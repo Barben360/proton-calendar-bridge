@@ -12,7 +12,7 @@ import (
 // calendar. Any other report, or one of ours elsewhere, is 403
 // supported-report (ruling M3-R23); the service is not asked.
 func (s *server) report(w http.ResponseWriter, r *http.Request, t target) {
-	body, ok := readBody(w, r)
+	body, ok := readBody(w, r, maxQueryBody)
 	if !ok {
 		return
 	}

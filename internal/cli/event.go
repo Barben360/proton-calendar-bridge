@@ -56,7 +56,7 @@ func (a *app) newEventList() *cobra.Command {
 			if evs == nil {
 				evs = []service.Event{}
 			}
-			return Finish(cmd, eventData{evs}, eventTable(evs), nil)
+			return Finish(cmd, eventData{evs}, eventTable(evs, from != "" || to != ""), nil)
 		},
 	}
 	c.Flags().StringVar(&calendar, "calendar", "", "the calendar's ID or exact name (required)")
@@ -85,9 +85,22 @@ func parseWhen(flag, v string) (t *time.Time, date string, err error) {
 	return &parsed, date, nil
 }
 
+// noEventText and noEventInRangeText are pcb event list with nothing to
+// show: the cache, not Proton, is read.
+const (
+	noEventText        = "No event cached for this calendar.\nHint: run pcb sync to bring the cache up to date"
+	noEventInRangeText = "No cached event in that range.\nHint: widen --from and --to, or run pcb sync to bring the cache up to date"
+)
+
 // eventTable renders the events as aligned columns: times in the local
 // zone, all-day events as dates (the end date is exclusive).
-func eventTable(evs []service.Event) string {
+func eventTable(evs []service.Event, ranged bool) string {
+	switch {
+	case len(evs) == 0 && ranged:
+		return noEventInRangeText
+	case len(evs) == 0:
+		return noEventText
+	}
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "START\tEND\tALL-DAY\tRECURRING\tID")

@@ -67,6 +67,11 @@ type Result struct {
 	// Unusable: the stored pair could not be read or did not match, and was
 	// replaced (pcb serve warns: a new fingerprint to accept).
 	Unusable bool
+	// Replaced: a certificate was stored and this call replaced it (clients
+	// must accept a new fingerprint); PreviousFingerprint is the replaced
+	// one's, "" when it could not be read.
+	Replaced            bool
+	PreviousFingerprint string
 	// Repaired lists the paths whose too-wide modes were narrowed (the
 	// directory to 0700, the key to 0600).
 	Repaired []string
@@ -91,13 +96,17 @@ func SelfSigned(o Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	reason, unusable := "no certificate yet", false
+	reason, unusable, replaced, previous := "no certificate yet", false, false, ""
 	cert, leaf, err := LoadPair(CertPath(o.Dir), KeyPath(o.Dir))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		reason, unusable = "the stored certificate or key is unusable", true
+		reason, unusable, replaced = "the stored certificate or key is unusable", true, true
+		if old, rerr := ReadCertificate(CertPath(o.Dir)); rerr == nil {
+			previous = Fingerprint(old.Raw)
+		}
 	default:
+		replaced, previous = true, Fingerprint(leaf.Raw)
 		reason = staleReason(leaf, o, now)
 		if reason == "" {
 			fixed, err := secure(KeyPath(o.Dir), 0o600, false)
@@ -112,6 +121,7 @@ func SelfSigned(o Options) (Result, error) {
 		return Result{}, err
 	}
 	res.Generated, res.Reason, res.Unusable, res.Repaired = true, reason, unusable, repaired
+	res.Replaced, res.PreviousFingerprint = replaced, previous
 	return res, nil
 }
 

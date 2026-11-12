@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,13 +99,17 @@ func (a *app) newServe() *cobra.Command {
 			if !errors.Is(err, errStopCut) { // cut: the process ends with the loop still running
 				a.closeService(svc)
 			}
+			if a.daemonSyncs(cmd, err) {
+				// Exit 20 as any refused start (M5 plan: sync.lock refused).
+				return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("pcb serve is already running"), Hint: "run pcb status to see it"}
+			}
 			return err
 		},
 	}
 	c.Flags().StringVar(&listen, "listen", "", "HOST:PORT to listen on, over [caldav] listen (default "+config.DefaultListen+")")
 	c.Flags().StringVar(&logLevel, "log-level", "", "debug, info, warn or error, over [log] level (default info)")
 	c.Flags().BoolVar(&waitForLogin, "wait-for-login", false, "keep serving (CalDAV answers 503) while logged out or after the session ends, until a login")
-	return c
+	return NoJSON(c)
 }
 
 // waitingLine is what pcb serve --wait-for-login prints while it waits.
@@ -261,9 +267,9 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		return syncFinish(err)
 	}
 
-	ln, err := a.Listen("tcp", cc.Listen)
+	ln, err := a.Listen(listenNetwork(cc.Listen), cc.Listen)
 	if err != nil {
-		return finish(&exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot listen on %s: %w", cc.Listen, err),
+		return finish(&exitcode.Error{Code: exitcode.Blocked, Err: causeError("cannot listen on "+cc.Listen, err),
 			Hint: "stop what uses that address, or choose another with --listen or [caldav] listen"})
 	}
 	ip := bindIP(ln.Addr())
@@ -288,7 +294,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+		ErrorLog:          serverErrorLog(log),
 	}
 	served := make(chan error, 1)
 	go func() {
@@ -308,7 +314,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		// below, then finish waits on a loop that has already returned.
 		synced <- result
 	case err := <-served:
-		result = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("the CalDAV listener failed: %w", err),
+		result = &exitcode.Error{Code: exitcode.Blocked, Err: causeError("the CalDAV listener failed", err),
 			Hint: "run pcb serve again"}
 	}
 	if err := unlessCut(log, cut, func() error { stopListener(srv, log, drainTimeout); return nil }); err != nil {
@@ -316,6 +322,34 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}
 	return finish(result)
 }
+
+// causeError is msg, then the operating system's reason for err (such as
+// "address already in use"), without the Go operation and address it
+// repeats ("listen tcp 127.0.0.1:1080: bind: ..."; ux Minor). It unwraps to
+// err.
+func causeError(msg string, err error) error {
+	reason := err.Error()
+	var (
+		se *os.SyscallError
+		oe *net.OpError
+	)
+	switch {
+	case errors.As(err, &se):
+		reason = se.Err.Error()
+	case errors.As(err, &oe) && oe.Err != nil:
+		reason = oe.Err.Error()
+	}
+	return &wrapped{msg: msg + ": " + reason, err: err}
+}
+
+// wrapped is an error whose text is msg and whose cause is err.
+type wrapped struct {
+	msg string
+	err error
+}
+
+func (w *wrapped) Error() string { return w.msg }
+func (w *wrapped) Unwrap() error { return w.err }
 
 // startControl serves the control socket of d (d.Socket) on svc and
 // returns what stops it: it closes the socket, which removes it. Off Unix
@@ -446,6 +480,13 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 		}
 		if res.Unusable {
 			fmt.Fprintf(warn, "Warning: the stored self-signed certificate was unusable and was replaced: accept the new one in Thunderbird after checking its fingerprint %s\n", fingerprint)
+		}
+		if res.Replaced {
+			if res.PreviousFingerprint == "" {
+				res.PreviousFingerprint = "unknown"
+			}
+			log.Warn("the TLS certificate changed: Thunderbird will ask to confirm the new fingerprint",
+				"old_fingerprint", res.PreviousFingerprint, "new_fingerprint", fingerprint, "reason", res.Reason)
 		}
 		if res.Generated {
 			log.Info("tls certificate generated", "fingerprint", fingerprint, "reason", res.Reason, "not_after", notAfter)
@@ -584,7 +625,7 @@ func (rl *renderLog) log(log *slog.Logger, c *service.RenderCounts) {
 		return
 	}
 	rl.last = *c
-	attrs := []any{"undecryptable", c.Undecryptable, "unverified", c.Unverified, "duplicate_masters", c.DuplicateMasters}
+	attrs := []any{"undecryptable", c.Undecryptable, "unverified", c.Unverified, "duplicate_masters", c.DuplicateMasters, "dropped_alarms", c.DroppedAlarms}
 	if len(c.KeysErrors) > 0 {
 		attrs = append(attrs, "keys_error_ids", c.KeysErrors)
 	}
@@ -622,4 +663,37 @@ func logPass(log *slog.Logger, p service.WatchPass) {
 		return
 	}
 	log.Info("sync pass", attrs...)
+}
+
+// serverErrorLog is the http.Server's ErrorLog: a failed TLS handshake is a
+// port scan or a client that does not trust the certificate, unauthenticated
+// and unlimited, so it is Debug; anything else the server reports is Warn
+// (audit surface-M7).
+func serverErrorLog(log *slog.Logger) *stdlog.Logger {
+	return stdlog.New(errorLogWriter{log}, "", 0)
+}
+
+type errorLogWriter struct{ log *slog.Logger }
+
+func (w errorLogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSuffix(string(p), "\n")
+	level := slog.LevelWarn
+	if strings.HasPrefix(msg, "http: TLS handshake error") {
+		level = slog.LevelDebug
+	}
+	w.log.Log(context.Background(), level, msg)
+	return len(p), nil
+}
+
+// listenNetwork is the network pcb serve listens on: "tcp4" for an IPv4
+// literal, because Go's "tcp" on 0.0.0.0 also binds [::] and would expose
+// the port on every IPv6 address of a user who chose IPv4 (audit
+// surface-M1); "tcp" for [::], an empty host and names, which keep the dual
+// stack.
+func listenNetwork(listen string) string {
+	host, _, err := net.SplitHostPort(listen)
+	if ip := net.ParseIP(host); err == nil && ip != nil && ip.To4() != nil && !strings.Contains(host, ":") {
+		return "tcp4"
+	}
+	return "tcp"
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -177,6 +178,7 @@ func mapError(err error, keyFile string) error {
 		ae  *api.Error
 		ts  *loginguard.TooSoon
 		rb  *store.RolledBackError
+		use *store.UnsupportedError
 		ne  net.Error
 		ue  *url.Error
 	)
@@ -217,10 +219,12 @@ func mapError(err error, keyFile string) error {
 		return blocked("Proton's answer could not be authenticated", "retry later; if it persists, check for a proxy that rewrites traffic")
 	case errors.As(err, &rb):
 		return rolledBack(rb)
+	case errors.As(err, &use):
+		return unsupportedStore(use)
 	case errors.Is(err, seal.ErrNoKey):
-		return blocked("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
+		return mustAct("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
-		return blocked("the stored secrets cannot be opened with the key file "+keyFile, "restore both from a backup, or run pcb logout to discard the stored session and log in again")
+		return mustAct("the stored secrets cannot be opened with the key file "+keyFile, "restore both from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.As(err, &ts):
 		return blocked(ts.Error(), "retry in "+ts.Wait.Round(time.Second).String())
 	case errors.As(err, &ae):
@@ -244,6 +248,10 @@ func protonDown(e *api.Error) error {
 			Hint: "retry in " + wait}
 	case e.Status >= 500:
 		return classed(classProtonUnavailable, "Proton is unavailable", "try again later")
+	case e.Code == api.CodeHumanVerification:
+		// It never clears by waiting: a person completes it in a browser.
+		return classed(classRefused, "Proton asks for a human verification (code 9001)",
+			"open the Proton web app from this machine's network and complete the verification")
 	}
 	return classed(classRefused, fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
 }
@@ -255,6 +263,35 @@ func rolledBack(rb *store.RolledBackError) *exitcode.Error {
 	return loginNeeded(rb.Explain(), store.RolledBackHint)
 }
 
+// unsupportedStore is a secrets.sealed this pcb cannot open (state-I1): a
+// newer pcb wrote it, or another sealer sealed it. A person upgrades pcb;
+// nothing here discards it (pcb logout does, once confirmed).
+func unsupportedStore(e *store.UnsupportedError) *exitcode.Error {
+	return mustAct(e.Explain(), "upgrade pcb")
+}
+
+// CheckStateOwner refuses euid 0 on a state directory another user owns (a
+// system install's pcb user): every file root writes there would become
+// root's, and that user could no longer read it (state Minor). userName
+// names a UID (nil or failing: "#UID", which sudo takes too). A directory
+// that does not exist yet, or a system without owners, passes.
+func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, error)) error {
+	if euid != 0 {
+		return nil
+	}
+	uid, ok := store.DirOwner(stateDir)
+	if !ok || uid == 0 {
+		return nil
+	}
+	name, sudoName := "#"+strconv.Itoa(uid), "'#"+strconv.Itoa(uid)+"'"
+	if userName != nil {
+		if n, err := userName(uid); err == nil && n != "" {
+			name, sudoName = n, n
+		}
+	}
+	return mustAct("the state directory belongs to "+name+": run pcb as that user", "sudo -u "+sudoName+" pcb …")
+}
+
 // keyCause is why the key file or the sealed store could not be used, safe
 // to show (it never holds a secret): the OS error with its operation and
 // path (permission denied, read-only file system) or the key file's mode
@@ -262,18 +299,42 @@ func rolledBack(rb *store.RolledBackError) *exitcode.Error {
 func keyCause(err error) string {
 	var (
 		me *seal.KeyModeError
+		se *seal.KeySizeError
 		pe *fs.PathError
 		le *os.LinkError
 	)
 	switch {
 	case errors.As(err, &me):
 		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
+	case errors.As(err, &se):
+		return fmt.Sprintf("it holds %d bytes, not a 32-byte key", se.Size)
 	case errors.As(err, &pe):
 		return pe.Error()
 	case errors.As(err, &le):
 		return le.Error()
 	}
 	return ""
+}
+
+// keyFault reports whether err, a failure to use the key file or the
+// sealed store, is one a person repairs (ux-I3): a key file that is
+// missing, refused for its mode or size, not for this data, or that this
+// user may not read or write. It is exit 10 in every command (MustAct, so
+// systemd does not restart pcb serve); any other cause (a full disk) stays
+// Blocked, as it may pass.
+func keyFault(err error) bool {
+	var me *seal.KeyModeError
+	return errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || // a wrong size is ErrCorrupt
+		errors.As(err, &me) || errors.Is(err, fs.ErrPermission)
+}
+
+// keyFailure is a failure to use the key file or the sealed store, with
+// msg and hint: MustAct for a keyFault, else Blocked.
+func keyFailure(err error, msg, hint string) *exitcode.Error {
+	if keyFault(err) {
+		return mustAct(msg, hint)
+	}
+	return blocked(msg, hint)
 }
 
 // keyFix is the hint for a key file that cannot be used.
@@ -284,7 +345,7 @@ const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes,
 // that cannot be used.
 func storeError(err error, keyFile string) error {
 	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}
 	var ee *exitcode.Error
@@ -292,21 +353,28 @@ func storeError(err error, keyFile string) error {
 		return mapError(err, keyFile)
 	}
 	if cause := keyCause(err); cause != "" {
-		return blocked("cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
+		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
 	}
-	return blocked("cannot use the stored secrets", "check the permissions of the state directory, or run pcb logout to discard the stored session")
+	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
 }
 
 // stateError maps an unreadable state.json (it fails closed). A secrets
-// generation out of range was edited or damaged: a person resets it.
+// generation out of range was edited or damaged: a person resets it. A file
+// a newer pcb wrote is not damaged: a person upgrades pcb, and a logout,
+// which would revoke the session, is never suggested (state-I2).
 func stateError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return mapError(err, "")
+	case errors.Is(err, store.ErrNewerState):
+		return mustAct("state.json was written by a newer pcb", "upgrade pcb")
 	case errors.Is(err, store.ErrGenerationOutOfRange):
 		return mustAct("the login state file holds a secrets generation out of range: it was edited or damaged", "run pcb logout, then pcb login")
 	}
-	return blocked("the login state file cannot be read", "run pcb logout to reset it")
+	if path, ok := store.StateUnreadable(err); ok {
+		return mustAct(store.UnreadableStateMessage(path), store.UnreadableStateFix())
+	}
+	return mustAct("the login state file cannot be read", "run pcb logout to reset it")
 }
 
 // stateLockError maps a state-file lock that could not be taken

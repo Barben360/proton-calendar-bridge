@@ -47,9 +47,15 @@ func (a *app) newSync() *cobra.Command {
 				err := svc.WatchSync(cmd.Context(), req, interval, func(p service.WatchPass) {
 					a.printPass(cmd, p)
 				})
+				if a.daemonSyncs(cmd, err) {
+					return Finish(cmd, nil, daemonSyncsText, nil)
+				}
 				return Finish(cmd, nil, "", err)
 			}
 			res, err := svc.Sync(cmd.Context(), req)
+			if a.daemonSyncs(cmd, err) {
+				return Finish(cmd, syncByDaemon{Calendars: []service.CalendarSync{}, DaemonSyncs: true}, daemonSyncsText, nil)
+			}
 			if res.Calendars == nil {
 				res.Calendars = []service.CalendarSync{}
 			}
@@ -65,6 +71,33 @@ func (a *app) newSync() *cobra.Command {
 	return c
 }
 
+// daemonSyncsText is what pcb sync says when pcb serve holds the sync
+// lock: there is nothing to do, the daemon syncs by itself (ux-I1).
+const daemonSyncsText = "pcb serve is running and already syncs: see pcb status"
+
+// syncByDaemon is pcb sync's data when pcb serve syncs instead: no
+// calendar synced by this command.
+type syncByDaemon struct {
+	Calendars   []service.CalendarSync `json:"calendars"`
+	DaemonSyncs bool                   `json:"daemon_syncs"`
+}
+
+// daemonSyncs reports whether err is the sync lock refused
+// (service.ErrSyncRunning) while a pcb serve answers on the control
+// socket: that daemon holds the lock and syncs by itself. Another holder
+// (pcb sync --watch) keeps err.
+func (a *app) daemonSyncs(cmd *cobra.Command, err error) bool {
+	if !errors.Is(err, service.ErrSyncRunning) {
+		return false
+	}
+	c, derr := a.daemon(cmd)
+	if derr != nil || c == nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
 // printPass writes one watch pass: a timestamped line per calendar on
 // stdout, or the failure of a pass that got nowhere on stderr with when
 // the next pass runs. The failure the watch stops on (Next 0) is left to
@@ -75,7 +108,7 @@ func (a *app) printPass(cmd *cobra.Command, p service.WatchPass) {
 		fmt.Fprintln(cmd.OutOrStdout(), syncText(p.Result, stamp+" "))
 		return
 	}
-	if p.Err == nil || p.Next == 0 {
+	if p.Next == 0 {
 		return
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "%s sync failed: %s; next try in %s\n", stamp, p.Err, p.Next.Round(time.Second))

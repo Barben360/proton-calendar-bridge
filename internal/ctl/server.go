@@ -246,10 +246,17 @@ func (s *Server) submitTOTP(ctx context.Context, body []byte) (any, error) {
 	return s.API.SubmitTOTP(ctx, req.Code)
 }
 
-// logout is POST /v1/logout: service.API.Logout, which also sends a Serve
-// with --wait-for-login back to waiting (ruling M5-R8).
-func (s *Server) logout(ctx context.Context, _ []byte) (any, error) {
-	return s.API.Logout(ctx)
+// logout is POST /v1/logout: service.API.Logout on the body, a
+// service.LogoutRequest (none from an older pcb: the zero request), which
+// also sends a Serve with --wait-for-login back to waiting (ruling M5-R8).
+func (s *Server) logout(ctx context.Context, body []byte) (any, error) {
+	var req service.LogoutRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, errBadBody
+		}
+	}
+	return s.API.Logout(ctx, req)
 }
 
 // oneLogin takes the login slot, or refuses at once while another login

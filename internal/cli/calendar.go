@@ -41,9 +41,15 @@ func (a *app) newCalendarList() *cobra.Command {
 	}
 }
 
+// noCalendarText is pcb calendar list for an account without a calendar.
+const noCalendarText = "No calendar yet.\nHint: create one in the Proton Calendar web app, then run pcb calendar list again"
+
 // calendarTable renders the calendars as aligned columns. ACCESS is rw or ro,
 // DEFAULT is * for the default calendar and - otherwise.
 func calendarTable(cals []service.Calendar) string {
+	if len(cals) == 0 {
+		return noCalendarText
+	}
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tTYPE\tACCESS\tDEFAULT\tKEYS\tID")

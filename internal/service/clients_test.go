@@ -21,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -270,7 +271,7 @@ func TestClientsSurviveLogout(t *testing.T) { // ruling M3-R17
 	t.Parallel()
 	e := newClientsEnv(t)
 	sec, _ := e.svc.AddClient(t.Context(), "Phone")
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1"); !ok {
@@ -430,7 +431,7 @@ func TestPasswordStaysRecoverableAcrossLogout(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
 	before := e.show(t, "")
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if after := e.show(t, ""); !after.Recoverable || after.Password != before.Password {
@@ -715,7 +716,7 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := e.svc.AddClient(t.Context(), "Laptop")
-		wantCode(t, err, exitcode.Blocked)
+		wantCode(t, err, exitcode.MustAct) // ux-I3: a key fault is the person's to repair
 		if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), key) {
 			t.Errorf("mode %04o: error %q, want the key file and %q", c.mode, err, c.want)
 		}
@@ -724,5 +725,142 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(exitcode.HintOf(err), "rotate") {
 			t.Errorf("mode %04o: show error %v, hint %q; want %q and no rotate", c.mode, err, exitcode.HintOf(err), c.want)
 		}
+	}
+	// ux-M: a key of the wrong size names its size, as the mode and the
+	// permission do.
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.AddClient(t.Context(), "Laptop")
+	wantCode(t, err, exitcode.MustAct)
+	const want = "the client's password could not be sealed with the key file "
+	if got := err.Error(); got != want+key+" (it holds 5 bytes, not a 32-byte key), so nothing was stored" {
+		t.Errorf("wrong size: error %q, want the size named", got)
+	}
+	if h := exitcode.HintOf(err); h != "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)" {
+		t.Errorf("wrong size: hint %q", h)
+	}
+}
+
+// A clients.json that cannot be parsed is a state that can pass, not a wrong
+// password: every request, the valid one included, is a 503 wait; it is
+// logged once per distinct failure (path and cause, no content) and no
+// failure is charged to the remote (audit surface-I2).
+func TestCorruptClientsFileAnswersARetryLogsOnceAndChargesNoLimiter(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	clk := &clock{now: t0}
+	buf := &syncBuffer{}
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg, Now: clk.Now, Sleep: clk.Sleep,
+		Logger: slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	sec, err := svc.AddClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dirs.State, "clients.json")
+	if err := os.WriteFile(file, []byte(`{bad SECRET-CONTENT`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 { // far more than the limiter's 5
+		ok, wait := svc.CheckClient(t.Context(), sec.Password, "203.0.113.5:1")
+		if ok || wait <= 0 {
+			t.Fatalf("request %d: ok=%v wait=%v, want refused with a retry wait", i, ok, wait)
+		}
+	}
+	logs := func() string { buf.mu.Lock(); defer buf.mu.Unlock(); return buf.b.String() }
+	got := logs()
+	if n := strings.Count(got, "clients.json cannot be loaded"); n != 1 {
+		t.Fatalf("%d error lines for 20 requests, want 1:\n%s", n, got)
+	}
+	for _, want := range []string{"level=ERROR", file, "not valid JSON"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "SECRET-CONTENT") || strings.Contains(got, sec.Password) {
+		t.Errorf("log leaks content:\n%s", got)
+	}
+	// Repaired: the same password passes at once, so nothing was charged.
+	if err := os.WriteFile(file, []byte(`{"version":2,"clients":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, wait := svc.CheckClient(t.Context(), "wrong", "203.0.113.5:1")
+	if ok || wait != 0 {
+		t.Fatalf("after the repair: ok=%v wait=%v, want a plain refusal (the limiter was not charged)", ok, wait)
+	}
+	// A different failure is logged again.
+	if err := os.WriteFile(file, []byte(`{"version":99,"clients":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc.CheckClient(t.Context(), "x", "203.0.113.5:1") //nolint:errcheck // result not under test
+	if n := strings.Count(logs(), "clients.json cannot be loaded"); n != 2 {
+		t.Errorf("%d error lines after a second distinct failure, want 2", n)
+	}
+}
+
+// A clients.json that cannot be loaded shows in the login status, which
+// feeds the clients-file-unreadable alert of pcb status and the daemon's
+// health (A12); a good or missing file shows nothing.
+func TestStatusNamesAClientsFileThatCannotBeLoaded(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	st, err := svc.Status(t.Context())
+	if err != nil || st.ClientsFile != "" {
+		t.Fatalf("no clients file: %+v, %v", st, err)
+	}
+	file := filepath.Join(dirs.State, "clients.json")
+	if err := os.MkdirAll(dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(`{bad`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = svc.Status(t.Context()); err != nil || st.ClientsFile != file {
+		t.Fatalf("corrupt clients file: ClientsFile %q, %v, want %q", st.ClientsFile, err, file)
+	}
+}
+
+// pcb event list with no cache while logged out says to log in (pcb sync
+// would only answer "not logged in"); once logged in it says to sync (A12).
+func TestEventsWithNoCacheNameTheLoginWhenLoggedOut(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = "http://127.0.0.1:1"
+	svc, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	_, err = svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	wantCode(t, err, exitcode.MustAct)
+	if h := exitcode.HintOf(err); h != "run pcb login" {
+		t.Errorf("logged out: %v, hint %q, want run pcb login", err, h)
+	}
+	if err := store.SaveState(dirs.State, store.State{Phase: store.PhaseReady}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
+	if h := exitcode.HintOf(err); h != "run pcb sync" {
+		t.Errorf("logged in, no cache: %v, hint %q, want run pcb sync", err, h)
 	}
 }

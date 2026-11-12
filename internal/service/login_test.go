@@ -560,7 +560,7 @@ func TestLogoutRevokesAndWipes(t *testing.T) {
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
 	acc := e.account(t)
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || !res.WasLoggedIn || !res.Revoked {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -578,7 +578,7 @@ func TestLogoutRevokesAndWipes(t *testing.T) {
 func TestLogoutWhenLoggedOut(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{})
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || res.WasLoggedIn || res.Revoked {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -591,7 +591,7 @@ func TestLogoutClearsPendingCaptcha(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{Captcha: "chal"})
 	e.login(t, e.req())
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || res.WasLoggedIn {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -608,7 +608,7 @@ func TestLogoutUnreadableStoreWipesLocally(t *testing.T) {
 	if err := os.Remove(e.cfg.Secrets.KeyFile); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || !res.WasLoggedIn || res.Revoked {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -754,7 +754,7 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			e.svc = e.open(t)
 			return login(nil)(t, e)
 		}},
-		{"unreadable store", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+		{"unreadable store", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			e.login(t, e.req())
 			if err := os.Remove(e.cfg.Secrets.KeyFile); err != nil {
 				t.Fatal(err)
@@ -762,7 +762,7 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			e.clk.advance(61 * time.Second)
 			return login(nil)(t, e)
 		}},
-		{"malformed state", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+		{"malformed state", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -782,12 +782,12 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			e.f.FailNext("POST", "/auth/v4", 422, int(gpa.HumanValidationInvalidToken), 0)
 			return login(func(r *service.LoginRequest) { r.CaptchaToken = "stale-token" })(t, e)
 		}},
-		{"failing logout", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+		{"failing logout", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			e.login(t, e.req())
 			if err := os.WriteFile(e.secrets().Path, []byte(`{"version":99,"sealer":"keyfile","data":""}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := e.svc.Logout(t.Context())
+			_, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 			return err
 		}},
 		{"unwritable state", protontest.Options{TwoFA: true}, exitcode.Blocked, func(t *testing.T, e *env) error {
@@ -885,7 +885,7 @@ func TestLogoutWipesEvenWhenCancelled(t *testing.T) {
 	e.login(t, e.req())
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	res, err := e.svc.Logout(ctx)
+	res, err := e.svc.Logout(ctx, service.LogoutRequest{})
 	if err != nil || !res.WasLoggedIn {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -897,23 +897,79 @@ func TestLogoutWipesEvenWhenCancelled(t *testing.T) {
 	}
 }
 
-func TestLogoutKeepsStoreItCannotJudge(t *testing.T) {
+// A store this pcb cannot read (state-I1) cannot be revoked: a logout
+// refuses to forget it unasked, saying so and how to end the session (exit
+// 10), and keeps everything; with Discard it wipes it like a lost key.
+func TestLogoutOfAStoreThisPcbCannotRead(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name, envelope, cause string
+	}{
+		{"newer pcb", `{"version":99,"sealer":"keyfile","data":""}`, "secrets.sealed was written by a newer pcb"},
+		{"other sealer", `{"version":2,"sealer":"tpm2","data":""}`, `secrets.sealed is sealed with "tpm2", which this pcb cannot use`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, protontest.Options{})
+			e.login(t, e.req())
+			if err := os.WriteFile(e.secrets().Path, []byte(tc.envelope), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
+			ee := wantExit(t, err, exitcode.MustAct)
+			if want := tc.cause + ", so pcb cannot revoke the Proton session"; ee.Error() != want {
+				t.Errorf("message = %q, want %q", ee.Error(), want)
+			}
+			if want := "end the session in the Proton web app (Settings → Security → Sessions), then run pcb logout --yes"; ee.Hint != want {
+				t.Errorf("hint = %q, want %q", ee.Hint, want)
+			}
+			if _, err := os.Stat(e.secrets().Path); err != nil {
+				t.Errorf("secrets.sealed was removed: %v", err)
+			}
+			if st := e.loadState(t); st.Phase != store.PhaseReady {
+				t.Errorf("state = %+v, want it untouched", st)
+			}
+			if got, err := e.svc.Status(t.Context()); err != nil || got.Secrets != service.SecretsUnsupported || got.Reason != tc.cause {
+				t.Errorf("status secrets %q reason %q (%v), want %q %q", got.Secrets, got.Reason, err, service.SecretsUnsupported, tc.cause)
+			}
+
+			res, err := e.svc.Logout(t.Context(), service.LogoutRequest{Discard: true})
+			if err != nil || !res.WasLoggedIn || res.Revoked {
+				t.Fatalf("Logout(Discard) = %+v, %v; want logged out locally, not revoked", res, err)
+			}
+			if _, err := os.Stat(e.secrets().Path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("secrets.sealed after the discard: %v", err)
+			}
+			if st := e.loadState(t); st.Phase != store.PhaseLoggedOut {
+				t.Errorf("state after the discard = %+v", st)
+			}
+		})
+	}
+}
+
+// A store unreadable for another reason (permissions) is kept, and the
+// hint fixes the cause instead of looping back to logout (exit 10).
+func TestLogoutKeepsAStoreItCannotRead(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file")
+	}
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
-	// A format this build does not know is not a lost key: keep the file.
-	if err := os.WriteFile(e.secrets().Path, []byte(`{"version":99,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+	if err := os.Chmod(e.secrets().Path, 0); err != nil {
 		t.Fatal(err)
 	}
-	_, err := e.svc.Logout(t.Context())
-	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint == "" {
-		t.Error("no hint")
+	t.Cleanup(func() { _ = os.Chmod(e.secrets().Path, 0o600) })
+	_, err := e.svc.Logout(t.Context(), service.LogoutRequest{Discard: true})
+	ee := wantExit(t, err, exitcode.MustAct) // ux-I3: a person fixes the permission
+	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": permission denied), so they were kept"; ee.Error() != want {
+		t.Errorf("message = %q, want %q", ee.Error(), want)
+	}
+	if want := "make secrets.sealed in " + e.dirs.State + " readable by the user pcb runs as, then run pcb logout again"; ee.Hint != want {
+		t.Errorf("hint = %q, want %q", ee.Hint, want)
 	}
 	if _, err := os.Stat(e.secrets().Path); err != nil {
 		t.Errorf("secrets.sealed was removed: %v", err)
-	}
-	if st := e.loadState(t); st.Phase != store.PhaseReady {
-		t.Errorf("state = %+v, want it untouched", st)
 	}
 }
 
@@ -924,7 +980,7 @@ func TestLogoutWipesCorruptStore(t *testing.T) {
 	if err := os.WriteFile(e.secrets().Path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || !res.WasLoggedIn || res.Revoked {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -943,7 +999,7 @@ func TestEveryMethodAfterCloseIsBlocked(t *testing.T) {
 	calls := map[string]func() error{
 		"Login":       func() error { _, err := e.svc.Login(ctx, e.req()); return err },
 		"SubmitTOTP":  func() error { _, err := e.svc.SubmitTOTP(ctx, "123456"); return err },
-		"Logout":      func() error { _, err := e.svc.Logout(ctx); return err },
+		"Logout":      func() error { _, err := e.svc.Logout(ctx, service.LogoutRequest{}); return err },
 		"Status":      func() error { _, err := e.svc.Status(ctx); return err },
 		"Calendars":   func() error { _, err := e.svc.Calendars(ctx); return err },
 		"Collections": func() error { _, err := e.svc.Collections(ctx); return err },
@@ -1069,7 +1125,7 @@ func TestLogoutWipesRolledBackSecrets(t *testing.T) {
 	e.login(t, e.req())
 	acc := e.account(t)
 	old := restoreOlderSecrets(t, e)
-	res, err := e.svc.Logout(t.Context())
+	res, err := e.svc.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || !res.WasLoggedIn || res.Revoked {
 		t.Fatalf("Logout = %+v, %v", res, err)
 	}
@@ -1117,7 +1173,7 @@ func TestLogoutOverMalformedStateKeepsTheGeneration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.dirs.State, "state.json"), []byte("{damaged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut || st.SecretsGeneration != 2 {
@@ -1150,7 +1206,7 @@ func TestGenerationOutOfRangeNeedsALogout(t *testing.T) {
 		ee.Hint != "run pcb logout, then pcb login" {
 		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
 	}
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	e.clk.advance(61 * time.Second)
@@ -1188,7 +1244,7 @@ func TestRolledBackSecretsRevokeTheHeldSession(t *testing.T) {
 			}
 		},
 		"logout": func(t *testing.T, e *env) {
-			if res, err := e.svc.Logout(t.Context()); err != nil || !res.WasLoggedIn {
+			if res, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil || !res.WasLoggedIn {
 				t.Fatalf("Logout = %+v, %v", res, err)
 			}
 		},
@@ -1261,7 +1317,7 @@ func TestLogoutAtTheGenerationBoundRecovers(t *testing.T) {
 	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "rolled-back" {
 		t.Fatalf("Status = %+v, %v", s, err)
 	}
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	if s, err := e.svc.Status(t.Context()); err != nil || s.Phase != "logged-out" {

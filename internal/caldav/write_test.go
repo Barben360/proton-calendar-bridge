@@ -12,10 +12,13 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	"github.com/emersion/go-webdav"
 	webdavcaldav "github.com/emersion/go-webdav/caldav"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -916,5 +920,83 @@ func TestAMovedAliasLeavesADeletedObjectsHrefToo(t *testing.T) {
 	changed, deleted := listed(t, r.syncReport(t, cal, tok))
 	if len(changed) != 1 || changed[objPath(cal, "y@x")] == "" || len(deleted) != 1 || deleted[0] != alt {
 		t.Errorf("the delta: changed %v, deleted %v; want y@x.ics changed and x@x deleted at %s", changed, deleted, alt)
+	}
+}
+
+// syncLog is a log the service and the handler may write at once.
+type syncLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *syncLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// A write the service refuses is logged once by the handler (write-I1),
+// end to end: Thunderbird's create with an attendee (pcb:attendee-change)
+// and its edit of an event holding a personal part (pcb:personal-part,
+// write-I3), each one warning with its code, calendar and href, and
+// neither the event's text nor its attendee.
+func TestRefusedWritesAreLogged(t *testing.T) {
+	t.Parallel()
+	var cal string
+	alarm := []string{"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "DESCRIPTION:x", "END:VALARM"}
+	r := newServingRig(t, func(f *protontest.Fake) {
+		cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"})
+		f.AddEvent(cal, protontest.Event{UID: "p@x", Start: base, End: base + 3600, Color: green, PersonalAlarms: true,
+			Card: card("p@x", "Quarterly numbers", base, alarm...)})
+	})
+	logs := &syncLog{}
+	r.h = caldav.Handler(r.svc, caldav.Options{Logger: slog.New(slog.NewTextHandler(logs, nil))})
+
+	invite := thunderbird("new@x", "Secret board meeting", "ORGANIZER:mailto:user@proton.me", "ATTENDEE;CN=Ann Example:mailto:ann@example.org")
+	if got := precondition403(t, r.put(calPath(cal)+"new@x.ics", invite, "If-None-Match", "*")); got != "attendee-change" {
+		t.Fatalf("an invitation: pcb precondition %q", got)
+	}
+	edited := strings.Replace(r.body(t, objPath(cal, "p@x")), "SUMMARY:Quarterly numbers", "SUMMARY:Quarterly results", 1)
+	rec := r.put(objPath(cal, "p@x"), edited, "If-Match", r.etag(t, objPath(cal, "p@x")))
+	if got := precondition403(t, rec); got != "personal-part" {
+		t.Fatalf("an edit of a row with a personal part: pcb precondition %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "<pcb:reason xmlns:pcb=\"urn:pcb\">this event has per-user data pcb cannot rewrite yet</pcb:reason>") {
+		t.Errorf("403 body %q", rec.Body)
+	}
+	if n := r.sent(); n != 0 {
+		t.Errorf("%d requests reached Proton's write endpoint, want none", n)
+	}
+
+	var lines []string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, `msg="refused a CalDAV write"`) {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("log:\n%s\nwant two refusal lines", logs)
+	}
+	for i, want := range [][]string{
+		{"level=WARN", "code=pcb:attendee-change", "calendar=" + strconv.Quote(cal), "href=" + objPath(cal, "new@x")},
+		{"level=WARN", "code=pcb:personal-part", "calendar=" + strconv.Quote(cal), "href=" + objPath(cal, "p@x"),
+			`reason="this event has per-user data pcb cannot rewrite yet"`},
+	} {
+		for _, a := range want {
+			if !strings.Contains(lines[i], a) {
+				t.Errorf("line %q lacks %q", lines[i], a)
+			}
+		}
+	}
+	for _, bad := range []string{"Secret board", "Quarterly", "Ann Example", "ann@example.org", r.pass} {
+		if strings.Contains(logs.String(), bad) {
+			t.Errorf("the log carries %q:\n%s", bad, logs)
+		}
 	}
 }

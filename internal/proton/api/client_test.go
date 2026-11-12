@@ -743,3 +743,54 @@ func TestNotSentOnlyBeforeTheRequestCanLeave(t *testing.T) {
 		t.Errorf("reset after send: %v, want an error that is not ErrNotSent", err)
 	}
 }
+
+// TestParseRetryAfter: both forms of the header (RFC 9110 §10.2.3), clamped
+// to an hour; a past date, garbage or nothing is 0.
+func TestParseRetryAfter(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	date := func(d time.Duration) string { return now.Add(d).Format(http.TimeFormat) }
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"120", 120 * time.Second},
+		{" 7 ", 7 * time.Second},
+		{date(90 * time.Second), 90 * time.Second},
+		{date(48 * time.Hour), time.Hour},
+		{"99999999999999999999999", time.Hour},
+		{"-99999999999999999999999", 0},
+		{date(-time.Minute), 0},
+		{"-5", 0},
+		{"soon", 0},
+		{"", 0},
+	} {
+		h := http.Header{}
+		if c.value != "" {
+			h.Set("Retry-After", c.value)
+		}
+		if got := api.ParseRetryAfter(h, now); got != c.want {
+			t.Errorf("Retry-After %q: %v, want %v", c.value, got, c.want)
+		}
+	}
+}
+
+// TestRetryAfterDateHonoured: a 429 whose Retry-After is an HTTP date waits
+// until that date, not the 1 s back-off.
+func TestRetryAfterDateHonoured(t *testing.T) {
+	var n atomic.Int32
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", time.Now().Add(30*time.Second).UTC().Format(http.TimeFormat))
+			reply(w, 429, `{"Code":85131,"Error":"Too many requests"}`)
+			return
+		}
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{})
+	if err := c.Get(t.Context(), "/p", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n.Load() != 2 || len(s.d) != 1 || s.d[0] < 25*time.Second || s.d[0] > 30*time.Second {
+		t.Fatalf("requests=%d sleeps=%v; want one wait of about 30 s", n.Load(), s.d)
+	}
+}

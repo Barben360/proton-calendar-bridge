@@ -64,7 +64,14 @@ type served struct {
 	log     *slog.Logger
 }
 
-func notSynced() error { return mustAct("no events are cached yet", "run pcb sync") }
+// notSynced is the answer when no cache exists: logged out, the step is the
+// login (pcb sync would only say "not logged in"), else a sync.
+func (l *Local) notSynced() error {
+	if st, err := store.LoadState(l.o.Dirs.State); err == nil && (st.Phase == store.PhaseLoggedOut || st.Phase == store.PhaseNeedsLogin) {
+		return mustAct("no events are cached yet: not logged in", "run pcb login")
+	}
+	return mustAct("no events are cached yet", "run pcb sync")
+}
 
 // readCache returns the cache to read and the function releasing it: Serve's
 // handle while Serve runs (for the account it serves only), else a read-only
@@ -117,7 +124,7 @@ func (l *Local) withCache(fn func(*cache.Cache) error) error {
 	}
 	defer release()
 	if db == nil {
-		return notSynced()
+		return l.notSynced()
 	}
 	return fn(db)
 }
@@ -291,7 +298,7 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 		return nil, err
 	}
 	if len(known) == 0 {
-		return nil, notSynced()
+		return nil, l.notSynced()
 	}
 	if len(ids) > 0 {
 		if err := l.ensureKeys(ctx, ids); err != nil {
@@ -398,6 +405,17 @@ func liveIn(groups []cache.Listed) func(string) bool {
 	return func(uid string) bool { return live[uid] }
 }
 
+// liveRows reports whether a row ID is one of groups'.
+func liveRows(groups []cache.Listed) func(string) bool {
+	live := map[string]bool{}
+	for _, g := range groups {
+		for _, r := range g.Rows {
+			live[r.ID] = true
+		}
+	}
+	return func(id string) bool { return live[id] }
+}
+
 // Objects implements API: every object of the calendar with its ETag, and
 // the sync token of that state, from one read transaction. Outside Serve
 // it opens the cache read-only for the call; during Serve it reads Serve's
@@ -417,6 +435,7 @@ func (l *Local) Objects(ctx context.Context, calID string) ([]ObjectInfo, string
 			}
 			out, token = infos(groups, ck, n), syncToken(v.Epoch(), position(v), ck.gen)
 			l.r.keepDuplicates(calID, liveIn(groups))
+			l.r.keepRows(calID, func(string) bool { return true }, liveRows(groups))
 			return nil
 		})
 		return l.cacheFail(err)
@@ -571,6 +590,12 @@ func (l *Local) Changes(ctx context.Context, calID, token string) (ChangeSet, er
 			}
 			if full {
 				l.r.keepDuplicates(calID, liveIn(changed))
+				l.r.keepRows(calID, func(string) bool { return true }, liveRows(changed))
+			} else {
+				// A delta forgets the rows it reports gone: a deleted UID's,
+				// and a changed UID's rows that no longer exist.
+				scope := liveIn(changed)
+				l.r.keepRows(calID, func(uid string) bool { return scope(uid) || slices.Contains(deleted, uid) }, liveRows(changed))
 			}
 			for _, uid := range deleted {
 				l.r.noteDuplicates(calID, uid, 0)

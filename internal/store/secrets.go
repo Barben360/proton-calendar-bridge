@@ -78,6 +78,40 @@ const RolledBackHint = "if you restored it on purpose, run pcb logout, then pcb 
 // pcb doctor): Error and its cause.
 func (e *RolledBackError) Explain() string { return e.Error() + ": it was restored or replaced" }
 
+// ErrUnsupported means secrets.sealed is a store this build cannot open:
+// written by a newer pcb (an envelope version it does not know) or sealed by
+// a sealer it does not have. Load returns it as an *UnsupportedError. Unlike
+// a lost key, a newer pcb can still read it, so nothing discards it unasked.
+var ErrUnsupported = errors.New("secrets.sealed cannot be opened by this pcb")
+
+// UnsupportedError is ErrUnsupported with its cause: Newer when the version
+// is above the one this build writes, else Sealer names the other sealer.
+type UnsupportedError struct {
+	Newer  bool
+	Sealer string // as the file names it, unchecked
+}
+
+func (e *UnsupportedError) Error() string { return e.Explain() }
+
+// Unwrap makes errors.Is(err, ErrUnsupported) hold.
+func (e *UnsupportedError) Unwrap() error { return ErrUnsupported }
+
+// maxSealerShown bounds the sealer name an explanation quotes: the file is
+// not trusted to hold a short or printable one.
+const maxSealerShown = 32
+
+// Explain is the cause, safe to show (pcb status, the service's errors).
+func (e *UnsupportedError) Explain() string {
+	if e.Newer {
+		return "secrets.sealed was written by a newer pcb"
+	}
+	name := e.Sealer
+	if r := []rune(name); len(r) > maxSealerShown {
+		name = string(r[:maxSealerShown]) + "…"
+	}
+	return fmt.Sprintf("secrets.sealed is sealed with %q, which this pcb cannot use", name)
+}
+
 type envelope struct {
 	Version int    `json:"version"`
 	Sealer  string `json:"sealer"`
@@ -164,11 +198,13 @@ func (s *Secrets) decode(raw []byte) (map[string]Account, uint64, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, 0, fmt.Errorf("%s: not a sealed store: %w", s.Path, seal.ErrCorrupt)
 	}
-	if env.Version != 1 && env.Version != secretsVersion {
-		return nil, 0, fmt.Errorf("%s: unsupported version %d", s.Path, env.Version)
-	}
-	if env.Sealer != s.Sealer.Name() {
-		return nil, 0, fmt.Errorf("%s is sealed with %q, not %q", s.Path, env.Sealer, s.Sealer.Name())
+	switch {
+	case env.Version > secretsVersion:
+		return nil, 0, &UnsupportedError{Newer: true}
+	case env.Version < 1:
+		return nil, 0, fmt.Errorf("%s: envelope version %d: %w", s.Path, env.Version, seal.ErrCorrupt)
+	case env.Sealer != s.Sealer.Name():
+		return nil, 0, &UnsupportedError{Sealer: env.Sealer}
 	}
 	plain, err := s.Sealer.Open(env.Data, aad(env.Version, env.Sealer))
 	if err != nil {
@@ -258,8 +294,27 @@ func (s *Secrets) setMirror(ctx context.Context, gen uint64) {
 	})
 	if err != nil && s.Log != nil {
 		s.Log().Warn("the secrets generation could not be recorded in state.json; a restored secrets.sealed goes unnoticed until the next write",
-			"generation", gen, "error", err.Error())
+			"generation", gen, "cause", stateWriteCause(err))
 	}
+}
+
+// stateWriteCause is why state.json could not be updated, in pcb's words
+// and secret-free: the lock held too long, a newer or damaged file, or the
+// operating system's reason (permission denied, no space left on device),
+// never the Go error chain (ruling A11).
+func stateWriteCause(err error) string {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, ErrStateLock) && errors.Is(err, context.DeadlineExceeded):
+		return "another pcb process held the state-file lock (state.lock) too long"
+	case errors.Is(err, ErrNewerState):
+		return ErrNewerState.Error()
+	case errors.Is(err, ErrGenerationOutOfRange):
+		return "state.json holds a secrets generation out of range"
+	case errors.As(err, &pe):
+		return "state.json or its lock cannot be used: " + pe.Err.Error()
+	}
+	return "state.json cannot be read or written"
 }
 
 // Wipe removes the sealed file under the store lock (a logout, or a store
@@ -291,12 +346,19 @@ func (s *Secrets) Wipe(ctx context.Context) (next uint64, err error) {
 }
 
 // wipe removes the file, then the mirror moves (the callers): a load racing
-// the removal never sees the new mirror with the old file. removed reports
+// the removal never sees the new mirror with the old file. The directory is
+// fsynced, so a power loss does not bring the file back. removed reports
 // whether there was a file.
 func (s *Secrets) wipe() (removed bool, err error) {
 	err = os.Remove(s.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
+	if err == nil {
+		syncDir(s.stateDir())
+	}
 	return err == nil, err
 }
+
+// syncDir fsyncs a directory, best effort; tests watch it.
+var syncDir = atomicfile.SyncDir

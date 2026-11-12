@@ -192,7 +192,7 @@ type logoutAPI struct {
 	s *sysRig
 }
 
-func (a *logoutAPI) Logout(context.Context) (service.LogoutResult, error) {
+func (a *logoutAPI) Logout(context.Context, service.LogoutRequest) (service.LogoutResult, error) {
 	_, err := os.Stat(a.s.logoutEnv[1])
 	a.s.mu.Lock()
 	a.s.events = append(a.s.events, "logout (state present: "+map[bool]string{true: "yes", false: "no"}[err == nil]+")")
@@ -992,6 +992,24 @@ func TestInstallSystemFollowsASymlinkedStateDir(t *testing.T) {
 	for _, st := range s.data().Steps {
 		if st.Path == "/var/lib/pcb" && st.Action != "keep" {
 			t.Errorf("rerun: %s, want keep", st)
+		}
+	}
+}
+
+// ux Minor: a home a systemd unit cannot hold (a space, a non-ASCII
+// letter) is refused with its reason, exit 10: a person picks other paths,
+// and --plan shows the refusal as it is.
+func TestInstallPlanRefusesAPathAUnitCannotHoldWithExit10(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ home, char string }{{"/home/alice smith", `' ' (U+0020)`}, {"/home/josé", `'é' (U+00E9)`}} {
+		s := newSysRig(t)
+		s.env["HOME"] = c.home
+		s.want(exitcode.MustAct, "install", "--plan")
+		want := "Error: the config directory, " + c.home + "/.config/pcb, holds " + c.char +
+			": pcb writes into a systemd unit only paths made of ASCII letters, digits and /._-+@,:=~\n" +
+			"Hint: set PCB_CONFIG_DIR and PCB_STATE_DIR, or move the binary, to such paths\n"
+		if got := s.errb.String(); got != want {
+			t.Errorf("HOME=%q: stderr %q, want %q", c.home, got, want)
 		}
 	}
 }

@@ -26,6 +26,35 @@ type Property struct {
 // Line is the unfolded content line.
 func (p Property) Line() string { return p.Name + p.Params + ":" + p.Value }
 
+// UnescapeText is a TEXT value unescaped (RFC 5545 §3.3.11): "\\", "\;",
+// "\," and "\n" or "\N" (a newline) become what they stand for; any other
+// backslash is kept as written. Values are otherwise kept escaped, as
+// written; this is for comparing a value with its unescaped form (a UID
+// as Proton's column may hold it, SPEC §5.3).
+func UnescapeText(v string) string {
+	if !strings.Contains(v, `\`) {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' || i+1 == len(v) {
+			b.WriteByte(v[i])
+			continue
+		}
+		switch c := v[i+1]; c {
+		case '\\', ';', ',':
+			b.WriteByte(c)
+		case 'n', 'N':
+			b.WriteByte('\n')
+		default:
+			b.WriteByte('\\')
+			continue
+		}
+		i++
+	}
+	return b.String()
+}
+
 // Item is a property or a nested component (Comp != nil), in source order.
 type Item struct {
 	Prop Property

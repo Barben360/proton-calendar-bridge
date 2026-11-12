@@ -132,11 +132,15 @@ func (c *Client) SubmitTOTP(ctx context.Context, code string) (service.LoginResu
 }
 
 // Logout asks the daemon to log out (service.API.Logout).
-func (c *Client) Logout(ctx context.Context) (service.LogoutResult, error) {
+func (c *Client) Logout(ctx context.Context, req service.LogoutRequest) (service.LogoutResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
+	b, err := json.Marshal(req)
+	if err != nil {
+		return service.LogoutResult{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("cannot encode the logout request"), Hint: "use the pcb of the same version as the daemon"}
+	}
 	var res service.LogoutResult
-	err := c.do(ctx, http.MethodPost, "/v1/logout", nil, &res)
+	err = c.do(ctx, http.MethodPost, "/v1/logout", b, &res)
 	return res, err
 }
 

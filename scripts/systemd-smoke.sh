@@ -137,6 +137,16 @@ jq -e '.data.active_state == "active"' <<<"$out" >/dev/null || fail "unexpected 
 step "u5. pcb status --json --daemon: needs-login"
 wait_status as_tester "$pcb" status --json --daemon
 
+step "u5b. pcb doctor while the daemon waits for a login: exit 0, needs-login a warning (ux-I2)"
+out=$(as_tester "$pcb" doctor) || fail "pcb doctor failed ($?) on a fresh install: $out"
+grep -q '^!  alert needs-login: not logged in to Proton$' <<<"$out" || fail "doctor's needs-login line: $out"
+grep -q '^✓  service: user: active$' <<<"$out" || fail "doctor's service line: $out"
+
+step "u5c. pcb sync while logged out: exit 10, run pcb login (ux-I1)"
+code=0
+out=$(as_tester "$pcb" sync 2>&1) || code=$?
+[ "$code" = 10 ] && grep -q '^Hint: run pcb login$' <<<"$out" || fail "pcb sync: exit $code: $out"
+
 step "u6. CalDAV with a client: 503"
 pw=$(as_tester "$pcb" client add smoke --json | jq -r '.data.password // empty')
 [ -n "$pw" ] || fail "pcb client add smoke --json gave no password"

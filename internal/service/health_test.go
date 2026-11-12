@@ -66,11 +66,11 @@ func TestHealthOutsideServeIsStopped(t *testing.T) {
 // zero, and Health carries them.
 func TestRenderCountsJSONKeys(t *testing.T) {
 	t.Parallel()
-	b, err := json.Marshal(service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3, KeysErrors: []string{"c1"}})
+	b, err := json.Marshal(service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3, DroppedAlarms: 4, KeysErrors: []string{"c1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"undecryptable":1,"unverified":2,"duplicate_masters":3,"keys_errors":["c1"]}`; string(b) != want {
+	if want := `{"undecryptable":1,"unverified":2,"duplicate_masters":3,"dropped_alarms":4,"keys_errors":["c1"]}`; string(b) != want {
 		t.Errorf("RenderCounts JSON %s, want %s", b, want)
 	}
 	e := newEnv(t, protontest.Options{})
@@ -85,8 +85,8 @@ func TestRenderCountsJSONKeys(t *testing.T) {
 	if err := json.Unmarshal(b, &top); err != nil {
 		t.Fatal(err)
 	}
-	if string(top.Render["keys_errors"]) != "[]" || len(top.Render) != 4 || string(top.Cals) != "[]" {
-		t.Errorf("Health JSON %s: want render with four keys, keys_errors and calendars as empty lists", b)
+	if string(top.Render["keys_errors"]) != "[]" || len(top.Render) != 5 || string(top.Cals) != "[]" {
+		t.Errorf("Health JSON %s: want render with five keys, keys_errors and calendars as empty lists", b)
 	}
 }
 

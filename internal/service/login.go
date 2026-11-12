@@ -140,7 +140,12 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 	p, err := auth.Begin(ctx, l.mgr, req.Username, []byte(req.Password), req.CaptchaToken)
 	if err != nil {
 		var ce *auth.CaptchaError
-		if errors.As(err, &ce) {
+		switch {
+		case errors.As(err, &ce) && last.Phase == store.PhaseReady:
+			// The stored session still works: the person gets the CAPTCHA
+			// and its token, and state.json stays as it was (state-I4).
+			return captchaResult(ce, req.Username), nil
+		case errors.As(err, &ce):
 			return l.needsCaptcha(ctx, ce, last, now, req.Username)
 		}
 		return LoginResult{}, l.fail(err)
@@ -208,13 +213,13 @@ func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), 
 	if err := os.MkdirAll(l.o.Dirs.State, 0o700); err != nil {
 		return nil, now, acquireError(err, l.o.Dirs.State)
 	}
-	release, err := loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now)
+	release, err := loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now, l.log())
 	if d, ok := loginguard.WaitFor(err); ok && wait {
 		if err := l.o.Sleep(ctx, d); err != nil {
 			return nil, now, l.fail(err)
 		}
 		now = now.Add(d)
-		release, err = loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now)
+		release, err = loginguard.Acquire(l.o.Dirs.State, loginguard.MinInterval, now, l.log())
 	}
 	if err != nil {
 		return nil, now, acquireError(err, l.o.Dirs.State)
@@ -235,7 +240,11 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 	if err := store.SaveStateContext(ctx, l.o.Dirs.State, st); err != nil {
 		return LoginResult{}, l.stateWriteError(err)
 	}
-	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}, nil
+	return captchaResult(ce, username), nil
+}
+
+func captchaResult(ce *auth.CaptchaError, username string) LoginResult {
+	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}
 }
 
 // finish runs what follows SRP: the 2FA code, the keys, the sealing. A failure
@@ -295,6 +304,10 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	keyPass, err := keys.DeriveKeyPass(user, addrs, salts, pl.password)
 	if err != nil {
 		return LoginResult{}, err
+	}
+	defer clear(keyPass) // sealed below; the account copy shares it
+	if l.keyPassHook != nil {
+		l.keyPassHook(keyPass)
 	}
 	// The client's tokens, not p.Tokens: a refresh during the key calls spent
 	// the refresh token SRP returned.

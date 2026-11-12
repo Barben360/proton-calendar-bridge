@@ -22,6 +22,8 @@ import (
 
 	"modernc.org/sqlite" // the "sqlite" driver
 	sqlitelib "modernc.org/sqlite/lib"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
 // ErrNotFound is returned by Raw for an unknown event.
@@ -159,7 +161,9 @@ func Open(path, accountID string) (*Cache, error) {
 		return nil, err
 	}
 	// Create the file ourselves so its mode never depends on the umask;
-	// SQLite gives -wal and -shm the mode of the main file.
+	// SQLite gives -wal and -shm the mode of the main file when it creates
+	// them. A file restored or copied with another mode is put back to 0600,
+	// its -wal and -shm too: they hold event metadata and ciphertext.
 	f, err := os.OpenFile(abs, os.O_RDWR|os.O_CREATE, 0o600)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, &IOError{Err: fmt.Errorf("directory %s does not exist: create the state directory first: %w", filepath.Dir(abs), err)}
@@ -167,11 +171,20 @@ func Open(path, accountID string) (*Cache, error) {
 	if err != nil {
 		return nil, ioError(err)
 	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, ioError(err)
+	}
 	if err := f.Close(); err != nil {
 		return nil, ioError(err)
 	}
+	for _, side := range []string{abs + "-wal", abs + "-shm"} {
+		if err := os.Chmod(side, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, ioError(err)
+		}
+	}
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "_txlock=immediate" +
-		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"}
+		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("cache: %w", err)
@@ -205,30 +218,8 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 		}
 	}
-	hadPins, err := c.hasTable(ctx, "pins")
-	if err != nil {
-		return fmt.Errorf("cache: read %s: %w", path, c.classify(err))
-	}
-	if version < schemaVersion {
-		err := c.tx(ctx, func(tx *sql.Tx) error {
-			for _, ddl := range []string{schemaV1, schemaV2} {
-				if _, err := tx.ExecContext(ctx, ddl); err != nil {
-					return err
-				}
-			}
-			_, err := tx.ExecContext(ctx, `PRAGMA user_version = `+strconv.Itoa(schemaVersion))
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("cache: create schema: %w", c.classify(err))
-		}
-	}
-	if !hadPins {
-		// A version 1 file, or a version 2 file of a build before the pins:
-		// its stored rows are the first seen.
-		if err := c.tx(ctx, func(tx *sql.Tx) error { return backfillPins(ctx, tx) }); err != nil {
-			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
-		}
+	if err := c.migrate(ctx, version); err != nil {
+		return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 	}
 	// Read first: opening for the same account must not take the write lock.
 	if got, err := c.account(ctx, c.db); err != nil {
@@ -240,7 +231,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return fmt.Errorf("cache: %w", err)
 		}
 	}
-	err = c.tx(ctx, func(tx *sql.Tx) error {
+	err := c.tx(ctx, func(tx *sql.Tx) error {
 		got, err := c.account(ctx, tx)
 		if err != nil {
 			return err
@@ -265,6 +256,99 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		return fmt.Errorf("cache: record account: %w", c.classify(err))
 	}
 	return nil
+}
+
+// The steps of a migration, as migrateStep sees them.
+const (
+	migrateSchema = "schema" // the tables created, user_version set
+	migratePins   = "pins"   // the stored rows pinned
+)
+
+// migrateStep, when set, runs after each step of a migration, inside its
+// transaction; an error aborts it as a crash there would (tests).
+var migrateStep func(step string) error
+
+// migrate brings a file of schema version to schemaVersion in one
+// transaction (state-I6): the tables, the pins of the stored rows and
+// user_version commit together or not at all, so a crash, SQLITE_BUSY or a
+// full disk half way leaves the file as it was and the next open migrates it
+// in full. The stored rows are pinned (they are the first seen) when the
+// file has rows and no pins: a version 1 file, a version 2 file of a build
+// before the pins, or one the old two-transaction migration left with an
+// empty pins table (a crash between its two steps). The backfill keeps any
+// pin there is, so it is idempotent. Both are decided again under the write
+// lock, since another process may have migrated the file meanwhile.
+func (c *Cache) migrate(ctx context.Context, version int) error {
+	backfill, err := needsPins(ctx, c.db, version)
+	if err != nil || (version >= schemaVersion && !backfill) {
+		return err
+	}
+	return c.tx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			return err
+		}
+		backfill, err := needsPins(ctx, tx, version)
+		if err != nil {
+			return err
+		}
+		if version < schemaVersion {
+			for _, ddl := range []string{schemaV1, schemaV2} {
+				if _, err := tx.ExecContext(ctx, ddl); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `PRAGMA user_version = `+strconv.Itoa(schemaVersion)); err != nil {
+				return err
+			}
+			if err := step(migrateSchema); err != nil {
+				return err
+			}
+		}
+		if backfill {
+			if err := backfillPins(ctx, tx); err != nil {
+				return err
+			}
+			if err := step(migratePins); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// needsPins reports whether a file of schema version needs its stored rows
+// pinned: it has rows and no pins (no pins table, or an empty one), or it is
+// a version 2 file without the pins table at all (which the backfill
+// creates; a lower version gets it from the schema).
+func needsPins(ctx context.Context, q querier, version int) (bool, error) {
+	var pinsTable, eventsTable int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE name = 'pins'), count(*) FILTER (WHERE name = 'events')
+		FROM sqlite_master WHERE type = 'table'`).Scan(&pinsTable, &eventsTable); err != nil {
+		return false, err
+	}
+	if pinsTable == 0 && version >= schemaVersion {
+		return true, nil
+	}
+	if eventsTable == 0 {
+		return false, nil
+	}
+	var found bool
+	if pinsTable > 0 {
+		// The pins first: a file with pins (every file but the ones above)
+		// never reads its events here.
+		if err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pins)`).Scan(&found); err != nil || found {
+			return false, err
+		}
+	}
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM events)`).Scan(&found)
+	return found, err
+}
+
+func step(name string) error {
+	if migrateStep == nil {
+		return nil
+	}
+	return migrateStep(name)
 }
 
 // errNoEpoch: the cache has no epoch yet (a file written before it existed).
@@ -476,8 +560,12 @@ func Remove(path string) error {
 			return err
 		}
 	}
+	syncDir(filepath.Dir(path))
 	return nil
 }
+
+// syncDir fsyncs a directory, best effort; tests watch it.
+var syncDir = atomicfile.SyncDir
 
 // tx runs fn in one immediate (write-locking) transaction.
 func (c *Cache) tx(ctx context.Context, fn func(*sql.Tx) error) error {

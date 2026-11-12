@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -293,7 +295,7 @@ func (c ClientsCheck) Run(context.Context) Result {
 	switch {
 	case err != nil:
 		r.Status, r.Message = StatusError, err.Error()
-		r.Fix = "check clients.json in " + shellquote.Quote(c.StateDir) + " (valid JSON in the format pcb wrote, mode 0600), or remove it and add the clients again"
+		r.Fix = "fix or restore " + shellquote.Quote(filepath.Join(c.StateDir, "clients.json")) + " (pcb client list shows the error)"
 	case len(list) == 0:
 		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", noClientFix(loggedIn(c.StateDir))
 	case len(list) == 1:
@@ -302,6 +304,57 @@ func (c ClientsCheck) Run(context.Context) Result {
 		r.Status, r.Message = StatusOK, fmt.Sprintf("%d clients", len(list))
 	}
 	return r
+}
+
+// SealedClientsCheck warns, per CalDAV client, when the key file no
+// longer opens the sealed copy of its password (a new key file, an edited
+// clients.json): pcb client show cannot give it, and only a rotation does
+// (ux Minor, parked M5). A key file that cannot be read at all is the key
+// file check's to report, and a missing one beside secrets.sealed the
+// secrets check's (a rotation is refused then): no warning here.
+type SealedClientsCheck struct {
+	StateDir string
+	KeyFile  string
+}
+
+// Name implements Check.
+func (SealedClientsCheck) Name() string { return "caldav client" }
+
+// Run implements Check: the first warning, or ok.
+func (c SealedClientsCheck) Run(ctx context.Context) Result {
+	if rs := c.RunAll(ctx); len(rs) > 0 {
+		return rs[0]
+	}
+	return Result{Name: c.Name(), Status: StatusOK, Message: "every sealed password opens"}
+}
+
+// RunAll implements Multi: one warning per client whose password cannot be
+// shown, none when all can.
+func (c SealedClientsCheck) RunAll(context.Context) []Result {
+	kf := &seal.KeyFile{Path: c.KeyFile}
+	switch err := kf.Check(); {
+	case err == nil:
+	case errors.Is(err, fs.ErrNotExist) && !exists(filepath.Join(c.StateDir, "secrets.sealed")):
+		// Lost with no session sealed: a rotation makes a new key.
+	default:
+		return nil
+	}
+	st := access.NewStore(c.StateDir, nil)
+	st.Sealer = kf
+	list, err := st.List()
+	if err != nil {
+		return nil // the clients check reports it
+	}
+	var out []Result
+	for _, cl := range list {
+		_, err := st.Reveal(cl.ID, kf.Open)
+		if err == nil || errors.Is(err, access.ErrNoSealedCopy) || !errors.Is(err, access.ErrNotRecoverable) {
+			continue
+		}
+		out = append(out, Result{Name: c.Name() + " " + cl.Name, Status: StatusWarn,
+			Message: "password cannot be shown", Fix: "pcb client rotate " + shellquote.Quote(cl.Name)})
+	}
+	return out
 }
 
 // noClientFix is what to run when no CalDAV client exists (decision 0013):

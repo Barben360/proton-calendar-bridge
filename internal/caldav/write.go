@@ -22,6 +22,9 @@ package caldav
 //	    unavailable or rate limiting (its own Retry-After), or the write is
 //	    not confirmed (ruling M3-R22: never a 4xx for a state that passes)
 //
+// Each 412, 409 and 403 above is a refusal, logged once at warning level
+// (refuse, audit write-I1).
+//
 // A write may run longer than the listener's timeouts allow a read
 // (ruling M4-R42): PUT and DELETE extend their connection's write deadline
 // to writeBudget, so a write that landed delivers its answer.
@@ -60,10 +63,10 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 	}
 	cond, ok := precondition(r)
 	if !ok {
-		empty(w, http.StatusPreconditionFailed)
+		s.refuse(w, r, "", preconditionRefusal())
 		return
 	}
-	body, ok := readBody(w, r)
+	body, ok := readBody(w, r, maxBody)
 	if !ok {
 		return
 	}
@@ -73,7 +76,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 		return
 	}
 	if c.ReadOnly && !c.WriteGateUndecided {
-		needPrivileges(w, r)
+		s.refuse(w, r, c.ID, privilegesRefusal(r))
 		return
 	}
 	res, err := s.api.PutObject(r.Context(), c.ID, t.name, body, cond)
@@ -92,7 +95,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request, t target) {
 func (s *server) delete(w http.ResponseWriter, r *http.Request, t target) {
 	cond, ok := precondition(r)
 	if !ok {
-		empty(w, http.StatusPreconditionFailed)
+		s.refuse(w, r, "", preconditionRefusal())
 		return
 	}
 	extendDeadline(w)
@@ -101,7 +104,7 @@ func (s *server) delete(w http.ResponseWriter, r *http.Request, t target) {
 		return
 	}
 	if c.ReadOnly && !c.WriteGateUndecided {
-		needPrivileges(w, r)
+		s.refuse(w, r, c.ID, privilegesRefusal(r))
 		return
 	}
 	if err := s.api.DeleteObject(r.Context(), c.ID, t.name, cond); err != nil {
@@ -118,13 +121,18 @@ func calendarBody(contentType string) bool {
 	return err == nil && mt == "text/calendar"
 }
 
-// precondition reads If-Match (an ETag compared as an exact string, or
-// "*") and If-None-Match: "*", or the ETags it names (the service compares
-// them weakly with the object's, and a missing object passes, RFC 9110
-// §13.1.2). An If-None-Match with no ETag in it is false: the request is
-// answered 412 without being tried.
+// precondition reads If-Match (the service compares its list of ETags
+// strongly, or "*"), from one header or several, and If-None-Match: "*", or
+// the ETags it names (the service compares them weakly with the object's,
+// and a missing object passes, RFC 9110 §13.1.2). An If-Match or an
+// If-None-Match present with no ETag in it (empty, blank or only commas:
+// RFC 9110 makes each a non-empty list) is false: the request is answered
+// 412 without being tried, never written unconditionally.
 func precondition(r *http.Request) (service.Precondition, bool) {
-	cond := service.Precondition{IfMatch: strings.TrimSpace(r.Header.Get("If-Match"))}
+	cond := service.Precondition{IfMatch: strings.TrimSpace(strings.Join(r.Header.Values("If-Match"), ","))}
+	if _, present := r.Header["If-Match"]; present && strings.Trim(cond.IfMatch, ", \t") == "" {
+		return cond, false
+	}
 	inm := strings.TrimSpace(strings.Join(r.Header.Values("If-None-Match"), ","))
 	if inm == "" {
 		return cond, true
@@ -154,14 +162,13 @@ func (s *server) writeFail(w http.ResponseWriter, r *http.Request, c service.Col
 	)
 	switch {
 	case errors.Is(err, service.ErrPreconditionFailed):
-		empty(w, http.StatusPreconditionFailed)
+		s.refuse(w, r, c.ID, preconditionRefusal())
 	case errors.As(err, &conflict):
-		xmlError(w, http.StatusConflict, `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:no-uid-conflict>`+
-			hrefXML(objectHref(c.ID, conflict.Href))+"</C:no-uid-conflict></D:error>")
+		s.refuse(w, r, c.ID, conflictRefusal(c.ID, conflict.Href))
 	case errors.Is(err, service.ErrNotWritable):
-		needPrivileges(w, r)
+		s.refuse(w, r, c.ID, privilegesRefusal(r))
 	case errors.As(err, &refusal):
-		refuse(w, refusal)
+		s.refuse(w, r, c.ID, pcbRefusal(refusal))
 	case errors.Is(err, service.ErrNoSuchObject), errors.Is(err, service.ErrNoSuchCalendar):
 		empty(w, http.StatusNotFound)
 	default:
@@ -169,29 +176,86 @@ func (s *server) writeFail(w http.ResponseWriter, r *http.Request, c service.Col
 	}
 }
 
-// needPrivileges answers a write to a read-only calendar: 403 with the
+// writeRefusal is a write the bridge refuses, answered with a 4xx the docs
+// list (412, 409, 403): its status and XML body ("" for none), and what
+// the log says of it, a code and a reason that are fixed text of ours.
+type writeRefusal struct {
+	status       int
+	body         string
+	code, reason string
+	conflict     string // 409: the href of the object holding the UID or the name
+}
+
+// refuse answers a refused write and logs it, the one place that does
+// (write-I1): a client may never show the answer (Thunderbird with offline
+// support retries it silently, E08 §4.2), so each refusal is one warning
+// naming the code, the calendar (calID; "" for a request refused before
+// any calendar is looked up), the object's href as requested and the
+// reason. The same code and href is logged at most once per refusalWindow, the
+// next line after it carrying repeated=N. Never the body, the event's content or the credentials.
+func (s *server) refuse(w http.ResponseWriter, r *http.Request, calID string, e writeRefusal) {
+	attrs := []any{"method", r.Method, "status", e.status, "code", e.code, "calendar", calID, "href", r.URL.EscapedPath(), "reason", e.reason}
+	if e.conflict != "" {
+		attrs = append(attrs, "conflict", e.conflict)
+	}
+	if repeated, ok := s.refusals.allow(e.code, r.URL.EscapedPath()); ok {
+		if repeated > 0 {
+			attrs = append(attrs, "repeated", repeated)
+		}
+		s.log.Warn("refused a CalDAV write", attrs...)
+	}
+	if e.body == "" {
+		empty(w, e.status)
+		return
+	}
+	xmlError(w, e.status, e.body)
+}
+
+// preconditionRefusal: If-Match or If-None-Match does not hold (412, no
+// body).
+func preconditionRefusal() writeRefusal {
+	return writeRefusal{status: http.StatusPreconditionFailed, code: "precondition-failed",
+		reason: "the If-Match or If-None-Match precondition does not hold on the object"}
+}
+
+// conflictRefusal: the UID lives at another name of calendar calID, or the
+// name holds another UID: 409 with the no-uid-conflict naming href, the
+// object that holds it (RFC 4791 §5.3.2.1).
+func conflictRefusal(calID, href string) writeRefusal {
+	return writeRefusal{status: http.StatusConflict,
+		body: `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:no-uid-conflict>` +
+			hrefXML(objectHref(calID, href)) + "</C:no-uid-conflict></D:error>",
+		code: "no-uid-conflict", reason: "the UID or the name belongs to another object of the calendar", conflict: objectHref(calID, href)}
+}
+
+// privilegesRefusal answers a write to a read-only calendar: 403 with the
 // privilege the request lacks (RFC 3744 need-privileges): write-content on
 // the object for a PUT, unbind on the calendar for a DELETE.
-func needPrivileges(w http.ResponseWriter, r *http.Request) {
+func privilegesRefusal(r *http.Request) writeRefusal {
 	href, privilege := r.URL.EscapedPath(), "<D:write-content/>"
 	if r.Method == http.MethodDelete {
 		href, privilege = path.Dir(strings.TrimSuffix(href, "/"))+"/", "<D:unbind/>"
 	}
-	forbidden(w, `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource>`+hrefXML(href)+
-		"<D:privilege>"+privilege+"</D:privilege></D:resource></D:need-privileges></D:error>")
+	return writeRefusal{status: http.StatusForbidden,
+		body: `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource>` + hrefXML(href) +
+			"<D:privilege>" + privilege + "</D:privilege></D:resource></D:need-privileges></D:error>",
+		code: "need-privileges", reason: "the calendar is read only"}
 }
 
 // pcbNamespace holds the bridge's own preconditions.
 const pcbNamespace = "urn:pcb"
 
-// refuse answers a change the bridge refuses: 403 with its pcb precondition
-// (the code without its "pcb:" prefix, in the urn:pcb namespace) and its
-// reason, which is ours, short and fixed (service.WriteRefusal).
-func refuse(w http.ResponseWriter, e *service.WriteRefusal) {
+// pcbRefusal answers a change the bridge refuses: 403 with its pcb
+// precondition (the code without its "pcb:" prefix, in the urn:pcb
+// namespace) and its reason, which is ours, short and fixed
+// (service.WriteRefusal).
+func pcbRefusal(e *service.WriteRefusal) writeRefusal {
 	local, ok := strings.CutPrefix(e.Code, "pcb:")
 	if !ok || !ncName(local) {
 		local = "refused"
 	}
-	forbidden(w, `<D:error xmlns:D="DAV:"><pcb:`+local+` xmlns:pcb="`+pcbNamespace+`"/><pcb:reason xmlns:pcb="`+pcbNamespace+`">`+
-		text(e.Reason)+"</pcb:reason></D:error>")
+	return writeRefusal{status: http.StatusForbidden,
+		body: `<D:error xmlns:D="DAV:"><pcb:` + local + ` xmlns:pcb="` + pcbNamespace + `"/><pcb:reason xmlns:pcb="` + pcbNamespace + `">` +
+			text(e.Reason) + "</pcb:reason></D:error>",
+		code: "pcb:" + local, reason: e.Reason}
 }

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
@@ -67,7 +68,7 @@ func (l *Local) clientsError(err error) error {
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
-		return blocked(msg+", so nothing was stored", keyFix)
+		return keyFailure(err, msg+", so nothing was stored", keyFix)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
@@ -128,7 +129,14 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 	if allowed, wait := l.limiter.Allow(remote); !allowed {
 		return false, wait
 	}
-	c, found := l.clients.Check(password)
+	c, found, err := l.clients.Verify(password)
+	if err != nil {
+		// Not the client's fault: a state that can pass, so a 503 and no
+		// limiter charge (audit surface-I2).
+		l.noteClientsLoad(err)
+		return false, clientsRetry
+	}
+	l.noteClientsLoad(nil)
 	if !found {
 		l.limiter.Fail(remote)
 		return false, 0
@@ -136,6 +144,27 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 	l.touch(c.ID)
 	l.noteActivity()
 	return true, 0
+}
+
+// clientsRetry is the wait a request is given while clients.json cannot be
+// loaded.
+const clientsRetry = 30 * time.Second
+
+// noteClientsLoad logs an unloadable clients.json once per distinct failure
+// (Error, path and cause, never content); a good load re-arms it.
+func (l *Local) noteClientsLoad(err error) {
+	l.xmu.Lock()
+	defer l.xmu.Unlock()
+	if err == nil {
+		l.clientsErr = ""
+		return
+	}
+	if msg := err.Error(); msg != l.clientsErr {
+		l.clientsErr = msg
+		l.log().Error("clients.json cannot be loaded: every CalDAV request is answered 503 until it is fixed",
+			"path", filepath.Join(l.o.Dirs.State, "clients.json"), "cause", msg,
+			"hint", "run pcb doctor, then fix or restore the file")
+	}
 }
 
 // defaultTouchTimeout bounds a background touch waiting for the clients lock.
@@ -274,11 +303,12 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 }
 
 // unrevealable is the MustAct of a sealed copy the key does not open. A
-// key file that exists but cannot be used (unreadable, a loose mode) is
-// Blocked with its cause: the key is not lost, so rotate is no way out.
+// key file that exists but cannot be used (unreadable, a loose mode, a
+// wrong size) names its cause (keyFailure): the key is not lost, so rotate
+// is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return blocked(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
 	}
 	why := "its sealed copy does not open with the key file " + l.keyFile()
 	switch {

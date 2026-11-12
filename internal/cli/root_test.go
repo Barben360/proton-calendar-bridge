@@ -37,3 +37,48 @@ func TestUsageContractListsEveryNewCommand(t *testing.T) {
 		}
 	}
 }
+
+// ux Minor: a flag value that does not parse says what the flag takes,
+// with a hint, never the parser's Go chain (strconv.ParseInt: ...).
+func TestBadFlagValueSaysWhatTheFlagTakes(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"login", "--password-fd", "x"}, "Error: invalid value \"x\" for --password-fd: it takes a whole number\nHint: run pcb login --help\n"},
+		{[]string{"sync", "--watch", "--interval", "3x"}, "Error: invalid value \"3x\" for --interval: it takes a duration such as 30s or 5m\nHint: run pcb sync --help\n"},
+	} {
+		code, out, errs := run(c.args...)
+		if code != exitcode.Usage || out != "" || errs != c.want {
+			t.Errorf("pcb %s: exit %d, stdout %q, stderr %q; want 2 and %q", strings.Join(c.args, " "), code, out, errs, c.want)
+		}
+	}
+}
+
+// ux Minor: help offers --json only where it is accepted, and login's
+// flags show no sentinel default.
+func TestHelpOffersOnlyWhatTheCommandTakes(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		args     []string
+		withJSON bool
+	}{{[]string{"serve", "--help"}, false}, {[]string{"service", "logs", "--help"}, false}, {[]string{"sync", "--help"}, true}} {
+		code, out, _ := run(c.args...)
+		if code != exitcode.OK || strings.Contains(out, "      --json ") != c.withJSON {
+			t.Errorf("pcb %s: exit %d, --json offered = %v, want %v:\n%s", strings.Join(c.args, " "), code, !c.withJSON, c.withJSON, out)
+		}
+	}
+	_, out, _ := run("login", "--help")
+	for _, want := range []string{
+		"      --password-fd N        read the password from file descriptor N until end of input (without it: $PCB_PASSWORD, else a prompt)\n",
+		"      --username NAME        log in as the Proton user NAME (without it: $PCB_USERNAME, else a prompt)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pcb login --help lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(default -1)") || strings.Contains(out, "(default 0)") {
+		t.Errorf("pcb login --help shows a sentinel default:\n%s", out)
+	}
+}

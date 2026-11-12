@@ -62,8 +62,14 @@ const MaxSecretsGeneration = 1 << 53
 // malformed state.json; logout resets it.
 var ErrGenerationOutOfRange = errors.New("the secrets generation is out of range")
 
+// ErrNewerState is the cause of LoadState's error for a state.json that
+// holds a field this build does not know: a newer pcb wrote it. It stays
+// refused (fail closed), but it is not damaged: upgrading pcb reads it.
+var ErrNewerState = errors.New("state.json was written by a newer pcb")
+
 // LoadState reads state.json. A missing file is logged out; a malformed one
-// is an error (fail closed: an unreadable state must not read as ready).
+// is an error (fail closed: an unreadable state must not read as ready), and
+// one that is only newer wraps ErrNewerState.
 func LoadState(stateDir string) (State, error) {
 	raw, err := os.ReadFile(statePath(stateDir))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -76,6 +82,9 @@ func LoadState(stateDir string) (State, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&s); err != nil {
+		if knownButNewer(raw) {
+			return State{}, fmt.Errorf("%s: %w", statePath(stateDir), ErrNewerState)
+		}
 		return State{}, fmt.Errorf("%s is malformed: %w", statePath(stateDir), err)
 	}
 	if dec.More() {
@@ -89,6 +98,15 @@ func LoadState(stateDir string) (State, error) {
 		return s, nil
 	}
 	return State{}, fmt.Errorf("%s: unknown phase %q", statePath(stateDir), s.Phase)
+}
+
+// knownButNewer reports whether raw, refused by the strict decoder, is a
+// valid state.json once its unknown fields are ignored: one JSON value whose
+// known fields all decode, so only fields this build does not know refused it.
+func knownButNewer(raw []byte) bool {
+	var s State
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	return dec.Decode(&s) == nil && !dec.More()
 }
 
 // ErrStateUnchanged, returned by UpdateState's fn, writes nothing; UpdateState

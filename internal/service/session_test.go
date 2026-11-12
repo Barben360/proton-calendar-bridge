@@ -525,7 +525,7 @@ func TestLogoutDropsClient(t *testing.T) {
 	if !e.svc.HasCachedClient() {
 		t.Fatal("no client cached after a session call")
 	}
-	if _, err := e.svc.Logout(t.Context()); err != nil {
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if e.svc.HasCachedClient() {

@@ -389,3 +389,62 @@ func TestSecretsCheckReportsRollback(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A state.json or secrets.sealed a newer pcb wrote is not damaged: the
+// check says to upgrade pcb, never to remove it or to log out (state-I1, I2).
+func TestSecretsCheckSaysUpgradeForANewerState(t *testing.T) {
+	state, key := sealedSetup(t)
+	if err := os.WriteFile(filepath.Join(state, "state.json"), []byte(`{"phase":"ready","added_later":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Message != "state.json was written by a newer pcb" || got.Fix != "upgrade pcb" {
+		t.Errorf("newer state.json: got %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(state, "state.json"), []byte(`{"phase":"ready"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "secrets.sealed"), []byte(`{"version":3,"sealer":"keyfile","data":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError || got.Message != "secrets.sealed was written by a newer pcb" || got.Fix != "upgrade pcb" {
+		t.Errorf("newer secrets.sealed: got %+v", got)
+	}
+}
+
+// A state.json this user cannot read gets the permission text; malformed JSON
+// keeps the reset hint; a newer file keeps "upgrade pcb" (A12 I1).
+func TestSecretsCheckSplitsUnreadableMalformedAndNewerState(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs chmod 000 to be enforced")
+	}
+	state := t.TempDir()
+	path := filepath.Join(state, "state.json")
+	run := func(body string, mode os.FileMode) doctor.Result {
+		t.Helper()
+		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(state, "k")}.Run(context.Background())
+	}
+	got := run(`{"phase":"ready"}`, 0o000)
+	if got.Status != doctor.StatusError || !strings.HasPrefix(got.Message, "the login state file "+path+" cannot be read by this user (owner ") ||
+		got.Fix != "make it readable by "+store.CurrentUser()+" (or run pcb as its owner)" {
+		t.Errorf("unreadable: %+v", got)
+	}
+	got = run(`{not json`, 0o600)
+	if got.Status != doctor.StatusError || got.Fix != "remove the damaged state.json, then log in again" {
+		t.Errorf("malformed: %+v", got)
+	}
+	got = run(`{"phase":"ready","field_from_the_future":1}`, 0o600)
+	if got.Status != doctor.StatusError || got.Fix != "upgrade pcb" {
+		t.Errorf("newer: %+v", got)
+	}
+}

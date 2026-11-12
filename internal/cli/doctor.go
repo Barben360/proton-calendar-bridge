@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 type doctorData struct {
@@ -39,13 +40,36 @@ func (a *app) newDoctor() *cobra.Command {
 				}
 				results = append(results, r)
 			}
-			var failure error
-			if doctor.Worst(results) == doctor.StatusError {
-				failure = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("doctor found errors")}
-			}
-			return Finish(cmd, doctorData{results}, "", failure)
+			return Finish(cmd, doctorData{results}, "", doctorFailure(results))
 		},
 	}
+}
+
+// doctorFailure is pcb doctor's failure, nil without an error result (ux-I2):
+// exit 20 when every error may pass by itself (Result.Transient: the
+// daemon did not answer its control socket cleanly), else 10: a file, a
+// mode, config.toml or an alert a person must fix.
+func doctorFailure(results []doctor.Result) error {
+	n, transient := 0, true
+	for _, r := range results {
+		if r.Status == doctor.StatusError {
+			n++
+			transient = transient && r.Transient
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	code := exitcode.MustAct
+	if transient {
+		code = exitcode.Blocked
+	}
+	what := "1 error"
+	if n > 1 {
+		what = fmt.Sprintf("%d errors", n)
+	}
+	return &exitcode.Error{Code: code, Err: errors.New("pcb doctor found " + what),
+		Hint: "fix what the failed checks name (marked ✗), then run pcb doctor again"}
 }
 
 // doctorDaemon is what the doctor learnt from the control socket, asked
@@ -77,8 +101,11 @@ func (d doctorDaemon) live() *doctor.Live {
 
 // results are what a running pcb serve reports: "daemon", then one
 // result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
-// a warning warns). With no daemon, "daemon" is skipped: offline checks
-// only.
+// a warning warns). needs-login while the daemon waits for a login is the
+// normal state of a fresh install: a warning (ux-I2). A daemon that does
+// not answer cleanly is a transient error, a control socket pcb refuses
+// is not. With no daemon, "daemon" is
+// skipped: offline checks only.
 func (d doctorDaemon) results() []doctor.Result {
 	const name = "daemon"
 	st := d.st
@@ -86,7 +113,10 @@ func (d doctorDaemon) results() []doctor.Result {
 	case d.unplaced:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
 	case d.err != nil:
-		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: d.err.Error(), Fix: exitcode.HintOf(d.err)}}
+		// A dial or status that failed may pass; a socket pcb refuses
+		// (ctl.ErrRefused) needs a person (ruling A11).
+		return []doctor.Result{{Name: name, Status: doctor.StatusError, Message: d.err.Error(), Fix: exitcode.HintOf(d.err),
+			Transient: !errors.Is(d.err, ctl.ErrRefused)}}
 	case !d.ok:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}
@@ -96,7 +126,8 @@ func (d doctorDaemon) results() []doctor.Result {
 		if al.Calendar != "" {
 			r.Name += " " + al.Calendar
 		}
-		if al.Severity == ctl.SeverityError {
+		waiting := st.Health != nil && st.Health.Serve == service.ServeWaitingForLogin
+		if al.Severity == ctl.SeverityError && (al.Code != ctl.CodeNeedsLogin || !waiting) {
 			r.Status = doctor.StatusError
 		}
 		results = append(results, r)
@@ -134,7 +165,8 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 		doctor.CacheCheck{StateDir: dirs.State},
 		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
 		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
-		doctor.ClientsCheck{StateDir: dirs.State})
+		doctor.ClientsCheck{StateDir: dirs.State},
+		doctor.SealedClientsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile})
 }
 
 var marks = map[doctor.Status]string{

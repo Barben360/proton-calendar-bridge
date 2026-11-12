@@ -2265,3 +2265,143 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	}
 	s.stop(t)
 }
+
+// UIDs are compared unescaped (write-I2; SPEC §5.3, the parked
+// UID-escaping item): an event whose UID column holds its text unescaped
+// (`pcb-a,b` for `UID:pcb-a\,b`) is the same object as a body carrying the
+// text, never a 409 naming its own name. pcb cannot rewrite it while the
+// two forms diverge, so its edit is unavailable (503), nothing sent; the
+// same UID at another name is a 409 naming the object's name, as for any
+// UID. The other direction too (ruling A9): a column holding the escaped
+// text (`pcb-c\,d`) and a client sending the UID unescaped (`UID:pcb-c,d`).
+func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
+	t.Parallel()
+	const column, text = "pcb-a,b", `pcb-a\,b`
+	const escapedColumn = `pcb-c\,d`
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: column, Start: base, End: base + 3600, Color: green, Card: card(text, "Escaped", base)})
+		f.AddEvent(cal, protontest.Event{UID: escapedColumn, Start: base, End: base + 3600, Color: green, Card: card(escapedColumn, "Kept", base)})
+	}).start(t)
+	t.Run("StoredEscapedSentUnescaped", func(t *testing.T) {
+		obj := r.object(t, escapedColumn)
+		body := edit(t, edit(t, obj.Data, "UID:"+escapedColumn+"\r\n", "UID:pcb-c,d\r\n"), "SUMMARY:Kept", "SUMMARY:Edited")
+		_, err := r.put(t, service.ObjectName(escapedColumn), body, service.Precondition{IfMatch: obj.ETag})
+		_ = wantExit(t, err, exitcode.Blocked)
+		wantIs(t, err, service.ErrUIDStoredOtherwise)
+		contains(t, "the object after the refusal", r.object(t, escapedColumn).Data, "SUMMARY:Kept")
+	})
+	obj := r.object(t, column)
+	name := service.ObjectName(column)
+	contains(t, "the object", obj.Data, "UID:"+text+"\r\n")
+
+	_, err := r.put(t, name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
+	e := wantExit(t, err, exitcode.Blocked)
+	wantIs(t, err, service.ErrUIDStoredOtherwise)
+	if got, want := e.Err.Error(), "the event's UID is stored by Proton in another form than its text, so pcb cannot rewrite it yet"; got != want {
+		t.Errorf("error %q, want %q", got, want)
+	}
+	if got, want := e.Hint, "edit the event in the Proton web app"; got != want {
+		t.Errorf("hint %q, want %q", got, want)
+	}
+	var ce *service.UIDConflictError
+	if errors.As(err, &ce) {
+		t.Errorf("the object's own edit is a UID conflict naming %q", ce.Href)
+	}
+
+	_, err = r.put(t, "elsewhere.ics", obj.Data, service.Precondition{IfNoneMatchAny: true})
+	_ = wantExit(t, err, exitcode.Usage)
+	if !errors.As(err, &ce) || ce.Href != name {
+		t.Errorf("the same UID at another name: %v, want a UID conflict naming %q", err, name)
+	}
+	if n := r.sendCalls(); n != 0 {
+		t.Errorf("%d requests reached the sync endpoint, want none", n)
+	}
+	contains(t, "the object after the refusals", r.object(t, column).Data, "SUMMARY:Escaped")
+}
+
+// A row holding a personal part (alarms from before they moved to
+// Notifications) is never updated (write-I3): pcb does not re-send that
+// part, and what Proton does to a part left out is unknown until live check
+// L.4 #10. The PUT is refused before anything is sent, whatever it changes;
+// the event can still be deleted (a delete rewrites no part).
+func TestARowWithAPersonalPartIsNotUpdated(t *testing.T) {
+	t.Parallel()
+	alarm := []string{"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "DESCRIPTION:x", "END:VALARM"}
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "p@x", Start: base, End: base + 3600, Color: green, PersonalAlarms: true,
+			Card: card("p@x", "Personal", base, alarm...)})
+		f.AddEvent(cal, protontest.Event{UID: "q@x", Start: base, End: base + 3600, Color: green, Card: card("q@x", "Plain", base)})
+	}).start(t)
+	if len(r.proton(t, "p@x")) != 1 || !strings.Contains(string(r.proton(t, "p@x")[0].Raw), `"PersonalEvents":[{`) {
+		t.Fatal("precondition: the seeded row has no personal part")
+	}
+	obj := r.object(t, "p@x")
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"a title edit", edit(t, obj.Data, "SUMMARY:Personal", "SUMMARY:Renamed")},
+		{"the object as served", obj.Data},
+	} {
+		_, err := r.put(t, "p@x.ics", c.body, service.Precondition{IfMatch: obj.ETag})
+		wantRefused(t, err, service.RefusePersonalPart)
+		var wr *service.WriteRefusal
+		if errors.As(err, &wr) && wr.Reason != "this event has per-user data pcb cannot rewrite yet" {
+			t.Errorf("%s: reason %q", c.name, wr.Reason)
+		}
+	}
+	if n := r.sendCalls(); n != 0 {
+		t.Errorf("%d requests reached the sync endpoint, want none", n)
+	}
+	// The control: a row without one takes the same edit.
+	plain := r.object(t, "q@x")
+	if _, err := r.put(t, "q@x.ics", edit(t, plain.Data, "SUMMARY:Plain", "SUMMARY:Renamed"), service.Precondition{IfMatch: plain.ETag}); err != nil {
+		t.Fatalf("the control edit: %v", err)
+	}
+	if err := r.svc.DeleteObject(t.Context(), r.cal, "p@x.ics", service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+	if len(r.proton(t, "p@x")) != 0 || !r.object(t, "p@x").Missing {
+		t.Error("the delete did not happen")
+	}
+}
+
+// If-Match is a list of entity tags or * (RFC 9110 §13.1.1, write-M4): the
+// object's ETag anywhere in the list holds; * holds on any existing object;
+// a weak tag never holds (strong comparison), not even the object's own
+// marked weak. A failed one sends nothing.
+func TestIfMatchListsCompareStrongly(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+	}).start(t)
+	summary := "Lunch"
+	for _, c := range []struct {
+		name, ifMatch string
+		holds         bool
+	}{
+		{"the ETag weak", "W/%s", false},
+		{"a list of others and the ETag weak", `"v1-other", W/%s`, false},
+		{"a list of others", `"v1-other", "v1-another"`, false},
+		{"the ETag last in a list", `"v1-other",%s`, true},
+		{"the ETag first, spaces around", ` %s , "v1-other" `, true},
+		{"* in a list", `"v1-other", *`, true},
+	} {
+		obj := r.object(t, "a@x")
+		sent := r.sendCalls()
+		next := summary + "+"
+		_, err := r.put(t, "a@x.ics", edit(t, obj.Data, "SUMMARY:"+summary, "SUMMARY:"+next),
+			service.Precondition{IfMatch: strings.ReplaceAll(c.ifMatch, "%s", obj.ETag)})
+		switch {
+		case c.holds && err != nil:
+			t.Errorf("%s: %v, want the edit written", c.name, err)
+		case c.holds:
+			summary = next
+		case !errors.Is(err, service.ErrPreconditionFailed):
+			t.Errorf("%s: %v, want ErrPreconditionFailed", c.name, err)
+		case r.sendCalls() != sent:
+			t.Errorf("%s: a failed precondition reached the sync endpoint", c.name)
+		}
+	}
+	contains(t, "the object", r.object(t, "a@x").Data, "SUMMARY:"+summary+"\r\n")
+}

@@ -287,7 +287,7 @@ func TestObjectChanges(t *testing.T) {
 				}
 			})
 		}
-		if _, err := e.svc.Logout(t.Context()); err != nil {
+		if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		wg.Wait()

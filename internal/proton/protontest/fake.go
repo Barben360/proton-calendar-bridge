@@ -88,23 +88,27 @@ type Fake struct {
 
 	mu        sync.Mutex
 	calls     []call
-	failures  map[string][]failure  // "METHOD /path" → queued answers
-	issued    map[string]bool       // access tokens handed out, not yet expired
-	minted    []string              // every access token handed out, in order
-	expired   map[string]bool       // access tokens that answer 401
-	unlocked  map[string]bool       // UIDs holding the locked scope
-	users     map[string]string     // username → user ID
-	passwords map[string]string     // username → password
-	captcha   string                // Options.Captcha, changed by SetCaptcha
-	codes     []string              // 2FA codes received, in order
-	sessions  map[string]sessionRec // access token minted by Session → session
+	failures  map[string][]failure       // "METHOD /path" → queued answers
+	stalls    map[string][]time.Duration // "METHOD /path" → queued stalls, by their bound
+	issued    map[string]bool            // access tokens handed out, not yet expired
+	minted    []string                   // every access token handed out, in order
+	expired   map[string]bool            // access tokens that answer 401
+	unlocked  map[string]bool            // UIDs holding the locked scope
+	users     map[string]string          // username → user ID
+	passwords map[string]string          // username → password
+	captcha   string                     // Options.Captcha, changed by SetCaptcha
+	codes     []string                   // 2FA codes received, in order
+	sessions  map[string]sessionRec      // access token minted by Session → session
 
 	cal calendars
 }
 
 type call struct{ method, path string }
 
-type failure struct{ status, code, retryAfter int }
+type failure struct {
+	status, code int
+	retryAfter   string // the Retry-After header, "" for none
+}
 
 // New starts a fake with one user (Options.Username and Password, or
 // throwaway values). It is closed when the test ends.
@@ -138,6 +142,7 @@ func New(t testing.TB, o Options) *Fake {
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 		http:      &http.Client{Timeout: 10 * time.Second},
 		failures:  map[string][]failure{},
+		stalls:    map[string][]time.Duration{},
 		issued:    map[string]bool{},
 		expired:   map[string]bool{},
 		unlocked:  map[string]bool{},
@@ -211,10 +216,33 @@ func (f *Fake) Calls(method, pathPrefix string) int {
 // with Proton code code, and a Retry-After header when retryAfter > 0. Calls
 // queue up: each answers one request.
 func (f *Fake) FailNext(method, path string, status, code, retryAfter int) {
+	ra := ""
+	if retryAfter > 0 {
+		ra = strconv.Itoa(retryAfter)
+	}
+	f.failNext(method, path, failure{status, code, ra})
+}
+
+// FailNextRetryAt is FailNext with Retry-After in its HTTP-date form, at.
+func (f *Fake) FailNextRetryAt(method, path string, status, code int, at time.Time) {
+	f.failNext(method, path, failure{status, code, at.UTC().Format(http.TimeFormat)})
+}
+
+func (f *Fake) failNext(method, path string, fl failure) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := method + " " + path
-	f.failures[key] = append(f.failures[key], failure{status, code, retryAfter})
+	f.failures[key] = append(f.failures[key], fl)
+}
+
+// StallNext makes the next request to method and path (exact) wait without
+// an answer until the client gives up, or at most bound, after which it is
+// answered as usual. Calls queue up: each stalls one request.
+func (f *Fake) StallNext(method, path string, bound time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := method + " " + path
+	f.stalls[key] = append(f.stalls[key], bound)
 }
 
 // SetCaptcha makes later logins answer the CAPTCHA challenge token, like
@@ -305,13 +333,32 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + r.URL.Path
 	f.mu.Lock()
 	f.calls = append(f.calls, call{r.Method, r.URL.Path})
+	stall := f.popStall(route)
+	f.mu.Unlock()
+	if stall > 0 {
+		// The server notices a client that gave up only once the body is
+		// read: read it now, and serve it again after the stall.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		t := time.NewTimer(stall)
+		select {
+		case <-r.Context().Done(): // the client gave up: nothing to answer
+			t.Stop()
+			return
+		case <-t.C:
+		}
+	}
+	f.mu.Lock()
 	fail, injected := f.popFailure(route)
 	expired := f.expired[bearer(r)] && r.URL.Path != "/auth/v4/refresh"
 	f.mu.Unlock()
 	switch {
 	case injected:
-		if fail.retryAfter > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(fail.retryAfter))
+		if fail.retryAfter != "" {
+			w.Header().Set("Retry-After", fail.retryAfter)
 		}
 		reply(w, fail.status, fail.code, "injected failure")
 	case expired:
@@ -344,6 +391,15 @@ func (f *Fake) popFailure(route string) (failure, bool) {
 	}
 	f.failures[route] = q[1:]
 	return q[0], true
+}
+
+func (f *Fake) popStall(route string) time.Duration {
+	q := f.stalls[route]
+	if len(q) == 0 {
+		return 0
+	}
+	f.stalls[route] = q[1:]
+	return q[0]
 }
 
 func (f *Fake) captchaToken() string {

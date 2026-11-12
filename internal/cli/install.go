@@ -11,6 +11,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // installData is what install and uninstall print with --json.
@@ -340,12 +341,12 @@ func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error
 			}
 			return a.Env(k)
 		}
-		svc, err := a.NewService(ctx, env)
+		svc, err := a.NewService(withLogger(ctx, newNoteLogger(a.Stderr)), env)
 		if err != nil {
 			return err
 		}
 		defer a.closeService(svc)
-		res, err := svc.Logout(ctx)
+		res, err := svc.Logout(ctx, service.LogoutRequest{})
 		if err != nil {
 			return err
 		}

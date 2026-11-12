@@ -706,7 +706,7 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 			atWipe = h.Serve
 			_, dbAtWipe = os.Stat(cache.Path(r.dirs.State))
 		})
-		if _, err := r.svc.Logout(t.Context()); err != nil {
+		if _, err := r.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		if atWipe != service.ServeWaitingForLogin || dbAtWipe != nil {
@@ -738,7 +738,7 @@ func TestLogoutDuringServeClosesTheCacheFirst(t *testing.T) {
 		done, _ := r.serve(t, service.ServeOptions{})
 		r.wantState(t, service.ServeServing)
 		r.wantPass(t)
-		if _, err := r.svc.Logout(t.Context()); err != nil {
+		if _, err := r.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -777,7 +777,7 @@ func TestLoginFixableStopsWait(t *testing.T) {
 		after func(t *testing.T, r *waitRig)
 	}{
 		{"not logged in", func(t *testing.T, r *waitRig) {
-			if _, err := r.open(t).Logout(t.Context()); err != nil {
+			if _, err := r.open(t).Logout(t.Context(), service.LogoutRequest{}); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -850,7 +850,7 @@ func TestUnknownCalendarIsPendingUntilTheFirstPassAfterALogin(t *testing.T) {
 	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
-	if _, err := r.svc.Logout(t.Context()); err != nil {
+	if _, err := r.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	r.wantState(t, service.ServeWaitingForLogin)
@@ -888,7 +888,7 @@ func holdWipe(t *testing.T, svc *service.Local) (release func() error) {
 		})
 	})
 	go func() {
-		_, err := svc.Logout(context.Background())
+		_, err := svc.Logout(context.Background(), service.LogoutRequest{})
 		done <- err
 	}()
 	select {
@@ -954,7 +954,7 @@ func TestLogoutBetweenTheCheckAndServingRefusesIt(t *testing.T) {
 	var once sync.Once
 	r.svc.BeforeServe(func() {
 		once.Do(func() {
-			if _, err := r.svc.Logout(context.Background()); err != nil {
+			if _, err := r.svc.Logout(context.Background(), service.LogoutRequest{}); err != nil {
 				t.Errorf("Logout: %v", err)
 			}
 		})
@@ -1028,7 +1028,7 @@ func TestWaitBeginsBeforeTheHandleIsCleared(t *testing.T) {
 	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
-	if _, err := r.svc.Logout(t.Context()); err != nil {
+	if _, err := r.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	r.wantState(t, service.ServeWaitingForLogin)
@@ -1097,7 +1097,7 @@ func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
 	other := r.open(t)
-	if _, err := other.Logout(t.Context()); err != nil {
+	if _, err := other.Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	r.f.AddUser("other", "other-pass")

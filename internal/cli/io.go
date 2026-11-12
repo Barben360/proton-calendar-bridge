@@ -29,7 +29,8 @@ type IO struct {
 	// Term asks the person questions.
 	Term Terminal
 	// NewService opens the service a command calls (in process for now; the
-	// socket client replaces it later). The command closes it.
+	// socket client replaces it later). The command closes it. ctx carries
+	// the logger the service warns on (loggerFrom; nil: none).
 	NewService func(ctx context.Context, env func(string) string) (service.API, error)
 	// Listen opens pcb serve's listener (net.Listen).
 	Listen func(network, address string) (net.Listener, error)
@@ -119,13 +120,13 @@ func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
 }
 
 // localService resolves the directories, loads config.toml and returns the
-// in-process service.
-func localService(_ context.Context, env func(string) string) (service.API, error) {
+// in-process service, logging on the logger ctx carries (loggerFrom).
+func localService(ctx context.Context, env func(string) string) (service.API, error) {
 	dirs, cfg, err := loadConfig(env)
 	if err != nil {
 		return nil, err
 	}
-	l, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg})
+	l, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg, Logger: loggerFrom(ctx)})
 	if err != nil {
 		return nil, err
 	}
@@ -135,9 +136,29 @@ func localService(_ context.Context, env func(string) string) (service.API, erro
 // app is the state the pcb commands share.
 type app struct{ IO }
 
-// service opens the service for cmd's run.
+// service opens the service for cmd's run, refusing root on another
+// user's state (stateOwner). Its warnings are lines on stderr
+// (newNoteLogger; ruling A2).
 func (a *app) service(cmd *cobra.Command) (service.API, error) {
-	return a.NewService(cmd.Context(), a.Env)
+	if err := a.stateOwner(); err != nil {
+		return nil, err
+	}
+	return a.NewService(withLogger(cmd.Context(), newNoteLogger(a.Stderr)), a.Env)
+}
+
+// stateOwner refuses to open the state as root on another user's state
+// directory (service.CheckStateOwner). pcb install, uninstall and service
+// run as root but do not open the state through here (uninstall's logout
+// opens its own service).
+func (a *app) stateOwner() error {
+	if a.Host.Euid == nil {
+		return nil
+	}
+	dirs, err := resolveDirs(a.Env)
+	if err != nil {
+		return nil //nolint:nilerr // the service reports it
+	}
+	return service.CheckStateOwner(dirs.State, a.Host.Euid(), a.Host.UserName)
 }
 
 // dialDaemon connects to the daemon on socket: nil, without an error, when

@@ -37,11 +37,13 @@ import (
 )
 
 // Precondition is a write's HTTP precondition. IfMatch is the If-Match
-// value: an ETag as the read API returns it (quoted), compared as an exact
-// string, or "*" for "the object exists"; "" for none. IfNoneMatchAny is
-// If-None-Match: * (the object must not exist); IfNoneMatch is an
-// If-None-Match naming ETags: the object, if it exists, must have none of
-// them (weak comparison, RFC 9110 §13.1.2; a missing object passes).
+// value: "*" for "the object exists", or a comma-separated list of ETags as
+// the read API returns them (quoted), one of which must be the object's by
+// strong comparison (a weak tag never holds, RFC 9110 §13.1.1); "" for
+// none. IfNoneMatchAny is If-None-Match: * (the object must not exist);
+// IfNoneMatch is an If-None-Match naming ETags: the object, if it exists,
+// must have none of them (weak comparison, RFC 9110 §13.1.2; a missing
+// object passes).
 type Precondition struct {
 	IfMatch        string   `json:"if_match,omitempty"`
 	IfNoneMatchAny bool     `json:"if_none_match_any,omitempty"`
@@ -94,6 +96,13 @@ var (
 	// in the Proton web app (ruling M4-R44). Unavailable (CalDAV: 503),
 	// never a refusal.
 	ErrHumanVerification = errors.New("a human verification is needed before Proton accepts writes")
+	// ErrUIDStoredOtherwise: the PUT's UID is, once unescaped (RFC 5545
+	// TEXT), the UID of the object at the requested name, which Proton
+	// stores in another form than the text of its parts (the parked
+	// UID-escaping item, SPEC §5.3, OPEN.md): the same object, which pcb
+	// cannot rewrite while the forms diverge. Unavailable (CalDAV: 503),
+	// never a 409 naming the object itself.
+	ErrUIDStoredOtherwise = errors.New("the event's UID is stored by Proton in another form than its text, so pcb cannot rewrite it yet")
 )
 
 // UIDConflictError: the PUT's UID lives at another name of the calendar,
@@ -178,6 +187,10 @@ func noSuchObject() error {
 
 func uidConflict(href string) error {
 	return writeFail(exitcode.Usage, &UIDConflictError{Href: href}, "change the object at its own name")
+}
+
+func uidStoredOtherwise() error {
+	return writeFail(exitcode.Blocked, ErrUIDStoredOtherwise, "edit the event in the Proton web app")
 }
 
 func refusal(r *WriteRefusal) error {
@@ -702,10 +715,24 @@ func checkPrecondition(cond Precondition, exists bool, etag string) error {
 		return preconditionFailed()
 	case cond.IfMatch == "":
 		return nil
-	case !exists, cond.IfMatch != "*" && cond.IfMatch != etag:
+	case !exists, !ifMatch(cond.IfMatch, etag):
 		return preconditionFailed()
 	}
 	return nil
+}
+
+// ifMatch reports whether an If-Match value holds on an existing object
+// whose ETag is etag (RFC 9110 §13.1.1): "*", or a comma-separated list of
+// entity tags one of which is etag by strong comparison. The object's ETag
+// is strong (objectETag), so a weak tag (W/"…") never equals it and never
+// holds.
+func ifMatch(value, etag string) bool {
+	for _, e := range strings.Split(value, ",") {
+		if e = strings.TrimSpace(e); e == "*" || e == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // PutObject implements API.
@@ -842,6 +869,9 @@ func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in i
 	if href := st.hrefOf(in.UID); st.live && href != name {
 		return objectState{}, planned{}, uidConflict(href)
 	}
+	if err := l.unescapedConflict(pre, w, in.UID, name, st); err != nil {
+		return objectState{}, planned{}, err
+	}
 	if st.nameUID != "" && st.nameUID != in.UID && st.nameLive && st.hrefOf(st.nameUID) == name {
 		return objectState{}, planned{}, uidConflict(name)
 	}
@@ -890,6 +920,35 @@ func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in i
 		}
 	}
 	return st, p, nil
+}
+
+// unescapedConflict compares the PUT's UID with the cached ones unescaped
+// (RFC 5545 TEXT; write-I2, the parked UID-escaping item of SPEC §5.3):
+// Proton's column may hold `a,b` for `UID:a\,b`, which ListByUID and the
+// exact checks do not match. The object at name whose UID is the PUT's
+// once both are unescaped is the same object, never a conflict with
+// itself: pcb cannot rewrite it while its forms diverge
+// (ErrUIDStoredOtherwise, 503). The unescaped UID live at another name is
+// a conflict naming that name, as for any UID.
+func (l *Local) unescapedConflict(ctx context.Context, w *write, uid, name string, st objectState) error {
+	if st.nameUID != "" && st.nameUID != uid && st.nameLive && st.hrefOf(st.nameUID) == name &&
+		ical.UnescapeText(st.nameUID) == ical.UnescapeText(uid) {
+		return uidStoredOtherwise()
+	}
+	plain := ical.UnescapeText(uid)
+	if plain == uid || st.live {
+		return nil
+	}
+	other, err := l.read(ctx, w, plain, name)
+	switch {
+	case err != nil:
+		return err
+	case !other.live:
+		return nil
+	case other.hrefOf(plain) == name:
+		return uidStoredOtherwise()
+	}
+	return uidConflict(other.hrefOf(plain))
 }
 
 // DeleteObject implements API.

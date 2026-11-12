@@ -26,6 +26,11 @@ func (q propRequest) wants(name xml.Name) bool { return slices.Contains(q.props,
 // bounds the response. Thunderbird asks for 7 at most.
 const maxProps = 64
 
+// maxNameBytes caps a requested property's name and namespace: both are
+// echoed on every resource, so a client could multiply them by the object
+// count (audit surface-I1). Real names are under 40 bytes.
+const maxNameBytes = 256
+
 // propSelection reads the prop, allprop or propname child of n; none is
 // allprop.
 func propSelection(n *node) (propRequest, error) {
@@ -45,12 +50,15 @@ func propSelection(n *node) (propRequest, error) {
 	return q, nil
 }
 
-// names lists the names of n's children, each once; more than maxProps is
-// errBadRequest.
+// names lists the names of n's children, each once; more than maxProps, or
+// a name or namespace over maxNameBytes, is errBadRequest.
 func names(n *node) ([]xml.Name, error) {
 	seen := make(map[xml.Name]bool, len(n.kids))
 	out := make([]xml.Name, 0, len(n.kids))
 	for _, k := range n.kids {
+		if len(k.name.Local) > maxNameBytes || len(k.name.Space) > maxNameBytes {
+			return nil, errBadRequest
+		}
 		if seen[k.name] {
 			continue
 		}
@@ -244,7 +252,7 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 		empty(w, http.StatusBadRequest)
 		return
 	}
-	body, ok := readBody(w, r)
+	body, ok := readBody(w, r, maxQueryBody)
 	if !ok {
 		return
 	}

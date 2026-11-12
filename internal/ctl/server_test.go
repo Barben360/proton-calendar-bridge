@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -321,6 +322,7 @@ type loginAPI struct {
 	logins  []service.LoginRequest
 	codes   []string
 	logouts int
+	discard []bool // each logout's Discard
 	loginFn func(service.LoginRequest) (service.LoginResult, error)
 
 	entered, release chan struct{}
@@ -349,9 +351,10 @@ func (a *loginAPI) SubmitTOTP(_ context.Context, code string) (service.LoginResu
 	return service.LoginResult{State: service.StateReady, Username: "alice", AccountID: "id1"}, nil
 }
 
-func (a *loginAPI) Logout(context.Context) (service.LogoutResult, error) {
+func (a *loginAPI) Logout(_ context.Context, r service.LogoutRequest) (service.LogoutResult, error) {
 	a.mu.Lock()
 	a.logouts++
+	a.discard = append(a.discard, r.Discard)
 	a.mu.Unlock()
 	return service.LogoutResult{WasLoggedIn: true, Revoked: true}, nil
 }
@@ -391,11 +394,19 @@ func TestLoginOverTheSocketNeverLogsSecrets(t *testing.T) {
 	if err != nil || res.State != service.StateReady || res.AccountID != "id1" {
 		t.Fatalf("SubmitTOTP = %+v, %v", res, err)
 	}
-	out, err := c.Logout(t.Context())
+	out, err := c.Logout(t.Context(), service.LogoutRequest{})
 	if err != nil || !out.WasLoggedIn || !out.Revoked {
 		t.Fatalf("Logout = %+v, %v", out, err)
 	}
+	// The discard of a store this pcb cannot read crosses (state-I1).
+	if _, err := c.Logout(t.Context(), service.LogoutRequest{Discard: true}); err != nil {
+		t.Fatal(err)
+	}
 	api.mu.Lock()
+	if want := []bool{false, true}; !slices.Equal(api.discard, want) {
+		t.Errorf("the daemon's logouts had Discard %v, want %v", api.discard, want)
+	}
+	api.logouts--
 	if len(api.logins) != 1 || api.logins[0] != req {
 		t.Errorf("the daemon got %d logins, want the request as sent", len(api.logins))
 	}
@@ -540,7 +551,7 @@ func TestClientRefusesAServerOfAnotherUID(t *testing.T) {
 		}
 	}
 	// The real check passes against this test's own server.
-	if _, err := dial(t, s.path).Logout(t.Context()); err != nil {
+	if _, err := dial(t, s.path).Logout(t.Context(), service.LogoutRequest{}); err != nil {
 		t.Errorf("Logout over the real peer check: %v", err)
 	}
 }

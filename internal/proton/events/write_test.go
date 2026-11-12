@@ -366,14 +366,19 @@ func TestTimeoutAfterSendIsAmbiguous(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(release) }) // runs before srv.Close
-	c := scriptedClient(srv.URL, &http.Client{Timeout: 150 * time.Millisecond})
+	// ResponseHeaderTimeout runs from the end of the request write, so the
+	// timeout is after the send however slow the scheduler is (a whole-call
+	// Client.Timeout could fire before the request left).
+	hc := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 200 * time.Millisecond}, Timeout: time.Minute}
+	t.Cleanup(hc.CloseIdleConnections)
+	c := scriptedClient(srv.URL, hc)
 	res, err := events.Sync(t.Context(), c, "cal", "m", oneUpdate)
 	if res != nil || !errors.Is(err, events.ErrAmbiguous) {
 		t.Fatalf("res=%v err=%v, want ErrAmbiguous", res, err)
 	}
 	select {
 	case <-received:
-	default:
+	case <-time.After(30 * time.Second): // the handler may lag the client's timer
 		t.Fatal("the server never received the body: the timeout was not after the send")
 	}
 	if len(received) != 0 {

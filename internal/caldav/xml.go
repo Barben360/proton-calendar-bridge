@@ -26,7 +26,7 @@ func caldav(local string) xml.Name { return xml.Name{Space: nsCalDAV, Local: loc
 
 // Limits of a request body's XML: nesting, element count and attributes per
 // element (namespace declarations included, ruling M3-R27) bound what a body
-// may cost beyond its 8 MiB (maxBody).
+// may cost beyond its size cap (maxQueryBody).
 const (
 	maxDepth    = 32
 	maxElements = 10_000

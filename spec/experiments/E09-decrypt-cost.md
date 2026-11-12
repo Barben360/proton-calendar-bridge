@@ -30,7 +30,7 @@ So about **0.2–0.4 s of CPU per 1 000 events, on one goroutine**, signatures c
 
 ## M3 as built
 
-`service.Local.Serve` renders rows on demand through `cards.Open` and the `internal/ical` merge, into an in-memory LRU of rendered objects (default 2 000, ruling in the M3 plan); nothing decrypted reaches the disk [verified: `TestUndecryptableEventDoesNotFailTheReport` serves a report through the real service over the fake Proton; the LRU size and the no-disk rule are [claim]: no test of their own in this task]. No new timing was taken: `BenchmarkOpen` above is the only measurement, and no benchmark covers the merge, the render or a whole cold start. A cold-start figure (login to the first full render of every calendar) needs the live half.
+`service.Local.Serve` renders rows on demand through `cards.Open` and the `internal/ical` merge, into an in-memory LRU of rendered objects (fixed at 2 000 entries, `lruCapacity`; not configurable, counted by objects, shared by all calendars; ruling in the M3 plan, docs corrected by the initial-version audit); nothing decrypted reaches the disk [verified: `TestUndecryptableEventDoesNotFailTheReport` serves a report through the real service over the fake Proton; the LRU size and the no-disk rule are [claim]: no test of their own in this task]. No new timing was taken: `BenchmarkOpen` above is the only measurement, and no benchmark covers the merge, the render or a whole cold start. A cold-start figure (login to the first full render of every calendar) needs the live half.
 
 ## Live half (pending)
 

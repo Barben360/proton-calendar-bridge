@@ -19,7 +19,9 @@ type API interface {
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
 	// Logout revokes the session and forgets the account. During Serve it
 	// first stops the sync loop and closes its cache handle (ruling M5-P10).
-	Logout(ctx context.Context) (LogoutResult, error)
+	// A stored session this pcb cannot read (Status.Secrets "unsupported")
+	// cannot be revoked: it is forgotten only with req.Discard.
+	Logout(ctx context.Context, req LogoutRequest) (LogoutResult, error)
 	// Status describes the login without any network call.
 	Status(ctx context.Context) (Status, error)
 	// Calendars lists the account's calendars.
@@ -121,8 +123,10 @@ type API interface {
 	RotateClient(ctx context.Context, idOrName string) (ClientSecret, error)
 	// CheckClient reports whether password is a client's, for a request
 	// from remote ("ip:port"). A remote with 5 failures in the last minute
-	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
-	// otherwise a refusal has retryAfter 0 (401).
+	// is refused unexamined and retryAfter says for how long (CalDAV: 503 with Retry-After);
+	// otherwise a refusal has retryAfter 0 (401). While clients.json cannot be
+	// loaded every request is refused with a retryAfter (503) and no failure
+	// is charged to the remote.
 	CheckClient(ctx context.Context, password, remote string) (ok bool, retryAfter time.Duration)
 	// Close releases what the service holds, aborting a login waiting for a code.
 	Close() error
@@ -176,17 +180,33 @@ type LoginResult struct {
 	DefaultClientCreated bool `json:"default_client_created,omitempty"`
 }
 
+// LogoutRequest asks for a logout. Discard forgets a stored session this
+// pcb cannot read (written by a newer pcb, or sealed by another sealer)
+// although it cannot be revoked; without it such a logout is refused.
+type LogoutRequest struct {
+	Discard bool `json:"discard,omitempty"`
+}
+
+// SecretsUnsupported is Status.Secrets for a store this pcb cannot read:
+// written by a newer pcb, or sealed by another sealer.
+const SecretsUnsupported = "unsupported"
+
 // LogoutResult says what Logout did. Revoked is false when Proton could not
 // be told (the local secrets are gone anyway).
+// SyncRunning: another pcb process held the sync lock (pcb sync, its
+// watch, or pcb serve); a pass of it may write the event cache again.
 type LogoutResult struct {
 	WasLoggedIn bool `json:"was_logged_in"`
 	Revoked     bool `json:"revoked"`
+	SyncRunning bool `json:"sync_running,omitempty"`
 }
 
 // Status is the login as the files describe it. Phase is the store's phase
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none", "unreadable" or
-// "rolled-back" (secrets.sealed older than the last one pcb wrote).
+// waits for its code. Secrets is "sealed", "none", "unreadable",
+// "unsupported" (written by a newer pcb, or sealed by another sealer: Reason
+// names which) or "rolled-back" (secrets.sealed older than the last one pcb
+// wrote).
 type Status struct {
 	Phase       string     `json:"phase"`
 	Reason      string     `json:"reason,omitempty"`
@@ -203,6 +223,9 @@ type Status struct {
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
 	// Sync is the event cache's state; nil while there is no cache.
 	Sync *SyncStatus `json:"sync,omitempty"`
+	// ClientsFile is the path of clients.json when it exists but cannot be
+	// loaded (corrupt, unreadable): every CalDAV request then answers 503.
+	ClientsFile string `json:"clients_file,omitempty"`
 }
 
 // SyncStatus is what the event cache holds, per calendar.
@@ -253,19 +276,22 @@ type WatchPass struct {
 // will). Since the keys were last loaded: Undecryptable counts the rows
 // served as placeholders (ruling M3-R4), Unverified the rows rendered with
 // X-PCB-INTEGRITY:unverified (ruling M3-R33), DuplicateMasters the masters
-// left out (ruling M3-R3); KeysErrors are the IDs of the calendars whose keys
+// left out (ruling M3-R3; a second exception of one RECURRENCE-ID counts
+// with them), DroppedAlarms the malformed reminders left out of events that
+// still render; KeysErrors are the IDs of the calendars whose keys
 // did not unlock (every event of them is a placeholder), sorted, nil if
 // none.
 type RenderCounts struct {
 	Undecryptable    int      `json:"undecryptable"`
 	Unverified       int      `json:"unverified"`
 	DuplicateMasters int      `json:"duplicate_masters"`
+	DroppedAlarms    int      `json:"dropped_alarms"`
 	KeysErrors       []string `json:"keys_errors"`
 }
 
 // Zero reports whether every counter is zero.
 func (c RenderCounts) Zero() bool {
-	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && len(c.KeysErrors) == 0
+	return c.Undecryptable == 0 && c.Unverified == 0 && c.DuplicateMasters == 0 && c.DroppedAlarms == 0 && len(c.KeysErrors) == 0
 }
 
 // CalendarSync is one calendar's outcome. Mode is initial, incremental or

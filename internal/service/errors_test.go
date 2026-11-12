@@ -49,8 +49,10 @@ func TestMapError(t *testing.T) {
 		{"503", &api.Error{Status: 503, Message: "down"}, exitcode.Blocked, "later", "Proton"},
 		{"proton 4xx", &api.Error{Status: 400, Code: 2000, Message: "bad"}, exitcode.Blocked, "", "2000"},
 		{"network", &net.OpError{Op: "dial", Err: errors.New("refused")}, exitcode.Blocked, "network", "reach Proton"},
-		{"no key", fmt.Errorf("%w: %s", seal.ErrNoKey, keyFile), exitcode.Blocked, "restore", keyFile},
-		{"corrupt store", seal.ErrCorrupt, exitcode.Blocked, "pcb logout", keyFile},
+		// ux-I3: a key or state file fault is the person's to repair: 10 in every command.
+		{"no key", fmt.Errorf("%w: %s", seal.ErrNoKey, keyFile), exitcode.MustAct, "restore", keyFile},
+		{"corrupt store", seal.ErrCorrupt, exitcode.MustAct, "pcb logout", keyFile},
+		{"key of a wrong size", &seal.KeySizeError{Path: keyFile, Size: 5}, exitcode.MustAct, "pcb logout", keyFile},
 		{"cache newer schema", fmt.Errorf("reading the cache: %w", cache.ErrNewerSchema), exitcode.Blocked, "upgrade pcb", "newer pcb"},
 		{"cache corrupt", fmt.Errorf("x: %w", cache.ErrCorrupt), exitcode.MustAct, "pcb sync --full", "damaged"},
 		{"cache permission", fmt.Errorf("x: %w", &cache.IOError{Err: &fs.PathError{Op: "open", Path: "/s/pcb.db", Err: fs.ErrPermission}}), exitcode.Blocked, "permissions", "permission denied"},

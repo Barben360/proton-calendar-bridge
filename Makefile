@@ -19,11 +19,14 @@ build:
 install: build
 	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
 
-# PKGS narrows the packages (CI runs two shards in parallel).
+# PKGS narrows the packages (CI runs three shards in parallel).
 PKGS ?= ./...
+# The service and cli packages run real SRP logins under -race: on a small
+# CI runner they need more than go test's 10 min default.
+TEST_TIMEOUT ?= 20m
 
 test:
-	go test -race $(PKGS)
+	go test -race -timeout $(TEST_TIMEOUT) $(PKGS)
 
 # Formatting, vet, then golangci-lint, as CI runs it.
 lint:
