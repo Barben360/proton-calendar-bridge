@@ -54,8 +54,40 @@ func TestProbeWriteMatrix(t *testing.T) {
 		t.Errorf("cleanup line %q: want nothing left, and no password in the output", lines[len(lines)-2])
 	}
 
-	f.Backend.FailNext("PUT", "/calendar/v1/"+cal+"/events/sync", 429, 429, 30)
+	// A failed cleanup is a partial run: Proton answers 500 to the deletes.
+	f.Mu.Lock()
+	f.Intercept = func(method, path string, body []byte) (labtest.Reply, bool) {
+		var req struct {
+			Events []struct{ Event json.RawMessage }
+		}
+		if method != "PUT" || !strings.HasSuffix(path, "/events/sync") || json.Unmarshal(body, &req) != nil {
+			return labtest.Reply{}, false
+		}
+		for _, e := range req.Events {
+			if len(e.Event) > 0 {
+				return labtest.Reply{}, false
+			}
+		}
+		return labtest.R(500, `{"Code":0,"Error":"injected"}`), true
+	}
+	f.Mu.Unlock()
 	code, env := run(t, "probe", "write-matrix", "--state-dir", dir, "--calendar", cal, "--interval", "0s")
+	f.Mu.Lock()
+	f.Intercept = nil
+	f.Mu.Unlock()
+	if code != exitcode.Partial {
+		t.Errorf("failed cleanup: code %d, envelope %v; want partial", code, env)
+	}
+	e, _ := env["error"].(map[string]any)
+	d, _ := env["data"].(map[string]any)
+	hint, _ := e["hint"].(string)
+	cleanup, _ := d["cleanup"].(string)
+	if !strings.Contains(hint, "pcb-lab-wm-") || !strings.Contains(cleanup, "HTTP 500") || !strings.Contains(cleanup, "left 10:") || !strings.Contains(cleanup, "-second-master") {
+		t.Errorf("failed cleanup: hint %q, cleanup %q; want the prefix hint and the rows left named", hint, cleanup)
+	}
+
+	f.Backend.FailNext("PUT", "/calendar/v1/"+cal+"/events/sync", 429, 429, 30)
+	code, env = run(t, "probe", "write-matrix", "--state-dir", dir, "--calendar", cal, "--interval", "0s")
 	if code != exitcode.Partial {
 		t.Fatalf("code %d, envelope %v; want partial after a 429", code, env)
 	}

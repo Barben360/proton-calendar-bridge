@@ -259,11 +259,13 @@ func TestWriteMatrixReportsWhatProtonDid(t *testing.T) {
 func TestWriteMatrixRefusesBeforeWriting(t *testing.T) {
 	t.Parallel()
 	f, cal, s := matrixRig(t, protontest.WriteOptions{}, "pcb-lab")
-	personal := f.Backend.AddCalendar(labtest.User, protontest.Calendar{Name: "Personal"})
-	_, err := probe.WriteMatrix(t.Context(), s, matrixOpts(personal))
 	var e *exitcode.Error
-	if !errors.As(err, &e) || e.Code != exitcode.Usage || strings.Contains(err.Error(), "Personal") {
-		t.Fatalf("err = %v; want a usage refusal that does not print the calendar's name", err)
+	for _, name := range []string{"Personal", "my pcb-lab", "xpcb-lab", "PCB-LAB"} { // the name must start with pcb-lab
+		other := f.Backend.AddCalendar(labtest.User, protontest.Calendar{Name: name})
+		_, err := probe.WriteMatrix(t.Context(), s, matrixOpts(other))
+		if !errors.As(err, &e) || e.Code != exitcode.Usage || strings.Contains(err.Error(), name) {
+			t.Fatalf("calendar %q: err = %v; want a usage refusal that does not print the calendar's name", name, err)
+		}
 	}
 	if n, u := len(f.Backend.SyncCalls()), f.Backend.Calls("PUT", "/core/v4/users/unlock"); n != 0 || u != 0 {
 		t.Errorf("%d writes, %d unlocks: a wrong calendar must stop before any key or write", n, u)
@@ -273,7 +275,7 @@ func TestWriteMatrixRefusesBeforeWriting(t *testing.T) {
 	}
 	o := matrixOpts(cal)
 	o.Password = []byte("not-the-password")
-	_, err = probe.WriteMatrix(t.Context(), s, o)
+	_, err := probe.WriteMatrix(t.Context(), s, o)
 	if !errors.As(err, &e) || e.Code != exitcode.MustAct || strings.Contains(err.Error(), "not-the-password") {
 		t.Fatalf("wrong password: err = %v; want must-act without the password", err)
 	}
@@ -339,5 +341,53 @@ func TestWriteMatrixKeepPaceAndStop(t *testing.T) {
 	}
 	if !strings.Contains(res.Stopped, "429") || len(res.Cases) != 1 || !strings.Contains(res.Cases[0].Line, "HTTP 429, code 429") || !strings.HasPrefix(res.Cleanup, "not tried") {
 		t.Errorf("stopped %q, cases %d, cleanup %q, first line %q", res.Stopped, len(res.Cases), res.Cleanup, res.Cases[0].Line)
+	}
+}
+
+// Proton's ?UID= may match more than the UID (HUMAN-CHECKS W3): a neighbour
+// whose UID only starts with a case's is neither read back nor deleted.
+func TestWriteMatrixReadsAndDeletesItsExactUIDsOnly(t *testing.T) {
+	t.Parallel()
+	f := labtest.NewFront(t, &labtest.Front{Options: protontest.Options{UIDMatch: strings.HasPrefix}})
+	cal := f.Backend.AddCalendar(labtest.User, protontest.Calendar{Name: "pcb-lab"})
+	s, err := session.Resume(t.Context(), loggedIn(t, f, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	neighbour := "pcb-lab-wm-0badcafe-rrule-hourly-neighbour"
+	f.Backend.AddEvent(cal, protontest.Event{UID: neighbour, Start: 1804000000, End: 1804003600})
+	o := matrixOpts(cal)
+	o.RunID = "0badcafe"
+	res, err := probe.WriteMatrix(t.Context(), s, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := lines(t, res)["rrule-hourly"]; !strings.Contains(l, "read-back: 1 row(s);") {
+		t.Errorf("rrule-hourly: %q; want only its own row read back", l)
+	}
+	c, err := s.API(nil, rate.NewLimiter(rate.Inf, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := events.ListByUID(t.Context(), c, cal, neighbour)
+	if err != nil || len(rows) != 1 || !strings.HasSuffix(res.Cleanup, "left 0") {
+		t.Errorf("neighbour rows %d (%v), cleanup %q; want the neighbour kept and ours gone", len(rows), err, res.Cleanup)
+	}
+}
+
+func TestWriteMatrixStopsWhenTheSessionEnds(t *testing.T) {
+	t.Parallel()
+	f, cal, s := matrixRig(t, protontest.WriteOptions{}, "pcb-lab")
+	path := "/calendar/v1/" + cal + "/events/sync"
+	f.Mu.Lock()
+	f.Replies = map[string]labtest.Reply{"PUT " + path: labtest.R(401, `{"Code":401,"Error":"Invalid access token"}`)}
+	f.Mu.Unlock()
+	res, err := probe.WriteMatrix(t.Context(), s, matrixOpts(cal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Writes != 1 || !strings.Contains(res.Stopped, "session ended") || len(res.Cases) != 1 || !strings.HasPrefix(res.Cleanup, "not tried") {
+		t.Errorf("writes %d, stopped %q, cases %d, cleanup %q; want one write, then a stop", res.Writes, res.Stopped, len(res.Cases), res.Cleanup)
 	}
 }

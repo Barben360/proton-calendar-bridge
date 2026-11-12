@@ -370,7 +370,11 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 	all := s.rows
 	if q.Has("UID") {
 		uid := q.Get("UID")
-		all = slices.DeleteFunc(slices.Clone(all), func(r *eventRec) bool { return r.cols.UID != uid })
+		match := f.o.UIDMatch
+		if match == nil {
+			match = func(a, b string) bool { return a == b }
+		}
+		all = slices.DeleteFunc(slices.Clone(all), func(r *eventRec) bool { return !match(r.cols.UID, uid) })
 	}
 	lo := min(page*size, len(all))
 	hi := min(lo+size, len(all))

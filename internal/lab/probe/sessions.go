@@ -9,6 +9,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
@@ -75,6 +76,18 @@ func Sessions(ctx context.Context, s *session.Session, revokeOthers bool) (Sessi
 	}
 	if !revokeOthers {
 		return res, nil
+	}
+	// Fail closed on our own session (ruling L4): it must be listed exactly
+	// once, or nothing is revoked.
+	self := 0
+	for _, si := range res.Sessions {
+		if si.Self {
+			self++
+		}
+	}
+	if self != 1 {
+		return res, &exitcode.Error{Code: exitcode.Blocked,
+			Err: fmt.Errorf("the listing holds this session %d time(s), not once: nothing revoked", self)}
 	}
 	for i := range res.Sessions {
 		si := &res.Sessions[i]

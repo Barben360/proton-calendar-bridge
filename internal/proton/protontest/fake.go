@@ -78,6 +78,10 @@ type Options struct {
 	// Listener is where the fake serves; nil: a new loopback port. The fake
 	// closes it with the rest.
 	Listener net.Listener
+	// UIDMatch, when set, decides which rows a listing's ?UID= returns
+	// (rowUID, query); nil: equal UIDs only. Whether Proton matches exactly
+	// is open (HUMAN-CHECKS W3).
+	UIDMatch func(rowUID, query string) bool
 }
 
 // Fake is a running fake Proton. URL, Username, Password and TOTPURI are the

@@ -70,10 +70,13 @@ func writeMatrixCmd() *cobra.Command {
 				b.WriteString("\n" + cs.Line)
 			}
 			fmt.Fprintf(&b, "\ncleanup: %s\n%d write(s)", res.Cleanup, res.Writes)
-			if res.Stopped != "" {
+			hint := "wait (honour Retry-After), then delete the events whose UID starts with " + res.UIDPrefix + " in the web app (or the whole pcb-lab calendar)"
+			switch {
+			case res.Stopped != "":
 				fmt.Fprintf(&b, "; stopped: %s", res.Stopped)
-				err = &exitcode.Error{Code: exitcode.Partial, Err: fmt.Errorf("the write matrix stopped: %s", res.Stopped),
-					Hint: "wait (honour Retry-After), then delete the events whose UID starts with " + res.UIDPrefix + " in the web app (or the whole pcb-lab calendar)"}
+				err = &exitcode.Error{Code: exitcode.Partial, Err: fmt.Errorf("the write matrix stopped: %s", res.Stopped), Hint: hint}
+			case res.CleanupFailed:
+				err = &exitcode.Error{Code: exitcode.Partial, Err: errors.New("the cleanup left rows of this run (see the cleanup line)"), Hint: hint}
 			}
 			return cli.Finish(cmd, res, b.String(), err)
 		},

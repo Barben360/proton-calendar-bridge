@@ -187,3 +187,35 @@ func TestProbeSessionsReportsWhatProtonAnswers(t *testing.T) {
 		})
 	}
 }
+
+// The revoke fails closed on its own session (L4): unless the listing holds
+// exactly one session with our UID, nothing is revoked.
+func TestProbeSessionsRevokeNeedsExactlyOneSelf(t *testing.T) {
+	f := labtest.NewFront(t, &labtest.Front{})
+	dir := labEnv(t, f, "")
+	self := savedUID(t, dir)
+	row := `{"UID":%q,"CreateTime":1794650000,"ClientID":"Other","LocalizedClientName":"","Revocable":1}`
+	for name, list := range map[string]string{
+		"own session missing": fmt.Sprintf(`{"Code":1000,"Sessions":[`+row+`,`+row+`]}`, "otherrevocable0001", "otherrevocable0002"),
+		"own session twice":   fmt.Sprintf(`{"Code":1000,"Sessions":[`+row+`,`+row+`,`+row+`]}`, self, self, "otherrevocable0001"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.Mu.Lock()
+			from := len(f.Log)
+			f.Replies = map[string]labtest.Reply{"GET /auth/v4/sessions": labtest.R(200, list)}
+			f.Mu.Unlock()
+			code, env := run(t, "probe", "sessions", "--state-dir", dir, "--revoke-others", "--yes")
+			e, _ := env["error"].(map[string]any)
+			if msg, _ := e["message"].(string); code != exitcode.Blocked || !strings.Contains(msg, "this session") {
+				t.Errorf("code %d, envelope %v; want blocked, naming its own session", code, env)
+			}
+			f.Mu.Lock()
+			defer f.Mu.Unlock()
+			for _, s := range f.Log[from:] {
+				if s.Method == "DELETE" {
+					t.Errorf("DELETE %s sent: nothing may be revoked", s.Path)
+				}
+			}
+		})
+	}
+}

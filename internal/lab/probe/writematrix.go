@@ -1,7 +1,6 @@
 package probe
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -17,7 +16,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
-	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/lab/session"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
@@ -54,6 +52,8 @@ type MatrixOptions struct {
 	Interval time.Duration // pause before every write but the first
 	// Sleep waits d or until ctx ends; nil: a real timer.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// RunID is the run's ID in every UID (8 hex digits); empty: a random one.
+	RunID string
 	// Limiter paces every request (nil: pcb's transport default, one per
 	// 250 ms after a burst of 8).
 	Limiter *rate.Limiter
@@ -83,8 +83,11 @@ type MatrixResult struct {
 	Scope     string       `json:"key_salts"` // how the key salts were read
 	Cases     []CaseResult `json:"cases"`
 	Cleanup   string       `json:"cleanup"`
-	Writes    int          `json:"writes"`
-	Stopped   string       `json:"stopped,omitempty"` // why no further write was sent
+	// CleanupFailed: rows of this run may be left (a listing or the delete
+	// failed, or the read-back still lists rows).
+	CleanupFailed bool   `json:"cleanup_failed,omitempty"`
+	Writes        int    `json:"writes"`
+	Stopped       string `json:"stopped,omitempty"` // why no further write was sent
 }
 
 // CaseResult is one case: each write's answer and what the read-back shows.
@@ -176,9 +179,11 @@ func WriteMatrix(ctx context.Context, s *session.Session, o MatrixOptions) (Matr
 		return MatrixResult{}, errors.New("the calendar's primary key or our address's signing key did not unlock: nothing can be sealed")
 	}
 
-	run, err := runID()
-	if err != nil {
-		return MatrixResult{}, err
+	run := o.RunID
+	if run == "" {
+		if run, err = runID(); err != nil {
+			return MatrixResult{}, err
+		}
 	}
 	m := &matrix{
 		o: o, c: c, rec: rec, calID: cal.ID, member: acc.MemberID, prefix: UIDPrefix + run + "-",
@@ -208,7 +213,9 @@ func WriteMatrix(ctx context.Context, s *session.Session, o MatrixOptions) (Matr
 	case o.Keep:
 		res.Cleanup = fmt.Sprintf("kept (--keep): %d UID(s) starting with %s", len(m.uids), m.prefix)
 	default:
-		res.Cleanup = m.cleanup(ctx)
+		var ok bool
+		res.Cleanup, ok = m.cleanup(ctx)
+		res.CleanupFailed = !ok
 	}
 	res.Writes = m.writes
 	return res, nil
@@ -258,35 +265,6 @@ type matrix struct {
 	writes                int
 	uids                  []string
 	stopped               string
-}
-
-// card is an event's lines per part, after UID and DTSTAMP.
-type card struct {
-	shared, enc, cal []string
-}
-
-func (k card) parts(uid string) map[ical.PartKind][]byte {
-	return map[ical.PartKind][]byte{
-		ical.SharedSigned:    fragment(uid, k.shared),
-		ical.SharedEncrypted: fragment(uid, k.enc),
-		ical.CalendarSigned:  fragment(uid, k.cal),
-	}
-}
-
-// fragment is a part in Proton's form: CRLF, no VERSION or PRODID, no CRLF
-// after the last line (the matrix's lines are all under 75 octets).
-func fragment(uid string, lines []string) []byte {
-	all := append([]string{"BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:" + uid, dtstamp}, lines...)
-	return []byte(strings.Join(append(all, "END:VEVENT", "END:VCALENDAR"), "\r\n"))
-}
-
-// simple is a one-hour event in Europe/Paris on day (YYYYMMDD) at 10:00.
-func simple(day, seq, summary string, extra ...string) card {
-	return card{
-		shared: append([]string{"DTSTART;TZID=" + paris + ":" + day + "T100000", "DTEND;TZID=" + paris + ":" + day + "T110000"}, append(extra, "SEQUENCE:"+seq)...),
-		enc:    []string{"SUMMARY:pcb-lab wm " + summary},
-		cal:    []string{},
-	}
 }
 
 // entry is one sync entry: a create (no id), an update or a delete (no body).
@@ -399,16 +377,8 @@ func (m *matrix) sync(ctx context.Context, entries ...entry) []Answer {
 // create seals k as a new event of uid and sends it, with extra body fields.
 func (m *matrix) create(ctx context.Context, what, uid string, k card, n events.Optional[events.NotificationList], extra map[string]any) Step {
 	m.remember(uid)
-	sealed, err := cards.Seal(k.parts(uid), cards.SealKeys{Signer: m.signer, CalendarPrimary: m.primary})
-	if err != nil {
-		return Step{What: what, Why: "sealing failed: " + err.Error()}
-	}
-	b, err := body(events.Body{WireEvent: sealed, Notifications: n}, extra)
-	if err != nil {
-		return Step{What: what, Why: err.Error()}
-	}
-	a := m.sync(ctx, entry{body: b})[0]
-	return Step{What: what, Answer: &a}
+	st, _ := m.send(ctx, what, "", uid, k, cards.SealKeys{Signer: m.signer, CalendarPrimary: m.primary}, n, extra)
+	return st
 }
 
 // update seals k over row r, reusing r's session keys, and sends it.
@@ -420,16 +390,24 @@ func (m *matrix) update(ctx context.Context, what, uid string, r readRow, k card
 	if err != nil || shared == nil {
 		return Step{What: what, Why: "the row's session key is not proven ours"}
 	}
-	sealed, err := cards.Seal(k.parts(uid), cards.SealKeys{Signer: m.signer, Shared: shared, Calendar: calKey, Update: true})
+	st, _ := m.send(ctx, what, r.id, uid, k, cards.SealKeys{Signer: m.signer, Shared: shared, Calendar: calKey, Update: true}, n, nil)
+	return st
+}
+
+// send seals k for uid with sk and sends it: a create when id is empty, else
+// an update of row id. It returns the step and what was sealed (its key
+// packets, when sk mints them).
+func (m *matrix) send(ctx context.Context, what, id, uid string, k card, sk cards.SealKeys, n events.Optional[events.NotificationList], extra map[string]any) (Step, events.WireEvent) {
+	sealed, err := cards.Seal(k.parts(uid), sk)
 	if err != nil {
-		return Step{What: what, Why: "sealing failed: " + err.Error()}
+		return Step{What: what, Why: "sealing failed: " + err.Error()}, sealed
 	}
-	b, err := body(events.Body{WireEvent: sealed, Notifications: n}, nil)
+	b, err := body(events.Body{WireEvent: sealed, Notifications: n}, extra)
 	if err != nil {
-		return Step{What: what, Why: err.Error()}
+		return Step{What: what, Why: err.Error()}, sealed
 	}
-	a := m.sync(ctx, entry{id: r.id, body: b})[0]
-	return Step{What: what, Answer: &a}
+	a := m.sync(ctx, entry{id: id, body: b})[0]
+	return Step{What: what, Answer: &a}, sealed
 }
 
 func (m *matrix) remember(uid string) {
@@ -441,397 +419,10 @@ func (m *matrix) remember(uid string) {
 	m.uids = append(m.uids, uid)
 }
 
-// readRow is a row read back, by its structural facts.
-type readRow struct {
-	id, keyPacket string
-	start, end    int64
-	startTZ       string
-	rrule         *string
-	recurrence    bool
-	notifications json.RawMessage
-	personal      int
-	open          *cards.Event
-	parts         map[cards.Kind][]byte
-	openErr       error
-}
-
-// readBack lists the rows of uid (exactly that UID) and opens each.
-func (m *matrix) readBack(ctx context.Context, uid string) ([]readRow, error) {
-	rows, err := events.ListByUID(ctx, m.c, m.calID, uid)
-	if err != nil {
-		return nil, err
-	}
-	var out []readRow
-	for _, r := range rows {
-		if r.UID != uid {
-			continue
-		}
-		var w struct {
-			SharedKeyPacket string
-			StartTimezone   string
-			RRule           *string
-			RecurrenceID    *int64
-			Notifications   json.RawMessage
-			PersonalEvents  []json.RawMessage
-		}
-		_ = json.Unmarshal(r.Raw, &w)
-		rr := readRow{
-			id: r.ID, keyPacket: w.SharedKeyPacket, start: r.Start, end: r.End, startTZ: w.StartTimezone,
-			rrule: w.RRule, recurrence: w.RecurrenceID != nil, notifications: compact(w.Notifications), personal: len(w.PersonalEvents),
-		}
-		ev, err := cards.Open(r.Raw, m.calKR, m.addrs, m.own)
-		if err != nil {
-			rr.openErr = err
-		} else {
-			rr.open = &ev
-			rr.parts = map[cards.Kind][]byte{}
-			for _, p := range ev.Parts {
-				if p.Kind != cards.Personal {
-					rr.parts[p.Kind] = p.Text
-				}
-			}
-		}
-		out = append(out, rr)
-	}
-	return out, nil
-}
-
-func compact(raw json.RawMessage) json.RawMessage {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return json.RawMessage("absent")
-	}
-	var b bytes.Buffer
-	if json.Compact(&b, raw) != nil {
-		return raw
-	}
-	return b.Bytes()
-}
-
-const asSent = "parts as sent"
-
-// partsFact compares r's parts with sent, by kind: the text is never shown.
-func partsFact(r readRow, sent map[ical.PartKind][]byte) string {
-	if r.openErr != nil {
-		return "parts do not open with the row's keys"
-	}
-	var diff []string
-	for k := ical.SharedSigned; k <= ical.Attendees; k++ {
-		got, have := r.parts[cards.Kind(k)]
-		want, sentIt := sent[k]
-		switch {
-		case have && !sentIt:
-			diff = append(diff, "extra "+k.String())
-		case sentIt && !have:
-			diff = append(diff, "no "+k.String())
-		case sentIt && !bytes.Equal(got, want):
-			diff = append(diff, k.String())
-		}
-	}
-	if len(diff) == 0 {
-		return asSent
-	}
-	return "parts differ: " + strings.Join(diff, ", ")
-}
-
-// partLine is the value of the first name: line of r's part k, or "absent".
-func partLine(r readRow, k ical.PartKind, name string) string {
-	for _, l := range strings.Split(string(r.parts[cards.Kind(k)]), "\r\n") {
-		if v, ok := strings.CutPrefix(l, name+":"); ok {
-			return v
-		}
-		if strings.HasPrefix(l, name+";") {
-			return l[len(name):]
-		}
-	}
-	return "absent"
-}
-
-func utc(unix int64) string { return time.Unix(unix, 0).UTC().Format(time.RFC3339) }
-
-// readFailed is the read-back fact of a failed listing.
-func readFailed(err error) string { return "listing failed: " + answerOf(err).String() }
-
-// matrixCase is one case: its name (the UID's end), its reference and how
-// it runs.
-type matrixCase struct {
-	name, ref string
-	run       func(ctx context.Context, m *matrix, uid string) CaseResult
-}
-
-var matrixCases = []matrixCase{
-	{"key-packets-on-update", "L.4 #3", caseKeyPackets},
-	{"second-master", "L.4 #5", caseSecondMaster},
-	{"rrule-count-50", "L.4 #6", rruleCase("20270302", "FREQ=WEEKLY;COUNT=50")},
-	{"rrule-until-2038", "L.4 #6", rruleCase("20270303", "FREQ=WEEKLY;UNTIL=20380106T090000Z")},
-	{"rrule-bysetpos-5", "L.4 #6", rruleCase("20270304", "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=5;COUNT=3")},
-	{"rrule-hourly", "L.4 #6", rruleCase("20270305", "FREQ=HOURLY;COUNT=3")},
-	{"rrule-interval-1000", "L.4 #6", rruleCase("20270306", "FREQ=DAILY;INTERVAL=1000;COUNT=2")},
-	{"status-tentative", "L.4 #8", caseTentative},
-	{"floating-time", "L.4 #8", timeCase("DTSTART:20270310T100000", "DTEND:20270310T110000")},
-	{"non-iana-tzid", "L.4 #8", timeCase("DTSTART;TZID=Mars/Olympus:20270311T100000", "DTEND;TZID=Mars/Olympus:20270311T110000")},
-	{"duration", "L.4 #8", caseDuration},
-	{"unbumped-time-edit", "R4", caseUnbumpedTime},
-	{"notifications-absent", "L.4 #10", caseNotificationsAbsent},
-	{"personal-part-left-out", "L.4 #10", casePersonal},
-}
-
-// one reads uid back expecting one openable row for a follow-up write; it
-// returns the row, or the read-back fact that stops the case.
-func (m *matrix) one(ctx context.Context, uid string) (readRow, string) {
-	rows, err := m.readBack(ctx, uid)
-	switch {
-	case err != nil:
-		return readRow{}, readFailed(err)
-	case len(rows) != 1:
-		return readRow{}, fmt.Sprintf("%d row(s)", len(rows))
-	case rows[0].openErr != nil:
-		return readRow{}, "1 row, parts do not open with the row's keys"
-	}
-	return rows[0], ""
-}
-
-func caseKeyPackets(ctx context.Context, m *matrix, uid string) CaseResult {
-	first := simple("20270301", "0", "key packets")
-	st := m.create(ctx, "create", uid, first, noNotifications, nil)
-	res := CaseResult{Steps: []Step{st}}
-	r, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.Steps = append(res.Steps, Step{What: "update with new key packets", Why: "no single row to update"})
-		res.ReadBack = stop
-		return res
-	}
-	next := simple("20270301", "1", "key packets renamed")
-	sealed, err := cards.Seal(next.parts(uid), cards.SealKeys{Signer: m.signer, CalendarPrimary: m.primary})
-	if err != nil {
-		res.Steps = append(res.Steps, Step{What: "update with new key packets", Why: "sealing failed: " + err.Error()})
-		res.ReadBack = "1 row"
-		return res
-	}
-	b, err := body(events.Body{WireEvent: sealed, Notifications: noNotifications}, nil)
-	if err != nil {
-		res.Steps = append(res.Steps, Step{What: "update with new key packets", Why: err.Error()})
-		res.ReadBack = "1 row"
-		return res
-	}
-	a := m.sync(ctx, entry{id: r.id, body: b})[0]
-	res.Steps = append(res.Steps, Step{What: "update with new key packets", Answer: &a})
-	rows, err := m.readBack(ctx, uid)
-	if err != nil {
-		res.ReadBack = readFailed(err)
-		return res
-	}
-	var facts []string
-	for _, row := range rows {
-		packet := "another"
-		switch row.keyPacket {
-		case sealed.SharedKeyPacket:
-			packet = "the new one"
-		case r.keyPacket:
-			packet = "the old one"
-		}
-		facts = append(facts, "key packet "+packet+", "+partsFact(row, next.parts(uid)))
-	}
-	res.ReadBack = fmt.Sprintf("%d row(s)", len(rows))
-	if len(facts) > 0 {
-		res.ReadBack += ": " + strings.Join(facts, "; ")
-	}
-	return res
-}
-
-func caseSecondMaster(ctx context.Context, m *matrix, uid string) CaseResult {
-	first, second := simple("20270302", "0", "first master"), simple("20270302", "0", "second master")
-	res := CaseResult{Steps: []Step{
-		m.create(ctx, "first create", uid, first, noNotifications, nil),
-		m.create(ctx, "second create, same UID", uid, second, noNotifications, nil),
-	}}
-	rows, err := m.readBack(ctx, uid)
-	if err != nil {
-		res.ReadBack = readFailed(err)
-		return res
-	}
-	masters, asFirst, asSecond := 0, 0, 0
-	for _, r := range rows {
-		if !r.recurrence {
-			masters++
-		}
-		if partsFact(r, first.parts(uid)) == asSent {
-			asFirst++
-		} else if partsFact(r, second.parts(uid)) == asSent {
-			asSecond++
-		}
-	}
-	res.ReadBack = fmt.Sprintf("%d row(s), %d master(s); as the first create %d, as the second %d", len(rows), masters, asFirst, asSecond)
-	return res
-}
-
-func rruleCase(day, rrule string) func(context.Context, *matrix, string) CaseResult {
-	return func(ctx context.Context, m *matrix, uid string) CaseResult {
-		k := simple(day, "0", "rrule", "RRULE:"+rrule)
-		res := CaseResult{Steps: []Step{m.create(ctx, "create", uid, k, noNotifications, nil)}}
-		rows, err := m.readBack(ctx, uid)
-		if err != nil {
-			res.ReadBack = readFailed(err)
-			return res
-		}
-		facts := []string{fmt.Sprintf("%d row(s)", len(rows))}
-		for _, r := range rows {
-			col := "null"
-			if r.rrule != nil {
-				col = fmt.Sprintf("%q", *r.rrule)
-			}
-			if r.rrule != nil && *r.rrule == rrule {
-				col += " (as sent)"
-			} else {
-				col += fmt.Sprintf(" (sent %q)", rrule)
-			}
-			facts = append(facts, "RRULE column "+col+", "+partsFact(r, k.parts(uid)))
-		}
-		res.ReadBack = strings.Join(facts, "; ")
-		return res
-	}
-}
-
-func caseTentative(ctx context.Context, m *matrix, uid string) CaseResult {
-	k := simple("20270309", "0", "tentative")
-	k.cal = []string{"STATUS:TENTATIVE"}
-	res := CaseResult{Steps: []Step{m.create(ctx, "create", uid, k, noNotifications, nil)}}
-	rows, err := m.readBack(ctx, uid)
-	if err != nil {
-		res.ReadBack = readFailed(err)
-		return res
-	}
-	facts := []string{fmt.Sprintf("%d row(s)", len(rows))}
-	for _, r := range rows {
-		facts = append(facts, "STATUS "+partLine(r, ical.CalendarSigned, "STATUS")+" in the calendar signed part, "+partsFact(r, k.parts(uid)))
-	}
-	res.ReadBack = strings.Join(facts, "; ")
-	return res
-}
-
-func timeCase(start, end string) func(context.Context, *matrix, string) CaseResult {
-	return func(ctx context.Context, m *matrix, uid string) CaseResult {
-		k := card{shared: []string{start, end, "SEQUENCE:0"}, enc: []string{"SUMMARY:pcb-lab wm time"}, cal: []string{}}
-		res := CaseResult{Steps: []Step{m.create(ctx, "create", uid, k, noNotifications, nil)}}
-		rows, err := m.readBack(ctx, uid)
-		if err != nil {
-			res.ReadBack = readFailed(err)
-			return res
-		}
-		facts := []string{fmt.Sprintf("%d row(s)", len(rows))}
-		for _, r := range rows {
-			facts = append(facts, fmt.Sprintf("StartTimezone %q, StartTime %s, %s", r.startTZ, utc(r.start), partsFact(r, k.parts(uid))))
-		}
-		res.ReadBack = strings.Join(facts, "; ")
-		return res
-	}
-}
-
-func caseDuration(ctx context.Context, m *matrix, uid string) CaseResult {
-	k := card{shared: []string{"DTSTART;TZID=" + paris + ":20270312T090000", "DURATION:PT45M", "SEQUENCE:0"}, enc: []string{"SUMMARY:pcb-lab wm duration"}, cal: []string{}}
-	res := CaseResult{Steps: []Step{m.create(ctx, "create", uid, k, noNotifications, nil)}}
-	rows, err := m.readBack(ctx, uid)
-	if err != nil {
-		res.ReadBack = readFailed(err)
-		return res
-	}
-	facts := []string{fmt.Sprintf("%d row(s)", len(rows))}
-	for _, r := range rows {
-		facts = append(facts, fmt.Sprintf("EndTime - StartTime %d s, DURATION %s, DTEND %s in the shared signed part, %s",
-			r.end-r.start, partLine(r, ical.SharedSigned, "DURATION"), partLine(r, ical.SharedSigned, "DTEND"), partsFact(r, k.parts(uid))))
-	}
-	res.ReadBack = strings.Join(facts, "; ")
-	return res
-}
-
-func caseUnbumpedTime(ctx context.Context, m *matrix, uid string) CaseResult {
-	first := simple("20270315", "0", "unbumped time")
-	res := CaseResult{Steps: []Step{m.create(ctx, "create", uid, first, noNotifications, nil)}}
-	r, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.Steps = append(res.Steps, Step{What: "time edit, SEQUENCE unchanged", Why: "no single row to update"})
-		res.ReadBack = stop
-		return res
-	}
-	moved := card{
-		shared: []string{"DTSTART;TZID=" + paris + ":20270315T103000", "DTEND;TZID=" + paris + ":20270315T113000", "SEQUENCE:0"},
-		enc:    first.enc, cal: first.cal,
-	}
-	res.Steps = append(res.Steps, m.update(ctx, "time edit, SEQUENCE unchanged", uid, r, moved, noNotifications))
-	after, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.ReadBack = stop
-		return res
-	}
-	shift := "unchanged by the update"
-	if d := after.start - r.start; d != 0 {
-		shift = fmt.Sprintf("moved %+d s by the update", d)
-	}
-	res.ReadBack = "1 row, StartTime " + shift + ", " + partsFact(after, moved.parts(uid))
-	return res
-}
-
-func caseNotificationsAbsent(ctx context.Context, m *matrix, uid string) CaseResult {
-	first := simple("20270316", "0", "notifications")
-	reminder := events.Value(events.NotificationList{{Type: 1, Trigger: "-PT15M"}})
-	res := CaseResult{Steps: []Step{m.create(ctx, "create with one reminder", uid, first, reminder, nil)}}
-	r, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.Steps = append(res.Steps, Step{What: "update, Notifications absent", Why: "no single row to update"})
-		res.ReadBack = stop
-		return res
-	}
-	next := simple("20270316", "1", "notifications renamed")
-	res.Steps = append(res.Steps, m.update(ctx, "update, Notifications absent", uid, r, next, events.Optional[events.NotificationList]{}))
-	after, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.ReadBack = fmt.Sprintf("Notifications after the create %s; after the update: %s", r.notifications, stop)
-		return res
-	}
-	res.ReadBack = fmt.Sprintf("Notifications after the create %s, after the update %s, %s", r.notifications, after.notifications, partsFact(after, next.parts(uid)))
-	return res
-}
-
-func casePersonal(ctx context.Context, m *matrix, uid string) CaseResult {
-	first := simple("20270317", "0", "personal part")
-	text := fragment(uid, []string{"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT10M", "DESCRIPTION:pcb-lab", "END:VALARM"})
-	res := CaseResult{}
-	sig, err := m.signer.SignDetached(crypto.NewPlainMessage(text))
-	var armored string
-	if err == nil {
-		armored, err = sig.GetArmored()
-	}
-	if err != nil {
-		res.Steps = []Step{{What: "create with a personal part", Why: "signing failed"}}
-		res.ReadBack = "0 row(s)"
-		return res
-	}
-	personal := map[string]any{"PersonalEventContent": map[string]any{"Type": 2, "Data": string(text), "Signature": armored}}
-	res.Steps = []Step{m.create(ctx, "create with a personal part", uid, first, noNotifications, personal)}
-	r, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.Steps = append(res.Steps, Step{What: "update leaving it out", Why: "no single row to update"})
-		res.ReadBack = stop
-		return res
-	}
-	if r.personal == 0 {
-		res.Steps = append(res.Steps, Step{What: "update leaving it out", Why: "the create stored no personal part"})
-		res.ReadBack = "1 row, personal parts after the create 0"
-		return res
-	}
-	next := simple("20270317", "1", "personal part renamed")
-	res.Steps = append(res.Steps, m.update(ctx, "update leaving it out", uid, r, next, noNotifications))
-	after, stop := m.one(ctx, uid)
-	if stop != "" {
-		res.ReadBack = fmt.Sprintf("personal parts after the create %d; after the update: %s", r.personal, stop)
-		return res
-	}
-	res.ReadBack = fmt.Sprintf("1 row, personal parts after the create %d, after the update %d, %s", r.personal, after.personal, partsFact(after, next.parts(uid)))
-	return res
-}
-
 // cleanup deletes every row of the UIDs written, in one call, and reads
-// them back. It never deletes a row whose UID lacks the run's prefix.
-func (m *matrix) cleanup(ctx context.Context) string {
+// them back. It never deletes a row whose UID lacks the run's prefix. ok is
+// false unless nothing is left.
+func (m *matrix) cleanup(ctx context.Context) (line string, ok bool) {
 	var del []entry
 	for _, uid := range m.uids {
 		if !strings.HasPrefix(uid, m.prefix) {
@@ -839,14 +430,14 @@ func (m *matrix) cleanup(ctx context.Context) string {
 		}
 		rows, err := m.readBack(ctx, uid)
 		if err != nil {
-			return "listing " + uid + " failed: " + answerOf(err).String() + "; nothing deleted"
+			return "listing " + uid + " failed: " + answerOf(err).String() + "; nothing deleted", false
 		}
 		for _, r := range rows {
 			del = append(del, entry{id: r.id})
 		}
 	}
 	if len(del) == 0 {
-		return "nothing to delete"
+		return "nothing to delete; left 0", true
 	}
 	answers := m.sync(ctx, del...)
 	refused := 0
@@ -855,13 +446,21 @@ func (m *matrix) cleanup(ctx context.Context) string {
 			refused++
 		}
 	}
-	left := 0
+	line = fmt.Sprintf("delete %d row(s) in one call: %s, %d entr(ies) refused", len(del), answers[0].String(), refused)
+	var left []string
+	n := 0
 	for _, uid := range m.uids {
 		rows, err := m.readBack(ctx, uid)
 		if err != nil {
-			return fmt.Sprintf("delete %d row(s): %s, %d entr(ies) refused; read-back failed: %s", len(del), answers[0], refused, answerOf(err))
+			return line + "; read-back failed: " + answerOf(err).String(), false
 		}
-		left += len(rows)
+		if len(rows) > 0 {
+			n += len(rows)
+			left = append(left, fmt.Sprintf("%s (%d)", uid, len(rows)))
+		}
 	}
-	return fmt.Sprintf("delete %d row(s) in one call: HTTP %d, %d entr(ies) refused; left %d", len(del), answers[0].Status, refused, left)
+	if n == 0 {
+		return line + "; left 0", true
+	}
+	return fmt.Sprintf("%s; left %d: %s", line, n, strings.Join(left, ", ")), false
 }

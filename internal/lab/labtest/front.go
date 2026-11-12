@@ -3,6 +3,7 @@
 package labtest
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -44,6 +45,9 @@ type Front struct {
 	Challenge string   // non-empty: answer POST /auth/v4 with 9001 and this token
 	TwoFA     bool
 	Replies   map[string]Reply // key "METHOD /path": answered instead of the backend
+	// Intercept, when set, sees each request's method, path and body after
+	// Replies and may answer it instead of the backend (true).
+	Intercept func(method, path string, body []byte) (Reply, bool)
 	Log       []Seen
 	URL       string
 	// Options shape the fake behind the front (its Username, Password and
@@ -76,7 +80,16 @@ func NewFront(t *testing.T, f *Front) *Front {
 		if canned && reply.Once {
 			delete(f.Replies, r.Method+" "+r.URL.Path)
 		}
+		intercept := f.Intercept
 		f.Mu.Unlock()
+		if !canned && intercept != nil {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			reply, canned = intercept(r.Method, r.URL.Path, body)
+		}
 		if canned {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(reply.Status)

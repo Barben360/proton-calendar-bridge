@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
@@ -37,11 +38,12 @@ func (a Answer) OK() bool { return a.Code == api.CodeOK }
 // maxMessage bounds the Proton message kept in an Answer.
 const maxMessage = 160
 
+// message is s cut to maxMessage runes, never inside a rune.
 func message(s string) string {
-	if len(s) > maxMessage {
-		return s[:maxMessage] + "…"
+	if utf8.RuneCountInString(s) <= maxMessage {
+		return s
 	}
-	return s
+	return string([]rune(s)[:maxMessage]) + "…"
 }
 
 // answerOf is the answer behind err, a failed api.Client call. A call
