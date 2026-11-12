@@ -90,6 +90,11 @@ func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
 // make a later page repeat a row or skip one: the caller checks Total and
 // the feed head.
 func List(ctx context.Context, c *api.Client, calID string) (Listing, error) {
+	return list(ctx, c, calID, nil)
+}
+
+// list is List with extra query parameters (UID= for ListByUID).
+func list(ctx context.Context, c *api.Client, calID string, extra url.Values) (Listing, error) {
 	l := Listing{Total: -1}
 	at := map[string]int{} // ID -> index in l.Rows
 	served := 0
@@ -99,6 +104,9 @@ func List(ctx context.Context, c *api.Client, calID string) (Listing, error) {
 			Total  *int
 		}
 		q := url.Values{"Page": {strconv.Itoa(page)}, "PageSize": {strconv.Itoa(PageSize)}}
+		for k, v := range extra {
+			q[k] = v
+		}
 		if err := c.Get(ctx, "/calendar/v1/"+url.PathEscape(calID)+"/events", q, &out); err != nil {
 			return Listing{}, fmt.Errorf("listing events (page %d): %w", page, err)
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -690,5 +691,55 @@ func TestSetTokensReplacesWhatIsSent(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 2 || seen[1] != "Bearer access-other" {
 		t.Errorf("bearers sent = %v", seen)
+	}
+}
+
+func TestPutOnceDoesNotRetryA429(t *testing.T) {
+	var n atomic.Int32
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Retry-After", "2")
+		reply(w, 429, `{"Code":0,"Error":"slow"}`)
+	}, api.Options{})
+	err := c.PutOnce(t.Context(), "/p", map[string]int{"a": 1}, nil)
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Status != 429 || ae.RetryAfter != 2*time.Second {
+		t.Fatalf("err = %v, want the 429 with its Retry-After", err)
+	}
+	if n.Load() != 1 || len(s.d) != 0 || errors.Is(err, api.ErrNotSent) {
+		t.Errorf("requests=%d sleeps=%v notSent=%v, want one request, no wait", n.Load(), s.d, errors.Is(err, api.ErrNotSent))
+	}
+	// Put keeps waiting out a 429 (it is rejected before processing).
+	n.Store(0)
+	if err := c.Put(t.Context(), "/p", map[string]int{"a": 1}, nil); err == nil || n.Load() < 2 {
+		t.Errorf("Put: err=%v requests=%d, want it retried", err, n.Load())
+	}
+}
+
+func TestNotSentOnlyBeforeTheRequestCanLeave(t *testing.T) {
+	// A refused connection: never left.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://" + l.Addr().String()
+	_ = l.Close()
+	c := api.New(api.Tokens{}, api.Options{BaseURL: base, Sleep: func(context.Context, time.Duration) error { return nil }})
+	if err := c.PutOnce(t.Context(), "/p", map[string]int{"a": 1}, nil); !errors.Is(err, api.ErrNotSent) {
+		t.Errorf("refused connection: %v, want ErrNotSent", err)
+	}
+	// A body that cannot encode: never left.
+	if err := c.PutOnce(t.Context(), "/p", make(chan int), nil); !errors.Is(err, api.ErrNotSent) {
+		t.Errorf("unencodable body: %v, want ErrNotSent", err)
+	}
+	// An answer cut after the request arrived: may have been processed.
+	c2, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}, api.Options{})
+	if err := c2.PutOnce(t.Context(), "/p", map[string]int{"a": 1}, nil); err == nil || errors.Is(err, api.ErrNotSent) {
+		t.Errorf("reset after send: %v, want an error that is not ErrNotSent", err)
 	}
 }

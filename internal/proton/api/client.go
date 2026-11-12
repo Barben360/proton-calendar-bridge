@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -111,6 +112,17 @@ func (c *Client) Put(ctx context.Context, path string, body, out any) error {
 	return c.Do(ctx, http.MethodPut, path, nil, body, out)
 }
 
+// PutOnce sends a PUT with a JSON body that must never be sent twice: a write
+// without an idempotency key. It behaves as Put except that a 429 is
+// returned at once, not waited out and retried; the caller decides whether
+// and when to send again. (A 401 still refreshes the tokens and re-sends
+// once: Proton rejected the request before processing it.) 5xx and network
+// errors are never retried for a PUT. Errors that happened before anything
+// could have reached Proton satisfy errors.Is(err, ErrNotSent).
+func (c *Client) PutOnce(ctx context.Context, path string, body, out any) error {
+	return c.do(ctx, http.MethodPut, path, nil, body, out, true)
+}
+
 // Delete sends a DELETE.
 func (c *Client) Delete(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodDelete, path, nil, nil, out)
@@ -128,15 +140,19 @@ func (c *Client) Delete(ctx context.Context, path string, out any) error {
 // every ID they put in it. Paths with "?", "#", "..", a backslash or control
 // characters are refused without sending anything.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.do(ctx, method, path, query, body, out, false)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any, once bool) error {
 	target, err := c.target(path, query)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return notSent(fmt.Errorf("%s %s: %w", method, path, err))
 	}
 	var payload []byte
 	if body != nil {
 		var err error
 		if payload, err = json.Marshal(body); err != nil {
-			return fmt.Errorf("%s %s: encode body: %w", method, path, err)
+			return notSent(fmt.Errorf("%s %s: encode body: %w", method, path, err))
 		}
 	}
 	where := method + " " + path
@@ -147,7 +163,7 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 			if ctx.Err() != nil {
 				err = ctx.Err()
 			}
-			return fmt.Errorf("%s: %w", where, err)
+			return notSent(fmt.Errorf("%s: %w", where, err))
 		}
 		sent := c.Tokens()
 		status, hdr, data, err := c.send(ctx, method, target, payload, sent)
@@ -179,9 +195,12 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 			}
 			refreshed = true
 			if err := c.refresh(ctx, sent); err != nil {
-				return fmt.Errorf("%s: %w", where, err)
+				return notSent(fmt.Errorf("%s: %w", where, err))
 			}
 		case status == http.StatusTooManyRequests:
+			if once {
+				return perr
+			}
 			limited++
 			wait := perr.RetryAfter
 			if wait == 0 {
@@ -253,6 +272,10 @@ func (c *Client) send(ctx context.Context, method, target string, payload []byte
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
+		}
+		var oe *net.OpError
+		if errors.As(err, &oe) && oe.Op == "dial" {
+			err = notSent(err) // no connection: the request never left
 		}
 		return 0, nil, nil, err
 	}

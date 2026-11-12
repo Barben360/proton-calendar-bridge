@@ -29,6 +29,21 @@ const (
 // log in again. It is wrapped, so test it with errors.Is.
 var ErrSessionEnded = errors.New("proton session ended")
 
+// ErrNotSent marks a failure from before the request could have reached
+// Proton: it never left (bad path, body that does not encode, rate limiter
+// or context given up while waiting, no connection) or Proton rejected it
+// before processing (a 401 whose token refresh then failed). Test it with
+// errors.Is; the message is the wrapped error's.
+var ErrNotSent = errors.New("request not sent")
+
+type notSentError struct{ err error }
+
+func (e notSentError) Error() string        { return e.err.Error() }
+func (e notSentError) Unwrap() error        { return e.err }
+func (e notSentError) Is(target error) bool { return target == ErrNotSent }
+
+func notSent(err error) error { return notSentError{err} }
+
 // Error is a Proton API failure. It holds nothing from the request.
 type Error struct {
 	Method, Path string // for diagnostics; never the query or the body
