@@ -56,7 +56,7 @@ func Inspect(path string) (Info, error) {
 		info.QuickCheck = err.Error()
 		return info, nil
 	}
-	if info.Schema == schemaVersion {
+	if info.Schema >= 1 && info.Schema <= schemaVersion {
 		err := db.QueryRow(`SELECT value FROM meta WHERE key = 'account'`).Scan(&info.Account)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			info.QuickCheck = err.Error()

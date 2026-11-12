@@ -1,7 +1,11 @@
 package cache
 
-// schemaVersion is the only schema so far, stored in PRAGMA user_version.
-const schemaVersion = 1
+// schemaVersion is stored in PRAGMA user_version: 1 is the M1-M3 schema, 2
+// adds the aliases table (M4).
+const schemaVersion = 2
+
+// SchemaVersion is the schema this build writes (for pcb doctor).
+const SchemaVersion = schemaVersion
 
 // events is a rowid table: raw blobs are large, which SQLite advises
 // against in WITHOUT ROWID tables. Timestamps are Unix seconds. Nothing decrypted is stored: raw is the row
@@ -49,4 +53,16 @@ CREATE TABLE IF NOT EXISTS tombstones (
 	PRIMARY KEY (calendar_id, id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS tombstones_seq ON tombstones (calendar_id, seq);
+`
+
+// schemaV2 remembers the hrefs clients chose (ruling M4-R6): one name per
+// UID of a calendar. Aliases outlive the UID's deletion (ruling M4-R22).
+const schemaV2 = `
+CREATE TABLE IF NOT EXISTS aliases (
+	calendar_id TEXT NOT NULL CHECK (calendar_id <> ''),
+	name        TEXT NOT NULL CHECK (name <> ''),
+	uid         TEXT NOT NULL CHECK (uid <> ''),
+	PRIMARY KEY (calendar_id, name),
+	UNIQUE (calendar_id, uid)
+) WITHOUT ROWID;
 `

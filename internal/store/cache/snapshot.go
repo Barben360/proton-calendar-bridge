@@ -83,6 +83,10 @@ type View interface {
 	// be named and are skipped.
 	// Like Listing, it reads no payload.
 	ChangedSince(since int64) (changed []Listed, deletedUIDs []string, err error)
+	// AliasOf returns the UID the client-chosen href name stands for.
+	AliasOf(name string) (uid string, ok bool, err error)
+	// AliasesFor returns every alias of the calendar, UID to name.
+	AliasesFor() (map[string]string, error)
 }
 
 // Snapshot runs fn inside one read transaction on calID: everything fn reads
@@ -248,4 +252,45 @@ func (v *view) ChangedSince(since int64) ([]Listed, []string, error) {
 		deleted = append(deleted, uid)
 	}
 	return changed, deleted, v.c.classify(rows.Err())
+}
+
+func (v *view) AliasOf(name string) (string, bool, error) {
+	if v.ended {
+		return "", false, errEnded
+	}
+	if v.c.noAliases {
+		return "", false, nil
+	}
+	var uid string
+	err := v.tx.QueryRowContext(v.ctx, `SELECT uid FROM aliases WHERE calendar_id = ? AND name = ?`, v.cal, name).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, v.c.classify(err)
+	}
+	return uid, true, nil
+}
+
+func (v *view) AliasesFor() (map[string]string, error) {
+	if v.ended {
+		return nil, errEnded
+	}
+	out := map[string]string{}
+	if v.c.noAliases {
+		return out, nil
+	}
+	rows, err := v.tx.QueryContext(v.ctx, `SELECT uid, name FROM aliases WHERE calendar_id = ?`, v.cal)
+	if err != nil {
+		return nil, v.c.classify(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var uid, name string
+		if err := rows.Scan(&uid, &name); err != nil {
+			return nil, v.c.classify(err)
+		}
+		out[uid] = name
+	}
+	return out, v.c.classify(rows.Err())
 }

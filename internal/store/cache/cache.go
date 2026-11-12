@@ -136,6 +136,8 @@ type Cache struct {
 	// noMeta: the file lacks the calendars' color, description and floor
 	// columns (a read-only handle on a file no writer upgraded yet).
 	noMeta bool
+	// noAliases: a version 1 file, which has no aliases table (same case).
+	noAliases bool
 }
 
 // Path is the cache file inside the state directory.
@@ -192,7 +194,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 	if version > schemaVersion {
 		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: upgrade pcb, or remove the file and run `pcb sync --full`: %w", path, version, schemaVersion, ErrNewerSchema)
 	}
-	if version == schemaVersion {
+	if version >= 1 {
 		if err := c.addLateColumns(ctx); err != nil {
 			return fmt.Errorf("cache: upgrade %s: %w", path, c.classify(err))
 		}
@@ -203,8 +205,10 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 	}
 	if version < schemaVersion {
 		err := c.tx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
-				return err
+			for _, ddl := range []string{schemaV1, schemaV2} {
+				if _, err := tx.ExecContext(ctx, ddl); err != nil {
+					return err
+				}
 			}
 			_, err := tx.ExecContext(ctx, `PRAGMA user_version = `+strconv.Itoa(schemaVersion))
 			return err
@@ -233,7 +237,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 			return err
 		}
 		if got != "" {
-			for _, t := range []string{"tombstones", "events", "calendars", "meta"} {
+			for _, t := range []string{"aliases", "tombstones", "events", "calendars", "meta"} {
 				if _, err := tx.ExecContext(ctx, `DELETE FROM `+t); err != nil {
 					return err
 				}
@@ -428,9 +432,10 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 	switch {
 	case version > schemaVersion:
 		return fmt.Errorf("cache: %s has schema version %d, newer than the %d this pcb supports: %w", path, version, schemaVersion, ErrNewerSchema)
-	case version < schemaVersion:
+	case version < 1:
 		return ErrNoCache // empty file: nothing was ever stored
 	}
+	c.noAliases = version < 2 // a read-only handle never upgrades
 	got, err := c.account(ctx, c.db)
 	if err != nil {
 		return fmt.Errorf("cache: %w", err)
@@ -583,7 +588,8 @@ func (w *writer) tombstone(id string, known map[string]string) error {
 	return nil
 }
 
-func (w *writer) finish(cursor string, at time.Time, full bool) error {
+// settle creates the calendar's row when it has none and stores the counter.
+func (w *writer) settle() error {
 	created, floor, err := createCalendar(w.ctx, w.tx, w.cal, w.start)
 	if err != nil {
 		return err
@@ -591,14 +597,18 @@ func (w *writer) finish(cursor string, at time.Time, full bool) error {
 	if created && w.seq == w.start {
 		w.seq = floor // no row took the floor's value: the creation does
 	}
-	if err := writeSeq(w.ctx, w.tx, w.seq); err != nil {
+	return writeSeq(w.ctx, w.tx, w.seq)
+}
+
+func (w *writer) finish(cursor string, at time.Time, full bool) error {
+	if err := w.settle(); err != nil {
 		return err
 	}
 	fullAt := int64(0)
 	if full {
 		fullAt = at.Unix()
 	}
-	_, err = w.tx.ExecContext(w.ctx, `INSERT INTO calendars (id, cursor, full_at, synced_at) VALUES (?, ?, ?, ?)
+	_, err := w.tx.ExecContext(w.ctx, `INSERT INTO calendars (id, cursor, full_at, synced_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, synced_at = excluded.synced_at,
 		full_at = CASE WHEN ? THEN excluded.full_at ELSE calendars.full_at END,
 		resync = CASE WHEN ? THEN '' ELSE calendars.resync END`,
@@ -674,6 +684,93 @@ func (c *Cache) ApplyDelta(ctx context.Context, calID, cursor string, upserts []
 		return Changes{}, c.classify(err)
 	}
 	return ch, nil
+}
+
+// ApplyWrite makes rows the content of one UID in the calendar, as Proton
+// returned them after a write (ruling M4-Rpre2): rows whose ETag changed are
+// written, the UID's stored rows absent from rows are tombstoned (with the
+// UID), and empty rows deletes the UID. A row of another UID is an error and
+// nothing is written. Unlike ApplyDelta it never touches the feed cursor, so
+// the syncer's next pass re-reads the same rows and finds them unchanged.
+func (c *Cache) ApplyWrite(ctx context.Context, calID, uid string, rows []Row, at time.Time) (Changes, error) {
+	if uid == "" {
+		return Changes{}, errors.New("cache: empty UID")
+	}
+	for _, r := range rows {
+		if r.UID != uid {
+			return Changes{}, fmt.Errorf("cache: row %q has another UID than the one written", r.ID)
+		}
+	}
+	var ch Changes
+	err := c.tx(ctx, func(tx *sql.Tx) error {
+		w, err := c.begin(ctx, tx, calID)
+		if err != nil {
+			return err
+		}
+		known, err := w.etags()
+		if err != nil {
+			return err
+		}
+		own, err := w.idsOf(uid)
+		if err != nil {
+			return err
+		}
+		keep := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			keep[r.ID] = true
+			if err := w.upsert(r, known); err != nil {
+				return err
+			}
+		}
+		for _, id := range own {
+			if !keep[id] {
+				if err := w.tombstone(id, known); err != nil {
+					return err
+				}
+			}
+		}
+		ch = w.ch
+		return w.settle()
+	})
+	if err != nil {
+		return Changes{}, c.classify(err)
+	}
+	return ch, nil
+}
+
+// idsOf lists the IDs of the stored rows of one UID.
+func (w *writer) idsOf(uid string) ([]string, error) {
+	rows, err := w.tx.QueryContext(w.ctx, `SELECT id FROM events WHERE calendar_id = ? AND uid = ?`, w.cal, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// PutAlias records that the client's href name stands for uid in the
+// calendar (ruling M4-R6). A UID has one name: the previous one is replaced,
+// and so is another UID's claim on the same name. Aliases outlive the UID's
+// deletion and die with the calendar or the epoch (ruling M4-R22).
+func (c *Cache) PutAlias(ctx context.Context, calID, name, uid string) error {
+	if calID == "" || name == "" || uid == "" {
+		return errors.New("cache: empty calendar ID, alias name or UID")
+	}
+	return c.classify(c.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM aliases WHERE calendar_id = ?1 AND (uid = ?2 OR name = ?3)`, calID, uid, name); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO aliases (calendar_id, name, uid) VALUES (?, ?, ?)`, calID, name, uid)
+		return err
+	}))
 }
 
 // Calendars lists the calendars, ordered by ID.
@@ -780,6 +877,7 @@ func (c *Cache) DropCalendar(ctx context.Context, id string) error {
 		for _, q := range []string{
 			`DELETE FROM events WHERE calendar_id = ?`,
 			`DELETE FROM tombstones WHERE calendar_id = ?`,
+			`DELETE FROM aliases WHERE calendar_id = ?`,
 			`DELETE FROM calendars WHERE id = ?`,
 		} {
 			if _, err := tx.ExecContext(ctx, q, id); err != nil {
