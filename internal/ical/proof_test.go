@@ -198,7 +198,11 @@ func TestProvesKey(t *testing.T) {
 		{"UID and DTSTAMP only", frag(uidLine, stampLine), false},
 		{"signed-routed lines only", frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "STATUS:CONFIRMED"), false},
 		{"a METHOD:REPLY .ics", []byte(reply), false},
-		{"VERSION at VCALENDAR level", []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR"), false},
+		// carbonate and caloxide write VERSION, PRODID and CALSCALE into
+		// their fragments (research B.4): harmless headers, allowed (M4-R20).
+		{"VERSION, PRODID and CALSCALE at VCALENDAR level", []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//x//EN\r\nCALSCALE:GREGORIAN\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR"), true},
+		{"METHOD beside VERSION", []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR"), false},
+		{"an X- property at VCALENDAR level", []byte("BEGIN:VCALENDAR\r\nX-WR-CALNAME:x\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR"), false},
 		{"a VTIMEZONE beside", []byte("BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nTZID:X\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR"), false},
 		{"two VEVENTs", []byte("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:x\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:u1\r\nEND:VEVENT\r\nEND:VCALENDAR"), false},
 		{"two VCALENDARs", append(frag(uidLine, "SUMMARY:x"), []byte("\r\n"+string(frag(uidLine)))...), false},

@@ -68,11 +68,19 @@ func ProvesKey(text []byte, uid string, k PartKind) bool {
 	if err != nil || uid == "" || len(top) != 1 || !strings.EqualFold(top[0].Name, "VCALENDAR") {
 		return false
 	}
-	cal := top[0]
-	if len(cal.Items) != 1 || cal.Items[0].Comp == nil || !strings.EqualFold(cal.Items[0].Comp.Name, "VEVENT") {
+	var ev *Component
+	for _, it := range top[0].Items {
+		switch {
+		case it.Comp != nil && strings.EqualFold(it.Comp.Name, "VEVENT") && ev == nil:
+			ev = it.Comp
+		case it.Comp == nil && fragmentHeader(it.Prop.Name):
+		default:
+			return false
+		}
+	}
+	if ev == nil {
 		return false
 	}
-	ev := *cal.Items[0].Comp
 	var uids []string
 	for _, p := range ev.Props() {
 		if strings.EqualFold(p.Name, "UID") {
@@ -85,4 +93,16 @@ func ProvesKey(text []byte, uid string, k PartKind) bool {
 	return slices.ContainsFunc(ev.Props(), func(p Property) bool {
 		return EncryptedOnly(p.Name) && slices.Contains(routeOf(strings.ToUpper(p.Name)), k)
 	})
+}
+
+// fragmentHeader reports the VCALENDAR-level properties a proving fragment
+// may carry: the headers carbonate and caloxide write into their fragments
+// (research B.4), never METHOD (a mailed .ics always has one) nor anything
+// else (ruling M4-R20).
+func fragmentHeader(name string) bool {
+	switch strings.ToUpper(name) {
+	case "VERSION", "PRODID", "CALSCALE":
+		return true
+	}
+	return false
 }
