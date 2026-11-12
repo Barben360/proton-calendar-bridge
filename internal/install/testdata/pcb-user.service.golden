@@ -13,6 +13,7 @@ Environment=PCB_STATE_DIR=/home/alice/.local/state/pcb
 ExecStart=/home/alice/go/bin/pcb serve --wait-for-login
 Restart=on-failure
 RestartSec=10s
+RestartPreventExitStatus=10
 TimeoutStopSec=30s
 UMask=0077
 NoNewPrivileges=yes

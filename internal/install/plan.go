@@ -298,6 +298,9 @@ func planFile(h Host, sp fileSpec) (Step, error) {
 		}
 	case sp.createOnly:
 		// M8: the content stays, the owner and mode are put right.
+		if err := singleLink(sp.path, fi); err != nil {
+			return Step{}, blocked(err, "remove the other links, or move the file away, then run the command again")
+		}
 		st.Action, st.content, st.fixOnly = ActionUpdate, nil, true
 		st.Note = "content kept: owner and mode put right"
 	default:

@@ -105,12 +105,23 @@ func makeDir(h Host, s Step) error {
 	if err := os.MkdirAll(p, mode); err != nil {
 		return err
 	}
+	// Through the opened directory, so a symlinked one (an admin's
+	// relocated /var/lib/pcb) gets its target put right. Following the
+	// link is safe: the parents, /etc and /var/lib, are root's.
+	d, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer d.Close() //nolint:errcheck // read-only
+	if fi, err := d.Stat(); err != nil || !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", s.Path)
+	}
 	if s.Mode != "" {
-		if err := os.Chmod(p, mode); err != nil { // MkdirAll leaves an existing one, and the umask applies
+		if err := d.Chmod(mode); err != nil { // MkdirAll leaves an existing one, and the umask applies
 			return err
 		}
 	}
-	return chown(h, p, s.Owner)
+	return chown(h, d, s.Owner)
 }
 
 // writeFile writes the step's content to a temporary file beside the
@@ -137,13 +148,15 @@ func writeFile(h Host, s Step) error {
 		err = f.Chmod(mode)
 	}
 	if err == nil {
+		// Through the descriptor: pcb owns /etc/pcb and could swap the
+		// temporary name for a link to another file.
+		err = chown(h, f, s.Owner)
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
-	}
-	if err == nil {
-		err = chown(h, tmp, s.Owner)
 	}
 	if err != nil {
 		return err
@@ -172,9 +185,11 @@ func createFrom(tmp, p string) error {
 }
 
 // fixFile puts an existing file's mode and owner right without touching
-// its content (M8). The mode is set through a descriptor checked to be the
-// regular file the path named, and Host.Chown does not follow a symlink, so
-// a swap in a directory pcb owns cannot steer either at another file.
+// its content (M8). Both go through one descriptor, opened on what the
+// path named and checked against its Lstat: a regular file, the same one,
+// with a single link. That stops a symlink or a later swap; a hard link
+// pcb planted to another file is refused by the link count (where
+// fs.protected_hardlinks is off), never chowned.
 func fixFile(h Host, s Step) error {
 	p := h.Path(s.Path)
 	mode, err := parseMode(s.Mode)
@@ -200,15 +215,27 @@ func fixFile(h Host, s Step) error {
 	if !os.SameFile(before, now) {
 		return fmt.Errorf("%s changed while being fixed", s.Path)
 	}
+	if err := singleLink(s.Path, now); err != nil {
+		return err
+	}
 	if err := f.Chmod(mode); err != nil {
 		return err
 	}
-	return chown(h, p, s.Owner)
+	return chown(h, f, s.Owner)
 }
 
-// chown gives p to owner ("user" or "user:group", the group being the
-// user's own); "" leaves it.
-func chown(h Host, p, owner string) error {
+// singleLink refuses a file with more than one hard link: changing it
+// would change the other names too.
+func singleLink(path string, fi fs.FileInfo) error {
+	if n, known := linkCount(fi); known && n > 1 {
+		return fmt.Errorf("%s has %d hard links: pcb changes no file linked elsewhere", path, n)
+	}
+	return nil
+}
+
+// chown gives the open file f to owner ("user" or "user:group", the group
+// being the user's own); "" leaves it.
+func chown(h Host, f *os.File, owner string) error {
 	if owner == "" {
 		return nil
 	}
@@ -220,7 +247,7 @@ func chown(h Host, p, owner string) error {
 	if !ok {
 		return fmt.Errorf("no user %s", name)
 	}
-	return h.Chown(p, uid, gid)
+	return h.Chown(f, uid, gid)
 }
 
 // removeDir removes a directory and everything in it. A relative path, or

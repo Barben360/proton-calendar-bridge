@@ -31,7 +31,7 @@ func noSystemHost() install.Host {
 		Executable: func() (string, error) { return "", errors.New("no binary in tests") },
 		LookupUser: func(string) (int, int, bool, error) { return 0, 0, false, nil },
 		UserName:   func(int) (string, error) { return "", errors.New("no users in tests") },
-		Chown:      func(string, int, int) error { return errors.New("no chown in tests") }}
+		Chown:      func(*os.File, int, int) error { return errors.New("no chown in tests") }}
 }
 
 type refusingRunner struct{}
@@ -131,8 +131,8 @@ func (s *sysRig) host() install.Host {
 			}
 			return "", errors.New("unknown uid")
 		},
-		Chown: func(p string, uid, gid int) error {
-			fi, err := os.Lstat(p)
+		Chown: func(f *os.File, uid, gid int) error {
+			fi, err := f.Stat()
 			if err != nil {
 				return err
 			}
@@ -883,5 +883,92 @@ func TestUninstallPromptNamesOnlyWhatIsDeleted(t *testing.T) {
 	}
 	if want := "keep dir /srv/pcb-config — not removed: only a directory named pcb is deleted; to delete it: rm -r -- /srv/pcb-config\n"; !strings.Contains(s.stdout.String(), want) {
 		t.Errorf("output lacks %q:\n%s", want, s.stdout.String())
+	}
+}
+
+// N1: with no directory to remove, --delete-data still logs out: that
+// needs the confirmation (or --yes) too.
+func TestUninstallDeleteDataConfirmsALogoutAlone(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.write(userUnit, string(install.UserUnit(install.UnitParams{Exec: "/opt/pcb/pcb", ConfigDir: "/srv/pcb-config", StateDir: "/srv/pcb-state"})), 0o644)
+	s.mkdir("/srv/pcb-config")
+	s.mkdir("/srv/pcb-state")
+	s.want(exitcode.MustAct, "uninstall", "--delete-data", "--json")
+	if _, msg, _ := s.failure(); !strings.Contains(msg, "logs out of Proton") || !strings.Contains(msg, "--yes") {
+		t.Errorf("refusal = %q", msg)
+	}
+	if got := s.takeEvents(); !slices.Equal(got, []string{showEnv}) {
+		t.Errorf("unconfirmed run did %q", got)
+	}
+	if !s.exists(userUnit) {
+		t.Error("the unit was removed unconfirmed")
+	}
+	s.term.interactive = true
+	s.term.lines = []string{"delete"}
+	s.want(exitcode.OK, "uninstall", "--delete-data")
+	if want := []string{"Log out of Proton (the session in /srv/pcb-state)? Type delete to confirm: "}; !slices.Equal(s.term.linePrompts, want) {
+		t.Errorf("prompts = %q, want %q", s.term.linePrompts, want)
+	}
+	if got := s.takeEvents(); !slices.Contains(got, "logout (state present: yes)") {
+		t.Errorf("confirmed run did %q", got)
+	}
+}
+
+// N1: a system --delete-data whose directories are gone still deletes the
+// user pcb: that needs the confirmation (or --yes) too.
+func TestUninstallDeleteDataConfirmsAUserdelAlone(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.euid = 0
+	s.users["pcb"] = true
+	s.write(install.SystemUnitPath, "[Unit]\n", 0o644)
+	s.want(exitcode.MustAct, "uninstall", "--delete-data", "--json")
+	if _, msg, _ := s.failure(); !strings.Contains(msg, "deletes the user pcb") || !strings.Contains(msg, "--yes") {
+		t.Errorf("refusal = %q", msg)
+	}
+	if got := s.takeEvents(); len(got) != 0 {
+		t.Errorf("unconfirmed run did %q", got)
+	}
+	s.term.interactive = true
+	s.term.lines = []string{"delete"}
+	s.want(exitcode.OK, "uninstall", "--delete-data")
+	if want := []string{"Delete the user pcb? Type delete to confirm: "}; !slices.Equal(s.term.linePrompts, want) {
+		t.Errorf("prompts = %q, want %q", s.term.linePrompts, want)
+	}
+	if got := s.takeEvents(); !slices.Contains(got, "userdel pcb") {
+		t.Errorf("confirmed run did %q", got)
+	}
+}
+
+// N3: a system directory an admin relocated through a symlink gets its
+// target put right, and a rerun plans nothing for it.
+func TestInstallSystemFollowsASymlinkedStateDir(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.euid = 0
+	s.mkdir("/srv/pcbdata")
+	if err := os.Chmod(filepath.Join(s.root, "srv/pcbdata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.mkdir("/var/lib")
+	if err := os.Symlink("../../srv/pcbdata", filepath.Join(s.root, "var/lib/pcb")); err != nil {
+		t.Fatal(err)
+	}
+	s.want(exitcode.OK, "install", "--system")
+	if got := s.mode("/srv/pcbdata"); got != 0o700 {
+		t.Errorf("target mode = %o, want 700", got)
+	}
+	if got, want := s.ownerSet("/srv/pcbdata"), fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()); got != want {
+		t.Errorf("target owner set = %q, want pcb's %q", got, want)
+	}
+	if fi, err := os.Lstat(filepath.Join(s.root, "var/lib/pcb")); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("/var/lib/pcb is no longer the symlink: %v", err)
+	}
+	s.want(exitcode.OK, "install", "--system", "--json")
+	for _, st := range s.data().Steps {
+		if st.Path == "/var/lib/pcb" && st.Action != "keep" {
+			t.Errorf("rerun: %s, want keep", st)
+		}
 	}
 }

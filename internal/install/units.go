@@ -26,9 +26,12 @@ Type=simple
 `
 
 // unitHardening needs no user namespace, so both units carry it (M5-P17).
-// No ~@resources: Go's runtime calls setrlimit.
+// No ~@resources: Go's runtime calls setrlimit. RestartPreventExitStatus=10
+// (M5-R8): exit 10 is a fault only the person can repair (a damaged cache,
+// a bad config), so systemd must not restart into it again.
 const unitHardening = `Restart=on-failure
 RestartSec=10s
+RestartPreventExitStatus=10
 TimeoutStopSec=30s
 UMask=0077
 NoNewPrivileges=yes

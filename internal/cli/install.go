@@ -222,8 +222,8 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 	if noSystemd {
 		return Finish(cmd, nil, "", errNoSystemd())
 	}
-	if removed := install.RemovedDirs(steps); len(removed) > 0 && !yes {
-		if err := a.confirmDelete(cmd, removed); err != nil {
+	if d := deletionOf(steps); d.any() && !yes {
+		if err := a.confirmDelete(cmd, d); err != nil {
 			return Finish(cmd, nil, "", err)
 		}
 	}
@@ -243,17 +243,75 @@ func runsSystemctl(steps []install.Step) bool {
 	return false
 }
 
-// confirmDelete asks the person to type "delete" before removed go; without
-// a person it fails naming --yes (exit 10).
-func (a *app) confirmDelete(cmd *cobra.Command, removed []string) error {
-	what := strings.Join(removed, " and ")
+// deletion is what a --delete-data plan destroys: directories, the
+// Proton session (logout), the system user.
+type deletion struct {
+	dirs   []string
+	logout string // the state directory whose session is revoked
+	user   bool
+}
+
+func deletionOf(steps []install.Step) deletion {
+	d := deletion{dirs: install.RemovedDirs(steps)}
+	for _, st := range steps {
+		switch {
+		case st.Action == install.ActionRun && st.Kind == install.KindLogout:
+			d.logout = st.Path
+		case st.Action == install.ActionRun && st.Kind == install.KindUser && strings.HasPrefix(st.Command, "userdel "):
+			d.user = true
+		}
+	}
+	return d
+}
+
+func (d deletion) any() bool { return len(d.dirs) > 0 || d.logout != "" || d.user }
+
+// question is the prompt's question, in the brief's words when directories
+// go (their "Proton session" covers the logout).
+func (d deletion) question() string {
+	var q string
+	switch {
+	case len(d.dirs) > 0:
+		q = "Delete " + strings.Join(d.dirs, " and ") + " (Proton session, cache, CalDAV clients)"
+		if d.user {
+			q += " and the user " + install.SystemUser
+		}
+	case d.logout != "":
+		q = "Log out of Proton (the session in " + d.logout + ")"
+		if d.user {
+			q += " and delete the user " + install.SystemUser
+		}
+	default:
+		q = "Delete the user " + install.SystemUser
+	}
+	return q + "?"
+}
+
+// summary lists what goes, for the refusal without a person.
+func (d deletion) summary() string {
+	var what []string
+	if len(d.dirs) > 0 {
+		what = append(what, "deletes "+strings.Join(d.dirs, " and "))
+	}
+	if d.logout != "" {
+		what = append(what, "logs out of Proton")
+	}
+	if d.user {
+		what = append(what, "deletes the user "+install.SystemUser)
+	}
+	return strings.Join(what, ", ")
+}
+
+// confirmDelete asks the person to type "delete" before anything of d goes
+// (M5-Rpre5: --delete-data needs a confirmation or --yes); without a
+// person it fails naming --yes (exit 10).
+func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 	if !a.interactive(cmd) {
 		return &exitcode.Error{Code: exitcode.MustAct,
-			Err:  fmt.Errorf("--delete-data deletes %s: confirm with --yes", what),
+			Err:  fmt.Errorf("--delete-data %s: confirm with --yes", d.summary()),
 			Hint: "pcb uninstall --delete-data --yes"}
 	}
-	answer, err := a.Term.ReadLine(cmd.Context(),
-		fmt.Sprintf("Delete %s (Proton session, cache, CalDAV clients)? Type delete to confirm: ", what))
+	answer, err := a.Term.ReadLine(cmd.Context(), d.question()+" Type delete to confirm: ")
 	if err != nil {
 		return err
 	}

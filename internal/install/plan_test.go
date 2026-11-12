@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -91,8 +90,8 @@ func (s *sys) host() install.Host {
 			return os.Getuid(), os.Getgid(), s.users[name], nil
 		},
 		UserName: func(int) (string, error) { return "alice", nil },
-		Chown: func(p string, uid, gid int) error {
-			fi, err := os.Lstat(p)
+		Chown: func(f *os.File, uid, gid int) error {
+			fi, err := f.Stat()
 			if err != nil {
 				return err
 			}
@@ -350,18 +349,8 @@ func TestPlanSystemFixesAWrongOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	pcbUID, pcbGID := os.Getuid()+1, os.Getgid()+1
-	var chowns []string
+	s.ids["pcb"] = [2]int{pcbUID, pcbGID}
 	h := s.host()
-	h.LookupUser = func(name string) (int, int, bool, error) {
-		if name == "pcb" {
-			return pcbUID, pcbGID, true, nil
-		}
-		return os.Getuid(), os.Getgid(), true, nil
-	}
-	h.Chown = func(p string, uid, gid int) error {
-		chowns = append(chowns, fmt.Sprintf("%s %d:%d", p, uid, gid))
-		return nil
-	}
 	steps, err := install.Plan(context.Background(), h, install.Request{Scope: install.ScopeSystem})
 	if err != nil {
 		t.Fatal(err)
@@ -372,8 +361,8 @@ func TestPlanSystemFixesAWrongOwner(t *testing.T) {
 	if err := install.Apply(context.Background(), h, steps, install.Hooks{}); err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("%s %d:%d", filepath.Join(s.root, "etc/pcb"), pcbUID, pcbGID); !slices.Contains(chowns, want) {
-		t.Fatalf("chowns = %q, want %q", chowns, want)
+	if got, want := s.ownerSet("/etc/pcb"), fmt.Sprintf("%d:%d", pcbUID, pcbGID); got != want {
+		t.Fatalf("owner set = %q, want %q", got, want)
 	}
 }
 
@@ -406,9 +395,15 @@ func TestPlanSystemWithoutRootMarksWhatItCannotRead(t *testing.T) {
 	if want := "remove dir /etc/pcb — config.toml needs root to inspect: a key_file it names elsewhere is not removed\n"; !strings.Contains(lines(unSteps), want) {
 		t.Fatalf("uninstall plan lacks %q:\n%s", want, lines(unSteps))
 	}
+	var unknown []install.Step
+	for _, st := range steps {
+		if st.Action == install.ActionUnknown {
+			unknown = append(unknown, st)
+		}
+	}
 	var se *install.StepError
-	if err := install.Apply(context.Background(), h, steps, install.Hooks{}); !errors.As(err, &se) || se.Step.Action != "unknown" {
-		t.Fatalf("Apply = %v, want a failure at the unknown step", err)
+	if err := install.Apply(context.Background(), h, unknown, install.Hooks{}); len(unknown) != 1 || !errors.As(err, &se) {
+		t.Fatalf("Apply(%v) = %v, want a refusal of the unknown step", unknown, err)
 	}
 }
 
@@ -497,5 +492,48 @@ func TestCreateWorksWithoutHardLinks(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(s.root, "home/alice/.config/pcb/config.toml")); string(b) != "mine" {
 		t.Fatalf("config.toml = %q: the fallback replaced it", b)
+	}
+}
+
+// N2: an existing system config.toml with another hard link is refused at
+// plan time (exit 20, named), and if one appears before Apply, Apply
+// refuses it too, changing nothing.
+func TestInstallRefusesAHardLinkedSystemConfig(t *testing.T) {
+	s := newSys(t)
+	s.euid = 0
+	s.users["pcb"] = true
+	s.ids["pcb"] = [2]int{os.Getuid() + 1, os.Getgid() + 1}
+	s.write("/etc/pcb/config.toml", "x", 0o644)
+	s.write("/etc/elsewhere/.keep", "", 0o600)
+	cfg := filepath.Join(s.root, "etc/pcb/config.toml")
+	other := filepath.Join(s.root, "etc/elsewhere/file")
+	if err := os.Link(cfg, other); err != nil {
+		t.Fatal(err)
+	}
+	h := s.host()
+	_, err := install.Plan(context.Background(), h, install.Request{Scope: install.ScopeSystem})
+	if exitcode.From(err) != exitcode.Blocked || !strings.Contains(fmt.Sprint(err), "/etc/pcb/config.toml has 2 hard links") {
+		t.Fatalf("Plan = %v, want a refusal (exit 20) naming config.toml", err)
+	}
+
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := install.Plan(context.Background(), h, install.Request{Scope: install.ScopeSystem})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(cfg, other); err != nil {
+		t.Fatal(err)
+	}
+	var se *install.StepError
+	if err := install.Apply(context.Background(), h, steps, install.Hooks{}); !errors.As(err, &se) || se.Step.Path != "/etc/pcb/config.toml" {
+		t.Fatalf("Apply = %v, want a failure at config.toml", err)
+	}
+	if got := s.mode("/etc/pcb/config.toml"); got != 0o644 {
+		t.Errorf("mode = %o: the linked file was changed", got)
+	}
+	if got := s.ownerSet("/etc/pcb/config.toml"); got != "" {
+		t.Errorf("the linked file was chowned to %s", got)
 	}
 }

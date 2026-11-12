@@ -15,6 +15,7 @@ Environment=PCB_STATE_DIR=/var/lib/pcb
 ExecStart=/usr/local/bin/pcb serve --wait-for-login
 Restart=on-failure
 RestartSec=10s
+RestartPreventExitStatus=10
 TimeoutStopSec=30s
 UMask=0077
 NoNewPrivileges=yes

@@ -35,16 +35,17 @@ type Host struct {
 	LookupUser func(name string) (uid, gid int, ok bool, err error)
 	// UserName is the name of the user with uid (the linger hint).
 	UserName func(uid int) (string, error)
-	// Chown never follows a final symlink (os.Lchown): root chowning in a
-	// directory pcb owns must not be steered at another file.
-	Chown func(path string, uid, gid int) error
+	// Chown changes the owner of an open file ((*os.File).Chown): through
+	// a descriptor, a name swapped in a directory pcb owns cannot steer it
+	// at another file.
+	Chown func(f *os.File, uid, gid int) error
 	Env   func(string) string
 }
 
 // OSHost is the machine pcb runs on.
 func OSHost() Host {
 	return Host{Run: osRunner{}, Euid: os.Geteuid, Executable: os.Executable, LookupUser: lookupUser,
-		UserName: userName, Chown: os.Lchown, Env: os.Getenv}
+		UserName: userName, Chown: (*os.File).Chown, Env: os.Getenv}
 }
 
 // Path is where the absolute path p lies on h: p under Root.
