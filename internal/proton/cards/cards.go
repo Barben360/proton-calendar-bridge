@@ -94,14 +94,15 @@ type Event struct {
 	shared, calendar keyUse
 }
 
-// keyUse is a row's session key and what proves it ours.
+// keyUse is a row's session key and what proves it ours (SessionKeys).
 type keyUse struct {
 	key *crypto.SessionKey // nil until an encrypted part opens with it
 	// packet: the row carries a key packet for it.
 	packet bool
-	// parts counts the encrypted parts opened with it, trusted those of
-	// them that are Own and Verified.
-	parts, trusted int
+	// texts are the plaintexts of the encrypted parts opened with it,
+	// verified how many of them are Verified (which implies Own).
+	texts    [][]byte
+	verified int
 }
 
 // ErrUndecryptable means a part of the row does not decrypt with the keys
@@ -206,9 +207,9 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 				p.Verified = verify(p.Text, wp.Signature, kr)
 			}
 			if use != nil {
-				use.parts++
-				if p.Own && p.Verified {
-					use.trusted++
+				use.texts = append(use.texts, p.Text)
+				if p.Verified { // verified only with an own key: Own too
+					use.verified++
 				}
 			}
 			ev.Parts = append(ev.Parts, p)

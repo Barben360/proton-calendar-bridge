@@ -197,6 +197,19 @@ dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
 if Proton signs a part of ours with another key than its author address's,
 the event shows as unverified.
 
+Session-key reuse on write [call] (research G, ruling M4-R14): an update
+reuses a row's session key only when every part encrypted under it verifies
+as ours **and** at least one of them holds a property the write routing
+table never puts in a signed part (SUMMARY, DESCRIPTION, LOCATION, ATTENDEE,
+COMMENT, any other encrypted-routed one; not UID or DTSTAMP). The server
+holds our cleartext signed parts with our signatures, so it could re-encrypt
+one under a key it chose and wrap that key to our calendar key; such a
+replay carries only signed-routed properties and is refused
+(`ErrUntrustedSessionKey`) [verified: `TestUntrustedSessionKeyIsRefused`].
+Residual risk: a third-party client that put encrypted-routed properties
+into a signed part of ours would hand the server a signed text it could
+replay as proof, so that client's rows could still be exploited.
+
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
   (default calendar), create/update/delete owned calendars, leave holidays

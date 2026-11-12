@@ -173,6 +173,10 @@ func randomFragment(rng *rand.Rand, uid string) []byte {
 	return frag(uid, lines...)
 }
 
+// hasLine reports whether a fragment from frag holds a line besides UID
+// and DTSTAMP (nil: no fragment).
+func hasLine(f []byte) bool { return bytes.Count(f, []byte("\r\n")) > 5 }
+
 // fold splits a content line into lines of at most 75 octets, continuation
 // lines starting with a space, never inside a rune.
 func fold(line string) []string {
@@ -213,14 +217,22 @@ func TestOpenSealRoundTrip(t *testing.T) {
 			usesShared = true
 		}
 		_, usesCal := parts[ical.CalendarEncrypted]
+		// A key is proven ours by a part under it holding a random line (all
+		// of them encrypted-only properties), not by UID and DTSTAMP alone.
+		provenShared := hasLine(parts[ical.SharedEncrypted]) || hasLine(parts[ical.Attendees])
+		provenCal := hasLine(parts[ical.CalendarEncrypted])
 
-		// Each key is given (an update) or not (a create) independently.
+		// A create mints; an update gives every key a part uses, and maybe
+		// one no part uses.
 		k := r.create()
 		if rng.IntN(2) == 0 {
-			k.Shared = newSessionKey(t)
-		}
-		if rng.IntN(2) == 0 {
-			k.Calendar = newSessionKey(t)
+			k.Update = true
+			if usesShared || rng.IntN(2) == 0 {
+				k.Shared = newSessionKey(t)
+			}
+			if usesCal || rng.IntN(2) == 0 {
+				k.Calendar = newSessionKey(t)
+			}
 		}
 		we := mustSeal(t, parts, k)
 
@@ -270,11 +282,13 @@ func TestOpenSealRoundTrip(t *testing.T) {
 		}
 
 		shared, cal, err := ev.SessionKeys()
-		if err != nil {
-			t.Fatalf("set %d: SessionKeys: %v", i, err)
+		wantErr := (usesShared && !provenShared) || (usesCal && !provenCal)
+		if errors.Is(err, cards.ErrUntrustedSessionKey) != wantErr || (err != nil && !wantErr) {
+			t.Fatalf("set %d: SessionKeys error %v, want untrusted %v", i, err, wantErr)
 		}
-		if (shared != nil) != usesShared || (cal != nil) != usesCal {
-			t.Fatalf("set %d: SessionKeys gives shared %v calendar %v; want %v %v", i, shared != nil, cal != nil, usesShared, usesCal)
+		wantShared, wantCal := usesShared && provenShared, usesCal && provenCal
+		if (shared != nil) != wantShared || (cal != nil) != wantCal {
+			t.Fatalf("set %d: SessionKeys gives shared %v calendar %v; want %v %v", i, shared != nil, cal != nil, wantShared, wantCal)
 		}
 		if k.Shared != nil && shared != nil && !bytes.Equal(shared.Key, k.Shared.Key) {
 			t.Errorf("set %d: the shared key opened is not the one given", i)
@@ -326,7 +340,7 @@ func TestSealSignsBinaryExactBytes(t *testing.T) {
 			want := parts[g.kinds[i]]
 			text := []byte(p.Data)
 			if p.Type == events.PartEncrypted {
-				one(t, p.Data)
+				one(t, p.Data, g.key)
 				if text, err = decrypt(p, g.key); err != nil {
 					t.Fatalf("%s Type 3 does not decrypt with its session key: %v", g.name, err)
 				}
@@ -359,9 +373,10 @@ func TestSealSignsBinaryExactBytes(t *testing.T) {
 	}
 }
 
-// one checks that b64 is exactly one SEIPD packet: the data packet only, no
-// key packet before or after it.
-func one(t *testing.T, b64 string) {
+// one checks that b64 is exactly one integrity-protected SEIPD packet (tag
+// 18, not the legacy tag 9): the data packet only, no key packet before or
+// after it, and under sk a literal data packet, not compressed.
+func one(t *testing.T, b64 string, sk *crypto.SessionKey) {
 	t.Helper()
 	data, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -373,11 +388,28 @@ func one(t *testing.T, b64 string) {
 		t.Fatalf("Data holds no packet: %v", err)
 	}
 	se, ok := p.(*packet.SymmetricallyEncrypted)
-	if !ok {
-		t.Fatalf("Data is a %T, want a SEIPD packet", p)
+	if !ok || !se.IntegrityProtected {
+		t.Fatalf("Data is a %T (integrity protected: %v), want a SEIPD packet", p, ok && se.IntegrityProtected)
 	}
-	if _, err := io.Copy(io.Discard, se.Contents); err != nil { // the body, left unread by the reader
+	cipher, err := sk.GetCipherFunc()
+	if err != nil {
 		t.Fatal(err)
+	}
+	rc, err := se.Decrypt(cipher, sk.Key)
+	if err != nil {
+		t.Fatalf("the SEIPD packet does not decrypt: %v", err)
+	}
+	inner, err := packet.Read(rc)
+	if lit, ok := inner.(*packet.LiteralData); err != nil || !ok {
+		t.Errorf("the SEIPD packet holds a %T (%v), want literal data, not compressed", inner, err)
+	} else if _, err := io.Copy(io.Discard, lit.Body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, rc); err != nil { // the rest, to the MDC
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Errorf("the SEIPD packet fails its integrity check: %v", err)
 	}
 	if p, err := pr.Next(); !errors.Is(err, io.EOF) {
 		t.Errorf("Data holds a packet after the SEIPD one: %T, %v", p, err)
@@ -479,7 +511,7 @@ func TestSealKeyPacketOpensWithThePrimaryOnly(t *testing.T) {
 	}{
 		{"two recipient keys", parts, cards.SealKeys{Signer: r.addr, CalendarPrimary: both}},
 		{"no recipient for a create", parts, cards.SealKeys{Signer: r.addr}},
-		{"no recipient for a minted calendar key", parts, cards.SealKeys{Signer: r.addr, Shared: newSessionKey(t)}},
+		{"a create given a session key", parts, cards.SealKeys{Signer: r.addr, CalendarPrimary: r.calKR, Shared: newSessionKey(t)}},
 		{"two signer keys", parts, cards.SealKeys{Signer: twoSigners, CalendarPrimary: r.calKR}},
 		{"no signer", parts, cards.SealKeys{CalendarPrimary: r.calKR}},
 		{"a personal part", map[ical.PartKind][]byte{ical.SharedSigned: frag("x"), ical.PartKind(cards.Personal): frag("x")}, r.create()},
@@ -495,16 +527,17 @@ func TestSealKeyPacketOpensWithThePrimaryOnly(t *testing.T) {
 
 // An update gives the row's session keys: the parts are encrypted under
 // them and no key packet is sent (research B.5), and no recipient is
-// needed. Each key stands alone: a row with a shared key but no calendar
-// key yet gets a calendar key packet only, and only when a part uses it. A
-// kind absent from the input is not emitted; its list is [] on the wire.
+// needed. An update never mints (ruling M4-R15): a part needing a key the
+// row lacks is ErrNeedsNewSessionKey, while a missing key no part needs is
+// fine. A kind absent from the input is not emitted; its list is [] on the
+// wire.
 func TestUpdateReusesSessionKeysAndSendsNoPacket(t *testing.T) {
 	t.Parallel()
 	r := newSealRig(t)
 	parts := fullParts("up@pcb.test")
 	shared, calSK := newSessionKey(t), newSessionKey(t)
 
-	we := mustSeal(t, parts, cards.SealKeys{Signer: r.addr, Shared: shared, Calendar: calSK})
+	we := mustSeal(t, parts, cards.SealKeys{Signer: r.addr, CalendarPrimary: r.calKR, Shared: shared, Calendar: calSK, Update: true})
 	raw, err := json.Marshal(we)
 	if err != nil {
 		t.Fatal(err)
@@ -526,21 +559,16 @@ func TestUpdateReusesSessionKeysAndSendsNoPacket(t *testing.T) {
 		}
 	}
 
-	// Mixed: the shared key given, the calendar one minted.
-	mixed := mustSeal(t, parts, cards.SealKeys{Signer: r.addr, CalendarPrimary: r.calKR, Shared: shared})
-	if mixed.SharedKeyPacket != "" || mixed.CalendarKeyPacket == "" {
-		t.Fatalf("shared given, calendar minted: SharedKeyPacket %q, CalendarKeyPacket set %v; want none and one",
-			mixed.SharedKeyPacket, mixed.CalendarKeyPacket != "")
-	}
-	minted, err := unwrap(mixed.CalendarKeyPacket, r.calKR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if text, err := decrypt(mixed.CalendarEventContent[1], minted); err != nil || !bytes.Equal(text, parts[ical.CalendarEncrypted]) {
-		t.Errorf("the calendar part does not decrypt under the minted key: %v", err)
-	}
-	if text, err := decrypt(mixed.SharedEventContent[1], shared); err != nil || !bytes.Equal(text, parts[ical.SharedEncrypted]) {
-		t.Errorf("the shared part does not decrypt under the given key: %v", err)
+	// A key a part needs and the row lacks: refused, whichever key, with a
+	// recipient at hand or not.
+	for name, k := range map[string]cards.SealKeys{
+		"calendar key missing":  {Signer: r.addr, CalendarPrimary: r.calKR, Shared: shared, Update: true},
+		"shared key missing":    {Signer: r.addr, CalendarPrimary: r.calKR, Calendar: calSK, Update: true},
+		"no keys, no recipient": {Signer: r.addr, Update: true},
+	} {
+		if we, err := cards.Seal(parts, k); !errors.Is(err, cards.ErrNeedsNewSessionKey) || we.SharedKeyPacket != "" || we.CalendarKeyPacket != "" {
+			t.Errorf("%s: error %v, key packets %v %v; want ErrNeedsNewSessionKey and none", name, err, we.SharedKeyPacket != "", we.CalendarKeyPacket != "")
+		}
 	}
 
 	// No calendar encrypted part: no calendar key is minted.
@@ -550,7 +578,7 @@ func TestUpdateReusesSessionKeysAndSendsNoPacket(t *testing.T) {
 			noCal[k] = v
 		}
 	}
-	none := mustSeal(t, noCal, cards.SealKeys{Signer: r.addr, CalendarPrimary: r.calKR, Shared: shared})
+	none := mustSeal(t, noCal, cards.SealKeys{Signer: r.addr, CalendarPrimary: r.calKR, Shared: shared, Update: true})
 	if none.SharedKeyPacket != "" || none.CalendarKeyPacket != "" {
 		t.Errorf("no calendar encrypted part: key packets %q %q, want none", none.SharedKeyPacket, none.CalendarKeyPacket)
 	}
@@ -559,7 +587,7 @@ func TestUpdateReusesSessionKeysAndSendsNoPacket(t *testing.T) {
 	}
 
 	// Only the shared signed part: the other lists are empty, sent as [].
-	only := mustSeal(t, map[ical.PartKind][]byte{ical.SharedSigned: parts[ical.SharedSigned]}, cards.SealKeys{Signer: r.addr})
+	only := mustSeal(t, map[ical.PartKind][]byte{ical.SharedSigned: parts[ical.SharedSigned]}, cards.SealKeys{Signer: r.addr, Update: true})
 	raw, err = json.Marshal(only)
 	if err != nil {
 		t.Fatal(err)
@@ -573,19 +601,24 @@ func TestUpdateReusesSessionKeysAndSendsNoPacket(t *testing.T) {
 }
 
 // Event.SessionKeys returns a key only when every encrypted part under it
-// is ours and verified (research G): a substituted key packet would make
-// the update readable by the server. Each key is judged alone; signed parts
-// do not count; a key packet no encrypted part uses proves nothing; a row
-// without a key packet has no key to reuse (nil, no error).
+// is ours and verified and at least one of them holds a property no signed
+// part of ours holds (research G, ruling M4-R14): a substituted key packet
+// would make the update readable by the server, which holds our cleartext
+// signed parts and our signatures over them, and so can replay one as an
+// encrypted part under a key it chose (review C1). Each key is judged alone;
+// signed parts do not count; a key packet no encrypted part uses proves
+// nothing; a row without a key packet has no key to reuse (nil, no error).
 func TestUntrustedSessionKeyIsRefused(t *testing.T) {
 	t.Parallel()
 	r := newSealRig(t)
-	parts := fullParts("trust@pcb.test")
+	const uid = "trust@pcb.test"
+	parts := fullParts(uid)
 	shared, calSK := newSessionKey(t), newSessionKey(t)
-	keys := cards.SealKeys{Signer: r.addr, Shared: shared, Calendar: calSK}
+	keys := cards.SealKeys{Signer: r.addr, Shared: shared, Calendar: calSK, Update: true}
 	we := mustSeal(t, parts, keys)
 	keys.Signer = r.f.OtherAddressKeyRing()
 	forged := mustSeal(t, parts, keys) // the same parts signed by another key
+	keys.Signer = r.addr
 	sharedKP, calKP := wrap(t, r.calKR, shared), wrap(t, r.calKR, calSK)
 
 	// swap returns we with one part's signature taken from forged, or
@@ -604,37 +637,85 @@ func TestUntrustedSessionKeyIsRefused(t *testing.T) {
 		return c
 	}
 	signedOnly := mustSeal(t, map[ical.PartKind][]byte{ical.SharedSigned: parts[ical.SharedSigned], ical.CalendarSigned: parts[ical.CalendarSigned]}, cards.SealKeys{Signer: r.addr})
-	noCalPart := mustSeal(t, map[ical.PartKind][]byte{ical.SharedSigned: parts[ical.SharedSigned], ical.SharedEncrypted: parts[ical.SharedEncrypted], ical.CalendarSigned: parts[ical.CalendarSigned]}, cards.SealKeys{Signer: r.addr, Shared: shared})
+	noCalPart := mustSeal(t, map[ical.PartKind][]byte{ical.SharedSigned: parts[ical.SharedSigned], ical.SharedEncrypted: parts[ical.SharedEncrypted], ical.CalendarSigned: parts[ical.CalendarSigned]}, keys)
+	// Encrypted parts of ours holding UID and DTSTAMP only prove nothing...
+	bare := mustSeal(t, map[ical.PartKind][]byte{
+		ical.SharedSigned: parts[ical.SharedSigned], ical.SharedEncrypted: frag(uid),
+		ical.CalendarSigned: parts[ical.CalendarSigned], ical.CalendarEncrypted: frag(uid),
+	}, keys)
+	// ...but one part under the key that does is enough.
+	oneProves := mustSeal(t, map[ical.PartKind][]byte{
+		ical.SharedSigned: parts[ical.SharedSigned], ical.SharedEncrypted: frag(uid), ical.Attendees: parts[ical.Attendees],
+		ical.CalendarSigned: parts[ical.CalendarSigned], ical.CalendarEncrypted: parts[ical.CalendarEncrypted],
+	}, keys)
+
+	// The server's replay (review C1): our cleartext signed part, with our
+	// signature, encrypted under a key it chose and wrapped to our calendar
+	// key.
+	replay := func(signed events.Part, evil *crypto.SessionKey) events.Part {
+		data, err := evil.Encrypt(crypto.NewPlainMessage([]byte(signed.Data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events.Part{Type: events.PartEncrypted, Data: base64.StdEncoding.EncodeToString(data), Signature: signed.Signature}
+	}
+	evilShared, evilCal := newSessionKey(t), newSessionKey(t)
+	evilKP, evilCalKP := wrap(t, r.calKR, evilShared), wrap(t, r.calKR, evilCal)
+	attack := events.WireEvent{
+		SharedEventContent:    events.PartList{we.SharedEventContent[0], replay(we.SharedEventContent[0], evilShared)},
+		CalendarEventContent:  events.PartList{we.CalendarEventContent[0], replay(we.CalendarEventContent[0], evilCal)},
+		AttendeesEventContent: events.PartList{},
+	}
+	// The same with a calendar signed part of UID and DTSTAMP only, which
+	// the codec writes for an event with no STATUS or TRANSP.
+	minimal := mustSeal(t, map[ical.PartKind][]byte{ical.CalendarSigned: frag(uid)}, cards.SealKeys{Signer: r.addr}).CalendarEventContent[0]
+	attackMinimal := events.WireEvent{
+		SharedEventContent:    events.PartList{we.SharedEventContent[0], replay(minimal, evilShared)},
+		CalendarEventContent:  events.PartList{minimal, replay(minimal, evilCal)},
+		AttendeesEventContent: events.PartList{},
+	}
 
 	cases := []struct {
-		name                string
-		raw                 json.RawMessage
-		own                 func(string) *crypto.KeyRing
-		wantShared, wantCal bool
+		name                         string
+		raw                          json.RawMessage
+		wantShared, wantCal, wantErr bool
+		allVerified                  bool // every part verifies: only the M4-R14 proof can refuse
 	}{
-		{"all ours and verified", rowJSON(t, we, me, sharedKP, calKP), r.own, true, true},
-		{"a signed part forged: encrypted parts decide", rowJSON(t, swap("shared", 0, false), me, sharedKP, calKP), r.own, true, true},
-		{"shared encrypted part forged", rowJSON(t, swap("shared", 1, false), me, sharedKP, calKP), r.own, false, true},
-		{"attendees part forged", rowJSON(t, swap("attendees", 0, false), me, sharedKP, calKP), r.own, false, true},
-		{"calendar encrypted part forged", rowJSON(t, swap("calendar", 1, false), me, sharedKP, calKP), r.own, true, false},
-		{"calendar encrypted part unsigned", rowJSON(t, swap("calendar", 1, true), me, sharedKP, calKP), r.own, true, false},
-		{"attendees part unsigned", rowJSON(t, swap("attendees", 0, true), me, sharedKP, calKP), r.own, false, true},
-		{"not our author", rowJSON(t, we, "stranger@pcb.test", sharedKP, calKP), r.own, false, false},
-		{"key packets no encrypted part uses", rowJSON(t, signedOnly, me, sharedKP, calKP), r.own, false, false},
+		{"all ours and verified", rowJSON(t, we, me, sharedKP, calKP), true, true, false, true},
+		{"replayed shared and calendar signed parts", rowJSON(t, attack, me, evilKP, evilCalKP), false, false, true, true},
+		{"replayed UID-and-DTSTAMP calendar signed part", rowJSON(t, attackMinimal, me, evilKP, evilCalKP), false, false, true, true},
+		{"encrypted parts of UID and DTSTAMP only", rowJSON(t, bare, me, sharedKP, calKP), false, false, true, true},
+		{"one proving part under the key is enough", rowJSON(t, oneProves, me, sharedKP, calKP), true, true, false, true},
+		{"a signed part forged: encrypted parts decide", rowJSON(t, swap("shared", 0, false), me, sharedKP, calKP), true, true, false, false},
+		{"shared encrypted part forged", rowJSON(t, swap("shared", 1, false), me, sharedKP, calKP), false, true, true, false},
+		{"attendees part forged", rowJSON(t, swap("attendees", 0, false), me, sharedKP, calKP), false, true, true, false},
+		{"calendar encrypted part forged", rowJSON(t, swap("calendar", 1, false), me, sharedKP, calKP), true, false, true, false},
+		{"calendar encrypted part unsigned", rowJSON(t, swap("calendar", 1, true), me, sharedKP, calKP), true, false, true, false},
+		{"attendees part unsigned", rowJSON(t, swap("attendees", 0, true), me, sharedKP, calKP), false, true, true, false},
+		{"not our author", rowJSON(t, we, "stranger@pcb.test", sharedKP, calKP), false, false, true, false},
+		{"key packets no encrypted part uses", rowJSON(t, signedOnly, me, sharedKP, calKP), false, false, true, true},
+		// No calendar key packet and no calendar encrypted part: nothing to
+		// reuse, nothing untrusted.
+		{"no calendar key at all", rowJSON(t, noCalPart, me, sharedKP, ""), true, false, false, true},
 	}
 	for _, c := range cases {
-		ev, err := cards.Open(c.raw, r.calKR, nil, c.own)
+		ev, err := cards.Open(c.raw, r.calKR, nil, r.own)
 		if err != nil {
 			t.Fatalf("%s: Open: %v", c.name, err)
 		}
-		gotShared, gotCal, err := ev.SessionKeys()
-		if wantErr := !c.wantShared || !c.wantCal; errors.Is(err, cards.ErrUntrustedSessionKey) != wantErr {
-			t.Errorf("%s: error %v, want ErrUntrustedSessionKey %v", c.name, err, wantErr)
+		for _, p := range ev.Parts {
+			if c.allVerified && !p.Verified {
+				t.Fatalf("%s: the %s does not verify; the case needs every part verified", c.name, p.Kind)
+			}
 		}
-		if c.wantShared != (gotShared != nil && bytes.Equal(gotShared.Key, shared.Key)) {
+		gotShared, gotCal, err := ev.SessionKeys()
+		if errors.Is(err, cards.ErrUntrustedSessionKey) != c.wantErr || (err != nil && !c.wantErr) {
+			t.Errorf("%s: error %v, want ErrUntrustedSessionKey %v", c.name, err, c.wantErr)
+		}
+		if c.wantShared != (gotShared != nil && bytes.Equal(gotShared.Key, shared.Key)) || (!c.wantShared && gotShared != nil) {
 			t.Errorf("%s: shared key returned %v, want %v", c.name, gotShared != nil, c.wantShared)
 		}
-		if c.wantCal != (gotCal != nil && bytes.Equal(gotCal.Key, calSK.Key)) {
+		if c.wantCal != (gotCal != nil && bytes.Equal(gotCal.Key, calSK.Key)) || (!c.wantCal && gotCal != nil) {
 			t.Errorf("%s: calendar key returned %v, want %v", c.name, gotCal != nil, c.wantCal)
 		}
 		if err != nil && strings.Contains(err.Error(), "Lunch") {
@@ -642,15 +723,18 @@ func TestUntrustedSessionKeyIsRefused(t *testing.T) {
 		}
 	}
 
-	// No calendar key packet and no calendar encrypted part: nothing to
-	// reuse, nothing untrusted (the next Seal mints one if needed).
-	ev, err := cards.Open(rowJSON(t, noCalPart, me, sharedKP, ""), r.calKR, nil, r.own)
+	// A shared key that reaches us through an AddressKeyPacket alone (no
+	// SharedKeyPacket) is the row's shared key too, judged the same way.
+	raw := editRaw(t, rowJSON(t, we, me, "", calKP), func(m map[string]any) {
+		m["AddressKeyPacket"], m["AddressID"] = wrap(t, r.addr, shared), "addr1"
+	})
+	ev, err := cards.Open(raw, r.calKR, map[string]*crypto.KeyRing{"addr1": r.addr}, r.own)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotShared, gotCal, err := ev.SessionKeys()
-	if err != nil || gotCal != nil || gotShared == nil || !bytes.Equal(gotShared.Key, shared.Key) {
-		t.Errorf("a row with no calendar key: shared %v calendar %v error %v; want the shared key, nil, nil", gotShared != nil, gotCal != nil, err)
+	gotShared, _, err := ev.SessionKeys()
+	if err != nil || gotShared == nil || !bytes.Equal(gotShared.Key, shared.Key) {
+		t.Errorf("a shared key from an AddressKeyPacket: returned %v, error %v; want the key", gotShared != nil, err)
 	}
 }
 
@@ -751,7 +835,7 @@ func TestFakeSyncAcceptsSealedEvents(t *testing.T) {
 	}
 
 	parts[ical.SharedEncrypted] = frag("contract@pcb.test", "SUMMARY:Dinner")
-	up := mustSeal(t, parts, cards.SealKeys{Signer: signer, CalendarPrimary: calKR, Shared: shared, Calendar: calSK})
+	up := mustSeal(t, parts, cards.SealKeys{Signer: signer, CalendarPrimary: calKR, Shared: shared, Calendar: calSK, Update: true})
 	if code, msg, _ := syncOne(t, c, f, cal, map[string]any{"ID": id, "Event": syncEntryEvent{up, 1, []any{}}}); code != 1000 {
 		t.Fatalf("update: code %d (%s), want 1000", code, msg)
 	}
