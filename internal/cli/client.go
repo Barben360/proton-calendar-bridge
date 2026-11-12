@@ -3,13 +3,13 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
@@ -103,7 +103,7 @@ func (a *app) newClientShow() *cobra.Command {
 
 // listenerFacts is the URL and, over TLS, the fingerprint a CalDAV client
 // needs: the running daemon's listener when one answers, else what pcb
-// serve would use for the configuration (offlineListener). Neither is
+// serve would use for the configuration (daemon.OfflineInfo). Neither is
 // secret: a daemon that cannot be asked is passed over. err says why the
 // URL is not known (a configuration that does not load).
 func (a *app) listenerFacts(cmd *cobra.Command) (url, fingerprint string, err error) {
@@ -112,18 +112,18 @@ func (a *app) listenerFacts(cmd *cobra.Command) (url, fingerprint string, err er
 		st, err := c.Status(ctx)
 		_ = c.Close()
 		if err == nil && st.Listener != nil {
-			return st.Listener.URL, st.Listener.Fingerprint, nil
+			return strings.TrimRight(st.Listener.URL, "/") + "/", st.Listener.Fingerprint, nil
 		}
 	}
 	dirs, cfg, err := loadConfig(a.Env)
 	if err != nil {
 		return "", "", err
 	}
-	url, fingerprint = offlineListener(ctx, cfg.CalDAV, filepath.Join(dirs.State, "tls"))
-	if url == "" {
+	info := daemon.OfflineInfo(ctx, dirs, cfg.CalDAV)
+	if info.Base == "" {
 		return "", "", errors.New("caldav.listen is not HOST:PORT")
 	}
-	return url, fingerprint, nil
+	return info.Base + "/", info.Fingerprint, nil
 }
 
 // clientShowText is one "Label: value" line per thing to enter; urlErr

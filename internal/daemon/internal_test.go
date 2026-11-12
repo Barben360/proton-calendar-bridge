@@ -1,4 +1,4 @@
-package cli
+package daemon
 
 import (
 	"bytes"
@@ -9,12 +9,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
 // startTestServer serves h on 127.0.0.1:0; entered gets a value when a
@@ -234,5 +236,33 @@ func TestListenNetworkIsTCP4OnlyForIPv4Literals(t *testing.T) {
 		if got := listenNetwork(listen); got != want {
 			t.Errorf("listenNetwork(%q) = %q, want %q", listen, got, want)
 		}
+	}
+}
+
+// The base has no trailing slash: AccountURL adds /dav/<id>/ to it.
+func TestThunderbirdBaseHasNoTrailingSlash(t *testing.T) {
+	t.Parallel()
+	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1080}
+	if got, err := thunderbirdBase(config.CalDAV{}, addr.IP, addr, false); got != "http://localhost:1080" || err != nil {
+		t.Errorf("plain base = %q, %v", got, err)
+	}
+	addr = &net.TCPAddr{IP: net.ParseIP("192.168.1.5"), Port: 8443}
+	if got, _ := thunderbirdBase(config.CalDAV{}, addr.IP, addr, true); got != "https://192.168.1.5:8443" {
+		t.Errorf("TLS base = %q", got)
+	}
+}
+
+func TestOfflineInfoNamesTheBaseAndNothingWhenListenIsMalformed(t *testing.T) {
+	t.Parallel()
+	dirs := paths.Dirs{State: t.TempDir()}
+	got := OfflineInfo(t.Context(), dirs, config.CalDAV{Listen: "127.0.0.1:1080"})
+	if got.Base != "http://localhost:1080" || got.TLS || got.Fingerprint != "" {
+		t.Errorf("OfflineInfo = %+v, want the plain loopback base", got)
+	}
+	if got := OfflineInfo(t.Context(), dirs, config.CalDAV{Listen: "not a listen address"}); got.Base != "" {
+		t.Errorf("OfflineInfo of a malformed listen = %+v, want no base", got)
+	}
+	if _, err := os.Stat(filepath.Join(dirs.State, "tls")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("OfflineInfo created the tls directory: %v", err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
@@ -92,12 +94,7 @@ func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, 
 			}
 			return &acceptSignal{Listener: ln, first: func() { s.addr <- ln.Addr() }}, nil
 		}}
-	switch {
-	case r.svc != nil:
-		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.svc, nil }
-	case r.mk != nil:
-		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
-	}
+	io.NewHub = r.newHub()
 	if sigs != nil {
 		io.Signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
 	}
@@ -113,6 +110,92 @@ func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, 
 		}
 	})
 	return s
+}
+
+// newHub is IO.NewHub for the rig: a real Hub on the rig's directories when
+// realHub is set; else the rig's service (the stub, or the one r.mk opens)
+// behind the daemon as the one account of a Hub; nil (the default) when the
+// rig has none.
+func (r *rig) newHub() func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) {
+	switch {
+	case r.realHub:
+		return func(_ context.Context, dirs paths.Dirs, cfg config.Config) (cli.Hub, error) {
+			// Passes wait for the next interval: no busy loop.
+			return service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg, Now: func() time.Time { return t0 },
+				Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }}})
+		}
+	case r.svc != nil:
+		return func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) { return oneAccountHub{r.svc}, nil }
+	case r.mk != nil:
+		return func(context.Context, paths.Dirs, config.Config) (cli.Hub, error) {
+			svc, err := r.mk()
+			if err != nil {
+				return nil, err
+			}
+			return oneAccountHub{svc}, nil
+		}
+	}
+	return nil
+}
+
+// oneAccountHub is a cli.Hub of one account, stubAccountID, over api: the
+// serve tests' stub services run behind the daemon as an account of a Hub.
+type oneAccountHub struct{ api service.API }
+
+const stubAccountID = "00000000"
+
+func (h oneAccountHub) Accounts() []service.AccountInfo { return cli.APIHub(h.api).Accounts() }
+func (h oneAccountHub) Account(sel string) (service.API, service.AccountInfo, error) {
+	return cli.APIHub(h.api).Account(sel)
+}
+func (h oneAccountHub) Login(ctx context.Context, r service.LoginRequest) (service.LoginResult, error) {
+	return cli.APIHub(h.api).Login(ctx, r)
+}
+func (h oneAccountHub) SubmitTOTP(ctx context.Context, sel, code string) (service.LoginResult, error) {
+	return cli.APIHub(h.api).SubmitTOTP(ctx, sel, code)
+}
+func (h oneAccountHub) SignOut(ctx context.Context, sel string, r service.LogoutRequest) (service.LogoutResult, error) {
+	return cli.APIHub(h.api).SignOut(ctx, sel, r)
+}
+func (h oneAccountHub) Remove(ctx context.Context, sel string, r service.LogoutRequest) (service.AccountInfo, error) {
+	return cli.APIHub(h.api).Remove(ctx, sel, r)
+}
+func (h oneAccountHub) SetCalDAV(ctx context.Context, sel string, on bool) (service.AccountInfo, error) {
+	return cli.APIHub(h.api).SetCalDAV(ctx, sel, on)
+}
+func (h oneAccountHub) Restart(ctx context.Context, sel string) (service.AccountInfo, error) {
+	return cli.APIHub(h.api).Restart(ctx, sel)
+}
+func (h oneAccountHub) Health(ctx context.Context, sel string) (service.Health, error) {
+	return cli.APIHub(h.api).Health(ctx, sel)
+}
+func (h oneAccountHub) OnChange(func()) {}
+func (h oneAccountHub) Close() error    { return h.api.Close() }
+
+// Route answers the compatibility URLs and the account's own.
+func (h oneAccountHub) Route(ctx context.Context, accountID, password, remote string) (service.API, string, time.Duration, error) {
+	if accountID != "" && accountID != stubAccountID {
+		return nil, "", 0, nil
+	}
+	if ok, wait := h.api.CheckClient(ctx, password, remote); !ok {
+		return nil, "", wait, nil
+	}
+	return h.api, stubAccountID, 0, nil
+}
+
+func (h oneAccountHub) Serve(ctx context.Context, o service.HubServeOptions) error {
+	so := o.ServeOptions
+	so.OnState = func(s service.ServeState) {
+		if o.OnState != nil {
+			o.OnState(stubAccountID, s)
+		}
+	}
+	so.OnPass = func(p service.WatchPass) {
+		if o.OnPass != nil {
+			o.OnPass(stubAccountID, p)
+		}
+	}
+	return h.api.Serve(ctx, so)
 }
 
 // acceptSignal calls first when the server first accepts: it is serving
@@ -268,6 +351,7 @@ func TestServeRefusesWhileSyncRuns(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, nil)
 	r.useLocal()
+	r.realHub = true
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +364,7 @@ func TestServeRefusesWhileSyncRuns(t *testing.T) {
 	if code := s.exit(); code != exitcode.Blocked {
 		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
 	}
-	if !strings.Contains(s.errb.String(), "a sync is already running") {
+	if !strings.Contains(s.errb.String(), "another pcb holds the state") {
 		t.Errorf("stderr = %q", s.errb.String())
 	}
 	s.neverListened()
@@ -290,6 +374,7 @@ func TestServeRefusesWhenLoggedOut(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, nil)
 	r.useLocal()
+	r.realHub = true
 	s := startServe(t, r, nil)
 	if code := s.exit(); code != exitcode.MustAct {
 		t.Fatalf("exit %d, want 10\nstderr: %s", code, s.errb.String())
@@ -372,7 +457,7 @@ func TestServeStopsOnSignal(t *testing.T) {
 
 	_, port, _ := net.SplitHostPort(addr)
 	lines := strings.Split(s.out.String(), "\n")
-	if want := "Thunderbird URL: http://localhost:" + port + "/"; lines[0] != want {
+	if want := "Thunderbird URL (" + stubAccountID + "): http://localhost:" + port + "/dav/" + stubAccountID + "/"; lines[0] != want {
 		t.Errorf("first line %q, want %q", lines[0], want)
 	}
 	// Not logged in (decision 0013): the login creates the client default.
@@ -542,7 +627,7 @@ func TestNonLoopbackBindNeverServesPlainHTTP(t *testing.T) {
 				fp := tlsutil.Fingerprint(leaf.Raw)
 				fingerprints = append(fingerprints, fp)
 				out := s.out.String()
-				if !strings.HasPrefix(out, "Thunderbird URL: https://") || !strings.Contains(out, ":"+portOf(addr)+"/\n") {
+				if !strings.HasPrefix(out, "Thunderbird URL (") || !strings.Contains(out, "): https://") || !strings.Contains(out, ":"+portOf(addr)+"/dav/"+stubAccountID+"/\n") {
 					t.Errorf("start %d: stdout = %q, want an https URL with the port first", start, out)
 				}
 				if lines := strings.Split(out, "\n"); len(lines) < 2 || !strings.Contains(lines[1], fp) {
@@ -614,7 +699,7 @@ func TestUserCertIsUsed(t *testing.T) {
 	if code := s.exit(); code != exitcode.OK {
 		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
 	}
-	if !strings.HasPrefix(s.out.String(), "Thunderbird URL: https://pcb.example:"+portOf(addr)+"/\n") || !strings.Contains(s.out.String(), user.Fingerprint) {
+	if !strings.HasPrefix(s.out.String(), "Thunderbird URL ("+stubAccountID+"): https://pcb.example:"+portOf(addr)+"/dav/"+stubAccountID+"/\n") || !strings.Contains(s.out.String(), user.Fingerprint) {
 		t.Errorf("stdout = %q, want the first hostname's URL and the user's fingerprint", s.out.String())
 	}
 	if _, err := os.Stat(filepath.Join(r.dirs.State, "tls")); !errors.Is(err, fs.ErrNotExist) {
@@ -632,14 +717,7 @@ func TestServeEndToEndPropfindsTheHomeSet(t *testing.T) {
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
 	r.want(exitcode.OK, "sync", "--json")
 	sec := addClient(t, r, "Thunderbird")
-	r.mk = func() (service.API, error) { // passes wait for the next interval: no busy loop
-		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-		if err != nil {
-			return nil, err
-		}
-		return service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
-			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
-	}
+	r.realHub = true // the real Hub migrates the state the commands above made
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	addr := s.listening()
 	body := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>`
@@ -915,7 +993,7 @@ func TestServeServesTheControlSocket(t *testing.T) {
 		st.Daemon.Socket != r.dirs.Socket() || st.Daemon.Version == "" {
 		t.Errorf("status = %+v, daemon %+v", st, st.Daemon)
 	}
-	if st.Listener == nil || st.Listener.URL != "http://localhost:"+port+"/" || st.Listener.TLS || !strings.HasSuffix(st.Listener.Addr, ":"+port) {
+	if st.Listener == nil || st.Listener.URL != "http://localhost:"+port || st.Listener.TLS || !strings.HasSuffix(st.Listener.Addr, ":"+port) {
 		t.Errorf("listener = %+v, want the CalDAV one on port %s", st.Listener, port)
 	}
 	if fi, err := os.Lstat(r.dirs.Socket()); err != nil || fi.Mode().Perm() != 0o600 {
@@ -1152,7 +1230,7 @@ func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 		}
 	}
 	out := s.out.String()
-	if lines := strings.Split(out, "\n"); !strings.HasPrefix(lines[0], "Thunderbird URL: http://localhost:") ||
+	if lines := strings.Split(out, "\n"); !strings.HasPrefix(lines[0], "Thunderbird URL ("+stubAccountID+"): http://localhost:") ||
 		!strings.Contains(out, "\nWaiting for a login: run pcb login\n") {
 		t.Errorf("stdout = %q, want the intro then the waiting line", out)
 	}
@@ -1179,7 +1257,7 @@ func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
 		t.Fatalf("pcb serve exited %d around the login", c)
 	default:
 	}
-	if n := strings.Count(s.out.String(), "Thunderbird URL:"); n != 1 {
+	if n := strings.Count(s.out.String(), "Thunderbird URL ("); n != 1 {
 		t.Errorf("the intro printed %d times, want once (no restart)", n)
 	}
 	s.stop()
@@ -1313,11 +1391,29 @@ func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
 		t.Errorf("pcb sync --watch: stdout %q", got)
 	}
 
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("first pcb serve: exit %d\nstderr: %s", code, s.errb.String())
+	}
+}
+
+// ux-I1: a second pcb serve names the running one (exit 20, as any refused
+// start): the Hub's serve.lock holds its PID.
+func TestASecondServeNamesTheRunningDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	r.realHub = true
+	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	s.listening()
+
 	second := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	if code := second.exit(); code != exitcode.Blocked {
 		t.Fatalf("second pcb serve: exit %d, want 20\nstderr: %s", code, second.errb.String())
 	}
-	if got, want := second.errb.String(), "Error: pcb serve is already running\nHint: run pcb status to see it\n"; got != want {
+	want := "Error: pcb is already serving (pid " + strconv.Itoa(os.Getpid()) + ")\nHint: stop it first, or use pcb status\n"
+	if got := second.errb.String(); got != want {
 		t.Errorf("second pcb serve: stderr %q, want %q", got, want)
 	}
 	second.neverListened()

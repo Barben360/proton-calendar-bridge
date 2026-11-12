@@ -173,6 +173,10 @@ type rig struct {
 	term *fakeTerm
 	svc  service.API // injected service, or nil for the default one
 	mk   func() (service.API, error)
+	// realHub makes pcb serve open a real Hub on the rig's directories
+	// (with the fixed clock and passes that wait for the next interval)
+	// instead of serving svc or mk's service as the one account of a Hub.
+	realHub bool
 	// dial, when set, replaces ctl.Dial (IO.DialDaemon).
 	dial func(ctx context.Context, path string) (*ctl.Client, error)
 	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
@@ -263,6 +267,7 @@ func (r *rig) run(args ...string) exitcode.Code {
 	case r.mk != nil:
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
 	}
+	io.NewHub = r.newHub()
 	io.DialDaemon = r.dial
 	io.Host = noSystemHost()
 	if r.hostRoot != "" {

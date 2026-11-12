@@ -14,6 +14,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -32,6 +33,9 @@ type IO struct {
 	// socket client replaces it later). The command closes it. ctx carries
 	// the logger the service warns on (loggerFrom; nil: none).
 	NewService func(ctx context.Context, env func(string) string) (service.API, error)
+	// NewHub opens the accounts pcb serve runs on, for dirs and cfg (the
+	// flags applied); pcb serve closes it once the daemon returned.
+	NewHub func(ctx context.Context, dirs paths.Dirs, cfg config.Config) (Hub, error)
 	// Listen opens pcb serve's listener (net.Listen).
 	Listen func(network, address string) (net.Listener, error)
 	// DialDaemon connects to pcb serve's control socket at path (ctl.Dial):
@@ -56,7 +60,7 @@ func osSignals() (<-chan os.Signal, func()) {
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
-	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen,
+	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, NewHub: localHub, Listen: net.Listen,
 		DialDaemon: ctl.Dial, Host: install.OSHost(), Signals: osSignals}
 }
 
@@ -76,6 +80,9 @@ func (o IO) withDefaults() IO {
 	}
 	if o.NewService == nil {
 		o.NewService = localService
+	}
+	if o.NewHub == nil {
+		o.NewHub = localHub
 	}
 	if o.Listen == nil {
 		o.Listen = net.Listen
@@ -131,6 +138,22 @@ func localService(ctx context.Context, env func(string) string) (service.API, er
 		return nil, err
 	}
 	return l, nil
+}
+
+// Hub is the accounts of a pcb serve: what daemon.Run serves, and Close.
+type Hub interface {
+	daemon.Hub
+	Close() error
+}
+
+// localHub opens the in-process Hub on dirs, logging on the logger ctx
+// carries (loggerFrom).
+func localHub(ctx context.Context, dirs paths.Dirs, cfg config.Config) (Hub, error) {
+	h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg, Logger: loggerFrom(ctx)}})
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 // app is the state the pcb commands share.
