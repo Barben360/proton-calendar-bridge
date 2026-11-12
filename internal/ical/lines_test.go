@@ -180,3 +180,21 @@ func TestUnfoldHostileContinuationsIsLinear(t *testing.T) {
 		t.Fatalf("value length %d", len(p.Value))
 	}
 }
+
+// UnescapeText undoes RFC 5545 §3.3.11's TEXT escapes and keeps any other
+// backslash as written (SPEC §5.3: a UID compared with Proton's column).
+func TestUnescapeText(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain@x":      "plain@x",
+		`pcb-a\,b`:     "pcb-a,b",
+		`a\;b\\c`:      `a;b\c`,
+		`line\nnext\N`: "line\nnext\n",
+		`odd\x`:        `odd\x`,
+		`trailing\`:    `trailing\`,
+		`\\,`:          `\,`,
+	} {
+		if got := UnescapeText(in); got != want {
+			t.Errorf("UnescapeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

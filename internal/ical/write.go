@@ -573,37 +573,3 @@ func instantKey(p Property, v string, withZone bool) string {
 	}
 	return "AT:" + strconv.FormatInt(w.t.Unix(), 10)
 }
-
-// AttendeeEdits names (by address, case-folded) the attendees the
-// incoming event keeps with other parameters than we served them: the
-// first stored line of the address as ApplyRow renders it (X-PM-TOKEN
-// consumed, PARTSTAT from statuses, by token), against the incoming line
-// without X-PM-TOKEN, parameters compared as in identity. Ruling M4-R9:
-// v1 does not write such edits (ROLE, CN, PARTSTAT, RSVP): Patch keeps the
-// stored line and the planner logs these at debug.
-func AttendeeEdits(current map[PartKind][]byte, incoming Component, statuses map[string]int) ([]string, error) {
-	stored, err := storedEntries(current)
-	if err != nil {
-		return nil, err
-	}
-	served := map[string]string{}
-	for _, k := range partKinds {
-		for _, e := range stored[k] {
-			if a := attendeeAddress(e.prop.Value); e.name == "ATTENDEE" && served[a] == "" {
-				served[a] = canonParams(joinStatus(e.prop.Params, statuses))
-			}
-		}
-	}
-	var edits []string
-	for _, p := range incoming.Props() {
-		if !strings.EqualFold(p.Name, "ATTENDEE") {
-			continue
-		}
-		a := attendeeAddress(p.Value)
-		params, _ := dropParam(p.Params, "X-PM-TOKEN")
-		if was, ok := served[a]; ok && was != canonParams(params) && !slices.Contains(edits, a) {
-			edits = append(edits, a)
-		}
-	}
-	return edits, nil
-}

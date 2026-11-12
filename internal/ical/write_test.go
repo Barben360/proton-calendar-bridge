@@ -349,38 +349,18 @@ func TestPatchSingleValuedInSeveralParts(t *testing.T) {
 }
 
 // Ruling M4-R9: an existing attendee's parameters (ROLE, CN, PARTSTAT,
-// RSVP) are not written in v1: the parts do not change, and AttendeeEdits
-// names the attendee for a debug log.
-func TestAttendeeParamEditsAreIgnoredAndReported(t *testing.T) {
+// RSVP) are not written in v1: the parts do not change.
+func TestAttendeeParamEditsAreIgnored(t *testing.T) {
 	cur := stored()
-	statuses := map[string]int{"tok1": 3}
 	base := served(t, cur)
-	edits, err := AttendeeEdits(cur, base, statuses)
-	if err != nil || len(edits) != 0 {
-		t.Fatalf("unedited: %v, %v", edits, err)
-	}
-	reordered := set(t, base, "ATTENDEE", "ATTENDEE;PARTSTAT=accepted;CN=\"Ann\":mailto:ANN@example.com")
-	if edits, err := AttendeeEdits(cur, reordered, statuses); err != nil || len(edits) != 0 {
-		t.Fatalf("same parameters in another order: %v, %v", edits, err)
-	}
 	for _, line := range []string{
 		"ATTENDEE;CN=Ann;PARTSTAT=DECLINED:mailto:ann@example.com",
 		"ATTENDEE;CN=Ann B;PARTSTAT=ACCEPTED:mailto:ann@example.com",
 		"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;ROLE=OPT-PARTICIPANT:mailto:ann@example.com",
 		"ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:ann@example.com",
 	} {
-		in := set(t, base, "ATTENDEE", line)
-		got, changed := mustPatch(t, cur, in)
+		got, changed := mustPatch(t, cur, set(t, base, "ATTENDEE", line))
 		expectParts(t, got, changed, stored())
-		edits, err := AttendeeEdits(cur, in, statuses)
-		if err != nil || !slices.Equal(edits, []string{"mailto:ann@example.com"}) {
-			t.Errorf("%s: edits %v, %v", line, edits, err)
-		}
-	}
-	in := base.Clone()
-	in.addProp(Property{Name: "ATTENDEE", Value: "mailto:new@example.com"})
-	if edits, err := AttendeeEdits(cur, in, statuses); err != nil || len(edits) != 0 {
-		t.Fatalf("an added attendee is not an edit: %v, %v", edits, err)
 	}
 }
 

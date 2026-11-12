@@ -64,6 +64,11 @@ const (
 	// cards.ErrMisroutedProperty's (ruling M4-R16, M4-R19): a signed part
 	// would carry a property that belongs in an encrypted part.
 	RefuseMisrouted = "pcb:" + string(ical.MisroutedStoredLine)
+	// RefusePersonalPart: a row of the event holds a personal part, which an
+	// update never re-sends (M4-R29); what Proton does to a part left out is
+	// live check L.4 #10, so the update is refused until it passes
+	// (write-I3). A delete is not.
+	RefusePersonalPart = "pcb:personal-part"
 )
 
 // WriteRefusal is a write the bridge refuses (CalDAV 403). Code is a pcb
@@ -197,10 +202,9 @@ type WritePlan struct {
 
 // Notes of a plan besides ParseWrite's.
 const (
-	noteStamp        = "DTSTAMP set to the write time"
-	noteEnd          = "DTEND defaulted"
-	noteAlarms       = "unsupported VALARMs dropped"
-	noteAttendeeEdit = "attendee parameter edits ignored"
+	noteStamp  = "DTSTAMP set to the write time"
+	noteEnd    = "DTEND defaulted"
+	noteAlarms = "unsupported VALARMs dropped"
 )
 
 // row is a group row as the planner reads it.
@@ -236,8 +240,9 @@ func invitation(raw json.RawMessage) bool {
 // M4-R19, constraints): a row that is a placeholder, someone else's
 // invitation, of another UID, with a part that did not decrypt, a part not
 // authored by us or a part of ours that is not verified (unsigned parts of
-// every kind included, unlike the render's unverifiedParts), two parts of
-// one kind, or two exception rows for one occurrence is refused.
+// every kind included, unlike the render's unverifiedParts), a personal
+// part (write-I3: never re-sent, live check L.4 #10), two parts of one
+// kind, or two exception rows for one occurrence is refused.
 func checkGroup(g Group) ([]*row, error) {
 	out := make([]*row, len(g.Rows))
 	seen := map[int64]bool{}
@@ -268,7 +273,7 @@ func checkGroup(g Group) ([]*row, error) {
 			case !p.Signed || !p.Verified:
 				return nil, refused(RefuseUnverified, "a part of the event is unsigned or its signature does not verify")
 			case p.Kind == cards.Personal:
-				continue
+				return nil, refused(RefusePersonalPart, "this event has per-user data pcb cannot rewrite yet")
 			}
 			k := ical.PartKind(p.Kind)
 			if _, dup := r.parts[k]; dup {
@@ -595,13 +600,6 @@ func (pl *planner) masterAttendees(master *row, c *ical.Component) (events.Atten
 	if len(added) > 0 || len(removed) > 0 {
 		return nil, refused(RefuseAttendeeChange, "a new occurrence must have its series' attendees")
 	}
-	edits, err := ical.AttendeeEdits(master.parts, *c, master.statuses())
-	if err != nil {
-		return nil, asRefusal(err)
-	}
-	if len(edits) > 0 {
-		pl.note(noteAttendeeEdit)
-	}
 	var lines []ical.Item
 	for _, p := range master.stored.Props() {
 		if strings.EqualFold(p.Name, "ATTENDEE") {
@@ -654,13 +652,6 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if len(added) > 0 || len(removed) > 0 {
 		return 0, nil, refused(RefuseAttendeeChange, "adding or removing attendees is not supported")
 	}
-	edits, err := ical.AttendeeEdits(r.parts, c, r.statuses())
-	if err != nil {
-		return 0, nil, asRefusal(err)
-	}
-	if len(edits) > 0 { // Patch keeps the stored lines (ruling M4-R9)
-		pl.note(noteAttendeeEdit)
-	}
 	stored, storedHas := sequence(r.stored)
 	seq, has := sequence(c)
 	bump := ical.IsSharedSignedChange(r.stored, c) && seq <= stored
@@ -702,15 +693,6 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 		IsOrganizer: isOrganizer,
 	}
 	return seq, &events.Op{Update: &events.Update{ID: r.ID, Body: body}}, nil
-}
-
-// statuses are the row's attendee statuses by token.
-func (r *row) statuses() map[string]int {
-	out := make(map[string]int, len(r.Event.Attendees))
-	for _, a := range r.Event.Attendees {
-		out[a.Token] = a.Status
-	}
-	return out
 }
 
 // rowFields are the row's fields an update re-sends, and a new exception

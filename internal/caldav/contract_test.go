@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2284,5 +2285,107 @@ func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
 		if rec.Code == http.StatusBadRequest {
 			t.Errorf("%s: a 256-byte namespace was refused", name)
 		}
+	}
+}
+
+// Every refused write logs exactly one warning, "refused a CalDAV write",
+// with its code, calendar, href and reason (write-I1: Thunderbird with
+// offline support never shows the answer and retries silently, so the log
+// is where a refusal reaches someone). It never carries the body, the
+// event's text or the client's password. A write that succeeds, or one
+// answered 404, logs no such line.
+func TestEachRefusedWriteLogsOneWarning(t *testing.T) {
+	t.Parallel()
+	const summary = "Secret board meeting"
+	body := string(ics(plainUID, summary, "ATTENDEE;CN=Ann Example:mailto:ann@example.org"))
+	put := func(calID string, hdr ...string) func(h http.Handler) *httptest.ResponseRecorder {
+		return func(h http.Handler) *httptest.ResponseRecorder {
+			return do(h, http.MethodPut, objPath(calID, plainUID), body, append([]string{"Content-Type", "text/calendar"}, hdr...)...)
+		}
+	}
+	del := func(calID string, hdr ...string) func(h http.Handler) *httptest.ResponseRecorder {
+		return func(h http.Handler) *httptest.ResponseRecorder {
+			return do(h, http.MethodDelete, objPath(calID, plainUID), "", hdr...)
+		}
+	}
+	href := objPath(workID, plainUID)
+	// The IDs hold "=", which slog's text handler quotes.
+	for _, tc := range []struct {
+		name    string
+		err     error
+		send    func(h http.Handler) *httptest.ResponseRecorder
+		status  int
+		attrs   []string // the line must hold each
+		noLines bool
+	}{
+		{"pcb refusal", svcErr(exitcode.Usage, &service.WriteRefusal{Code: "pcb:attendee-change", Reason: "adding or removing attendees is not supported"}),
+			put(workID), http.StatusForbidden,
+			[]string{"method=PUT", "status=403", "code=pcb:attendee-change", "calendar=" + strconv.Quote(workID), "href=" + href, `reason="adding or removing attendees is not supported"`}, false},
+		{"pcb refusal of a DELETE", svcErr(exitcode.Usage, &service.WriteRefusal{Code: "pcb:invitation", Reason: "the event is an invitation from someone else"}),
+			del(workID), http.StatusForbidden,
+			[]string{"method=DELETE", "status=403", "code=pcb:invitation", "calendar=" + strconv.Quote(workID), "href=" + href, `reason="the event is an invitation from someone else"`}, false},
+		{"service precondition", svcErr(exitcode.Usage, service.ErrPreconditionFailed), put(workID, "If-Match", `"v1-old"`), http.StatusPreconditionFailed,
+			[]string{"status=412", "code=precondition-failed", "calendar=" + strconv.Quote(workID), "href=" + href, `reason="the If-Match or If-None-Match precondition does not hold on the object"`}, false},
+		{"If-None-Match naming no ETag", nil, put(workID, "If-None-Match", ","), http.StatusPreconditionFailed,
+			[]string{"status=412", "code=precondition-failed", `calendar=""`, "href=" + href}, false},
+		{"UID conflict", svcErr(exitcode.Usage, &service.UIDConflictError{Href: "other one.ics"}), put(workID), http.StatusConflict,
+			[]string{"status=409", "code=no-uid-conflict", "calendar=" + strconv.Quote(workID), "href=" + href, "conflict=" + calPath(workID) + "other%20one.ics",
+				`reason="the UID or the name belongs to another object of the calendar"`}, false},
+		{"read-only calendar", nil, put(holID), http.StatusForbidden,
+			[]string{"status=403", "code=need-privileges", "calendar=" + strconv.Quote(holID), "href=" + objPath(holID, plainUID), `reason="the calendar is read only"`}, false},
+		{"service read only", svcErr(exitcode.Usage, service.ErrNotWritable), del(workID), http.StatusForbidden,
+			[]string{"method=DELETE", "status=403", "code=need-privileges", "calendar=" + strconv.Quote(workID)}, false},
+		{"success", nil, put(workID), http.StatusNoContent, nil, true},
+		{"missing object", svcErr(exitcode.Usage, service.ErrNoSuchObject), del(workID), http.StatusNotFound, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			s := newStub()
+			s.writeErr = tc.err
+			h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+			wantStatus(t, tc.send(h), tc.status)
+			var lines []string
+			for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				if strings.Contains(l, `msg="refused a CalDAV write"`) {
+					lines = append(lines, l)
+				}
+			}
+			if tc.noLines {
+				if len(lines) != 0 {
+					t.Fatalf("logged %q, want no refusal line", lines)
+				}
+				return
+			}
+			if len(lines) != 1 || !strings.Contains(lines[0], "level=WARN") {
+				t.Fatalf("log:\n%s\nwant exactly one warning \"refused a CalDAV write\"", logs.String())
+			}
+			for _, a := range tc.attrs {
+				if !strings.Contains(lines[0], a) {
+					t.Errorf("the line %q lacks %q", lines[0], a)
+				}
+			}
+			for _, bad := range []string{summary, "Ann Example", "ann@example.org", password, "BEGIN:VEVENT"} {
+				if strings.Contains(logs.String(), bad) {
+					t.Errorf("the log carries %q:\n%s", bad, logs.String())
+				}
+			}
+		})
+	}
+}
+
+// If-Match reaches the service as sent, a list included, and several
+// If-Match headers as one list (RFC 9110 §5.3): the service compares them
+// (write-M4).
+func TestIfMatchListsReachTheService(t *testing.T) {
+	t.Parallel()
+	s := newStub()
+	h := caldav.Handler(s, caldav.Options{})
+	req := authed(call(http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar"))
+	req.Header.Add("If-Match", `"v1-a", W/"v1-b"`)
+	req.Header.Add("If-Match", `"v1-plain"`)
+	wantStatus(t, serve(h, req), http.StatusNoContent)
+	if w := s.writeCalls(); len(w) != 1 || w[0].cond.IfMatch != `"v1-a", W/"v1-b","v1-plain"` {
+		t.Errorf("the service got %+v", w)
 	}
 }

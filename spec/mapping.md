@@ -30,6 +30,7 @@ Part names: **SS** shared signed (clear text, detached signature), **SE** shared
 | Resource name: empty, `.`, `..`, a `/`, a control character, invalid UTF-8; or over 255 bytes when it is about to become an alias | refused `pcb:bad-resource-name` |
 | Resource name that is another UID's alternative name (`~~<base64url>.ics`, M4-R38) | refused `pcb:bad-resource-name` |
 | `If-None-Match` naming ETags | evaluated (weak comparison; a missing object passes); an empty list is 412 |
+| `If-Match` | `*`: the object must exist; else a comma-separated list (several headers are one list), one of which must be the object's ETag by strong comparison: a weak `W/"…"` tag never matches (RFC 9110 §13.1.1); otherwise 412 |
 
 ## 2. VCALENDAR level
 
@@ -139,7 +140,7 @@ Other row fields:
 | `IsOrganizer` | absent; a new exception: its master's | the row's (absent when absent or null) | |
 | `Permissions` | 1 | 1 | what every bridge sends (research A.2) |
 | `SharedKeyPacket`, `CalendarKeyPacket` | minted AES-256 keys, each wrapped to the primary calendar key only | never sent: the row's session keys are reused | §8, SPEC §5.3 |
-| `PersonalEventContent` | not sent | not sent | personal parts are never written (M4-R29; L.4 #10 live) |
+| `PersonalEventContent` | not sent | not sent | personal parts are never written (M4-R29); an update of a row that holds one is refused, `pcb:personal-part` (§8), until live check L.4 #10 shows what Proton does to a part left out |
 | Plaintext times, `RRule`, `Exdates`, `RecurrenceID`, `IsImport` | not sent | not sent | Proton derives the columns from SS (research C) |
 
 ## 6. SEQUENCE (ruling M4-R4)
@@ -178,10 +179,15 @@ The executor reads the UID's rows from Proton (`ListByUID`) before planning. The
 | `pcb:invitation` | a row carries an `AddressKeyPacket` (someone else's invitation); also refuses a DELETE | B.3, M4-R27 |
 | `pcb:untrusted-key` | a row's key packet differs from its pin; or a session key is not proven ours; or a row's UID column is not the event's UID | M4-R14, R17, R19, R30 |
 | `pcb:unsupported-change` | the change needs a session key the row lacks; two exception rows for one occurrence; two parts of one kind in a row; series cases of §7 | M4-R13, R15 |
+| `pcb:personal-part` | a row holds a personal part (per-user data, such as alarms stored before they moved to `Notifications`): an update never re-sends it (§5), and what Proton does to a part left out is live check L.4 #10; reason `this event has per-user data pcb cannot rewrite yet`. Lifted once L.4 #10 passes | M4-R29, audit write-I3 |
 | `pcb:misrouted-stored-line` | a stored signed part holds a property that belongs in an encrypted part (we would sign it in clear) | M4-R16, R19 |
 | `pcb:proton-refused` | Proton refused the call or one entry, and the read-back shows neither the write nor a concurrent change; the reason gives Proton's code only | M4-R34 |
 
-A DELETE skips the trust checks (placeholder, undecryptable, not ours, unverified, untrusted key): it re-signs nothing, so an event one cannot read can still be deleted (M4-R27). Only `pcb:invitation` and the write gate refuse it.
+A DELETE skips the trust checks (placeholder, undecryptable, not ours, unverified, untrusted key) and `pcb:personal-part`: it re-signs nothing and leaves no part behind, so an event one cannot read or rewrite can still be deleted (M4-R27). Only `pcb:invitation` and the write gate refuse it.
+
+UIDs are compared unescaped (RFC 5545 TEXT, audit write-I2): should Proton's UID column hold `a,b` for `UID:a\,b` (the UID-escaping question, SPEC §5.3), a PUT of that object at its own name is the same object, never a 409 naming itself; pcb cannot rewrite it while the two forms differ, so it answers 503 (nothing sent). The same UID at another name is a 409 naming the object's name.
+
+Every refusal (each 403 `pcb:CODE`, 403 `need-privileges`, 409 `no-uid-conflict`, 412) is logged once by `pcb serve` at warning level: `refused a CalDAV write` with the method, status, code, calendar ID, href and reason (fixed text; a 409 adds the conflicting href), never the body or the event's content (audit write-I1).
 
 Not a pcb precondition: a read-only calendar is `DAV:need-privileges` (403); an undecided write gate is 503 (M4-R39). See SPEC §8.1 and §9 for the whole status mapping.
 

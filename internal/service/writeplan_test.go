@@ -130,8 +130,9 @@ type seed struct {
 	// (AddressKeyPacket) instead of the calendar key; strangerInvitation to
 	// the stranger's, so that the row does not open.
 	invitation, strangerInvitation bool
-	// personal adds a personal part: "own-unsigned" (ours, unsigned, opens)
-	// or "undecryptable" (encrypted to the stranger).
+	// personal adds a personal part: "own" (ours, signed, opens),
+	// "own-unsigned" (ours, unsigned, opens) or "undecryptable" (encrypted
+	// to the stranger).
 	personal                        string
 	notifications, color, attendees string // raw JSON; "" is null, null, []
 	isOrganizer                     *int
@@ -268,7 +269,8 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 		if s.personal == "undecryptable" {
 			to = stranger
 		}
-		msg, err := to.Encrypt(crypto.NewPlainMessage([]byte(frag("UID:"+planUID, stamp, "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM"))), nil)
+		text := []byte(frag("UID:"+planUID, stamp, "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM"))
+		msg, err := to.Encrypt(crypto.NewPlainMessage(text), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -276,7 +278,11 @@ func (s seed) row(t *testing.T) cache.StoredRow {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r["PersonalEvents"] = []map[string]any{{"Type": 1, "Data": armored, "Signature": "", "Author": author}}
+		part := map[string]any{"Type": 1, "Data": armored, "Signature": "", "Author": author}
+		if s.personal == "own" {
+			part["Type"], part["Signature"] = 3, sign(t, me, text)
+		}
+		r["PersonalEvents"] = []map[string]any{part}
 	}
 	for k, v := range s.fields {
 		if v == nil {
@@ -1080,6 +1086,8 @@ func TestGroupChecksComeBeforePlanning(t *testing.T) {
 	faults = append(faults,
 		fault{"an unsigned personal part of ours", func() seed { s := base(); s.personal = "own-unsigned"; return s }, RefuseUnverified},
 		fault{"a personal part that does not decrypt", func() seed { s := base(); s.personal = "undecryptable"; return s }, RefuseUndecryptable},
+		// Write-I3: never re-sent, so never left behind by an update.
+		fault{"a verified personal part of ours", func() seed { s := base(); s.personal = "own"; return s }, RefusePersonalPart},
 		fault{"a row of another UID", func() seed { s := base(); s.uidColumn = "other@pcb.test"; return s }, RefuseUntrustedKey},
 		fault{"two shared encrypted parts", func() seed { s := base(); s.dup = []ical.PartKind{ical.SharedEncrypted}; return s }, RefuseUnsupportedChange},
 	)
@@ -1141,9 +1149,9 @@ func TestMissingStampAndEndAreDefaulted(t *testing.T) {
 }
 
 // Ruling M4-R9: editing an existing attendee's parameters (PARTSTAT, ROLE,
-// CN) is not written: the stored line stays byte for byte, the plan notes
-// it, and the update re-sends the row's attendee statuses (research A.2: a
-// [] would wipe the RSVPs).
+// CN) is not written: the stored line stays byte for byte, and the update
+// re-sends the row's attendee statuses (research A.2: a [] would wipe the
+// RSVPs).
 func TestAttendeeParameterEditsAreIgnored(t *testing.T) {
 	stored := seed{id: "row-m", parts: attendeeParts(), attendees: annStatus}.row(t)
 	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
@@ -1156,18 +1164,9 @@ func TestAttendeeParameterEditsAreIgnored(t *testing.T) {
 	if got.parts[ical.Attendees] != attendeeParts()[ical.Attendees] {
 		t.Errorf("attendees part =\n%q\nwant it as stored", got.parts[ical.Attendees])
 	}
-	if !strings.Contains(strings.Join(p.Notes, "|"), noteAttendeeEdit) {
-		t.Errorf("notes = %v, want %q", p.Notes, noteAttendeeEdit)
-	}
 	if a := got.field("Attendees"); a != `[{"Token":"tok1","Status":3,"Comment":{"Message":"see you","Type":0}}]` {
 		t.Errorf("Attendees = %s, want the row's", a)
 	}
-	t.Run("no edit, no note", func(t *testing.T) {
-		p := plan(t, g, cal(with(t, attendeeBody(), map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"})))
-		if strings.Contains(strings.Join(p.Notes, "|"), noteAttendeeEdit) {
-			t.Errorf("notes = %v", p.Notes)
-		}
-	})
 }
 
 // Research A.2 (Task 5 review): an update re-sends the stored row's
