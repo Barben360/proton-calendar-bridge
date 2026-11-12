@@ -47,11 +47,18 @@ type API interface {
 	// MustAct. It may call Proton (the
 	// CTag holds each calendar's settings, ruling M3-R14).
 	Collections(ctx context.Context) ([]Collection, error)
-	// Objects lists a calendar's objects (one per UID) with their ETags, and
-	// the calendar's current sync token.
+	// Objects lists a calendar's objects (one per UID) with their ETags and
+	// the names they are served at, and the calendar's current sync token.
 	Objects(ctx context.Context, calID string) ([]ObjectInfo, string, error)
 	// ObjectsByUID returns the rendered objects of uids, in their order.
 	ObjectsByUID(ctx context.Context, calID string, uids []string) ([]Object, error)
+	// ObjectsByName returns the rendered objects served at names (resource
+	// names within the calendar), in their order: Missing for a name that
+	// serves no live object. Each UID is served at one name, its alias or
+	// its canonical name (ObjectName), or its alternative name when another
+	// UID's alias holds its canonical name (rulings M4-R6, M4-R38); any
+	// other name of it serves nothing.
+	ObjectsByName(ctx context.Context, calID string, names []string) ([]Object, error)
 	// Changes returns what changed in a calendar since a sync token ("" for
 	// everything); a token it cannot answer from is an error whose cause is
 	// ErrInvalidSyncToken.
@@ -312,27 +319,33 @@ type Collection struct {
 	SyncToken string `json:"sync_token"`
 }
 
-// ObjectInfo names one object: the UID of its rows and its ETag (quoted, as
-// HTTP sends it). The adapter derives the object's href from the UID.
+// ObjectInfo names one object: the UID of its rows, the resource name it is
+// served at within its calendar (ObjectsByName says which) and its ETag
+// (quoted, as HTTP sends it; "" for a deletion).
 type ObjectInfo struct {
 	UID  string `json:"uid"`
-	ETag string `json:"etag"`
+	Name string `json:"name"`
+	ETag string `json:"etag,omitempty"`
 }
 
 // Object is a rendered object: a VCALENDAR (CRLF line ends) holding the
-// UID's master and exceptions, decrypted. Missing: the UID has no live row.
-// Data is shared with the service's in-memory cache: never modify it.
+// UID's master and exceptions, decrypted, and the name it is served at.
+// Missing: the UID has no live row (ObjectsByName: or the name serves no
+// UID, then UID is ""). Data is shared with the service's in-memory cache:
+// never modify it.
 type Object struct {
 	UID     string `json:"uid"`
+	Name    string `json:"name"`
 	ETag    string `json:"etag,omitempty"`
 	Data    []byte `json:"data,omitempty"`
 	Missing bool   `json:"missing,omitempty"`
 }
 
 // ChangeSet is what changed since a sync token: the objects to fetch, the
-// UIDs with no live row left, and the token to ask from next.
+// UIDs with no live row left (at the name each was served at, ETag ""),
+// and the token to ask from next.
 type ChangeSet struct {
 	Changed []ObjectInfo `json:"changed"`
-	Deleted []string     `json:"deleted"`
+	Deleted []ObjectInfo `json:"deleted"`
 	Token   string       `json:"token"`
 }

@@ -561,7 +561,7 @@ func TestServeRefreshesCalendarSettings(t *testing.T) {
 	contains(t, "a@x", e.objects(t, work, "a@x")["a@x"].Data, "TRIGGER:-PT30M\r\n")
 	// a@x and b@x did not change, yet a client holding the former token
 	// fetches them all, and still learns that c@x is gone.
-	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || !slices.Equal(cs.Deleted, []string{"c@x"}) || cs.Token != tok {
+	if cs := e.changes(t, work, tokW); !slices.Equal(changedUIDs(cs), []string{"a@x", "b@x"}) || !slices.Equal(deletedUIDs(cs), []string{"c@x"}) || cs.Token != tok {
 		t.Errorf("Changes(token before the settings change) = %+v, want a@x and b@x changed, c@x deleted", cs)
 	}
 	// Other's keys now unlock: its objects decrypt, and its former token

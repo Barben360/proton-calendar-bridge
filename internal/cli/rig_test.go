@@ -121,6 +121,10 @@ func (*stubAPI) ObjectsByUID(context.Context, string, []string) ([]service.Objec
 	return nil, nil
 }
 
+func (*stubAPI) ObjectsByName(context.Context, string, []string) ([]service.Object, error) {
+	return nil, nil
+}
+
 func (*stubAPI) Changes(context.Context, string, string) (service.ChangeSet, error) {
 	return service.ChangeSet{}, nil
 }

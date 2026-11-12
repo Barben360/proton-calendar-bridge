@@ -328,26 +328,21 @@ func (l *Local) beginWrite(ctx context.Context, calID string) (*write, error) {
 
 // objectState is an object as the cache holds it after the refresh: its
 // rows, the UID a name stands for and whether that UID has rows, and the
-// calendar's aliases (UID to name).
+// calendar's served names (names.go).
 type objectState struct {
 	group    cache.Group
 	live     bool
 	nameUID  string // the UID the requested name stands for, "" if none
 	nameLive bool   // nameUID has rows
-	aliases  map[string]string
+	names    nameIndex
 }
 
-// hrefOf is the name a UID is served at: its alias, else its canonical
-// name.
-func (s objectState) hrefOf(uid string) string {
-	if a, ok := s.aliases[uid]; ok {
-		return a
-	}
-	return ObjectName(uid)
-}
+// hrefOf is the name a UID is served at (names.served).
+func (s objectState) hrefOf(uid string) string { return s.names.served(uid) }
 
-// read returns the cached state of uid, and the UID name stands for: its
-// alias, else the UID it is the canonical name of.
+// read returns the cached state of uid, and the UID name stands for
+// (names.standsFor: its alias, else the UID it is the canonical or the
+// alternative name of).
 func (l *Local) read(ctx context.Context, w *write, uid, name string) (objectState, error) {
 	var st objectState
 	err := l.onWriter(func(db *cache.Cache, _ *served) error {
@@ -358,18 +353,12 @@ func (l *Local) read(ctx context.Context, w *write, uid, name string) (objectSta
 					return err
 				}
 			}
-			if st.aliases, err = v.AliasesFor(); err != nil {
+			aliases, err := v.AliasesFor()
+			if err != nil {
 				return err
 			}
-			aliased, ok, err := v.AliasOf(name)
-			switch {
-			case err != nil:
-				return err
-			case ok:
-				st.nameUID = aliased
-			default:
-				st.nameUID, _ = UIDOfName(name)
-			}
+			st.names = newNames(aliases)
+			st.nameUID = st.names.standsFor(name)
 			if st.nameUID != "" {
 				_, st.nameLive, err = v.Group(st.nameUID)
 			}
@@ -613,6 +602,11 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	}
 	if st.nameUID != "" && st.nameUID != in.UID && st.nameLive && st.hrefOf(st.nameUID) == name {
 		return PutResult{}, uidConflict(name)
+	}
+	// Another UID's alternative name is reserved for it (ruling M4-R38): an
+	// alias there could later stand where that UID must be served.
+	if alt, ok := uidOfAlternativeName(name); ok && alt != in.UID {
+		return PutResult{}, refusal(refused(RefuseBadName, "the resource name is reserved for another event"))
 	}
 	etag, err := l.etagNow(w, st.group)
 	if err != nil {

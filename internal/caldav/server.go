@@ -9,11 +9,14 @@
 //	/dav/calendars/me/<calseg>/             a calendar: PROPFIND, REPORT
 //	/dav/calendars/me/<calseg>/<name>.ics   an object: PROPFIND, GET, HEAD
 //
-// calseg is the first 16 hex digits of sha256 of the calendar's ID; name is
-// the UID when it is made of [A-Za-z0-9._@-] (1 to 200 bytes), else "~" and
-// the UID in unpadded base64url (ruling M3-R13). Writes come with M4: PUT
-// and DELETE are refused (403 need-privileges), PROPPATCH and MKCALENDAR are
-// 405.
+// calseg is the first 16 hex digits of sha256 of the calendar's ID. name is
+// the one name the service serves the object at (service.ObjectsByName):
+// the name a client created it at (an alias, ruling M4-R6), else the UID
+// when it is made of [A-Za-z0-9._@-] (1 to 200 bytes), else "~" and the UID
+// in unpadded base64url (ruling M3-R13), or "~~" and the UID in unpadded
+// base64url when another object's alias holds that name (ruling M4-R38).
+// An object also answers PUT and DELETE (write.go, M4); PROPPATCH and
+// MKCALENDAR are 405.
 //
 // Every method but OPTIONS needs a client's app password (Basic, any
 // username). A service that cannot answer (logged out, no cache, Proton or
@@ -29,7 +32,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -45,9 +48,9 @@ const (
 	// davClasses never names calendar-schedule or calendar-auto-schedule:
 	// Thunderbird would stop sending invitations itself (E08 §5.1).
 	davClasses = "1, 3, calendar-access"
-	allowed    = "OPTIONS, GET, HEAD, PROPFIND, REPORT"
+	allowed    = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, REPORT"
 
-	maxBody = 8 << 20 // request bodies, larger: 413
+	maxBody = 8 << 20 // request bodies (a PUT's iCalendar too), larger: 413
 	// maxHrefs bounds a calendar-multiget (Thunderbird sends 100); more is
 	// 413, the request being too large rather than forbidden.
 	maxHrefs = 1000
@@ -100,13 +103,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case t.kind == kindWellKnown:
 		w.Header().Set("Location", principalPath)
 		empty(w, http.StatusPermanentRedirect)
-	case r.Method == http.MethodPut || r.Method == http.MethodDelete:
-		refuseWrite(w, r)
-	case r.Method != "PROPFIND" && r.Method != "REPORT" && r.Method != http.MethodGet && r.Method != http.MethodHead:
+	case r.Method != "PROPFIND" && r.Method != "REPORT" && r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		r.Method != http.MethodPut && r.Method != http.MethodDelete:
 		w.Header().Set("Allow", allowed)
 		empty(w, http.StatusMethodNotAllowed)
 	case t.kind == kindNone:
 		empty(w, http.StatusNotFound)
+	case (r.Method == http.MethodPut || r.Method == http.MethodDelete) && t.kind != kindObject:
+		// A collection is not written to.
+		w.Header().Set("Allow", allowed)
+		empty(w, http.StatusMethodNotAllowed)
+	case r.Method == http.MethodPut:
+		s.put(w, r, t)
+	case r.Method == http.MethodDelete:
+		s.delete(w, r, t)
 	case r.Method == "PROPFIND":
 		s.propfind(w, r, t)
 	case r.Method == "REPORT":
@@ -131,12 +141,25 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, service.ErrNoSuchCalendar):
 		empty(w, http.StatusNotFound)
 	default:
-		if r.Context().Err() == nil && !errors.Is(err, service.ErrCalendarPending) {
-			// The service's errors are secret-free by contract (service.API).
-			s.log.Warn("caldav: the service could not answer", "method", r.Method, "error", err.Error())
-		}
-		unavailable(w)
+		s.unavailable(w, r, err)
 	}
+}
+
+// unavailable answers err, a failure of the service, 503 with Retry-After:
+// Proton's own wait when it asked for one (a 429), else unavailableRetry;
+// with a warning unless the calendar is pending or the request's context
+// ended.
+func (s *server) unavailable(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() == nil && !errors.Is(err, service.ErrCalendarPending) {
+		// The service's errors are secret-free by contract (service.API).
+		s.log.Warn("caldav: the service could not answer", "method", r.Method, "error", err.Error())
+	}
+	wait := service.ProtonRetryAfter(err)
+	if wait <= 0 {
+		wait = unavailableRetry
+	}
+	w.Header().Set("Retry-After", retryAfter(wait))
+	empty(w, http.StatusServiceUnavailable)
 }
 
 // unavailable answers 503 with the Retry-After a client should wait.
@@ -193,9 +216,9 @@ func (s *server) collection(w http.ResponseWriter, r *http.Request, seg string) 
 
 // withData writes the objects of infos into ms with the properties q asks;
 // calendar-data only for the first dataCap of them, rendered in one
-// ObjectsByUID (the others answer it in a 404 propstat). It returns the UIDs
-// rendered as missing (deleted since infos was read); false when it
-// answered a service failure itself.
+// ObjectsByUID (the others answer it in a 404 propstat). It returns the
+// names of the objects rendered as missing (deleted since infos was read);
+// false when it answered a service failure itself.
 func (s *server) withData(w http.ResponseWriter, r *http.Request, ms *multistatus, calID string, infos []service.ObjectInfo, q propRequest) ([]string, bool) {
 	n := min(len(infos), s.dataCap)
 	uids := make([]string, n)
@@ -211,26 +234,26 @@ func (s *server) withData(w http.ResponseWriter, r *http.Request, ms *multistatu
 		}
 		for _, o := range objs {
 			if o.Missing {
-				gone = append(gone, o.UID)
+				gone = append(gone, o.Name)
 				continue
 			}
-			objectResource(calID, o.UID, o.ETag, o.Data, true).write(ms, q)
+			objectResource(calID, o.Name, o.ETag, o.Data, true).write(ms, q)
 		}
 	}
 	for _, o := range infos[n:] {
-		objectResource(calID, o.UID, o.ETag, nil, false).write(ms, q)
+		objectResource(calID, o.Name, o.ETag, nil, false).write(ms, q)
 	}
 	return gone, true
 }
 
-// object reads one object; it answers the failure itself (404 when the UID
-// has no live row).
+// object reads the object served at t's name; it answers the failure
+// itself (404 when the name serves no live object).
 func (s *server) object(w http.ResponseWriter, r *http.Request, t target) (service.Collection, service.Object, bool) {
 	c, ok := s.collection(w, r, t.calseg)
 	if !ok {
 		return c, service.Object{}, false
 	}
-	objs, err := s.api.ObjectsByUID(r.Context(), c.ID, []string{t.uid})
+	objs, err := s.api.ObjectsByName(r.Context(), c.ID, []string{t.name})
 	if err != nil {
 		s.fail(w, r, err)
 		return c, service.Object{}, false
@@ -258,17 +281,6 @@ func (s *server) get(w http.ResponseWriter, r *http.Request, t target) {
 	}
 }
 
-// refuseWrite answers PUT and DELETE until M4: 403 with the privilege the
-// request lacks (RFC 3744 need-privileges).
-func refuseWrite(w http.ResponseWriter, r *http.Request) {
-	href, privilege := r.URL.EscapedPath(), "<D:write-content/>"
-	if r.Method == http.MethodDelete {
-		href, privilege = path.Dir(strings.TrimSuffix(href, "/"))+"/", "<D:unbind/>"
-	}
-	forbidden(w, `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource>`+hrefXML(href)+
-		"<D:privilege>"+privilege+"</D:privilege></D:resource></D:need-privileges></D:error>")
-}
-
 // kind is what a path names.
 type kind int
 
@@ -285,7 +297,7 @@ const (
 type target struct {
 	kind   kind
 	calseg string // kindCalendar, kindObject
-	uid    string // kindObject
+	name   string // kindObject: the resource name, decoded
 }
 
 // resolve maps a request path (decoded) to what it names. Collections
@@ -309,14 +321,15 @@ func resolve(p string) target {
 	if !isSegment(seg) {
 		return target{}
 	}
-	if name == "" {
+	switch {
+	case name == "":
 		return target{kind: kindCalendar, calseg: seg}
-	}
-	uid, ok := parseName(name)
-	if !ok {
+	case strings.Contains(name, "/"): // nothing is nested in a calendar
 		return target{}
 	}
-	return target{kind: kindObject, calseg: seg, uid: uid}
+	// Which object the name serves, if any, is the service's to say: a
+	// client may have chosen it (ruling M4-R6).
+	return target{kind: kindObject, calseg: seg, name: name}
 }
 
 // calendarSegment is the path segment of calendar id: the first 16 hex
@@ -332,11 +345,6 @@ func isSegment(s string) bool {
 
 func calendarHref(id string) string { return homePath + calendarSegment(id) + "/" }
 
-func objectHref(calID, uid string) string { return calendarHref(calID) + objectName(uid) }
-
-// objectName is uid's resource name (service.ObjectName).
-func objectName(uid string) string { return service.ObjectName(uid) }
-
-// parseName is objectName's inverse, exact: a name that is not the
-// canonical name of its UID does not decode (service.UIDOfName).
-func parseName(name string) (string, bool) { return service.UIDOfName(name) }
+// objectHref is the href of the object served at name in calendar calID,
+// the name percent-encoded (a canonical name needs none).
+func objectHref(calID, name string) string { return calendarHref(calID) + url.PathEscape(name) }

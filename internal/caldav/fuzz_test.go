@@ -17,7 +17,7 @@ import (
 // body empty or one of the DAV:error preconditions.
 func fuzzBody(t *testing.T, method, depth string, body []byte) {
 	s := newStub()
-	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: []string{"gone@x"}, Token: "tok-2"}
+	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
 	rec := do(caldav.Handler(s, caldav.Options{}), method, calPath(workID), string(body), "Depth", depth)
 	switch rec.Code {
 	case http.StatusMultiStatus:

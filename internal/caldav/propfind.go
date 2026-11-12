@@ -175,8 +175,9 @@ func homeResource() *resource {
 	return res
 }
 
-// The privileges a calendar advertises (rulings M3-R1, M3-R15): a writable
-// one says so already, though writes are refused until M4.
+// The privileges a calendar advertises: read and write when the write gate
+// lets us write it (ruling M4-R1: Collection.ReadOnly), else read alone; a
+// write to a read-only one is 403 need-privileges (write.go).
 const (
 	readPrivileges  = "<D:privilege><D:read/></D:privilege>"
 	writePrivileges = readPrivileges + "<D:privilege><D:write/></D:privilege><D:privilege><D:write-content/></D:privilege>" +
@@ -211,10 +212,10 @@ func calendarResource(c service.Collection) *resource {
 	return res
 }
 
-// objectResource is an object's properties; calendar-data only when data
-// was read (never in allprop, RFC 4791 §9.6).
-func objectResource(calID, uid, etag string, data []byte, haveData bool) *resource {
-	res := &resource{href: objectHref(calID, uid)}
+// objectResource is the properties of the object served at name;
+// calendar-data only when data was read (never in allprop, RFC 4791 §9.6).
+func objectResource(calID, name, etag string, data []byte, haveData bool) *resource {
+	res := &resource{href: objectHref(calID, name)}
 	res.add(dav("resourcetype"), "")
 	res.add(dav("getetag"), text(etag))
 	res.add(dav("getcontenttype"), componentType)
@@ -287,7 +288,7 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 		if !ok {
 			return
 		}
-		objectResource(c.ID, o.UID, o.ETag, o.Data, true).write(ms, q)
+		objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
 	}
 	ms.send(w)
 }
@@ -303,7 +304,7 @@ func (s *server) listObjects(w http.ResponseWriter, r *http.Request, ms *multist
 	}
 	if !q.wants(caldav("calendar-data")) {
 		for _, o := range infos {
-			objectResource(c.ID, o.UID, o.ETag, nil, false).write(ms, q)
+			objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
 		}
 		return true
 	}

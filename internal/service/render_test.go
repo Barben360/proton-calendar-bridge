@@ -33,6 +33,14 @@ func changedUIDs(cs service.ChangeSet) []string {
 	return out
 }
 
+func deletedUIDs(cs service.ChangeSet) []string {
+	var out []string
+	for _, c := range cs.Deleted {
+		out = append(out, c.UID)
+	}
+	return out
+}
+
 func (e *env) collection(t *testing.T, id string) service.Collection {
 	t.Helper()
 	list, err := e.svc.Collections(t.Context())
@@ -151,7 +159,7 @@ func TestObjectChanges(t *testing.T) {
 		e.f.AddEvent(work, protontest.Event{UID: "n@x", Start: base, End: base + 60})
 		e.sync(t, false)
 		cs = e.changes(t, work, tok2)
-		if !slices.Equal(changedUIDs(cs), []string{"n@x"}) || !slices.Equal(cs.Deleted, []string{"a@x"}) {
+		if !slices.Equal(changedUIDs(cs), []string{"n@x"}) || !slices.Equal(deletedUIDs(cs), []string{"a@x"}) {
 			t.Errorf("after deleting a@x and adding n@x: %+v", cs)
 		}
 		if again := e.changes(t, work, cs.Token); len(again.Changed)+len(again.Deleted) != 0 || again.Token != cs.Token {
@@ -159,7 +167,7 @@ func TestObjectChanges(t *testing.T) {
 		}
 		// An older token (before any deletion) stays valid and sees it all.
 		old := e.changes(t, work, tok1)
-		if !slices.Equal(changedUIDs(old), []string{"n@x", "s@x"}) || !slices.Equal(old.Deleted, []string{"a@x"}) || old.Token != cs.Token {
+		if !slices.Equal(changedUIDs(old), []string{"n@x", "s@x"}) || !slices.Equal(deletedUIDs(old), []string{"a@x"}) || old.Token != cs.Token {
 			t.Errorf("Changes(older token) = %+v", old)
 		}
 		if got := e.objects(t, work, "a@x")["a@x"]; !got.Missing {
@@ -256,7 +264,7 @@ func TestObjectChanges(t *testing.T) {
 			t.Errorf("DuplicateMasters after a listing without e@x = %d, want 1 (f@x)", n)
 		}
 		deleteUID("f@x")
-		if cs := e.changes(t, work, tok); !slices.Equal(cs.Deleted, []string{"f@x"}) {
+		if cs := e.changes(t, work, tok); !slices.Equal(deletedUIDs(cs), []string{"f@x"}) {
 			t.Fatalf("Changes = %+v, want f@x deleted", cs)
 		}
 		if n := e.svc.RenderCounts().DuplicateMasters; n != 0 {

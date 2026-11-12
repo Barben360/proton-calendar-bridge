@@ -1321,7 +1321,7 @@ func TestDeleteReadsBack(t *testing.T) {
 	if !r.object(t, "series@x").Missing {
 		t.Error("the cache still serves the object")
 	}
-	if cs := r.changes(t, tok); !slices.Equal(cs.Deleted, []string{"series@x"}) || len(cs.Changed) != 0 {
+	if cs := r.changes(t, tok); !slices.Equal(deletedUIDs(cs), []string{"series@x"}) || len(cs.Changed) != 0 {
 		t.Errorf("changes %+v", cs)
 	}
 	if p := r.s.next(t, false); calSync(t, p.Result, r.cal).Deleted != 0 {
