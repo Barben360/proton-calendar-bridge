@@ -167,9 +167,17 @@ a second account is a second `service.Local` in the same process, held by
   `TestServeRefusesWithNoLoggedInAccount`, `TestServeWithoutTheFlagExitsWhenTheOnlyAccountNeedsALogin`,
   `TestServeWaitForLoginParksAnUnreadableAccount`, `TestServeWaitsForALoginWithNoAccount`].
 - **Adding, relogin, pending.** `Hub.Login` takes the username: an account whose address matches
-  (case-insensitive, pending or not) is relogged; else, when exactly one account has no address
-  at all (an M5 account migrated signed out, R16) that one is adopted; else a new `<local-id>`
-  directory is made, the login runs on it and, on success, the account joins the running set.
+  (case-insensitive, pending or not) is relogged; an account whose `state.json` cannot be read
+  matches by its sealed account's username and the login meets its fault (exit 10), and a login
+  of its Proton user under another address is refused as a duplicate (R37). Else, when exactly
+  one account is signed out with no address and a readable `state.json` (an M5 account migrated
+  signed out, R16, R37), that one is **adopted** by this first login whose address matches no
+  account, whoever it is: the login inherits the account's `clients.json`, so the old Thunderbird
+  password then reads the new user's calendars. When you add a different account after signing
+  an M5 account out, run `pcb client rotate NAME` for each of its clients (`pcb client list`)
+  [verified: `TestLoginAdoptsTheSignedOutM5Account`, `TestLoginDoesNotAdoptAnUnreadableAccount`,
+  `TestLoginDoesNotAdoptALoggedInAddresslessAccount`, `TestLoginOfAnUnreadableAccountsUserAddsNothing`].
+  Else a new `<local-id>` directory is made, the login runs on it and, on success, the account joins the running set.
   One login runs at a time per process (`a login is already in progress`). A failed add (wrong
   password, refusal, a 2FA code not given within the 5 min TTL) removes the new directory. An
   add stopped by a CAPTCHA keeps its directory as a **pending** account (phase `needs-captcha`,
@@ -194,9 +202,10 @@ a second account is a second `service.Local` in the same process, held by
   `pcb.db` wiped, the login reset, the directory, the address and `clients.json` kept (CalDAV passwords
   stay valid and viewable, decision 0013); it is listed as `logged-out`. `pcb account remove` signs
   out, then deletes the directory, confirmed as `logout --yes` is (`--non-interactive` without `--yes`:
-  exit 10); a sign-out the store refuses keeps the directory, and calls in flight finish first
+  exit 10); a sign-out the store refuses keeps the directory, and calls in flight finish first;
+  a CalDAV request does not wait for a removal: the account being removed is skipped (R39)
   [verified: `TestRemoveDeletesOnlyThatAccount`, `TestRemoveWaitsForTheCallsInFlight`,
-  `TestCallDuringRemoveFindsNoAccount`]. The first completed login of an account creates its `default`
+  `TestCallDuringRemoveFindsNoAccount`, `TestCompatibilityRouteSkipsAnAccountBeingRemoved`]. The first completed login of an account creates its `default`
   CalDAV client (decision 0013).
 - **Adapters switch.** `pcb account caldav on|off` writes `caldav` (a boolean; absent, as in an M5
   `state.json`, means on) into the account's `state.json`; the design's `adapters: {"caldav": ...}`
@@ -610,18 +619,22 @@ Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.
   or renamed (it is a directory name and appears in the CalDAV URL, §9). Proton's user ID stays inside
   (`state.json`, the cache's `meta`) and is checked as before [verified: `TestLocalIDShape`].
 - `layout.json` is `{"version": 2}`; anything else is refused (malformed or an unknown version: damaged,
-  exit 20 `run pcb doctor`; a version above 2: `ErrNewerLayout`, exit 20 `upgrade pcb`, ruling R9).
+  exit 10 `run pcb doctor`; a version above 2: `ErrNewerLayout`, exit 10 `upgrade pcb`, ruling R9; a layout pcb
+  cannot read, exit 10 naming the file: a person must act, so a unit that does not restart on 10 stops instead of
+  looping, ruling R36) [verified: `TestOpenHubRefusesDamagedLayout`, `TestOpenHubRefusesUnreadableLayout`].
   Root files: `serve.lock` (the serving process, holds its PID, §4.1), `sync.lock` (the root lock, kept
   under its M5 name, ruling R7: held by the serving process, and by `OpenHub` while it migrates), `layout.lock`
   (serialises migrations), `login.lock` and `last-login` (the login guard, shared by every account).
 - **Migration.** A state with no `layout.json` and account data at the root (`state.json`, `secrets.sealed`,
   `clients.json`, `pcb.db`, `-wal`, `-shm`: data files only, locks do not count, R6) is the M5 layout. The first
-  command that opens the state (every command except `pcb doctor`, which reads both layouts and never writes)
+  command that opens the state (`pcb doctor` does not: it reads both layouts and never writes)
   moves the account's files into `accounts/<new-id>.migrating/`, renames the directory,
   then writes `layout.json`, each step fsynced; a start that finds the staging directory (or the account
   directory without `layout.json`) resumes with the same ID. It holds `layout.lock` and the root `sync.lock`
   without waiting: an M5 `pcb serve` or `pcb sync` running makes it exit 20 `another pcb holds the state`,
-  hint `stop the running pcb first`. The root `sync.lock` is not moved (R7: it is v2's root lock); the
+  hint `stop the running pcb first`; another pcb migrating (`layout.lock` held) is exit 20 too, `another pcb is
+  moving the state to the per-account layout` (both may pass by themselves, R36)
+  [verified: `TestOpenHubRefusesWhileM5SyncLockHeld`, `TestOpenHubRefusesWhileLayoutLockHeld`]. The root `sync.lock` is not moved (R7: it is v2's root lock); the
   other lock files move with the account. A root `state.lock`, `secrets.lock` or `clients.lock` found beside
   `layout.json` later (an older binary recreates them when it opens the state) is stale and harmless: lock
   files hold no data and never count as an older pcb's account files (R6)
@@ -633,8 +646,8 @@ Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.
   `TestAccountsOfAnM5StateLeaveItAsItIs`, `TestAccountsOfAnInterruptedMigration`].
 - **No downgrade.** An M5 binary cannot be changed: on a v2 state it sees no root `state.json` (logged out) and,
   if it logs in, writes `state.json` and `secrets.sealed` at the root beside `layout.json`. M6 then refuses
-  (exit 20, `account files of an older pcb are beside the per-account layout: <names>`, hint `remove them or
-  move the state directory aside: no downgrade after M6`) and never guesses which copy is current; `pcb doctor`
+  (exit 10, `account files of an older pcb are beside the per-account layout: <names>`, hint `remove them or
+  move the state directory aside: this pcb version cannot be downgraded`, R36) and never guesses which copy is current; `pcb doctor`
   reports it on its `accounts` check. The root `sync.lock` held by a serving M6 process stops an older binary from
   writing meanwhile [verified: `TestLegacyBesideLayoutIsRefused`, `TestOpenHubRefusesLegacyBesideLayout`,
   `TestAccountsWithLegacyFilesBesideTheLayout`, `TestOpenHubRefusesNewerLayout`, `TestLayoutUnknownVersionIsRefused`].
@@ -1150,7 +1163,7 @@ Not planned [decided 0007].
 
 Not planned [decided 0007]. The control API (CTL, §4) is internal: JSON
 over HTTP on a unix socket (0600, peer UID checked), versioned
-(`/ctl/v1/…`), used only by `pcb`. It is documented in code, not in
+(`/v2/…` since M6), used only by `pcb`. It is documented in code, not in
 OpenAPI, and may change between versions.
 
 ## 12. A4 — MCP adapter
@@ -1296,10 +1309,11 @@ reboot and a real login are [assumed → step 7].]
 M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`, `internal/doctor`; rulings in §18):
 - Selector: `A` is the account's address (case-insensitive) or its local ID (`pcb account list`), pending adds included; empty, it is the only account
   that is not pending. With several and none given: exit 2, `several accounts: name one with --account`, hint listing them, and `--json` `data.accounts` carries the
-  list (also over the control socket, R31); with none (or a selector that names none): exit 2, `no account` (`no account X`), hint `add one with pcb login`
-  (`see pcb account list`, or `finish the pending login (pcb login resume)` while only a pending add exists). `PCB_ACCOUNT` is read when the flag is not
+  list (also over the control socket, R31); a selector that names none: exit 2, `no account X`, hint `see pcb account list`; none given and no account
+  to choose: exit 10 (a person must add one, R38), `no account`, hint `add one with pcb login` (`finish the pending login (pcb login resume), or add an
+  account with pcb login` while only pending adds exist). `PCB_ACCOUNT` is read when the flag is not
   given [verified: `TestSelectAccount`, `TestSelectorRules`, `TestSelectorRequiredWithTwoAccounts`, `TestPCBAccountEnv`,
-  `TestOnlySelectingCommandsTakeAccount`, `TestLoginRefusesAnAccountSelector`, `TestSeveralAccountsCrossTheSocket`].
+  `TestOnlySelectingCommandsTakeAccount`, `TestLoginRefusesAnAccountSelector`, `TestSeveralAccountsCrossTheSocket`, `TestNoAccountIsExit10`].
 - `pcb login` takes the username first and decides (§4.1); the result names its account (`data.account`, the local ID); `pcb login resume` takes the selector
   (a lone pending add is found without one; with several waiting and none named it lists them, exit 2); `pcb logout` of a state whose only account is a pending add acts on it
   (R34) [verified: `TestLoginAddsAccountByUsername`, `TestLoginResumeSelectsThePendingLogin`, `TestLoginResumeNamesTheWaitingLogins`,
@@ -1313,9 +1327,9 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
   is the command's (the `pcb status` key-fault exception of §13 stands). `pcb status --daemon --json` is still the container's health check [verified:
   `TestStatusShowsEveryAccount`, `TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone`, `TestStatusShowsTheDaemon`].
-- `pcb doctor`: process-wide checks once; per account, results named `<address>: <check>` (`sealed secrets`, `secrets`, `cache`, `caldav clients`, the sealed-client
+- `pcb doctor`: process-wide checks once; per account, results named `<address>: <check>` (the local ID when the account has no address) (`sealed secrets`, `secrets`, `cache`, `caldav clients`, the sealed-client
   warnings); an `accounts` result for the layout (no account: a warning; a move to layout v2 stopped midway, or `.migrating`: a warning naming it; files of an older
-  pcb beside the layout or a newer layout: a failed check with the fix) [verified: `TestDoctorNamesTheAccount`, `TestAccountsOfTheV2Layout`, `TestAccountsOfAStateWithNothing`,
+  pcb beside the layout, a newer or an unreadable layout: a failed check with the fix, exit 10 as every failed file check, R36) [verified: `TestDoctorNamesTheAccount`, `TestAccountsOfTheV2Layout`, `TestAccountsOfAStateWithNothing`,
   `TestAccountsOfAnUnreadableLayout`].
 - `pcb serve`'s intro prints one `Thunderbird URL (<address>): <base>/dav/<local-id>/` line per account CalDAV serves (a pending add and an account with CalDAV off are left
   out), the TLS fingerprint once, and, per served account with no client, the `client add`/`login` hint; with `--wait-for-login` and no account, `Waiting for a login: run pcb login`
@@ -1583,11 +1597,11 @@ M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMA
 | R2 | `OpenHub` takes the root `sync.lock` (and `layout.lock`) only while it migrates an M5 layout; with layout v2 it never touches them, so CLI commands work while a daemon serves |
 | R3, R18, R19, R22 | the Hub runs every `Local.Serve` with `WaitForLogin` and applies the process exit rule itself; a removed account's loop stops first; a login re-reads CalDAV, address and creation time under `state.lock` (a CalDAV switch is not lost to a relogin); `ServeStopped` is reused for parked, paused and ended loops |
 | R4, R5, R26 | `service.AccountPath` is the one URL helper; `daemon.Hub` is the interface `daemon`, `ctl` and `cli` share (`*service.Hub` satisfies it); `Router.Route` returns `(api, localID, retryAfter, err)` so the handler knows which account `/` authenticated |
-| R6, R7, R9 | legacy detection counts data files only, never locks; `Migrate` leaves the root `sync.lock` in place; `ErrNewerLayout` for a `layout.json` above version 2 (exit 20, `upgrade pcb`) |
+| R6, R7, R9 | legacy detection counts data files only, never locks; `Migrate` leaves the root `sync.lock` in place; `ErrNewerLayout` for a `layout.json` above version 2 (exit 10 since R36, `upgrade pcb`) |
 | R8 | the `state.json` key is `address` (the design wrote `username`) |
 | R10, R12, R14, R15, R17 | `Hub.SubmitTOTP` applies the same post-login rules as `Hub.Login`; a duplicate-user refusal revokes the session it opened first; account-changing commands go through Hub methods (CTL when a daemon answers, since a running Hub does not rescan `accounts/`); `SignOut` fires `OnChange` |
 | R11, R13 | an abandoned add (no Proton user, never logged in, no data, no CAPTCHA, no held 2FA login) is removed lazily and by `OpenHub` once older than the 2FA TTL plus a minute |
-| R16 | `OpenHub` backfills a migrated account's address from its sealed username; a migrated signed-out account with no address is adopted by the first login that matches no account |
+| R16, R37 | `OpenHub` backfills a migrated account's address from its sealed username; a migrated signed-out account with no address (and a readable `state.json`, R37) is adopted by the first login that matches no account; cost: that login inherits its `clients.json`, so the old Thunderbird password reads the new user's calendars (`pcb client rotate`, §4.1) |
 | R20 | `serve.lock` holds the PID as decimal text and a newline |
 | R21, R23, R25 | a damaged cache parks the account with exit 10 (not 20), a sync lock held elsewhere is retried every 30 s and never parked, and a Restart racing the park is a no-op that a later Restart repairs |
 | R24 | the serve half of `hub.go` is `hub_serve.go`, the account API `hub_api.go` (a pure move) |
@@ -1598,6 +1612,9 @@ M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMA
 | R32 | an unclean control path (the ServeMux 301) is a 404 envelope |
 | R33 | `pcb serve` opens the Hub itself (`service.OpenHub`) and runs `daemon.Run` with kind `serve` |
 | R34 | upgrade-path fixes: `pcb doctor` warns on a `.migrating` directory and names the layout fix; `pcb logout` with only a pending account acts on it; offline status drops an account only on the Hub's "no account" refusal |
+| R36 | layout refusals (files of an older pcb beside the layout, a newer, damaged or unreadable `layout.json`) are exit 10, as state faults; another pcb holding `layout.lock` or the root `sync.lock` stays exit 20 |
+| R38 | with no selector, no account (or only pending adds) is exit 10; a selector naming none and several accounts stay exit 2; `ErrNoAccount` stays the cause, which offline status and the control socket's status match |
+| R39 | a CalDAV request skips an account being removed instead of waiting for its revoke; the adoption cost of R16 is documented (§4.1) |
 
 Where the built behaviour differs from the design (§4 of the design document, each marked there): the `state.json` key `address`, not `username` (R8); one `caldav` boolean, not an `adapters` object (§7.1); the root `sync.lock` stays at the root and is held by the serving process and the migration (R7); a held per-account sync lock is retried, not parked (R23); a damaged cache parks with exit 10 (R21); root `serve.lock` and `layout.lock` are new; stale root `state.lock`, `secrets.lock` and `clients.lock` an old binary recreates are never cleaned (§7.1).
 
