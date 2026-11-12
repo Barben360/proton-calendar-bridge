@@ -26,6 +26,7 @@ func TestSelectAccount(t *testing.T) {
 		msg      string
 		hint     string
 		several  []string
+		code     exitcode.Code // the refusal's; Usage when 0
 	}{
 		{name: "by ID", list: []service.AccountInfo{a, b}, selector: "bbbbbbbb", want: "bbbbbbbb"},
 		{name: "by address, any case", list: []service.AccountInfo{a, b}, selector: "B@X.Test", want: "bbbbbbbb"},
@@ -33,9 +34,10 @@ func TestSelectAccount(t *testing.T) {
 		{name: "a pending one named", list: []service.AccountInfo{a, p}, selector: "p@x.test", want: "pppppppp"},
 		{name: "the only ready one", list: []service.AccountInfo{p, a}, want: "aaaaaaaa"},
 		{name: "unknown", list: []service.AccountInfo{a}, selector: "z@x.test", msg: "no account z@x.test", hint: "see pcb account list"},
-		{name: "none", msg: "no account", hint: "add one with pcb login"},
+		// Ruling R38: with no account to choose a person must act (10).
+		{name: "none", msg: "no account", hint: "add one with pcb login", code: exitcode.MustAct},
 		{name: "only pending", list: []service.AccountInfo{p}, msg: "no account",
-			hint: "finish the pending login (pcb login resume), or add an account with pcb login"},
+			hint: "finish the pending login (pcb login resume), or add an account with pcb login", code: exitcode.MustAct},
 		{name: "several", list: []service.AccountInfo{a, p, b}, msg: "several accounts: name one with --account",
 			hint: "name one with --account or PCB_ACCOUNT (pcb account list)", several: []string{"aaaaaaaa", "bbbbbbbb"}},
 	}
@@ -49,7 +51,11 @@ func TestSelectAccount(t *testing.T) {
 				}
 				return
 			}
-			ee := wantExit(t, err, exitcode.Usage)
+			code := tt.code
+			if code == 0 {
+				code = exitcode.Usage
+			}
+			ee := wantExit(t, err, code)
 			if ee.Error() != tt.msg || ee.Hint != tt.hint {
 				t.Errorf("refusal %q, hint %q; want %q, %q", ee.Error(), ee.Hint, tt.msg, tt.hint)
 			}

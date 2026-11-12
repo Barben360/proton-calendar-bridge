@@ -275,7 +275,7 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	accounts := make([]AccountStatus, 0, len(infos))
 	for _, info := range infos {
 		as, err := s.accountStatus(ctx, info, now())
-		if isUsage(err) {
+		if errors.Is(err, service.ErrNoAccount) {
 			continue // removed since Accounts listed it
 		}
 		if base != "" {
@@ -304,15 +304,13 @@ func (s *Server) accountStatus(ctx context.Context, info service.AccountInfo, no
 		}
 	}
 	as.Alerts = Alerts(AlertInput{Account: info.ID, Login: as.Login, Stopped: info.Stopped, Health: as.Health, Now: now})
-	if err != nil && !isUsage(err) {
+	if err != nil && !errors.Is(err, service.ErrNoAccount) {
 		as.Alerts = append(as.Alerts, Alert{Account: info.ID, Code: CodeAccountUnreadable, Severity: SeverityError,
 			Message: err.Error(), Fix: exitcode.HintOf(err)})
 		SortAlerts(as.Alerts)
 	}
 	return as, err
 }
-
-func isUsage(err error) bool { return err != nil && exitcode.From(err) == exitcode.Usage }
 
 // login is POST /v2/login: Hub.Login on the body, a service.LoginRequest.
 // A login that completes here wakes a Serve waiting for one, as an

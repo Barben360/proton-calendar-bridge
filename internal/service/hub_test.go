@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -50,6 +51,8 @@ type hubEnv struct {
 	// sessions records the tokens SkipSRP handed out, by username.
 	smu      sync.Mutex
 	sessions map[string]api.Tokens
+	// http, when set before open, is the services' HTTP client.
+	http *http.Client
 }
 
 func newHubEnv(t *testing.T) *hubEnv {
@@ -89,7 +92,7 @@ func (e *hubEnv) options() service.HubOptions {
 		sleep = e.sleep
 	}
 	return service.HubOptions{Options: service.Options{
-		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: sleep, AfterFunc: e.afterFunc,
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: sleep, AfterFunc: e.afterFunc, HTTP: e.http,
 	}}
 }
 
@@ -287,12 +290,14 @@ func TestOpenHubRefusesLegacyBesideLayout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.dirs.State, "secrets.sealed"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Ruling R36: a person must act (10), so a unit that does not restart
+	// on 10 stops instead of looping.
 	_, err := service.OpenHub(e.options())
-	ee := wantExit(t, err, exitcode.Blocked)
+	ee := wantExit(t, err, exitcode.MustAct)
 	if msg := ee.Error(); !strings.Contains(msg, "state.json, secrets.sealed") || !strings.Contains(msg, e.dirs.State) {
 		t.Errorf("message %q does not name the files and the directory", msg)
 	}
-	if ee.Hint != "remove them or move the state directory aside: no downgrade after M6" {
+	if ee.Hint != "remove them or move the state directory aside: this pcb version cannot be downgraded" {
 		t.Errorf("hint = %q", ee.Hint)
 	}
 }
@@ -307,8 +312,64 @@ func TestOpenHubRefusesNewerLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := service.OpenHub(e.options())
-	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint == "" || !strings.Contains(ee.Error(), "newer pcb") {
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint == "" || !strings.Contains(ee.Error(), "newer pcb") {
 		t.Errorf("error = %q, hint %q, want a newer pcb named and a hint", ee.Error(), ee.Hint)
+	}
+}
+
+// Ruling R36: a damaged layout.json needs a person (10), as a damaged
+// state.json does.
+func TestOpenHubRefusesDamagedLayout(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "layout.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.OpenHub(e.options())
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "damaged") || ee.Hint != "run pcb doctor" {
+		t.Errorf("error = %q, hint %q, want the damaged layout and pcb doctor", ee.Error(), ee.Hint)
+	}
+}
+
+// Ruling R36: a layout.json pcb cannot read (permissions) needs a person
+// too: no restart fixes it.
+func TestOpenHubRefusesUnreadableLayout(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("file modes do not stop root, nor apply on Windows")
+	}
+	e := newHubEnv(t)
+	_ = e.open(t).Close()
+	path := filepath.Join(e.dirs.State, "layout.json")
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	_, err := service.OpenHub(e.options())
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "cannot use the state layout") || !strings.Contains(ee.Error(), path) {
+		t.Errorf("error = %q, want the unreadable layout.json named", ee.Error())
+	}
+}
+
+// Ruling R36: another pcb moving the state (layout.lock held) may pass by
+// itself: Blocked (20), unlike the layout errors.
+func TestOpenHubRefusesWhileLayoutLockHeld(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := filelock.Lock(t.Context(), filepath.Join(e.dirs.State, "layout.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	_, err = service.OpenHub(e.options())
+	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Error(), "another pcb is moving the state") {
+		t.Errorf("error = %q, want another pcb moving the state", ee.Error())
 	}
 }
 
@@ -648,7 +709,7 @@ func TestSelectorRules(t *testing.T) {
 	h := e.open(t)
 	e.skip(t, h)
 	_, _, err := h.Account("")
-	if ee := wantExit(t, err, exitcode.Usage); ee.Error() != "no account" {
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no account" || !errors.Is(err, service.ErrNoAccount) {
 		t.Errorf("zero accounts: %q, want no account", ee.Error())
 	}
 	_, _, err = h.Account("nobody@x")
@@ -844,15 +905,18 @@ func TestOnChangeRunsOutsideTheHubLock(t *testing.T) {
 
 // stripAddress removes the address from the root state.json, as an M5
 // pcb wrote it (M5 had no such field).
-func (e *hubEnv) stripAddress(t *testing.T) {
+func (e *hubEnv) stripAddress(t *testing.T) { t.Helper(); stripAddressIn(t, e.dirs.State) }
+
+// stripAddressIn removes the address from the state.json of dir.
+func stripAddressIn(t *testing.T, dir string) {
 	t.Helper()
-	if err := store.UpdateState(e.dirs.State, func(s *store.State) error {
+	if err := store.UpdateState(dir, func(s *store.State) error {
 		s.Address = ""
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(e.dirs.State, "state.json"))
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,6 +980,100 @@ func TestLoginAdoptsTheSignedOutM5Account(t *testing.T) {
 	}
 	if ok, _ := a.CheckClient(t.Context(), pw, "192.0.2.1:1"); !ok {
 		t.Error("the M5 CalDAV client was lost")
+	}
+}
+
+// Ruling R37: only a signed-out account whose state.json reads is adopted
+// by the login of an unknown address. One whose state.json cannot be read
+// has no address to show either: the login adds a new account and leaves
+// the broken one as it was.
+func TestLoginDoesNotAdoptAnUnreadableAccount(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	rb := e.mustLogin(t, h, userB)
+	broken := filepath.Join(store.AccountDir(e.dirs.State, rb.Account), "state.json")
+	if err := os.WriteFile(broken, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := e.login(t, h, userC)
+	if err != nil {
+		t.Fatalf("Login(c) with b's state.json broken: %v", err)
+	}
+	if rc.Account == ra.Account || rc.Account == rb.Account {
+		t.Fatalf("Login(c) went to %q, want a new account (a %q, b %q)", rc.Account, ra.Account, rb.Account)
+	}
+	if got, want := e.accountDirs(t), ids([]service.AccountInfo{{ID: ra.Account}, {ID: rb.Account}, {ID: rc.Account}}); !slices.Equal(got, want) {
+		t.Errorf("accounts/ = %v, want %v", got, want)
+	}
+	if raw, err := os.ReadFile(broken); err != nil || string(raw) != "{not json" {
+		t.Errorf("b's state.json = %q, %v; want it untouched", raw, err)
+	}
+	if st := status(t, h, userC); st.Phase != string(service.StateReady) || st.Address != userC {
+		t.Errorf("c = %+v, want ready", st)
+	}
+}
+
+// Ruling R37: an account whose state.json cannot be read is still found by
+// the address of its sealed account: the login of that address meets the
+// account's fault (exit 10, the way out named) instead of adding a second
+// account for the same Proton user; another address of that user is
+// refused as a duplicate.
+func TestLoginOfAnUnreadableAccountsUserAddsNothing(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	broken := filepath.Join(store.AccountDir(e.dirs.State, ra.Account), "state.json")
+	if err := os.WriteFile(broken, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.login(t, h, userA)
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != "run pcb logout to reset it" {
+		t.Errorf("Login(a): %q, hint %q; want a's state fault", ee.Error(), ee.Hint)
+	}
+	if got := e.accountDirs(t); !slices.Equal(got, []string{ra.Account}) {
+		t.Fatalf("accounts/ after Login(a) = %v, want only a's", got)
+	}
+	_, err = e.login(t, h, aliasA)
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), ra.Account) {
+		t.Errorf("Login(alias of a): %q, want the duplicate of %s refused", ee.Error(), ra.Account)
+	}
+	if got := e.accountDirs(t); !slices.Equal(got, []string{ra.Account}) {
+		t.Errorf("accounts/ after Login(alias of a) = %v, want only a's", got)
+	}
+	if sessionAliveOn(t, e.f.URL, e.session(aliasA)) {
+		t.Error("the duplicate login's session was not revoked")
+	}
+}
+
+// Ruling R37: a logged-in account with no address in its state.json is
+// not adopted either: the login of an unknown address adds an account
+// instead of colliding with that account's session.
+func TestLoginDoesNotAdoptALoggedInAddresslessAccount(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	dirA := store.AccountDir(e.dirs.State, ra.Account)
+	stripAddressIn(t, dirA)
+	rc, err := e.login(t, h, userC)
+	if err != nil {
+		t.Fatalf("Login(c) beside a logged-in account with no address: %v", err)
+	}
+	if rc.Account == ra.Account {
+		t.Fatalf("Login(c) adopted a's account %q", ra.Account)
+	}
+	st, err := store.LoadState(dirA)
+	if err != nil || st.AccountID != e.f.UserID(userA) {
+		t.Errorf("a's state = %+v, %v; want still a's user", st, err)
+	}
+	if got, want := e.accountDirs(t), ids([]service.AccountInfo{{ID: ra.Account}, {ID: rc.Account}}); !slices.Equal(got, want) {
+		t.Errorf("accounts/ = %v, want %v", got, want)
 	}
 }
 

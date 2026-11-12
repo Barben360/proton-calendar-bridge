@@ -131,7 +131,7 @@ func TestAccountsWithLegacyFilesBesideTheLayout(t *testing.T) {
 	saveState(t, root, "")
 	layout, err := doctor.Accounts(root)
 	var lerr *doctor.LayoutError
-	if !errors.As(err, &lerr) || !errors.Is(err, store.ErrLegacyBesideLayout) || lerr.Fix != "remove them or move the state directory aside: no downgrade after M6" {
+	if !errors.As(err, &lerr) || !errors.Is(err, store.ErrLegacyBesideLayout) || lerr.Fix != "remove them or move the state directory aside: this pcb version cannot be downgraded" {
 		t.Fatalf("err = %v, want the legacy refusal with its fix", err)
 	}
 	if n := strings.Count(err.Error(), "state.json"); n != 1 {

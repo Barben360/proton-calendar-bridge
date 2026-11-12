@@ -216,6 +216,22 @@ func TestPCBAccountEnv(t *testing.T) {
 	}
 }
 
+// Ruling R38: with no account a command that needs one is exit 10 (a
+// person must add one), not 2: the invocation itself is sound. A selector
+// naming nothing stays 2.
+func TestNoAccountIsExit10(t *testing.T) {
+	t.Parallel()
+	r := accountsRig(t)
+	r.want(exitcode.MustAct, "calendar", "list", "--json")
+	if e := r.envelope().Error; e == nil || e.Message != "no account" || e.Hint != "add one with pcb login" {
+		t.Errorf("no account: error = %+v", e)
+	}
+	r.want(exitcode.Usage, "calendar", "list", "--json", "--account", "nobody@x")
+	if e := r.envelope().Error; e == nil || e.Message != "no account nobody@x" {
+		t.Errorf("unknown account: error = %+v", e)
+	}
+}
+
 // Design §4.6: pcb status shows every account (the ctl.Status shape,
 // daemon null offline); --account narrows it to one.
 func TestStatusShowsEveryAccount(t *testing.T) {

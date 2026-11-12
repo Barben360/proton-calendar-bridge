@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -77,7 +78,7 @@ func (h *stubHub) find(selector string) (service.AccountInfo, error) {
 			return i, nil
 		}
 	}
-	return service.AccountInfo{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account " + selector), Hint: "see pcb account list"}
+	return service.AccountInfo{}, &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%w %s", service.ErrNoAccount, selector), Hint: "see pcb account list"}
 }
 
 func (h *stubHub) Accounts() []service.AccountInfo { return append(slices.Clone(h.infos), h.ghosts...) }

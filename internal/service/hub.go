@@ -439,8 +439,9 @@ func (h *Hub) Accounts() []AccountInfo {
 
 // Account chooses an account: selector is its local ID or its address
 // (case-insensitive), a pending account included; empty, it is the only
-// account that is not pending. Unknown, none or several are Usage errors;
-// several carry a *SeveralAccountsError listing them.
+// account that is not pending. Unknown or several are Usage errors, none
+// ready MustAct (SelectAccount); several carry a *SeveralAccountsError
+// listing them.
 func (h *Hub) Account(selector string) (API, AccountInfo, error) {
 	h.sweep()
 	a, err := h.pick(selector)
@@ -469,9 +470,10 @@ func (h *Hub) pick(selector string) (*hubAccount, error) {
 // SelectAccount is the account of list that selector names: its local ID,
 // else its address (case-insensitively), a pending account included.
 // Empty, it is the only account of list that is not pending. It refuses
-// (Usage) a selector that names none and an empty one with no account
-// ready, both with ErrNoAccount as cause, and an empty one with several
-// ready, with a *SeveralAccountsError listing them in list's order.
+// a selector that names none (Usage) and an empty one with no account
+// ready (MustAct, ruling R38), both with ErrNoAccount as cause, and an
+// empty one with several ready (Usage), with a *SeveralAccountsError
+// listing them in list's order.
 // Hub.Account chooses with it; so does the CLI, over a daemon's list.
 func SelectAccount(list []AccountInfo, selector string) (AccountInfo, error) {
 	if selector != "" {
@@ -501,9 +503,9 @@ func SelectAccount(list []AccountInfo, selector string) (AccountInfo, error) {
 		return ready[0], nil
 	case 0:
 		if pending > 0 {
-			return AccountInfo{}, noAccount("", "finish the pending login (pcb login resume), or add an account with pcb login")
+			return AccountInfo{}, noReadyAccount("finish the pending login (pcb login resume), or add an account with pcb login")
 		}
-		return AccountInfo{}, noAccount("", "add one with pcb login")
+		return AccountInfo{}, noReadyAccount("add one with pcb login")
 	}
 	return AccountInfo{}, severalAccounts(ready)
 }
@@ -656,7 +658,7 @@ func (h *Hub) login(ctx context.Context, req LoginRequest) (LoginResult, bool, e
 	swept := h.sweepLocked()
 	var a *hubAccount
 	for _, b := range h.list() {
-		if strings.EqualFold(inspect(b).address, req.Username) {
+		if strings.EqualFold(knownAddress(b), req.Username) {
 			a = b
 			break
 		}
@@ -676,13 +678,15 @@ func (h *Hub) login(ctx context.Context, req LoginRequest) (LoginResult, bool, e
 	return res, swept || changed, err
 }
 
-// addressless is the only account of list with no address, nil if there
-// are none or several: an M5 account migrated signed out, whose state.json
-// never had one (ruling R16; M5 held one account).
+// addressless is the only account of list signed out with no address,
+// nil if there are none or several: an M5 account migrated signed out,
+// whose state.json never had one (ruling R16; M5 held one account). An
+// account whose state.json cannot be read, or that is logged in, is never
+// one (ruling R37): a login into it would fail.
 func addressless(list []*hubAccount) *hubAccount {
 	var found *hubAccount
 	for _, a := range list {
-		if inspect(a).address == "" {
+		if d := inspect(a); d.readable && d.st.AccountID == "" && d.address == "" {
 			if found != nil {
 				return nil
 			}
@@ -690,6 +694,32 @@ func addressless(list []*hubAccount) *hubAccount {
 		}
 	}
 	return found
+}
+
+// knownAddress is a's address as inspect reads it, else, when a's
+// state.json cannot be read, the username of its sealed account (ruling
+// R37): the login of that address then reaches a and meets its fault,
+// instead of adding a second account for the same Proton user.
+func knownAddress(a *hubAccount) string {
+	d := inspect(a)
+	if d.readable || d.address != "" {
+		return d.address
+	}
+	for _, acc := range sealedAccounts(a) {
+		return acc.Username
+	}
+	return ""
+}
+
+// sealedAccounts is what a's sealed secrets hold when it is one account,
+// nil otherwise or when they cannot be read. It opens them: only for an
+// account whose state.json cannot be read.
+func sealedAccounts(a *hubAccount) map[string]store.Account {
+	accounts, err := a.local.secrets.Load()
+	if err != nil || len(accounts) != 1 {
+		return nil
+	}
+	return accounts
 }
 
 // freshDir reports whether the account directory dir never completed a login.
@@ -781,14 +811,19 @@ func (h *Hub) settle(ctx context.Context, a *hubAccount, added, fresh bool, res 
 }
 
 // userAccount is the address (else the local ID) of the account other than
-// except whose Proton user is userID, "" if none.
+// except whose Proton user is userID, "" if none. An account whose
+// state.json cannot be read is its sealed account's user (ruling R37).
 func (h *Hub) userAccount(userID string, except *hubAccount) string {
 	for _, b := range h.list() {
 		if b == except {
 			continue
 		}
 		d := inspect(b)
-		if d.st.AccountID == userID || (d.held != nil && d.held.userID == userID) {
+		sealed := false
+		if !d.readable {
+			_, sealed = sealedAccounts(b)[userID]
+		}
+		if d.st.AccountID == userID || (d.held != nil && d.held.userID == userID) || sealed {
 			if d.address != "" {
 				return d.address
 			}

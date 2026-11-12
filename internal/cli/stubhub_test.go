@@ -90,7 +90,7 @@ func (h *stubHub) Accounts() []service.AccountInfo {
 
 func noAccount(selector string) error {
 	if selector == "" {
-		return &exitcode.Error{Code: exitcode.Usage, Err: service.ErrNoAccount, Hint: "add one with pcb login"}
+		return &exitcode.Error{Code: exitcode.MustAct, Err: service.ErrNoAccount, Hint: "add one with pcb login"}
 	}
 	return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%w %s", service.ErrNoAccount, selector), Hint: "see pcb account list"}
 }
