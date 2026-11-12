@@ -190,7 +190,11 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=WEEKLY;BYSETPOS=1;BYDAY=MO", "", false},
 		{"FREQ=DAILY;WKST=SU;INTERVAL=2", "", true},
 		{"FREQ=DAILY;WKST=XX", "", false},
-		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "", false}, // M4-R10: DAILY takes no BY part
+		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "", true}, // M4-R12: written as WEEKLY
+		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO", "", true},  // M4-R12
+		{"FREQ=DAILY;INTERVAL=2;BYDAY=MO", "", false}, // M4-R12: not the same meaning as WEEKLY
+		{"FREQ=DAILY;BYDAY=1MO", "", false},           // M4-R12: plain days only
+		{"FREQ=DAILY;BYDAY=MO;BYHOUR=3", "", false},
 		{"FREQ=DAILY;BYHOUR=3,4", "", false},
 		{"FREQ=WEEKLY;BYHOUR=3", "", false},
 		{"FREQ=DAILY;BYMINUTE=5", "", false},
@@ -492,5 +496,30 @@ func TestThunderbirdFakedMasterIsDropped(t *testing.T) {
 	}
 	if r := refusalOf(t, wcal(fake)); r.Code != BadData {
 		t.Fatalf("a faked master alone: code %q, want %q (no VEVENT left)", r.Code, BadData)
+	}
+}
+
+// Ruling M4-R12: DAILY with plain BYDAY days and INTERVAL absent or 1 (the
+// form Thunderbird is believed to write for "every weekday") is written
+// as the WEEKLY rule it means, in place; COUNT and UNTIL stay as sent.
+func TestDailyBydayIsRewritten(t *testing.T) {
+	cases := []struct{ rule, want string }{
+		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"},
+		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO,WE;COUNT=10", "FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE;COUNT=10"},
+		{"BYDAY=SA,SU;FREQ=DAILY;UNTIL=20271231T225959Z", "BYDAY=SA,SU;FREQ=WEEKLY;UNTIL=20271231T225959Z"},
+		{"freq=daily;byday=mo", "freq=WEEKLY;byday=mo"},
+		{"FREQ=DAILY;COUNT=3", "FREQ=DAILY;COUNT=3"},
+		{"FREQ=WEEKLY;BYDAY=MO", "FREQ=WEEKLY;BYDAY=MO"},
+	}
+	for _, c := range cases {
+		t.Run(c.rule, func(t *testing.T) {
+			in := mustParseWrite(t, wcal(timed("RRULE:"+c.rule)))
+			if got := values(in.Master.Comp, "RRULE"); len(got) != 1 || got[0] != ":"+c.want {
+				t.Fatalf("RRULE = %v, want %q", got, c.want)
+			}
+			if rewritten := c.want != c.rule; slices.Contains(in.Notes, noteDaily) != rewritten {
+				t.Fatalf("notes %q, rewritten %v", in.Notes, rewritten)
+			}
+		})
 	}
 }

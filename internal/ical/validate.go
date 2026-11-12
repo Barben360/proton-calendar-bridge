@@ -58,6 +58,7 @@ const (
 	noteDuration  = "DURATION converted to DTEND"
 	noteMozilla   = "Mozilla TZID mapped to its IANA name"
 	noteFaked     = "Thunderbird's faked master dropped"
+	noteDaily     = "DAILY BYDAY written as WEEKLY"
 	noteMonthly   = "MONTHLY BYDAY ordinal written as BYSETPOS"
 )
 
@@ -287,6 +288,10 @@ func normalise(c Component, n *notes) (we WriteEvent, rid *when, r *Refusal) {
 		if v, ok := monthlyOrdinal(rule.Value); ok {
 			rule.Value = v
 			n.add(noteMonthly)
+		}
+		if v, ok := dailyByday(rule.Value); ok {
+			rule.Value = v
+			n.add(noteDaily)
 		}
 		if r := checkRRule(rule.Value, start); r != nil {
 			return we, nil, r
@@ -738,6 +743,42 @@ func monthlyOrdinal(rule string) (string, bool) {
 	}
 	parts[at] = "BYDAY=" + day
 	return strings.Join(slices.Insert(parts, at+1, "BYSETPOS="+pos), ";"), true
+}
+
+// dailyByday writes FREQ=DAILY with a BYDAY of plain weekdays and INTERVAL
+// absent or 1 as the FREQ=WEEKLY rule it means, only FREQ's value changed
+// (ruling M4-R12: Thunderbird's "every weekday" [inferred]). Any other rule
+// comes back as it is: checkRRule refuses BYDAY on DAILY.
+func dailyByday(rule string) (string, bool) {
+	parts := strings.Split(rule, ";")
+	freq, daily, days := -1, false, false
+	for i, kv := range parts {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return rule, false
+		}
+		switch strings.ToUpper(k) {
+		case "FREQ":
+			freq, daily = i, strings.EqualFold(v, "DAILY")
+		case "INTERVAL":
+			if !isCount(v) || atoi(v) != 1 {
+				return rule, false
+			}
+		case "BYDAY":
+			days = true
+			for d := range strings.SplitSeq(v, ",") {
+				if !weekdays[strings.ToUpper(d)] {
+					return rule, false
+				}
+			}
+		}
+	}
+	if !daily || !days {
+		return rule, false
+	}
+	k, _, _ := strings.Cut(parts[freq], "=")
+	parts[freq] = k + "=WEEKLY"
+	return strings.Join(parts, ";"), true
 }
 
 func atoi(s string) int {
