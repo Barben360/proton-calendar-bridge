@@ -172,7 +172,13 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=1,2", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH,FR;BYSETPOS=1", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH", "", false},
-		{"FREQ=MONTHLY;BYDAY=1TH", "", false}, // the constraints' shape is BYDAY+BYSETPOS
+		{"FREQ=MONTHLY;BYDAY=5TH", "", false},  // M4-R5: ordinals 1..4 and -1 only
+		{"FREQ=MONTHLY;BYDAY=-2TH", "", false}, // M4-R5
+		{"FREQ=MONTHLY;BYDAY=0TH", "", false},
+		{"FREQ=MONTHLY;BYDAY=1TH,2FR", "", false},        // M4-R5: one day only
+		{"FREQ=MONTHLY;BYDAY=1TH,FR", "", false},         // M4-R5: one day only
+		{"FREQ=MONTHLY;BYDAY=1TH;BYSETPOS=1", "", false}, // an ordinal with BYSETPOS is not rewritten
+		{"FREQ=WEEKLY;BYDAY=1TH", "", true},              // the rewrite is MONTHLY's only (WEEKLY is not restricted)
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=1;BYMONTHDAY=5", "", false},
 		{"FREQ=MONTHLY;BYMONTH=3", "", false},
 		{"FREQ=YEARLY;BYMONTHDAY=5", "", false},
@@ -406,6 +412,33 @@ func TestDurationBecomesDTEnd(t *testing.T) {
 			}
 			if !slices.Contains(in.Notes, noteDuration) {
 				t.Errorf("notes %q lack %q", in.Notes, noteDuration)
+			}
+		})
+	}
+}
+
+// Ruling M4-R5: Thunderbird's MONTHLY BYDAY=<n><DAY> (n in 1..4 or -1, one
+// day) is written in Proton's form BYDAY=<DAY>;BYSETPOS=<n>, in place.
+func TestMonthlyOrdinalBydayIsRewritten(t *testing.T) {
+	cases := []struct{ rule, want string }{
+		{"FREQ=MONTHLY;BYDAY=2TU", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"},
+		{"FREQ=MONTHLY;BYDAY=1MO;COUNT=10", "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;COUNT=10"},
+		{"FREQ=MONTHLY;BYDAY=4SU", "FREQ=MONTHLY;BYDAY=SU;BYSETPOS=4"},
+		{"FREQ=MONTHLY;BYDAY=-1FR;INTERVAL=2", "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;INTERVAL=2"},
+		{"FREQ=MONTHLY;BYDAY=+3we", "FREQ=MONTHLY;BYDAY=WE;BYSETPOS=3"},
+		{"freq=monthly;byday=2tu", "freq=monthly;BYDAY=TU;BYSETPOS=2"},
+		// Already Proton's form, or not MONTHLY: as sent.
+		{"FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"},
+		{"FREQ=WEEKLY;BYDAY=2TU", "FREQ=WEEKLY;BYDAY=2TU"},
+	}
+	for _, c := range cases {
+		t.Run(c.rule, func(t *testing.T) {
+			in := mustParseWrite(t, wcal(timed("RRULE:"+c.rule)))
+			if got := values(in.Master.Comp, "RRULE"); len(got) != 1 || got[0] != ":"+c.want {
+				t.Fatalf("RRULE = %v, want %q", got, c.want)
+			}
+			if rewritten := c.want != c.rule; slices.Contains(in.Notes, noteMonthly) != rewritten {
+				t.Fatalf("notes %q, rewritten %v", in.Notes, rewritten)
 			}
 		})
 	}

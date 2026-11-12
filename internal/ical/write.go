@@ -59,16 +59,15 @@ var routes = map[string][]PartKind{
 
 func everyPart(name string) bool { return name == "UID" || name == "DTSTAMP" }
 
-// serverOwned are lines only Proton or our render write: an incoming event
-// never writes them, and Patch keeps the stored ones.
-func serverOwned(name string) bool {
-	return name == "COLOR" || name == sessionKey || strings.HasPrefix(name, "X-PCB-")
-}
+// ours are pcb's own markers and Proton-internal key material: never in a
+// part we write, not even when a stored part holds them (ruling M4-R7).
+func ours(name string) bool { return name == sessionKey || strings.HasPrefix(name, "X-PCB-") }
 
-// neverRouted: what an incoming event never puts into a part (DURATION is
-// made DTEND by ParseWrite).
+// neverRouted: what an incoming event never puts into a part. COLOR is the
+// row's Color (a stored COLOR line is another client's, kept); DURATION is
+// made DTEND by ParseWrite.
 func neverRouted(name string) bool {
-	return serverOwned(name) || name == "DURATION" || vcalendarLevel[name]
+	return ours(name) || name == "COLOR" || name == "DURATION" || vcalendarLevel[name]
 }
 
 // routeOf is the parts a property goes to (name upper-case).
@@ -281,8 +280,9 @@ type entry struct {
 //     SUMMARY where it is, even off-table);
 //   - a stored line the event no longer carries is removed, from every
 //     part (an EXDATE from both signed parts), except nested components
-//     and server-owned lines (COLOR, X-PM-SESSION-KEY, X-PCB-*), which an
-//     incoming event never writes;
+//     and COLOR lines, another client's data that an incoming event never
+//     writes, kept verbatim; stored X-PCB-* and X-PM-SESSION-KEY lines are
+//     always removed (ruling M4-R7);
 //   - a new line goes where Route says, after the part's last property
 //     (before END:VEVENT and any nested component);
 //   - a part missing UID or DTSTAMP gets the incoming ones first.
@@ -363,7 +363,7 @@ func Patch(current map[PartKind][]byte, incoming Component) (map[PartKind][]byte
 		lines, isBlock, content, hadContent := []string{}, []bool{}, false, false
 		present := map[string]bool{}
 		for _, e := range es {
-			if !e.keep && (e.block || serverOwned(e.name)) {
+			if !e.keep && (e.block || e.name == "COLOR") {
 				e.keep = true
 			}
 			hadContent = hadContent || !everyPart(e.name)

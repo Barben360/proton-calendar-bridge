@@ -322,9 +322,12 @@ func TestPatchAttendeeKeepsStoredLine(t *testing.T) {
 	}
 }
 
-func TestPatchKeepsServerOwnedLines(t *testing.T) {
+// Ruling M4-R7: stored X-PCB-* and X-PM-SESSION-KEY lines are stripped;
+// stored COLOR lines and nested components are another client's data, kept
+// verbatim; nothing of the kind is taken from the incoming event.
+func TestPatchStripsOursAndKeepsColorAndComponents(t *testing.T) {
 	cur := map[PartKind][]byte{
-		SharedSigned:    frag(uidLine, stampLine, "DTSTART:20261105T100000Z"),
+		SharedSigned:    frag(uidLine, stampLine, "DTSTART:20261105T100000Z", "X-PCB-ANYTHING:1"),
 		SharedEncrypted: frag(uidLine, stampLine, "SUMMARY:Title", "COLOR:tomato", "X-PM-SESSION-KEY:a2V5", "X-PCB-INTEGRITY:unverified", "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM"),
 		CalendarSigned:  frag(uidLine, stampLine),
 	}
@@ -334,11 +337,17 @@ func TestPatchKeepsServerOwnedLines(t *testing.T) {
 		"X-PCB-PLACEHOLDER:1", "X-PM-SESSION-KEY:Zm9yZ2Vk", "DURATION:PT1H", "BEGIN:VALARM", "ACTION:EMAIL", "TRIGGER:-PT1M", "END:VALARM")
 	got, changed := mustPatch(t, cur, in)
 	want := map[PartKind][]byte{
-		SharedSigned:    cur[SharedSigned],
-		SharedEncrypted: frag(uidLine, stampLine, "SUMMARY:Title", "COLOR:tomato", "X-PM-SESSION-KEY:a2V5", "X-PCB-INTEGRITY:unverified", "LOCATION:new", "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM"),
+		SharedSigned:    frag(uidLine, stampLine, "DTSTART:20261105T100000Z"),
+		SharedEncrypted: frag(uidLine, stampLine, "SUMMARY:Title", "COLOR:tomato", "LOCATION:new", "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM"),
 		CalendarSigned:  cur[CalendarSigned],
 	}
-	expectParts(t, got, changed, want, SharedEncrypted)
+	expectParts(t, got, changed, want, SharedSigned, SharedEncrypted)
+
+	// Nothing else edited: the stripping alone changes the part.
+	in = comp(t, uidLine, stampLine, "DTSTART:20261105T100000Z", "SUMMARY:Title")
+	got, changed = mustPatch(t, cur, in)
+	want[SharedEncrypted] = frag(uidLine, stampLine, "SUMMARY:Title", "COLOR:tomato", "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT5M", "END:VALARM")
+	expectParts(t, got, changed, want, SharedSigned, SharedEncrypted)
 }
 
 func TestPatchCanonicalFragments(t *testing.T) {

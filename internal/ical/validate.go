@@ -3,6 +3,7 @@ package ical
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ const (
 	noteToken     = "X-PM-TOKEN dropped from ATTENDEE"
 	noteDuration  = "DURATION converted to DTEND"
 	noteMozilla   = "Mozilla TZID mapped to its IANA name"
+	noteMonthly   = "MONTHLY BYDAY ordinal written as BYSETPOS"
 )
 
 // WriteEvent is one VEVENT of a PUT body, normalised for writing.
@@ -251,9 +253,14 @@ func normalise(c Component, n *notes) (we WriteEvent, recID int64, isException b
 		rid, _ := parseWhen(&out.Items[i].Prop, out.Items[i].Prop.Value, nil)
 		recID, isException = rid.t.Unix(), true
 	}
-	if rule, ok := out.Get("RRULE"); ok {
+	if i := indexOf(out, "RRULE"); i >= 0 {
 		if isException {
 			return we, 0, false, refuse(UnsupportedRecurrence, "an exception with RRULE")
+		}
+		rule := &out.Items[i].Prop
+		if v, ok := monthlyOrdinal(rule.Value); ok {
+			rule.Value = v
+			n.add(noteMonthly)
 		}
 		if r := checkRRule(rule.Value, start); r != nil {
 			return we, 0, false, r
@@ -619,6 +626,46 @@ func checkRRule(rule string, start when) *Refusal {
 		}
 	}
 	return nil
+}
+
+// monthlyOrdinal writes a MONTHLY rule's BYDAY=<n><DAY> (n in 1..4 or -1,
+// "+" allowed, one day, no BYSETPOS) in Proton's form BYDAY=<DAY>;BYSETPOS=<n>,
+// in place (ruling M4-R5: same meaning, Thunderbird writes the first). Any
+// other rule comes back as it is, and checkRRule judges it.
+func monthlyOrdinal(rule string) (string, bool) {
+	parts := strings.Split(rule, ";")
+	at, monthly := -1, false
+	for i, kv := range parts {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return rule, false
+		}
+		switch strings.ToUpper(k) {
+		case "FREQ":
+			monthly = strings.EqualFold(v, "MONTHLY")
+		case "BYDAY":
+			at = i
+		case "BYSETPOS":
+			return rule, false
+		}
+	}
+	if !monthly || at < 0 {
+		return rule, false
+	}
+	_, v, _ := strings.Cut(parts[at], "=")
+	v = strings.ToUpper(v)
+	if len(v) < 3 {
+		return rule, false
+	}
+	pos, day := v[:len(v)-2], v[len(v)-2:]
+	if rest, plus := strings.CutPrefix(pos, "+"); plus && rest != "-1" {
+		pos = rest
+	}
+	if !weekdays[day] || !setPos[pos] {
+		return rule, false
+	}
+	parts[at] = "BYDAY=" + day
+	return strings.Join(slices.Insert(parts, at+1, "BYSETPOS="+pos), ";"), true
 }
 
 func atoi(s string) int {
