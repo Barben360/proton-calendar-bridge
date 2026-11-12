@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -70,6 +71,7 @@ func TestLoadOverridesEachKey(t *testing.T) {
 		Proton:  config.Proton{BaseURL: "https://example.org", AppVersion: "web-calendar@1.2.3"},
 		Secrets: config.Secrets{KeyFile: "/k/my.key"},
 		CalDAV:  config.CalDAV{Listen: "127.0.0.1:1080"},
+		Log:     config.Log{Level: "info"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -230,4 +232,41 @@ func TestValidateListenIsTheConfigRule(t *testing.T) {
 			t.Errorf("ValidateListen(%q) = %v", good, err)
 		}
 	}
+}
+
+func TestLogLevelDefaultsToInfo(t *testing.T) {
+	if got := config.Defaults(dirs).Log.Level; got != "info" {
+		t.Fatalf("default level = %q", got)
+	}
+	cfg, err := config.Load(write(t, "[proton]\napp_version = \"x\"\n"), dirs)
+	if err != nil || cfg.Log.Level != "info" {
+		t.Fatalf("level = %q, %v", cfg.Log.Level, err)
+	}
+	lvl, err := config.ParseLevel(cfg.Log.Level)
+	if err != nil || lvl != slog.LevelInfo {
+		t.Fatalf("ParseLevel = %v, %v", lvl, err)
+	}
+	cfg, err = config.Load(write(t, "[log]\nlevel = \"warn\"\n"), dirs)
+	if err != nil || cfg.Log.Level != "warn" {
+		t.Fatalf("level = %q, %v", cfg.Log.Level, err)
+	}
+	for name, want := range map[string]slog.Level{"debug": slog.LevelDebug, "info": slog.LevelInfo, "warn": slog.LevelWarn, "error": slog.LevelError} {
+		if got, err := config.ParseLevel(name); err != nil || got != want {
+			t.Errorf("ParseLevel(%q) = %v, %v", name, got, err)
+		}
+	}
+}
+
+func TestUnknownLogLevelIsRefused(t *testing.T) {
+	const secret = "VerboseSecretValue"
+	msg := refused(t, "[log]\nlevel = \""+secret+"\"\n")
+	if !strings.Contains(msg, "log.level must be one of debug, info, warn, error") || strings.Contains(msg, secret) {
+		t.Fatalf("message = %q", msg)
+	}
+	for _, bad := range []string{"INFO", "Warn", "", "warning", "trace"} {
+		if _, err := config.ParseLevel(bad); err == nil || (bad != "" && strings.Contains(err.Error(), bad)) {
+			t.Errorf("ParseLevel(%q) = %v, want a refusal that does not echo it", bad, err)
+		}
+	}
+	refused(t, "[log]\nlevel = \"\"\n")
 }

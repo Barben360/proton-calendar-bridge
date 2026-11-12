@@ -13,6 +13,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -50,6 +51,52 @@ func TestListenerCheck(t *testing.T) {
 	got = doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080", TLSCert: tlsutil.CertPath(dir), TLSKey: tlsutil.KeyPath(dir)}}.Run(ctx)
 	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "TLS") || !strings.Contains(got.Message, "tls_cert") {
 		t.Errorf("user certificate on loopback: %+v", got)
+	}
+}
+
+// M5-R15 C4: with a daemon answering, the CalDAV checks report its
+// listener (a --listen override, a config edited since it started), not
+// what config.toml predicts.
+func TestCalDAVChecksPreferTheDaemonsListener(t *testing.T) {
+	ctx := context.Background()
+	tlsDir := filepath.Join(t.TempDir(), "tls")
+	res := selfSigned(t, tlsDir)
+	loopback := config.CalDAV{Listen: "127.0.0.1:1080"}
+	at := func() time.Time { return day0 }
+	live := &doctor.Live{Addr: "0.0.0.0:1080", URL: "https://192.168.1.5:1080/", TLS: true, Fingerprint: res.Fingerprint, NotAfter: &res.Leaf.NotAfter}
+
+	got := doctor.ListenerCheck{CalDAV: loopback, Live: live}.Run(ctx)
+	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "0.0.0.0:1080") || !strings.Contains(got.Message, "TLS") ||
+		!strings.Contains(got.Message, "running daemon") || strings.Contains(got.Message, "plain HTTP") {
+		t.Errorf("listener: %+v", got)
+	}
+	got = doctor.CertificateCheck{CalDAV: loopback, TLSDir: tlsDir, Now: at, Live: live}.Run(ctx)
+	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, res.Fingerprint) {
+		t.Errorf("certificate the daemon serves: %+v", got)
+	}
+
+	// The daemon serves another certificate than the one on disk.
+	other := *live
+	other.Fingerprint = "AB:CD"
+	got = doctor.CertificateCheck{CalDAV: loopback, TLSDir: tlsDir, Now: at, Live: &other}.Run(ctx)
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "AB:CD") || !strings.Contains(got.Fix, "restart") {
+		t.Errorf("another certificate: %+v", got)
+	}
+	// None on disk (another state dir): the daemon's own facts.
+	got = doctor.CertificateCheck{CalDAV: loopback, TLSDir: filepath.Join(t.TempDir(), "tls"), Now: at, Live: &other}.Run(ctx)
+	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "AB:CD") || !strings.Contains(got.Message, "running daemon") {
+		t.Errorf("no certificate on disk: %+v", got)
+	}
+
+	// A daemon on plain HTTP while the config says TLS.
+	plain := &doctor.Live{Addr: "127.0.0.1:1080", URL: "http://localhost:1080/"}
+	remote := config.CalDAV{Listen: "0.0.0.0:8443"}
+	got = doctor.ListenerCheck{CalDAV: remote, Live: plain}.Run(ctx)
+	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "127.0.0.1:1080, plain HTTP") {
+		t.Errorf("plain listener: %+v", got)
+	}
+	if got := (doctor.CertificateCheck{CalDAV: remote, TLSDir: tlsDir, Now: at, Live: plain}).Run(ctx); got.Status != doctor.StatusSkip {
+		t.Errorf("plain certificate: %+v", got)
 	}
 }
 
@@ -140,9 +187,18 @@ func TestCertificateCheckUserCertificate(t *testing.T) {
 func TestClientsCheck(t *testing.T) {
 	ctx := context.Background()
 	state := t.TempDir()
+	// Not logged in: the login creates the client default (decision 0013).
 	got := doctor.ClientsCheck{StateDir: state}.Run(ctx)
+	if got.Status != doctor.StatusWarn || got.Fix != "pcb login (it creates the client default), then pcb client show" {
+		t.Errorf("no client, logged out: %+v", got)
+	}
+	// Logged in with no client (all removed): only client add makes one.
+	if err := store.SaveState(state, store.State{Phase: store.PhaseReady}); err != nil {
+		t.Fatal(err)
+	}
+	got = doctor.ClientsCheck{StateDir: state}.Run(ctx)
 	if got.Status != doctor.StatusWarn || got.Fix != "pcb client add NAME" {
-		t.Errorf("no client: %+v", got)
+		t.Errorf("no client, logged in: %+v", got)
 	}
 	if _, _, err := access.NewStore(state, nil).Add(ctx, "Thunderbird"); err != nil {
 		t.Fatal(err)

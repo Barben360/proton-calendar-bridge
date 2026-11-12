@@ -2,8 +2,10 @@ package doctor_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
@@ -216,6 +219,50 @@ func TestFileModeCheckFlagsGroupReadable(t *testing.T) {
 	}
 }
 
+// M5-R15 C3: the key file check reads the key, as pcb does: a 0600 key
+// this user cannot read (a container secret left host-owned) fails with
+// the cause, and so does one of the wrong size.
+func TestKeyFileCheckReadsTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "secrets.key")
+	check := doctor.KeyFileCheck{Path: path}
+	if got := check.Run(ctx); got.Status != doctor.StatusSkip || got.Name != "key file" {
+		t.Errorf("missing: %+v", got)
+	}
+	if err := os.WriteFile(path, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusOK || !strings.Contains(got.Message, "32 bytes") {
+		t.Errorf("readable: %+v", got)
+	}
+	if err := os.WriteFile(path, make([]byte, 31), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusError || !strings.Contains(got.Message, "not a 32-byte key") || got.Fix == "" {
+		t.Errorf("31 bytes: %+v", got)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	got := check.Run(ctx)
+	want := fmt.Sprintf("not readable by this user (uid %d): permission denied", os.Geteuid())
+	if got.Status != doctor.StatusError || !strings.Contains(got.Message, want) || !strings.Contains(got.Fix, "chown") {
+		t.Errorf("mode 0000: %+v, want %q and a chown fix", got, want)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.Run(ctx); got.Status != doctor.StatusError || got.Fix != "chmod 600 "+path {
+		t.Errorf("mode 0644: %+v", got)
+	}
+}
+
 func TestFileModeCheckSkipsMissingAndRejectsDirs(t *testing.T) {
 	dir := t.TempDir()
 	if got := (doctor.FileModeCheck{Label: "f", Path: filepath.Join(dir, "nope"), Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusSkip {
@@ -303,6 +350,42 @@ func TestSecretsCheckFailsOnMalformedState(t *testing.T) {
 	}
 	got := doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(t.TempDir(), "k")}.Run(context.Background())
 	if got.Status != doctor.StatusError {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSecretsCheckReportsRollback(t *testing.T) {
+	root := t.TempDir()
+	state, key := filepath.Join(root, "state"), filepath.Join(root, "cfg", "secrets.key")
+	secrets := store.NewSecrets(state, &seal.KeyFile{Path: key})
+	seal1 := func() {
+		t.Helper()
+		err := secrets.Update(context.Background(), func(m map[string]store.Account) error {
+			m["userA"] = store.Account{ID: "userA", UID: "uid", AccessToken: "at", RefreshToken: "rt"}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seal1()
+	old, err := os.ReadFile(secrets.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal1()
+	restore := doctor.SetDevice(func(p string) (uint64, bool) { return uint64(len(p)), true })
+	defer restore()
+	if got := (doctor.SecretsCheck{StateDir: state, KeyFile: key}).Run(context.Background()); got.Status != doctor.StatusWarn {
+		t.Fatalf("before the restore: %+v", got)
+	}
+	if err := os.WriteFile(secrets.Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := doctor.SecretsCheck{StateDir: state, KeyFile: key}.Run(context.Background())
+	if got.Status != doctor.StatusError ||
+		got.Message != "secrets.sealed is older than the last one pcb wrote (generation 1 < 2): it was restored or replaced" ||
+		got.Fix != "if you restored it on purpose, run pcb logout, then pcb login" {
 		t.Fatalf("got %+v", got)
 	}
 }

@@ -71,6 +71,15 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
+// Check reads the key as Seal and Open do, without creating it: nil when
+// the key file is usable, else why not (fs.ErrNotExist, a *fs.PathError,
+// a *KeyModeError, ErrCorrupt for a wrong size). The key is not kept.
+func (k *KeyFile) Check() error {
+	key, err := k.read()
+	clear(key)
+	return err
+}
+
 // key reads the key, creating it first when create is set and it is absent.
 func (k *KeyFile) key(create bool) ([]byte, error) {
 	key, err := k.read()
@@ -98,7 +107,7 @@ func (k *KeyFile) read() ([]byte, error) {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("key file %s is accessible by others (mode %04o). Fix: chmod 600 %s", k.Path, info.Mode().Perm(), k.Path)
+		return nil, &KeyModeError{Path: k.Path, Mode: info.Mode().Perm()}
 	}
 	key := make([]byte, keySize+1)
 	n, err := f.Read(key)

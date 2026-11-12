@@ -2,11 +2,13 @@ package cli
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,11 +111,29 @@ func TestListenerTLSNeedsTLS12(t *testing.T) {
 func TestURLHostIsLocalhostOnlyForTheUsualLoopbacks(t *testing.T) {
 	t.Parallel()
 	for ip, want := range map[string]string{"127.0.0.1": "localhost", "::1": "localhost", "127.0.0.2": "127.0.0.2", "192.168.1.5": "192.168.1.5"} {
-		if got := urlHost(config.CalDAV{}, net.ParseIP(ip)); got != want {
-			t.Errorf("urlHost(%s) = %q, want %q", ip, got, want)
+		if got, err := urlHost(config.CalDAV{}, net.ParseIP(ip), net.InterfaceAddrs); got != want || err != nil {
+			t.Errorf("urlHost(%s) = %q, %v; want %q", ip, got, err, want)
 		}
 	}
-	if got := urlHost(config.CalDAV{Hostnames: []string{"pcb.lan"}}, net.ParseIP("127.0.0.1")); got != "pcb.lan" {
+	if got, _ := urlHost(config.CalDAV{Hostnames: []string{"pcb.lan"}}, net.ParseIP("127.0.0.1"), net.InterfaceAddrs); got != "pcb.lan" {
 		t.Errorf("urlHost with a hostname = %q", got)
+	}
+}
+
+// An unspecified bind names the first interface address; when the
+// interfaces cannot be listed (a unit without AF_NETLINK), the error comes
+// back with the localhost fallback, so serve can log it (final review I1).
+func TestURLHostReportsAnInterfaceListingError(t *testing.T) {
+	t.Parallel()
+	lan := func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.IPv4(127, 0, 0, 1)}, &net.IPNet{IP: net.IPv4(192, 168, 1, 7)}}, nil
+	}
+	if got, err := urlHost(config.CalDAV{}, net.IPv4zero, lan); got != "192.168.1.7" || err != nil {
+		t.Errorf("urlHost(0.0.0.0) = %q, %v; want 192.168.1.7", got, err)
+	}
+	denied := func() ([]net.Addr, error) { return nil, errors.New("address family not supported by protocol") }
+	got, err := urlHost(config.CalDAV{}, net.IPv4zero, denied)
+	if got != "localhost" || err == nil || !strings.Contains(err.Error(), "address family not supported") {
+		t.Errorf("urlHost(0.0.0.0) with no interface list = %q, %v; want localhost and the cause", got, err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -107,6 +108,8 @@ func (*stubAPI) WatchSync(context.Context, service.SyncRequest, time.Duration, f
 
 func (*stubAPI) Serve(context.Context, service.ServeOptions) error { return nil }
 
+func (*stubAPI) Health(context.Context) (service.Health, error) { return service.Health{}, nil }
+
 func (*stubAPI) Events(context.Context, service.EventsRequest) ([]service.Event, error) {
 	return nil, nil
 }
@@ -137,6 +140,12 @@ func (*stubAPI) RemoveClient(context.Context, string) (service.Client, error) {
 	return service.Client{}, nil
 }
 func (*stubAPI) CheckClient(context.Context, string, string) (bool, time.Duration) { return false, 0 }
+func (*stubAPI) ShowClient(context.Context, string) (service.ClientCredentials, error) {
+	return service.ClientCredentials{}, nil
+}
+func (*stubAPI) RotateClient(context.Context, string) (service.ClientSecret, error) {
+	return service.ClientSecret{}, nil
+}
 
 func (*stubAPI) PutObject(context.Context, string, string, []byte, service.Precondition) (service.PutResult, error) {
 	return service.PutResult{}, nil
@@ -164,12 +173,17 @@ type rig struct {
 	term *fakeTerm
 	svc  service.API // injected service, or nil for the default one
 	mk   func() (service.API, error)
+	// dial, when set, replaces ctl.Dial (IO.DialDaemon).
+	dial func(ctx context.Context, path string) (*ctl.Client, error)
 	// ctrlC cancels the command like Ctrl-C when it first waits on the terminal.
 	ctrlC bool
 	// cancelled is when ctrlC fired during the last run; zero if it did not.
 	cancelled time.Time
-	out       bytes.Buffer
-	errb      bytes.Buffer
+	// hostRoot, when set, is the root of the host's files (systemd,
+	// container markers) instead of a root that does not exist.
+	hostRoot string
+	out      bytes.Buffer
+	errb     bytes.Buffer
 }
 
 // stubRig is a rig on a stub service, without a Proton: nothing can reach one.
@@ -191,7 +205,13 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 		f = protontest.New(t, *o)
 		user, password, baseURL = f.Username, f.Password, f.URL
 	}
-	root := t.TempDir()
+	// Not t.TempDir: the control socket's path must fit the 108 bytes of
+	// sun_path.
+	root, err := os.MkdirTemp("", "pcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	dirs := paths.Dirs{Config: filepath.Join(root, "cfg", "pcb"), State: filepath.Join(root, "state", "pcb")}
 	if err := os.MkdirAll(dirs.Config, 0o700); err != nil {
 		t.Fatal(err)
@@ -238,6 +258,12 @@ func (r *rig) run(args ...string) exitcode.Code {
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.svc, nil }
 	case r.mk != nil:
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
+	}
+	io.DialDaemon = r.dial
+	io.Host = noSystemHost()
+	if r.hostRoot != "" {
+		io.Host.Root = r.hostRoot
+		io.Host.Env = func(k string) string { return r.env[k] }
 	}
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()

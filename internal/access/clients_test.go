@@ -3,7 +3,9 @@ package access_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // clock is a settable fake clock.
@@ -398,5 +401,252 @@ func TestFileReplacedByAnotherInodeWithSameSizeAndMtimeIsReloaded(t *testing.T) 
 	}
 	if _, ok := serve.Check(pw2); !ok {
 		t.Error("the running store missed a client added behind an identical size and mtime")
+	}
+}
+
+// sealedStore is newStore whose passwords are sealed with a key file kept
+// beside the state directory.
+func sealedStore(t *testing.T) (*access.Store, *seal.KeyFile, string) {
+	t.Helper()
+	s, _, dir := newStore(t)
+	k := &seal.KeyFile{Path: filepath.Join(filepath.Dir(dir), "secrets.key")}
+	s.Sealer = k
+	return s, k, dir
+}
+
+// clientsFile is clients.json as tests read and edit it.
+type clientsFile struct {
+	Version int              `json:"version"`
+	Clients []map[string]any `json:"clients"`
+}
+
+func readClients(t *testing.T, dir string) clientsFile {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "clients.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f clientsFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func writeClients(t *testing.T, dir string, f clientsFile) {
+	t.Helper()
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "clients.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevealReturnsTheAddedPassword(t *testing.T) {
+	t.Parallel()
+	s, k, dir := sealedStore(t)
+	id, pw, err := s.Add(t.Context(), "Thunderbird")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Reveal(id, k.Open)
+	if err != nil || got != pw {
+		t.Fatalf("Reveal = %d chars, %v; want the added password", len(got), err)
+	}
+	// Another process (a fresh Store) reveals it too, and the file holds a
+	// version 2 record with a sealed copy, never the password itself.
+	other := access.NewStore(dir, newClock().now)
+	other.Sealer = k
+	if got, err := other.Reveal(id, k.Open); err != nil || got != pw {
+		t.Fatalf("a fresh store's Reveal = %d chars, %v", len(got), err)
+	}
+	f := readClients(t, dir)
+	if f.Version != 2 || f.Clients[0]["sealed"] == nil || f.Clients[0]["sealed"] == "" {
+		t.Errorf("file = %+v, want version 2 with a sealed copy", f)
+	}
+	if _, err := s.Reveal("c0000000000000000", k.Open); !errors.Is(err, access.ErrNotFound) {
+		t.Errorf("Reveal(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevealRefusesAnotherClientsAAD(t *testing.T) {
+	t.Parallel()
+	s, k, dir := sealedStore(t)
+	idA, pwA, _ := s.Add(t.Context(), "a")
+	idB, _, _ := s.Add(t.Context(), "b")
+	f := readClients(t, dir)
+	f.Clients[1]["sealed"] = f.Clients[0]["sealed"] // a's sealed copy moved to b
+	writeClients(t, dir, f)
+	got, err := s.Reveal(idB, k.Open)
+	if !errors.Is(err, access.ErrNotRecoverable) || !errors.Is(err, seal.ErrCorrupt) || got != "" {
+		t.Fatalf("Reveal(b) with a's blob = %d chars, %v; want ErrNotRecoverable caused by seal.ErrCorrupt (the AAD names the client)", len(got), err)
+	}
+	if strings.Contains(err.Error(), pwA) {
+		t.Error("the error carries a password")
+	}
+	if got, err := s.Reveal(idA, k.Open); err != nil || got != pwA {
+		t.Errorf("Reveal(a) = %d chars, %v; want a's password", len(got), err)
+	}
+}
+
+func TestV1ClientsStillCheckAndAreNotRecoverable(t *testing.T) {
+	t.Parallel()
+	s, k, dir := sealedStore(t)
+	// A file pcb wrote before decision 0013: version 1, salt and hash only.
+	salt := []byte("0123456789abcdef")
+	const pw = "an-old-password-of-32-characters"
+	sum := sha256.Sum256(append(append([]byte(nil), salt...), pw...))
+	writeClients(t, dir, clientsFile{Version: 1, Clients: []map[string]any{{
+		"id": "c00000000000000aa", "name": "Old", "created": "2026-11-01T10:00:00Z",
+		"salt": base64.StdEncoding.EncodeToString(salt), "hash": base64.StdEncoding.EncodeToString(sum[:]),
+	}}})
+	if c, ok := s.Check(pw); !ok || c.Name != "Old" {
+		t.Fatalf("Check(v1 password) = %+v, %v; want the v1 client", c, ok)
+	}
+	got, err := s.Reveal("c00000000000000aa", k.Open)
+	if !errors.Is(err, access.ErrNotRecoverable) || !errors.Is(err, access.ErrNoSealedCopy) || got != "" {
+		t.Fatalf("Reveal(v1) = %d chars, %v; want ErrNotRecoverable caused by ErrNoSealedCopy", len(got), err)
+	}
+	// The next change writes version 2 and keeps the v1 record as it was.
+	if _, _, err := s.Add(t.Context(), "New"); err != nil {
+		t.Fatal(err)
+	}
+	f := readClients(t, dir)
+	if f.Version != 2 || len(f.Clients) != 2 || f.Clients[0]["sealed"] != nil {
+		t.Fatalf("after an add: %+v; want version 2 with the v1 record unsealed", f)
+	}
+	if _, ok := access.NewStore(dir, newClock().now).Check(pw); !ok {
+		t.Fatal("the v1 password stopped working after the rewrite")
+	}
+	// Rotating it makes it recoverable.
+	_, npw, err := s.Rotate(t.Context(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Reveal("c00000000000000aa", k.Open); err != nil || got != npw {
+		t.Errorf("Reveal after rotate = %d chars, %v; want the new password", len(got), err)
+	}
+}
+
+func TestRotateInvalidatesTheOldPassword(t *testing.T) {
+	t.Parallel()
+	s, k, dir := sealedStore(t)
+	id, old, _ := s.Add(t.Context(), "Phone")
+	_, other, _ := s.Add(t.Context(), "Laptop")
+	before, _ := s.List()
+	serve := access.NewStore(dir, newClock().now) // the daemon, holding the old file
+	if _, ok := serve.Check(old); !ok {
+		t.Fatal("setup")
+	}
+	c, pw, err := s.Rotate(t.Context(), "PHONE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ID != id || c.Name != "Phone" || !c.Created.Equal(before[0].Created) || pw == old || len(pw) != 32 {
+		t.Fatalf("Rotate = %+v, %d chars; want the same client with a new 32-character password", c, len(pw))
+	}
+	if _, ok := serve.Check(old); ok {
+		t.Error("the old password still passes after a rotate")
+	}
+	if got, ok := serve.Check(pw); !ok || got.ID != id {
+		t.Errorf("the new password: %+v, %v", got, ok)
+	}
+	if _, ok := serve.Check(other); !ok {
+		t.Error("rotating one client broke another")
+	}
+	if got, err := s.Reveal(id, k.Open); err != nil || got != pw {
+		t.Errorf("Reveal after rotate = %d chars, %v", len(got), err)
+	}
+	if c2, _, err := s.Rotate(t.Context(), id); err != nil || c2.ID != id {
+		t.Errorf("Rotate by ID = %+v, %v", c2, err)
+	}
+	if _, _, err := s.Rotate(t.Context(), "nobody"); !errors.Is(err, access.ErrNotFound) {
+		t.Errorf("Rotate(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevealWithoutTheKeyIsNotRecoverableAndCheckStillWorks(t *testing.T) {
+	t.Parallel()
+	s, k, _ := sealedStore(t)
+	id, pw, _ := s.Add(t.Context(), "Phone")
+	if err := os.Remove(k.Path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Reveal(id, k.Open)
+	if !errors.Is(err, access.ErrNotRecoverable) || !errors.Is(err, seal.ErrNoKey) || got != "" {
+		t.Fatalf("Reveal without the key = %d chars, %v; want ErrNotRecoverable caused by seal.ErrNoKey", len(got), err)
+	}
+	if _, ok := s.Check(pw); !ok {
+		t.Error("the check needs the key: it must not")
+	}
+}
+
+func TestAddFirstAddsOnlyToAnEmptyListOnce(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "state")
+	k := &seal.KeyFile{Path: filepath.Join(filepath.Dir(dir), "secrets.key")}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	added := 0
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := access.NewStore(dir, newClock().now) // one store per "process"
+			s.Sealer = k
+			_, _, ok, err := s.AddFirst(t.Context(), "default")
+			if err != nil {
+				t.Error(err)
+			}
+			if ok {
+				mu.Lock()
+				added++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	l, err := access.NewStore(dir, nil).List()
+	if err != nil || len(l) != 1 || l[0].Name != "default" || added != 1 {
+		t.Fatalf("after 8 racing AddFirst: %+v (%v), %d reported added; want one default", l, err, added)
+	}
+	// Once any client exists, it adds nothing, even after default is gone.
+	s := access.NewStore(dir, nil)
+	s.Sealer = k
+	if _, _, err := s.Add(t.Context(), "Phone"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Remove(t.Context(), "default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := s.AddFirst(t.Context(), "default"); ok || err != nil {
+		t.Errorf("AddFirst with a client = %v, %v; want nothing added", ok, err)
+	}
+	if l, _ := s.List(); len(l) != 1 || l[0].Name != "Phone" {
+		t.Errorf("clients = %+v, want Phone only", l)
+	}
+}
+
+// A sealed copy that opens but is not the password the hash checks (a
+// hand-edited file) is never shown: show must print what the check accepts.
+func TestRevealRefusesASealedCopyThatIsNotThePassword(t *testing.T) {
+	t.Parallel()
+	s, k, dir := sealedStore(t)
+	idA, _, _ := s.Add(t.Context(), "a")
+	_, pwB, _ := s.Add(t.Context(), "b")
+	f := readClients(t, dir)
+	f.Clients[0]["salt"], f.Clients[0]["hash"] = f.Clients[1]["salt"], f.Clients[1]["hash"] // a now checks b's password
+	writeClients(t, dir, f)
+	if _, ok := s.Check(pwB); !ok {
+		t.Fatal("setup: b's password no longer checks")
+	}
+	got, err := s.Reveal(idA, k.Open)
+	if !errors.Is(err, access.ErrNotRecoverable) || errors.Is(err, seal.ErrCorrupt) || got != "" {
+		t.Fatalf("Reveal = %d chars, %v; want ErrNotRecoverable for a copy that opens but does not match the hash", len(got), err)
 	}
 }

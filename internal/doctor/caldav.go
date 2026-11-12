@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -86,10 +87,24 @@ func usesTLS(cc config.CalDAV, ip net.IP) bool {
 	return cc.TLSCert != "" || ip == nil || !ip.IsLoopback()
 }
 
-// ListenerCheck reports what pcb serve will listen on, and how.
+// Live is the listener of the running daemon (pcb status's), which the
+// CalDAV checks report instead of what config.toml predicts: the daemon may
+// serve a --listen override or a config edited since it started (M5-R15
+// C4).
+type Live struct {
+	Addr        string // the bound address
+	URL         string
+	TLS         bool
+	Fingerprint string     // over TLS
+	NotAfter    *time.Time // over TLS
+}
+
+// ListenerCheck reports what pcb serve will listen on, and how; with a
+// daemon answering, what it listens on.
 type ListenerCheck struct {
 	CalDAV config.CalDAV
 	Bind   *Bind // shared with CertificateCheck; nil: its own
+	Live   *Live // nil: no daemon answered
 }
 
 // Name implements Check.
@@ -98,6 +113,14 @@ func (ListenerCheck) Name() string { return "caldav listener" }
 // Run implements Check.
 func (c ListenerCheck) Run(ctx context.Context) Result {
 	r := Result{Name: c.Name()}
+	if l := c.Live; l != nil {
+		how := "plain HTTP"
+		if l.TLS {
+			how = "TLS"
+		}
+		r.Status, r.Message = StatusOK, l.Addr+", "+how+" (the running daemon; URL "+l.URL+")"
+		return r
+	}
 	if err := config.ValidateListen(c.CalDAV.Listen); err != nil {
 		r.Status, r.Message = StatusError, "caldav.listen "+err.Error()
 		r.Fix = "set [caldav] listen in config.toml to HOST:PORT, such as " + config.DefaultListen
@@ -127,6 +150,7 @@ type CertificateCheck struct {
 	TLSDir string           // <state>/tls
 	Now    func() time.Time // nil: time.Now
 	Bind   *Bind            // shared with ListenerCheck; nil: its own
+	Live   *Live            // nil: no daemon answered
 }
 
 // Name implements Check.
@@ -139,10 +163,22 @@ func (c CertificateCheck) Run(ctx context.Context) Result {
 	if c.Now != nil {
 		now = c.Now
 	}
-	ip, ipErr := bindOf(c.Bind, c.CalDAV.Listen).IP(ctx)
-	if ipErr == nil && !usesTLS(c.CalDAV, ip) {
-		r.Status, r.Message = StatusSkip, "plain HTTP on loopback: no certificate needed"
+	var ip net.IP
+	switch {
+	case c.Live != nil && !c.Live.TLS:
+		r.Status, r.Message = StatusSkip, "the running daemon serves plain HTTP: no certificate needed"
 		return r
+	case c.Live != nil:
+		if host, _, err := net.SplitHostPort(c.Live.Addr); err == nil {
+			ip = net.ParseIP(host)
+		}
+	default:
+		var ipErr error
+		ip, ipErr = bindOf(c.Bind, c.CalDAV.Listen).IP(ctx)
+		if ipErr == nil && !usesTLS(c.CalDAV, ip) {
+			r.Status, r.Message = StatusSkip, "plain HTTP on loopback: no certificate needed"
+			return r
+		}
 	}
 	if c.CalDAV.TLSCert != "" {
 		_, leaf, err := tlsutil.LoadPair(c.CalDAV.TLSCert, c.CalDAV.TLSKey)
@@ -151,7 +187,7 @@ func (c CertificateCheck) Run(ctx context.Context) Result {
 			r.Fix = "fix the two files or their paths in config.toml, or remove both keys to use a self-signed certificate"
 			return r
 		}
-		return c.judge(r, leaf, now(), nil, "certificate of caldav.tls_cert", "replace it")
+		return c.served(c.judge(r, leaf, now(), nil, "certificate of caldav.tls_cert", "replace it"), leaf)
 	}
 	if runtime.GOOS != "windows" {
 		for path, want := range map[string]fs.FileMode{c.TLSDir: 0o700, tlsutil.KeyPath(c.TLSDir): 0o600} {
@@ -165,6 +201,8 @@ func (c CertificateCheck) Run(ctx context.Context) Result {
 	}
 	leaf, err := tlsutil.Inspect(c.TLSDir)
 	switch {
+	case errors.Is(err, fs.ErrNotExist) && c.Live != nil:
+		return c.liveOnly(r, now())
 	case errors.Is(err, fs.ErrNotExist):
 		r.Status, r.Message = StatusSkip, "no self-signed certificate yet: pcb serve generates it"
 		return r
@@ -177,7 +215,40 @@ func (c CertificateCheck) Run(ctx context.Context) Result {
 	if ip != nil && !ip.IsUnspecified() {
 		bind = ip
 	}
-	return c.judge(r, leaf, now(), bind, "self-signed certificate", "restart pcb serve (it replaces the certificate), then accept the new one in Thunderbird")
+	return c.served(c.judge(r, leaf, now(), bind, "self-signed certificate", "restart pcb serve (it replaces the certificate), then accept the new one in Thunderbird"), leaf)
+}
+
+// served is r, unless the running daemon serves another certificate than
+// leaf, the one on disk: then a warning that a restart serves leaf.
+func (c CertificateCheck) served(r Result, leaf *x509.Certificate) Result {
+	if c.Live == nil || c.Live.Fingerprint == "" || c.Live.Fingerprint == tlsutil.Fingerprint(leaf.Raw) {
+		return r
+	}
+	r.Status = StatusWarn
+	r.Message = "the running daemon serves another certificate (SHA-256 fingerprint " + c.Live.Fingerprint + ") than the one on disk: " + r.Message
+	r.Fix = "restart pcb serve to serve the one on disk, then accept it in Thunderbird"
+	return r
+}
+
+// liveOnly rates the certificate the running daemon serves from its own
+// facts, when none is on disk where this doctor looks.
+func (c CertificateCheck) liveOnly(r Result, t time.Time) Result {
+	r.Status, r.Message = StatusOK, "served by the running daemon"
+	if na := c.Live.NotAfter; na != nil {
+		expires := na.UTC().Format(time.DateOnly)
+		switch {
+		case !t.Before(*na):
+			r.Status, r.Message = StatusWarn, "served by the running daemon, expired on "+expires
+			r.Fix = "restart pcb serve (it replaces a self-signed certificate)"
+		case !t.Add(tlsutil.RenewBefore).Before(*na):
+			r.Status, r.Message = StatusWarn, "served by the running daemon, expires on "+expires+", in less than 30 days"
+			r.Fix = "restart pcb serve (it replaces a self-signed certificate)"
+		default:
+			r.Message += ", expires on " + expires
+		}
+	}
+	r.Message += ", SHA-256 fingerprint " + c.Live.Fingerprint
+	return r
 }
 
 // judge rates a certificate at t: expiry, hostnames, the bind IP when not
@@ -205,7 +276,9 @@ func (c CertificateCheck) judge(r Result, leaf *x509.Certificate, t time.Time, b
 	return r
 }
 
-// ClientsCheck warns when no CalDAV client can sign in.
+// ClientsCheck warns when no CalDAV client can sign in. Its fix follows
+// decision 0013: a login creates the client default, so with no login the
+// fix is pcb login; once logged in, only pcb client add makes one.
 type ClientsCheck struct {
 	StateDir string
 }
@@ -222,11 +295,28 @@ func (c ClientsCheck) Run(context.Context) Result {
 		r.Status, r.Message = StatusError, err.Error()
 		r.Fix = "check clients.json in " + shellquote.Quote(c.StateDir) + " (valid JSON in the format pcb wrote, mode 0600), or remove it and add the clients again"
 	case len(list) == 0:
-		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", "pcb client add NAME"
+		r.Status, r.Message, r.Fix = StatusWarn, "no CalDAV client: nothing can sign in to pcb serve", noClientFix(loggedIn(c.StateDir))
 	case len(list) == 1:
 		r.Status, r.Message = StatusOK, "1 client"
 	default:
 		r.Status, r.Message = StatusOK, fmt.Sprintf("%d clients", len(list))
 	}
 	return r
+}
+
+// noClientFix is what to run when no CalDAV client exists (decision 0013):
+// logged out, pcb login creates the client default; logged in, it would
+// not run again, so pcb client add.
+func noClientFix(loggedIn bool) string {
+	if loggedIn {
+		return "pcb client add NAME"
+	}
+	return "pcb login (it creates the client default), then pcb client show"
+}
+
+// loggedIn reports whether state.json says the login is ready; an
+// unreadable state counts as not logged in (the secrets check reports it).
+func loggedIn(stateDir string) bool {
+	st, err := store.LoadState(stateDir)
+	return err == nil && st.Phase == store.PhaseReady
 }

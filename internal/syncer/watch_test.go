@@ -214,3 +214,100 @@ func TestWatchHonoursRetryAfter(t *testing.T) {
 		t.Errorf("waits %v, want %v", waits, want)
 	}
 }
+
+// NextInterval replaces Interval after a success: it is asked for each
+// wait, raised to MinInterval, and a failure's back-off ignores it.
+func TestNextIntervalIsUsedAfterASuccess(t *testing.T) {
+	t.Parallel()
+	p, _ := script(t, nil, nil, errFlaky, nil, errStop)
+	s := time.Second
+	next := []time.Duration{5 * time.Minute, 2 * s, 5 * time.Minute}
+	var waits []time.Duration
+	err := syncer.Watch(t.Context(), p, syncer.WatchOptions{
+		NextInterval: func() time.Duration { d := next[0]; next = next[1:]; return d },
+		Sleep:        func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil },
+		Stop:         func(err error) bool { return errors.Is(err, errStop) },
+		Rand:         func() float64 { return 0.5 },
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("Watch = %v", err)
+	}
+	// 5 min; 2 s raised to the 10 s minimum; a failure backs off from Interval (30 s), not from NextInterval; 5 min.
+	if want := []time.Duration{5 * time.Minute, syncer.MinInterval, 30 * s, 5 * time.Minute}; !slices.Equal(waits, want) {
+		t.Errorf("waits %v, want %v", waits, want)
+	}
+}
+
+// A wake ends the sleep after a success and no other: a back-off keeps its
+// whole wait, and the wake is spent, not kept for the next sleep.
+func TestWakeCutsOnlyASuccessSleep(t *testing.T) {
+	t.Parallel()
+	wake := make(chan struct{}) // unbuffered: a send returns once Watch's listener took it
+	sleeping := make(chan struct{})
+	release := make(chan struct{})
+	var cut []bool // per sleep: ended by the wake (its context ended)
+	var waits []time.Duration
+	p, _ := script(t, errFlaky, nil, nil, errStop)
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		done <- syncer.Watch(ctx, p, syncer.WatchOptions{
+			Wake: wake,
+			Sleep: func(sctx context.Context, d time.Duration) error {
+				waits = append(waits, d)
+				sleeping <- struct{}{}
+				select {
+				case <-release:
+					cut = append(cut, false)
+					return nil
+				case <-sctx.Done():
+					cut = append(cut, true)
+					return sctx.Err()
+				}
+			},
+			Stop: func(err error) bool { return errors.Is(err, errStop) },
+			Rand: func() float64 { return 0.5 },
+		})
+	}()
+	// step runs one send of the scenario, failing the test (and ending Watch)
+	// rather than hanging when Watch does not take it.
+	step := func(what string, ch chan struct{}) {
+		t.Helper()
+		select {
+		case ch <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatalf("Watch did not take %s", what)
+		}
+	}
+	await := func(what string) {
+		t.Helper()
+		select {
+		case <-sleeping:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatalf("Watch did not reach %s", what)
+		}
+	}
+	// Sleep 1 follows a failure: two wakes change nothing, then it runs its course.
+	await("the back-off sleep")
+	step("a wake in the back-off", wake)
+	step("a second wake (sent once the first was handled)", wake)
+	step("the release of the back-off sleep", release)
+	// Sleep 2 follows a success: a wake ends it.
+	await("the sleep after a success")
+	step("a wake after a success", wake)
+	// Sleep 3 (a success again) shows the wake was spent: it runs its course.
+	await("the next sleep")
+	step("the release of the last sleep", release)
+	if err := <-done; !errors.Is(err, errStop) {
+		t.Fatalf("Watch = %v", err)
+	}
+	if want := []bool{false, true, false}; !slices.Equal(cut, want) {
+		t.Errorf("sleeps cut by the wake %v, want %v", cut, want)
+	}
+	if want := []time.Duration{30 * time.Second, 30 * time.Second, 30 * time.Second}; !slices.Equal(waits, want) {
+		t.Errorf("recorded waits %v, want %v", waits, want)
+	}
+}

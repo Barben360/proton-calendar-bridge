@@ -1,6 +1,7 @@
 package paths_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -57,4 +58,70 @@ func TestResolveXDG(t *testing.T) {
 			}
 		}
 	})
+}
+
+func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+func TestStateDirOverride(t *testing.T) {
+	got, err := paths.Resolve(envOf(map[string]string{"PCB_STATE_DIR": "/srv/pcb", "XDG_CONFIG_HOME": "/x/cfg", "XDG_STATE_HOME": "/x/state"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (paths.Dirs{Config: "/x/cfg/pcb", State: "/srv/pcb"}); got != want {
+		t.Fatalf("got %+v, want %+v (verbatim, no /pcb suffix; Config still from XDG)", got, want)
+	}
+}
+
+func TestConfigDirOverride(t *testing.T) {
+	got, err := paths.Resolve(envOf(map[string]string{"PCB_CONFIG_DIR": "/etc/pcb", "XDG_CONFIG_HOME": "/x/cfg", "XDG_STATE_HOME": "/x/state"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (paths.Dirs{Config: "/etc/pcb", State: "/x/state/pcb"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	// Both overrides need no HOME and no XDG.
+	got, err = paths.Resolve(envOf(map[string]string{"PCB_CONFIG_DIR": "/data/config", "PCB_STATE_DIR": "/data/state"}))
+	if err != nil || got != (paths.Dirs{Config: "/data/config", State: "/data/state"}) {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestRelativeOverrideIsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"PCB_STATE_DIR", "PCB_STATE_DIR must be an absolute path"},
+		{"PCB_CONFIG_DIR", "PCB_CONFIG_DIR must be an absolute path"},
+	} {
+		_, err := paths.Resolve(envOf(map[string]string{tc.name: "rel/dir", "HOME": "/home/u"}))
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%s relative: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestSocketPath(t *testing.T) {
+	if got := (paths.Dirs{Config: "/c", State: "/var/lib/pcb"}).Socket(); got != "/var/lib/pcb/pcb.sock" {
+		t.Fatalf("Socket = %q", got)
+	}
+}
+
+func TestEmptyOverrideIsUnset(t *testing.T) {
+	got, err := paths.Resolve(envOf(map[string]string{"PCB_CONFIG_DIR": "", "PCB_STATE_DIR": "", "XDG_CONFIG_HOME": "/x/cfg", "XDG_STATE_HOME": "/x/state"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (paths.Dirs{Config: "/x/cfg/pcb", State: "/x/state/pcb"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestCannotLocateNamesTheOverrides(t *testing.T) {
+	_, err := paths.Resolve(envOf(nil))
+	if err == nil || !strings.Contains(err.Error(), "PCB_CONFIG_DIR") {
+		t.Fatalf("config: %v", err)
+	}
+	_, err = paths.Resolve(envOf(map[string]string{"XDG_CONFIG_HOME": "/x/cfg"}))
+	if err == nil || !strings.Contains(err.Error(), "PCB_STATE_DIR") {
+		t.Fatalf("state: %v", err)
+	}
 }

@@ -1,0 +1,30 @@
+[Unit]
+Description=pcb, the Proton Calendar CalDAV bridge
+Documentation=https://github.com/Barben360/proton-calendar-bridge
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=PCB_CONFIG_DIR=/home/alice/.config/pcb
+Environment=PCB_STATE_DIR=/home/alice/.local/state/pcb
+ExecStart=/home/alice/go/bin/pcb serve --wait-for-login
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=10
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

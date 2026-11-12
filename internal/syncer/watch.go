@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +29,14 @@ type WatchOptions struct {
 	// Retry-After), 0 for none; nil: none. Watch waits the longer of it,
 	// capped at MaxRetryAfter, and the back-off.
 	RetryAfter func(error) time.Duration
+	// NextInterval is the wait after a successful pass (Serve slows it when
+	// no client is about); nil: Interval. It is raised to at least
+	// MinInterval. A failure's back-off still starts from Interval.
+	NextInterval func() time.Duration
+	// Wake ends a sleep that follows a successful pass, so the next pass
+	// starts at once. During a back-off or a Retry-After wait a wake is
+	// received and dropped: it never shortens one.
+	Wake <-chan struct{}
 }
 
 // Watch runs pass until ctx ends or Stop accepts a pass error, which it
@@ -69,6 +78,9 @@ func Watch(ctx context.Context, pass func(context.Context) (Report, error), o Wa
 			}
 		default:
 			failures = 0
+			if o.NextInterval != nil {
+				wait = max(o.NextInterval(), MinInterval)
+			}
 		}
 		if o.OnPass != nil {
 			o.OnPass(rep, err, wait)
@@ -76,13 +88,52 @@ func Watch(ctx context.Context, pass func(context.Context) (Report, error), o Wa
 		if stop {
 			return err
 		}
-		if err := o.Sleep(ctx, wait); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+		if err := sleepOrWake(ctx, o, wait, err == nil); err != nil {
 			return err
 		}
 	}
+}
+
+// sleepOrWake sleeps wait; after a success (cuttable) a receive on o.Wake
+// ends the sleep early and returns nil. It returns ctx's error when ctx
+// ended, or the sleep's own.
+func sleepOrWake(ctx context.Context, o WatchOptions, wait time.Duration, cuttable bool) error {
+	if o.Wake == nil {
+		return finishSleep(ctx, o.Sleep(ctx, wait))
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var woken atomic.Bool
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-o.Wake:
+				if cuttable {
+					woken.Store(true)
+					cancel()
+					return
+				}
+			case <-sctx.Done():
+				return
+			}
+		}
+	}()
+	err := o.Sleep(sctx, wait)
+	cancel()
+	<-stopped
+	if err != nil && woken.Load() && ctx.Err() == nil {
+		return nil
+	}
+	return finishSleep(ctx, err)
+}
+
+func finishSleep(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // backoff is interval × 2^(failures-1), capped at max(MaxBackoff,

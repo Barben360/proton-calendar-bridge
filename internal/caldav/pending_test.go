@@ -1,12 +1,16 @@
 package caldav_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -107,5 +111,41 @@ func TestPendingCalendarIs503UntilTheFirstPassReachesIt(t *testing.T) {
 	}
 	if ms := parseMS(t, r.do("PROPFIND", home, tbHomeSet, "Depth", "1")); len(ms.responses) != 3 {
 		t.Errorf("the home set after the pass lists %d responses", len(ms.responses))
+	}
+}
+
+// Rulings M5-P8 and M3-R22: while pcb serve waits for a login, every
+// request that reaches the service answers 503 with Retry-After: 30 and
+// no warning (it is expected, like a pending calendar; never a 4xx that
+// would disable the calendar in Thunderbird); without credentials it is
+// still 401, the service never asked.
+func TestWaitingForLoginIs503WithoutAWarning(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	s := newStub()
+	waiting := &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrWaitingForLogin, Hint: "run pcb login"}
+	s.readErr, s.writeErr = waiting, waiting
+	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	for _, tc := range []struct{ method, path, body, depth string }{
+		{"PROPFIND", home, tbHomeSet, "1"},
+		{"PROPFIND", calPath(workID), tbServerInfo, "0"},
+		{"PROPFIND", calPath(workID), tbEtags, "1"},
+		{"REPORT", calPath(workID), tbSync(""), "1"},
+		{"REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "1"},
+		{"GET", objPath(workID, plainUID), "", ""},
+		{"PUT", objPath(workID, plainUID), "x", ""},
+		{"DELETE", objPath(workID, plainUID), "", ""},
+	} {
+		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth, "Content-Type", "text/calendar")
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
+			t.Errorf("%s %s while waiting: %d, Retry-After %q, body %q; want 503, 30, none",
+				tc.method, tc.path, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("waiting for a login was logged:\n%s", logs.String())
+	}
+	if rec := serve(h, call("PROPFIND", home, tbHomeSet, "Depth", "1")); rec.Code != http.StatusUnauthorized {
+		t.Errorf("PROPFIND without credentials while waiting: %d, want 401", rec.Code)
 	}
 }

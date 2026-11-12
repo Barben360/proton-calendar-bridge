@@ -14,9 +14,11 @@ import (
 type API interface {
 	// Login runs the login state machine: ready, needs-totp or needs-captcha.
 	Login(ctx context.Context, req LoginRequest) (LoginResult, error)
-	// SubmitTOTP finishes a login that answered needs-totp.
+	// SubmitTOTP finishes a login that answered needs-totp, within 5
+	// minutes of it: then the login is revoked and forgotten.
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
-	// Logout revokes the session and forgets the account.
+	// Logout revokes the session and forgets the account. During Serve it
+	// first stops the sync loop and closes its cache handle (ruling M5-P10).
 	Logout(ctx context.Context) (LogoutResult, error)
 	// Status describes the login without any network call.
 	Status(ctx context.Context) (Status, error)
@@ -32,15 +34,25 @@ type API interface {
 	// Serve runs serve mode's sync loop until ctx ends (nil) or a person is
 	// needed (that error): the sync lock held throughout, and the read
 	// methods below answered from its own cache handle (ruling M3-R6). It
-	// needs a ready login; a start it refuses never calls o.Ready.
+	// needs a ready login; a start it refuses never calls o.Ready. With
+	// o.WaitForLogin it is ready once it holds the sync lock and waits for
+	// a login instead (logged out, the session ended, a Logout meanwhile):
+	// the reads and writes then answer ErrWaitingForLogin.
 	Serve(ctx context.Context, o ServeOptions) error
+	// Health is Serve's live state: the cadence, the last pass, each
+	// calendar's sync, error class and write gate with its reason, the
+	// render counters and the human verifications Proton asked for. It
+	// calls no network. Outside Serve it is {Serve: "stopped"}; while Serve
+	// waits for a login, {Serve: "waiting-for-login"}.
+	Health(ctx context.Context) (Health, error)
 	// Events lists a calendar's cached events. It calls Proton only when the
 	// calendar is not in the cache, to tell "not synced yet" from "no such calendar".
 	Events(ctx context.Context, req EventsRequest) ([]Event, error)
 	// The read methods below read the event cache: during Serve, Serve's
 	// own handle; otherwise a read-only handle opened for each call. They
 	// call Proton only to unlock a calendar's keys and read its settings,
-	// the first time the process reads that calendar.
+	// the first time the process reads that calendar. While Serve waits for
+	// a login they answer ErrWaitingForLogin.
 
 	// Collections lists the calendars of the event cache with their CTag
 	// and sync token, and those not synced yet as Pending; no cache is a
@@ -72,7 +84,7 @@ type API interface {
 	// ErrNotWritable (403 need-privileges: the gate decided read only;
 	// undecided is ErrGateUndecided, unavailable, ruling M4-R39), *WriteRefusal (403 with its
 	// pcb precondition), ErrNoSuchObject and ErrNoSuchCalendar (404);
-	// ErrWriteNotConfirmed, ErrCalendarPending, ErrNotServing and every
+	// ErrWriteNotConfirmed, ErrCalendarPending, ErrWaitingForLogin, ErrNotServing and every
 	// other error are unavailable (503, ProtonRetryAfter says how long
 	// Proton asked to wait).
 
@@ -85,7 +97,8 @@ type API interface {
 	DeleteObject(ctx context.Context, calID, name string, cond Precondition) error
 	// The client methods manage the CalDAV app passwords in
 	// <state>/clients.json. They need no login and no network, and logout
-	// leaves them (ruling M3-R17).
+	// leaves them (ruling M3-R17). A login that completes (Login,
+	// SubmitTOTP) with no client in the list adds one named default.
 
 	// AddClient creates a client and returns its password, this once. A bad
 	// or taken name is a Usage error.
@@ -95,6 +108,17 @@ type API interface {
 	// RemoveClient deletes the client with this ID or (case-insensitive)
 	// name; an unknown one is a Usage error.
 	RemoveClient(ctx context.Context, idOrName string) (Client, error)
+	// ShowClient returns a client's credentials, its password opened from
+	// its sealed copy (decision 0013); a client made before that has none:
+	// Recoverable is false, with no error. A sealed copy the key cannot
+	// open is a MustAct naming the key file. An empty idOrName means the
+	// client named default, else the only client; with several and no
+	// default it is a MustAct. URL and Fingerprint are left empty: the
+	// caller that knows the listener fills them.
+	ShowClient(ctx context.Context, idOrName string) (ClientCredentials, error)
+	// RotateClient gives a client (chosen as ShowClient does) a new
+	// password and returns it; the old one stops passing CheckClient at once.
+	RotateClient(ctx context.Context, idOrName string) (ClientSecret, error)
 	// CheckClient reports whether password is a client's, for a request
 	// from remote ("ip:port"). A remote with 5 failures in the last minute
 	// is refused unexamined and retryAfter says for how long (CalDAV: 429);
@@ -138,13 +162,18 @@ const (
 )
 
 // LoginResult is the outcome of Login or SubmitTOTP. CaptchaURL and
-// CaptchaToken are set with needs-captcha.
+// CaptchaToken are set with needs-captcha; LoginExpires with needs-totp:
+// when the login waiting for its code ends (Login's time + 5 minutes).
 type LoginResult struct {
 	State        LoginState `json:"state"`
 	Username     string     `json:"username,omitempty"`
 	AccountID    string     `json:"account_id,omitempty"`
 	CaptchaURL   string     `json:"captcha_url,omitempty"`
 	CaptchaToken string     `json:"captcha_token,omitempty"`
+	LoginExpires *time.Time `json:"login_expires,omitempty"`
+	// DefaultClientCreated: this login created the CalDAV client named
+	// default, the list being empty (decision 0013; pcb client show).
+	DefaultClientCreated bool `json:"default_client_created,omitempty"`
 }
 
 // LogoutResult says what Logout did. Revoked is false when Proton could not
@@ -156,7 +185,8 @@ type LogoutResult struct {
 
 // Status is the login as the files describe it. Phase is the store's phase
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none" or "unreadable".
+// waits for its code. Secrets is "sealed", "none", "unreadable" or
+// "rolled-back" (secrets.sealed older than the last one pcb wrote).
 type Status struct {
 	Phase       string     `json:"phase"`
 	Reason      string     `json:"reason,omitempty"`
@@ -168,6 +198,9 @@ type Status struct {
 	CaptchaURL  string     `json:"captcha_url,omitempty"`
 	LastLogin   *time.Time `json:"last_login,omitempty"`
 	LastRelogin *time.Time `json:"last_relogin,omitempty"`
+	// LoginExpires is set with needs-totp: when the login waiting for its
+	// code ends.
+	LoginExpires *time.Time `json:"login_expires,omitempty"`
 	// Sync is the event cache's state; nil while there is no cache.
 	Sync *SyncStatus `json:"sync,omitempty"`
 }
@@ -224,10 +257,10 @@ type WatchPass struct {
 // did not unlock (every event of them is a placeholder), sorted, nil if
 // none.
 type RenderCounts struct {
-	Undecryptable    int
-	Unverified       int
-	DuplicateMasters int
-	KeysErrors       []string
+	Undecryptable    int      `json:"undecryptable"`
+	Unverified       int      `json:"unverified"`
+	DuplicateMasters int      `json:"duplicate_masters"`
+	KeysErrors       []string `json:"keys_errors"`
 }
 
 // Zero reports whether every counter is zero.
@@ -247,6 +280,9 @@ type CalendarSync struct {
 	Deleted int    `json:"deleted"`
 	Events  int    `json:"events"`
 	Error   string `json:"error,omitempty"`
+	// ErrorClass sorts Error for Health (errorClass): rate-limited,
+	// proton-unavailable, network, session, refused, deferred, cache or other.
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 // EventsRequest selects cached events: Calendar is an ID or an exact name;

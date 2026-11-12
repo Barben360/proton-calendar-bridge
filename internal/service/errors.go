@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -14,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 	"github.com/Barben360/proton-calendar-bridge/internal/syncer"
@@ -36,9 +39,72 @@ type detail struct {
 	limited    bool          // Proton is rate limiting (a 429): the hint is a one-shot "retry in X"
 	retryAfter time.Duration // Proton's Retry-After, 0 if none
 	final      bool          // a retry cannot help: a person must change something
+	class      string        // the error class Health reports (errorClass), "" when the code says enough
+	login      bool          // a MustAct a login fixes (loginFixes)
+	switched   bool          // another account is logged in than Serve serves (accountSwitched)
 }
 
 func (d *detail) Error() string { return d.msg }
+
+// classed is a Blocked error of a known error class (errorClass).
+func classed(class, msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: msg, class: class}, Hint: hint}
+}
+
+// withClass is ee marked with class, its code, message, hint and
+// finality kept.
+func withClass(ee *exitcode.Error, class string) *exitcode.Error {
+	d := detail{msg: ee.Err.Error()}
+	var old *detail
+	if errors.As(ee.Err, &old) {
+		d = *old
+	}
+	d.class = class
+	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
+
+// loginNeeded is a MustAct that a login fixes (ruling M5-R8): not logged
+// in, the session ended, the login marked needs-login or needs-captcha, the
+// sealed secrets rolled back.
+func loginNeeded(msg, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.MustAct, Err: &detail{msg: msg, login: true}, Hint: hint}
+}
+
+// asLoginNeeded is ee, a MustAct, marked as one a login fixes, its message,
+// hint and class kept.
+func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
+	d := detail{msg: ee.Err.Error()}
+	var old *detail
+	if errors.As(ee.Err, &old) {
+		d = *old
+	}
+	d.login = true
+	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
+
+// loginFixes reports whether err is a MustAct a login fixes: Serve with
+// WaitForLogin waits for one after it; any other stop ends Serve (ruling
+// M5-R8). It reads the type only, never the text.
+func loginFixes(err error) bool {
+	var d *detail
+	return exitcode.From(err) == exitcode.MustAct && errors.As(err, &d) && d.login
+}
+
+// switchedAccount is the stop of a pass on Serve's cache once another
+// process logged in to another account: final without WaitForLogin (exit
+// 20, restart pcb serve); with it, Serve waits and serves the new account
+// (ruling M5-R10).
+func switchedAccount() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked,
+		Err:  &detail{msg: "pcb is now logged in to another Proton account than pcb serve started with", final: true, switched: true},
+		Hint: "restart pcb serve"}
+}
+
+// accountSwitched reports whether err is switchedAccount's, by type.
+func accountSwitched(err error) bool {
+	var d *detail
+	return errors.As(err, &d) && d.switched
+}
 
 // final is a Blocked error that no retry can fix.
 func final(msg, hint string) *exitcode.Error {
@@ -80,6 +146,11 @@ var ErrNoSuchCalendar = errors.New("no such calendar in the event cache")
 // the calendar in Thunderbird).
 var ErrCalendarPending = errors.New("the calendar is not synced yet")
 
+// ErrWaitingForLogin is the cause of the error a read or a write returns
+// while Serve waits for a login (ServeOptions.WaitForLogin): it answers once
+// a login is ready (CalDAV: 503, never a 4xx).
+var ErrWaitingForLogin = errors.New("pcb serve is waiting for a login")
+
 func invalidSyncToken() *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.Usage, Err: ErrInvalidSyncToken, Hint: "list the calendar in full (an empty sync token)"}
 }
@@ -105,6 +176,7 @@ func mapError(err error, keyFile string) error {
 		uve *auth.UnsupportedVerificationError
 		ae  *api.Error
 		ts  *loginguard.TooSoon
+		rb  *store.RolledBackError
 		ne  net.Error
 		ue  *url.Error
 	)
@@ -120,7 +192,7 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	case cf != nil:
-		return cf
+		return withClass(cf, classCache)
 	case errors.Is(err, auth.ErrBadCredentials):
 		return mustAct("wrong Proton username or password", "check them, then run pcb login again (Proton allows one attempt per minute)")
 	case errors.Is(err, auth.ErrTOTPRejected):
@@ -138,11 +210,13 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, keys.ErrKeysLocked):
 		return mustAct("the password does not unlock the account keys", "check the password; accounts in two-password mode are not supported")
 	case errors.Is(err, api.ErrSessionEnded):
-		return mustAct("the Proton session has ended", "run pcb login")
+		return loginNeeded("the Proton session has ended", "run pcb login")
 	case errors.As(err, &uve):
 		return blocked(uve.Error(), "complete the verification once in a browser on this network, then retry later")
 	case errors.Is(err, auth.ErrServerProof):
 		return blocked("Proton's answer could not be authenticated", "retry later; if it persists, check for a proxy that rewrites traffic")
+	case errors.As(err, &rb):
+		return rolledBack(rb)
 	case errors.Is(err, seal.ErrNoKey):
 		return blocked("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
@@ -152,7 +226,7 @@ func mapError(err error, keyFile string) error {
 	case errors.As(err, &ae):
 		return protonDown(ae)
 	case errors.As(err, &ne), errors.As(err, &ue):
-		return blocked("cannot reach Proton", "check the network connection, then retry")
+		return classed(classNetwork, "cannot reach Proton", "check the network connection, then retry")
 	}
 	return blocked("unexpected error", "run pcb doctor; if it persists, report it without any secret")
 }
@@ -166,33 +240,94 @@ func protonDown(e *api.Error) error {
 		if e.RetryAfter > 0 {
 			wait = e.RetryAfter.Round(time.Second).String()
 		}
-		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter},
+		return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "Proton is rate limiting requests", limited: true, retryAfter: e.RetryAfter, class: classRateLimited},
 			Hint: "retry in " + wait}
 	case e.Status >= 500:
-		return blocked("Proton is unavailable", "try again later")
+		return classed(classProtonUnavailable, "Proton is unavailable", "try again later")
 	}
-	return blocked(fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
+	return classed(classRefused, fmt.Sprintf("Proton refused the request (code %d)", e.Code), "try again later; if it persists, run pcb doctor")
 }
 
+// rolledBack is what a person must do about a restored or replaced
+// secrets.sealed (store.ErrRolledBack): only they know whether the restore
+// was meant, and a new login is the way out either way.
+func rolledBack(rb *store.RolledBackError) *exitcode.Error {
+	return loginNeeded(rb.Explain(), store.RolledBackHint)
+}
+
+// keyCause is why the key file or the sealed store could not be used, safe
+// to show (it never holds a secret): the OS error with its operation and
+// path (permission denied, read-only file system) or the key file's mode
+// refusal; "" when there is none to give (M5-R15 C2).
+func keyCause(err error) string {
+	var (
+		me *seal.KeyModeError
+		pe *fs.PathError
+		le *os.LinkError
+	)
+	switch {
+	case errors.As(err, &me):
+		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
+	case errors.As(err, &pe):
+		return pe.Error()
+	case errors.As(err, &le):
+		return le.Error()
+	}
+	return ""
+}
+
+// keyFix is the hint for a key file that cannot be used.
+const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+
 // storeError maps a failure of the sealed store: a lost or foreign key names
-// the key file; anything else is a store that cannot be used.
+// the key file, a rolled-back file is a MustAct; anything else is a store
+// that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}
 	var ee *exitcode.Error
 	if errors.As(err, &ee) {
 		return mapError(err, keyFile)
 	}
+	if cause := keyCause(err); cause != "" {
+		return blocked("cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
+	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory, or run pcb logout to discard the stored session")
 }
 
-// stateError maps an unreadable state.json (it fails closed).
+// stateError maps an unreadable state.json (it fails closed). A secrets
+// generation out of range was edited or damaged: a person resets it.
 func stateError(err error) error {
-	if errors.Is(err, context.Canceled) {
+	switch {
+	case errors.Is(err, context.Canceled):
 		return mapError(err, "")
+	case errors.Is(err, store.ErrGenerationOutOfRange):
+		return mustAct("the login state file holds a secrets generation out of range: it was edited or damaged", "run pcb logout, then pcb login")
 	}
 	return blocked("the login state file cannot be read", "run pcb logout to reset it")
+}
+
+// stateLockError maps a state-file lock that could not be taken
+// (store.ErrStateLock): held past its timeout by another process, or not
+// creatable.
+func stateLockError(err error, stateDir string) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return blocked("another pcb process holds the login state file's lock (state.lock) too long", "run the command again; if it persists, look for a stuck pcb process")
+	case errors.Is(err, context.Canceled):
+		return mapError(err, "")
+	}
+	return blocked("cannot take the lock of the login state file", "make sure "+stateDir+" is writable by this user")
+}
+
+// stateWriteError maps a failed SaveState or UpdateState of state.json.
+func (l *Local) stateWriteError(err error) error {
+	if errors.Is(err, store.ErrStateLock) {
+		return stateLockError(err, l.o.Dirs.State)
+	}
+	return storeError(err, l.keyFile())
 }
 
 // acquireError maps what loginguard.Acquire returns: its own refusals are

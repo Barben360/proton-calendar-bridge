@@ -2,7 +2,9 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -67,11 +71,19 @@ type env struct {
 	dirs paths.Dirs
 	cfg  config.Config
 	svc  *service.Local
+	// after, when set, is the services' AfterFunc (the pending login's expiry).
+	after func(time.Duration, func()) func() bool
 }
 
 func newEnv(t *testing.T, fo protontest.Options) *env {
 	t.Helper()
-	e := &env{clk: &clock{now: t0}}
+	return newEnvWith(t, fo, nil)
+}
+
+// newEnvWith is newEnv with after as the service's AfterFunc.
+func newEnvWith(t *testing.T, fo protontest.Options, after func(time.Duration, func()) func() bool) *env {
+	t.Helper()
+	e := &env{clk: &clock{now: t0}, after: after}
 	fo.Now = e.clk.Now
 	e.f = protontest.New(t, fo)
 	root := t.TempDir()
@@ -85,7 +97,7 @@ func newEnv(t *testing.T, fo protontest.Options) *env {
 // open starts a service on the env's dirs, closed with the test.
 func (e *env) open(t *testing.T) *service.Local {
 	t.Helper()
-	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep})
+	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, AfterFunc: e.after})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,5 +1016,467 @@ func TestAbortAfterRefreshRevokesLiveSession(t *testing.T) {
 	live := api.Tokens{UID: uid, AccessToken: minted[len(minted)-1]}
 	if sessionAlive(t, e, live) {
 		t.Error("the refreshed session is still alive after the failed login")
+	}
+}
+
+const (
+	rolledBackMsg  = "secrets.sealed is older than the last one pcb wrote (generation 1 < 2): it was restored or replaced"
+	rolledBackHint = "if you restored it on purpose, run pcb logout, then pcb login"
+)
+
+// restoreOlderSecrets puts back secrets.sealed as it was after the login
+// (generation 1) once the store sealed generation 2: a restored backup.
+func restoreOlderSecrets(t *testing.T, e *env) []byte {
+	t.Helper()
+	old, err := os.ReadFile(e.secrets().Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.editAccount(t, func(a *store.Account) { a.AccessToken += "-rotated" })
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return old
+}
+
+func TestRolledBackSecretsNeedALogin(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	restoreOlderSecrets(t, e)
+	calls := e.f.Calls("", "/")
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Secrets != "rolled-back" || st.Phase != "needs-login" || st.Reason != rolledBackMsg || st.Username != "" {
+		t.Fatalf("Status = %+v, %v", st, err)
+	}
+	_, err = e.svc.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != rolledBackMsg || ee.Hint != rolledBackHint {
+		t.Errorf("Calendars: message %q hint %q", ee.Error(), ee.Hint)
+	}
+	e.clk.advance(61 * time.Second)
+	_, err = e.svc.Login(t.Context(), e.req())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != rolledBackMsg || ee.Hint != rolledBackHint {
+		t.Errorf("Login: message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("", "/") - calls; n != 0 {
+		t.Errorf("%d requests made with the restored secrets, want 0", n)
+	}
+}
+
+func TestLogoutWipesRolledBackSecrets(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	acc := e.account(t)
+	old := restoreOlderSecrets(t, e)
+	res, err := e.svc.Logout(t.Context())
+	if err != nil || !res.WasLoggedIn || res.Revoked {
+		t.Fatalf("Logout = %+v, %v", res, err)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d revocations with the restored tokens, want 0", n)
+	}
+	if !sessionAlive(t, e, tokensOf(acc)) {
+		t.Error("the session was revoked")
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("the restored secrets.sealed remains")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut {
+		t.Errorf("state = %+v", st)
+	}
+	// Restored once more after the logout: still refused.
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.secrets().Load(); !errors.Is(err, store.ErrRolledBack) {
+		t.Errorf("restored after logout: Load err = %v, want ErrRolledBack", err)
+	}
+	if err := os.Remove(e.secrets().Path); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login after the logout: %+v", res)
+	}
+	if st, err := e.svc.Status(t.Context()); err != nil || st.Secrets != "sealed" || st.Phase != "ready" {
+		t.Errorf("Status after a new login = %+v, %v", st, err)
+	}
+}
+
+// Logout is the reset of a damaged state.json: the new one carries the
+// wiped generation + 1, so the wiped file is still refused if restored.
+func TestLogoutOverMalformedStateKeepsTheGeneration(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	old, err := os.ReadFile(e.secrets().Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "state.json"), []byte("{damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseLoggedOut || st.SecretsGeneration != 2 {
+		t.Fatalf("state = %+v, want logged-out with generation 2", st)
+	}
+	if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.secrets().Load(); !errors.Is(err, store.ErrRolledBack) {
+		t.Errorf("the wiped file restored: Load err = %v, want ErrRolledBack", err)
+	}
+}
+
+// A mirror edited out of range fails closed with a MustAct; logout resets
+// it and a new login works.
+func TestGenerationOutOfRangeNeedsALogout(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	var st map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(mustJSON(t, e.loadState(t))), &st); err != nil {
+		t.Fatal(err)
+	}
+	st["secrets_generation"] = json.RawMessage("18446744073709551615")
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "state.json"), []byte(mustJSON(t, st)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.Status(t.Context())
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "the login state file holds a secrets generation out of range: it was edited or damaged" ||
+		ee.Hint != "run pcb logout, then pcb login" {
+		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login after the reset: %+v", res)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "sealed" {
+		t.Errorf("Status = %+v, %v", s, err)
+	}
+	if g := e.loadState(t).SecretsGeneration; g != 3 {
+		t.Errorf("generation after logout and login = %d, want 3", g)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// The session pcb holds in memory when the store is found rolled back is
+// its newest, sealed only in the file the restore replaced: it is revoked
+// (ruling M5-R3), also when its access token has expired (the refresh before
+// the revoke stays in memory: the rolled-back store refuses it).
+func TestRolledBackSecretsRevokeTheHeldSession(t *testing.T) {
+	t.Parallel()
+	detects := map[string]func(t *testing.T, e *env){
+		"operation": func(t *testing.T, e *env) {
+			_, err := e.svc.Calendars(t.Context())
+			if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != rolledBackHint {
+				t.Errorf("hint = %q", ee.Hint)
+			}
+		},
+		"logout": func(t *testing.T, e *env) {
+			if res, err := e.svc.Logout(t.Context()); err != nil || !res.WasLoggedIn {
+				t.Fatalf("Logout = %+v, %v", res, err)
+			}
+		},
+	}
+	for name, detect := range detects {
+		for _, expired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/expired=%v", name, expired), func(t *testing.T) {
+				t.Parallel()
+				e := newEnv(t, protontest.Options{})
+				e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+				e.login(t, e.req())
+				old, err := os.ReadFile(e.secrets().Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.f.ExpireAccessTokens()
+				if got := e.calendars(t); len(got) != 1 { // refreshes: the held client has the newest tokens
+					t.Fatalf("calendars = %+v", got)
+				}
+				newest := e.account(t)
+				if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if !sessionAlive(t, e, tokensOf(newest)) {
+					t.Fatal("the newest session is not alive before the check")
+				}
+				if expired {
+					e.f.ExpireAccessTokens()
+				}
+				refreshes := e.f.Calls("POST", "/auth/v4/refresh")
+				detect(t, e)
+				if sessionRefreshable(t, e, tokensOf(newest)) {
+					t.Error("the newest session, held in memory, is still alive")
+				}
+				if expired && e.f.Calls("POST", "/auth/v4/refresh") == refreshes {
+					t.Error("no in-memory refresh before revoking an expired session")
+				}
+				// A second detection has nothing left to revoke.
+				deletes := e.f.Calls("DELETE", "/auth/v4")
+				_, _ = e.svc.Calendars(t.Context())
+				if n := e.f.Calls("DELETE", "/auth/v4"); n != deletes {
+					t.Errorf("%d revocations after a second detection, want %d", n, deletes)
+				}
+			})
+		}
+	}
+}
+
+// sessionRefreshable reports whether tok's refresh token still opens its
+// session on the fake (it rotates it: call it last).
+func sessionRefreshable(t *testing.T, e *env, tok api.Tokens) bool {
+	t.Helper()
+	m := auth.NewManager(e.f.URL, e.cfg.Proton.AppVersion)
+	defer m.Close()
+	_, err := auth.Refresh(t.Context(), m, tok)
+	return err == nil
+}
+
+// A mirror edited to exactly the bound is valid but makes the store rolled
+// back; a single logout recovers (the next generation saturates).
+func TestLogoutAtTheGenerationBoundRecovers(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	st := e.loadState(t)
+	st.SecretsGeneration = store.MaxSecretsGeneration
+	if err := store.SaveState(e.dirs.State, st); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "rolled-back" {
+		t.Fatalf("Status = %+v, %v", s, err)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Phase != "logged-out" {
+		t.Fatalf("Status after one logout = %+v, %v", s, err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login: %+v", res)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "sealed" || s.Phase != "ready" {
+		t.Errorf("Status after the login = %+v, %v", s, err)
+	}
+}
+
+// fakeTimers stands in for time.AfterFunc: each timer runs only when the
+// test fires it, and never once stopped, as a real one.
+type fakeTimers struct {
+	mu sync.Mutex
+	ts []*fakeTimer
+}
+
+type fakeTimer struct {
+	d     time.Duration
+	f     func()
+	state atomic.Int32 // 0 armed, 1 stopped, 2 fired
+}
+
+func (ft *fakeTimers) AfterFunc(d time.Duration, f func()) func() bool {
+	tm := &fakeTimer{d: d, f: f}
+	ft.mu.Lock()
+	ft.ts = append(ft.ts, tm)
+	ft.mu.Unlock()
+	return func() bool { return tm.state.CompareAndSwap(0, 1) }
+}
+
+func (ft *fakeTimers) timer(t *testing.T, i int) *fakeTimer {
+	t.Helper()
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if i >= len(ft.ts) {
+		t.Fatalf("%d timers armed, want at least %d", len(ft.ts), i+1)
+	}
+	return ft.ts[i]
+}
+
+func (ft *fakeTimers) count() int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return len(ft.ts)
+}
+
+// fire runs the timer as its duration passing would: not at all when it
+// was stopped. It reports whether it ran.
+func (tm *fakeTimer) fire() bool {
+	if !tm.state.CompareAndSwap(0, 2) {
+		return false
+	}
+	tm.f()
+	return true
+}
+
+// M5-Rpre4: the login a daemon holds for its 2FA code lives 5 minutes; then
+// its half session is revoked and SubmitTOTP says it expired.
+func TestPendingLoginExpiresAfterFiveMinutes(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	res := e.login(t, e.req())
+	want := t0.Add(5 * time.Minute)
+	if res.State != service.StateNeedsTOTP || res.LoginExpires == nil || !res.LoginExpires.Equal(want) {
+		t.Fatalf("Login = %+v; want needs-totp expiring at %v", res, want)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Phase != "needs-totp" || st.LoginExpires == nil || !st.LoginExpires.Equal(want) {
+		t.Fatalf("Status = %+v, %v; want needs-totp with login_expires %v", st, err, want)
+	}
+	if n := ft.count(); n != 1 || ft.timer(t, 0).d != 5*time.Minute {
+		t.Fatalf("%d timers (first %v), want one of 5 min", n, ft.timer(t, 0).d)
+	}
+
+	if !ft.timer(t, 0).fire() {
+		t.Fatal("the expiry timer was stopped before it fired")
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1 (the half session revoked)", n)
+	}
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the login waiting for its 2FA code expired after 5 minutes" || ee.Hint != "run pcb login again" {
+		t.Errorf("SubmitTOTP after expiry = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/2fa"); n != 0 {
+		t.Errorf("%d 2FA submissions after the expiry, want 0", n)
+	}
+	st, err = e.svc.Status(t.Context())
+	if err != nil || st.Phase == "needs-totp" || st.LoginExpires != nil {
+		t.Errorf("Status after expiry = %+v, %v; want no login waiting", st, err)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("secrets sealed by an expired login")
+	}
+	// A new login starts afresh: the expiry is not remembered for ever.
+	e.clk.advance(time.Minute) // past the login guard
+	if res := e.login(t, e.req()); res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login after expiry = %+v", res)
+	}
+	if res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP of the new login = %+v, %v", res, err)
+	}
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a 2FA code" {
+		t.Errorf("SubmitTOTP with nothing pending = %q; the old expiry still told", ee.Error())
+	}
+}
+
+func TestSubmitBeforeExpiryStillWorks(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	e.clk.advance(4*time.Minute + 59*time.Second)
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP at 4:59 = %+v, %v", res, err)
+	}
+	if ft.timer(t, 0).fire() {
+		t.Error("the expiry timer was left armed after the login completed")
+	}
+	// Even a timer that fired just before the completion stopped it finds
+	// nothing to revoke: the stored session lives on.
+	ft.timer(t, 0).f()
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d DELETE /auth/v4 after a completed login, want 0", n)
+	}
+	if !sessionAlive(t, e, tokensOf(e.account(t))) {
+		t.Error("the completed login's session was revoked")
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "ready" || st.LoginExpires != nil {
+		t.Errorf("Status = %+v; want ready without login_expires", st)
+	}
+}
+
+// A login that replaces one waiting for its code stops the old timer, and a
+// stale timer never revokes the newer login.
+func TestReplacedLoginsTimerNeverRevokesTheNewOne(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	e.clk.advance(time.Minute) // past the login guard
+	e.login(t, e.req())
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Fatalf("%d DELETE /auth/v4, want 1 (the replaced login aborted)", n)
+	}
+	if ft.timer(t, 0).fire() {
+		t.Error("the replaced login's timer was left armed")
+	}
+	ft.timer(t, 0).f() // as if it had fired just before the stop
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4 after the stale timer, want 1", n)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-totp" {
+		t.Fatalf("phase after the stale timer = %q, want needs-totp", st.Phase)
+	}
+	if res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP of the newer login = %+v, %v", res, err)
+	}
+	if ft.timer(t, 1).fire() {
+		t.Error("the completed login's timer was left armed")
+	}
+}
+
+// A rejected code keeps the login waiting under its first deadline: no
+// second timer, and expiry still ends it.
+func TestRejectedCodeKeepsTheDeadline(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	if _, err := e.svc.SubmitTOTP(t.Context(), "000000"); err == nil {
+		t.Fatal("a wrong code was accepted")
+	}
+	if n := ft.count(); n != 1 {
+		t.Errorf("%d timers after a rejected code, want 1", n)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.LoginExpires == nil || !st.LoginExpires.Equal(t0.Add(5*time.Minute)) {
+		t.Errorf("login_expires after a rejected code = %v, want the first deadline", st.LoginExpires)
+	}
+	if !ft.timer(t, 0).fire() {
+		t.Fatal("the timer was stopped by a rejected code")
+	}
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "expired") {
+		t.Errorf("SubmitTOTP after expiry = %v", ee)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1", n)
+	}
+}
+
+// M5-R15 C2: the login's sealing names why the key file cannot be read.
+func TestLoginNamesWhyTheKeyCannotBeRead(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	e := newEnv(t, protontest.Options{})
+	if err := os.MkdirAll(filepath.Dir(e.cfg.Secrets.KeyFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.cfg.Secrets.KeyFile, make([]byte, 32), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.Login(t.Context(), e.req())
+	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) {
+		t.Fatalf("Login = %v, want the key file and permission denied", err)
 	}
 }

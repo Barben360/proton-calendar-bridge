@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -29,15 +30,22 @@ const wipeTimeout = 10 * time.Second
 
 func errClosed() error { return blocked("service closed", "start a new session") }
 
-// Options build a Local. Sealer, HTTP, Now and Sleep default to the key file
-// of Config, the API client's default, time.Now and a context-aware sleep.
+// Options build a Local. Sealer, HTTP, Now, Sleep and AfterFunc default to
+// the key file of Config, the API client's default, time.Now, a
+// context-aware sleep and time.AfterFunc. AfterFunc runs f once d has
+// passed, unless stop (true: it will not run) came first; it ends a login
+// left waiting for its 2FA code (pendingTTL). Logger gets what the service
+// says outside Serve (Serve's own logger wins while it runs); nil discards
+// it.
 type Options struct {
-	Dirs   paths.Dirs
-	Config config.Config
-	Sealer seal.Sealer
-	HTTP   *http.Client
-	Now    func() time.Time
-	Sleep  func(ctx context.Context, d time.Duration) error
+	Dirs      paths.Dirs
+	Config    config.Config
+	Sealer    seal.Sealer
+	HTTP      *http.Client
+	Now       func() time.Time
+	Sleep     func(ctx context.Context, d time.Duration) error
+	AfterFunc func(d time.Duration, f func()) (stop func() bool)
+	Logger    *slog.Logger
 }
 
 // Local is the in-process API. Operations that change the login (an
@@ -48,8 +56,9 @@ type Local struct {
 	secrets *store.Secrets
 	mgr     *gpa.Manager
 
-	clients *access.Store   // CalDAV app passwords, <state>/clients.json; survives logout (ruling M3-R17)
-	limiter *access.Limiter // failed CalDAV password checks per remote IP
+	clients *access.Store               // CalDAV app passwords, <state>/clients.json, sealed by o.Sealer; survives logout (ruling M3-R17)
+	slog    atomic.Pointer[slog.Logger] // Serve's logger while it runs (log)
+	limiter *access.Limiter             // failed CalDAV password checks per remote IP
 
 	tmu          sync.Mutex // guards touching and the start of touches
 	touching     map[string]bool
@@ -61,7 +70,8 @@ type Local struct {
 
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
-	waiting atomic.Bool // pending != nil, readable without mu
+	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
+	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
 	closed  atomic.Bool
 
 	cmu    sync.Mutex // guards cached; never held across a network call
@@ -72,12 +82,35 @@ type Local struct {
 	smu    sync.RWMutex // guards served; held for reading while a read uses it
 	served *served      // Serve's cache handle, nil outside Serve
 
+	lmu  sync.Mutex // guards live
+	live *live      // Serve's live state, nil outside Serve (Health)
+
+	gmu       sync.Mutex    // guards waitSince, halts, logouts and phase
+	waitSince *time.Time    // when Serve began waiting for a login, nil when it does not wait
+	halts     int           // logouts in progress: Serve does not start serving meanwhile
+	logouts   uint64        // logouts begun in this process (serveOn refuses a login read before one)
+	phase     *servePhase   // Serve's serving phase, nil when it does not serve
+	loginWake chan struct{} // a login completed in this process (capacity 1)
+
+	// unlisted is Serve's cache handle until its first pass that got
+	// through: an unknown calendar is pending meanwhile (ruling M5-R9).
+	unlisted atomic.Pointer[cache.Cache]
+
+	hmu   sync.Mutex           // guards human
+	human map[string]time.Time // unanswered human verifications by source, since when
+
 	cals calLocks // one per calendar: a write and the syncer's pass of it run one at a time
 
 	// Tests only: a write's pre-send budget when set (preSendBudget
 	// otherwise), and a failure injected at a write's cache steps (fault).
-	preSend    time.Duration
-	writeFault func(stage string) error
+	preSend      time.Duration
+	writeFault   func(stage string) error
+	humanHook    func()                                 // runs once a needs-login mark is decided, before its write
+	stateTimeout time.Duration                          // bounds humanNeeded's wait for state.lock when set
+	checkHook    func()                                 // runs at each login check of a Serve waiting for a login
+	wipeHook     func()                                 // runs in Logout just before the wipe
+	serveHook    func()                                 // runs between a ready login check and serveOn
+	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -112,6 +145,9 @@ func NewLocal(o Options) (*Local, error) {
 	if o.Sleep == nil {
 		o.Sleep = sleep
 	}
+	if o.AfterFunc == nil {
+		o.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
 	l := &Local{
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
@@ -121,9 +157,12 @@ func NewLocal(o Options) (*Local, error) {
 
 		touching:     map[string]bool{},
 		touchTimeout: defaultTouchTimeout,
+		loginWake:    make(chan struct{}, 1),
 	}
+	l.clients.Sealer = o.Sealer
 	l.tctx, l.tcancel = context.WithCancel(context.Background())
 	l.r.lru = newLRU(lruCapacity)
+	l.secrets.Log = l.serveLog
 	return l, nil
 }
 
@@ -136,6 +175,18 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// log is Serve's logger while Serve runs, else Options.Logger, else a
+// discarding one.
+func (l *Local) log() *slog.Logger {
+	if lg := l.slog.Load(); lg != nil {
+		return lg
+	}
+	if l.o.Logger != nil {
+		return l.o.Logger
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 // keyFile is the path named in store errors.
@@ -162,6 +213,27 @@ func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.T
 	})
 }
 
+// revokeHeld ends the session of the cached client, best effort within
+// revokeTimeout, and drops the client. It runs when secrets.sealed is found
+// rolled back: that session is pcb's newest, sealed only in the file the
+// restore replaced, so it is revoked rather than left live and forgotten
+// (ruling M5-R3). The restored file's own session is not revoked. The
+// revoke runs on a client of the held tokens that refreshes in memory only
+// (client): the cached client's refresh goes through the rolled-back store,
+// which refuses it, so an expired access token would leave the session alive.
+func (l *Local) revokeHeld() {
+	l.cmu.Lock()
+	cc := l.cached
+	l.cmu.Unlock()
+	l.dropClient()
+	if cc == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
+	defer cancel()
+	_ = auth.Logout(ctx, l.client(cc.c.Tokens()))
+}
+
 // revoke ends acc's session, best effort within revokeTimeout.
 func (l *Local) revoke(ctx context.Context, acc store.Account) bool {
 	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
@@ -173,23 +245,40 @@ func (l *Local) revoke(ctx context.Context, acc store.Account) bool {
 // Logout implements API. The local wipe runs even when ctx is cancelled, so
 // a cancelled caller cannot leave secrets behind; only the revocation (best
 // effort) follows ctx.
+//
+// During Serve, the sync loop is stopped and its cache handle closed first
+// (ruling M5-P10), before mu is taken: a pass may need mu to end.
 func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
+	release := l.haltServe()
+	defer release()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed.Load() {
 		return LogoutResult{}, errClosed()
 	}
 	l.dropPending(ctx)
+	l.expired = false
+	accounts, err := l.secrets.Load()
+	if errors.Is(err, store.ErrRolledBack) {
+		l.revokeHeld()
+	}
 	l.dropClient()
+	if l.wipeHook != nil {
+		l.wipeHook()
+	}
 	wipe, cancel := context.WithTimeout(context.WithoutCancel(ctx), wipeTimeout)
 	defer cancel()
 	var res LogoutResult
-	accounts, err := l.secrets.Load()
+	var next uint64 // the mirror the wipe moved to: seeds state.json below
 	switch {
-	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt):
-		// Unopenable for good: nothing to revoke with, so wipe what cannot be used.
+	case errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack):
+		// Unopenable for good, or restored (its tokens are not the current
+		// session's, and may be someone else's to keep): nothing to revoke
+		// with, so wipe what cannot be used. The wipe moves the mirror past
+		// it, so the file is refused if restored again.
 		res.WasLoggedIn = true
-		if werr := l.secrets.Wipe(wipe); werr != nil {
+		var werr error
+		if next, werr = l.secrets.Wipe(wipe); werr != nil {
 			return LogoutResult{}, storeError(werr, l.keyFile())
 		}
 	case err != nil:
@@ -205,11 +294,9 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 			}
 		}
 		if len(accounts) > 0 {
-			if err := l.secrets.Update(wipe, func(a map[string]store.Account) error {
-				clear(a)
-				return nil
-			}); err != nil {
-				return LogoutResult{}, storeError(err, l.keyFile())
+			var werr error
+			if next, werr = l.secrets.Wipe(wipe); werr != nil {
+				return LogoutResult{}, storeError(werr, l.keyFile())
 			}
 		}
 	}
@@ -217,8 +304,11 @@ func (l *Local) Logout(ctx context.Context) (LogoutResult, error) {
 		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
 			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
 	}
-	if err := store.SaveState(l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut}); err != nil {
-		return LogoutResult{}, storeError(err, l.keyFile())
+	// Seeded with the wiped generation + 1: over an unreadable state.json
+	// (the reset logout is) the mirror write failed and SaveState cannot
+	// read the old one, so the mirror must not restart at 0.
+	if err := store.SaveStateContext(wipe, l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next}); err != nil {
+		return LogoutResult{}, l.stateWriteError(err)
 	}
 	return res, nil
 }
@@ -251,17 +341,23 @@ func (l *Local) Status(context.Context) (Status, error) {
 	}
 	if _, err := os.Stat(l.secrets.Path); err == nil {
 		accounts, err := l.secrets.Load()
-		if err != nil {
+		var rb *store.RolledBackError
+		switch {
+		case errors.As(err, &rb):
+			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
+		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
-		} else {
+		default:
 			s.Secrets = "sealed"
 			s.Username = accounts[st.AccountID].Username
 		}
 	} else if st.Phase == store.PhaseReady {
 		s.Phase, s.Reason = string(store.PhaseNeedsLogin), "no stored session"
 	}
-	if l.waiting.Load() {
+	if exp := l.waiting.Load(); exp != nil {
 		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
+		t := *exp
+		s.LoginExpires = &t
 	}
 	s.Sync = l.syncStatus()
 	return s, nil

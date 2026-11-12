@@ -3,9 +3,11 @@ package service_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -543,5 +545,123 @@ func TestCloseDropsClient(t *testing.T) {
 	}
 	if e.svc.HasCachedClient() {
 		t.Error("the client survived Close")
+	}
+}
+
+// A login that finishes in another process while needs-login is being
+// written is kept: the decision and the write are one step under state.lock.
+func TestHumanNeededDoesNotOverwriteAFinishedLogin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file locks are Unix only")
+	}
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	newer := e.loadState(t)
+	newer.LastLogin = t0.Add(time.Hour) // a person's login, in another process
+	statePath := filepath.Join(e.dirs.State, "state.json")
+	var landed chan error
+	e.svc.OnHumanNeeded(func() {
+		// needs-login is decided; the other process writes state.json now.
+		landed = make(chan error, 1)
+		unlock, ok, err := filelock.TryLock(filepath.Join(e.dirs.State, "state.lock"))
+		switch {
+		case err != nil:
+			landed <- err
+		case ok: // nothing holds state.lock between the decision and the write
+			defer unlock()
+			raw, err := json.MarshalIndent(newer, "", "  ")
+			if err == nil {
+				err = os.WriteFile(statePath, raw, 0o600)
+			}
+			landed <- err
+		default: // it waits for the lock, as a login's SaveState does
+			go func() { landed <- store.SaveState(e.dirs.State, newer) }()
+		}
+	})
+	_, err := e.svc.Calendars(t.Context())
+	_ = wantExit(t, err, exitcode.MustAct)
+	if landed == nil {
+		t.Fatal("needs-login was never decided")
+	}
+	if err := <-landed; err != nil {
+		t.Fatal(err)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseReady || !st.LastLogin.Equal(newer.LastLogin) {
+		t.Errorf("state = %+v, want the finished login kept", st)
+	}
+}
+
+// A state.lock held past its timeout is reported as the lock, not as an
+// unreadable state.json, and nothing is written.
+func TestHumanNeededReportsAHeldStateLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file locks are Unix only")
+	}
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	before, _ := e.files(t)
+	unlock, ok, err := filelock.TryLock(filepath.Join(e.dirs.State, "state.lock"))
+	if err != nil || !ok {
+		t.Fatalf("TryLock = %v, %v", ok, err)
+	}
+	defer unlock()
+	e.svc.SetStateTimeout(50 * time.Millisecond)
+	_, err = e.svc.Calendars(t.Context())
+	ee := wantExit(t, err, exitcode.Blocked)
+	if ee.Error() != "another pcb process holds the login state file's lock (state.lock) too long" ||
+		ee.Hint != "run the command again; if it persists, look for a stuck pcb process" {
+		t.Errorf("message %q hint %q", ee.Error(), ee.Hint)
+	}
+	if after, _ := e.files(t); !bytes.Equal(before, after) {
+		t.Errorf("state.json written without the lock:\n%s", after)
+	}
+}
+
+// afterRoundTrip runs after each response, before the client reads it.
+type afterRoundTrip func(resp *http.Response)
+
+func (a afterRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err == nil {
+		a(resp)
+	}
+	return resp, err
+}
+
+// The needs-login mark is durable: a request cancelled once the session is
+// known to have ended still writes it.
+func TestHumanNeededMarksEvenWhenTheRequestIsCancelled(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s, err := service.NewLocal(service.Options{
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: afterRoundTrip(func(resp *http.Response) {
+			if resp.StatusCode == http.StatusUnauthorized { // Proton has answered that the session ended
+				cancel()
+			}
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	_, err = s.Calendars(ctx)
+	_ = wantExit(t, err, exitcode.MustAct)
+	if ctx.Err() == nil {
+		t.Fatal("the request was not cancelled: the test proves nothing")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseNeedsLogin || st.Reason != "the Proton session has ended" {
+		t.Errorf("state = %+v, want needs-login", st)
 	}
 }

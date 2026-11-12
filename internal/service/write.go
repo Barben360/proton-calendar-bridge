@@ -389,7 +389,7 @@ func (l *Local) beginWrite(ctx context.Context, calID string) (*write, error) {
 	var typ calendar.Type
 	err := l.onWriter(func(db *cache.Cache, s *served) error {
 		w.account, w.log = s.account, s.log
-		c, err := syncedCalendar(ctx, db, calID)
+		c, err := l.syncedCalendar(ctx, db, calID)
 		typ = calendar.ParseType(c.Type)
 		w.typ = typ
 		return l.fail(err)
@@ -520,6 +520,7 @@ func (l *Local) listRows(ctx context.Context, w *write, uid string) ([]events.Ro
 		return err
 	})
 	if verify {
+		l.noteHuman(hvWrite)
 		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
 		return nil, humanVerification()
 	}
@@ -712,6 +713,9 @@ func (l *Local) PutObject(ctx context.Context, calID, name string, body []byte, 
 	if l.closed.Load() {
 		return PutResult{}, errClosed()
 	}
+	if err := l.waitingErr(); err != nil {
+		return PutResult{}, err
+	}
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return PutResult{}, err
 	}
@@ -893,6 +897,9 @@ func (l *Local) DeleteObject(ctx context.Context, calID, name string, cond Preco
 	if l.closed.Load() {
 		return errClosed()
 	}
+	if err := l.waitingErr(); err != nil {
+		return err
+	}
 	if err := l.onWriter(func(*cache.Cache, *served) error { return nil }); err != nil {
 		return err
 	}
@@ -999,6 +1006,7 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 	case humanVerificationAsked(syncErr):
 		// Asked before the call is processed, as a 429 is (ruling M4-R44):
 		// nothing applied, and never a refusal.
+		l.noteHuman(hvWrite)
 		w.log.Warn("Proton asks for a human verification: a person must complete it in the Proton web app before pcb can write", "calendar", w.calID)
 		return humanVerification()
 	case errors.As(syncErr, &ae) && !api.SessionWide(ctx, syncErr):
@@ -1065,6 +1073,7 @@ func (l *Local) execute(ctx context.Context, w *write, uid string, before cache.
 		w.log.Warn("a write is not confirmed: a row came back under other key packets than pcb sent or pinned", "calendar", w.calID, "row", v.packetRow, "field", v.packetField)
 		return notConfirmed()
 	case v.ok:
+		l.clearHuman(hvWrite)
 		if stored != nil {
 			// Proton holds the write: the answer says so (ruling M4-R43),
 			// and the next sync pass stores the rows (and pins a row the

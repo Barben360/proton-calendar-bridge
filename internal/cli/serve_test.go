@@ -12,14 +12,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -61,6 +64,18 @@ type serveRun struct {
 
 func startServe(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, args ...string) *serveRun {
 	t.Helper()
+	return startServeWith(t, r, wrap, nil, args...)
+}
+
+// startServeWith is startServe with sigs, when set, as the signals pcb
+// serve subscribes to (IO.Signals).
+func startServeWith(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, sigs chan os.Signal, args ...string) *serveRun {
+	t.Helper()
+	// The state directory pcb serve binds its control socket in (a real
+	// service makes it before it is ready).
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s := &serveRun{t: t, requested: make(chan string, 1), addr: make(chan net.Addr, 1), code: make(chan exitcode.Code, 1),
 		out: &syncBuffer{}, errb: &syncBuffer{}}
 	io := cli.IO{Stdout: s.out, Stderr: s.errb, Term: r.term, Env: func(k string) string { return r.env[k] },
@@ -80,6 +95,9 @@ func startServe(t *testing.T, r *rig, wrap func(net.Listener) net.Listener, args
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.svc, nil }
 	case r.mk != nil:
 		io.NewService = func(context.Context, func(string) string) (service.API, error) { return r.mk() }
+	}
+	if sigs != nil {
+		io.Signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	s.stop = cancel
@@ -158,6 +176,9 @@ type serveStub struct {
 	stopOnCancel error
 	// passes, when set, are the passes Serve reports after its first one.
 	passes []service.WatchPass
+	// hang, when set, makes Serve outlive its context until it is closed:
+	// a sync loop that does not stop. hung is closed once it hangs.
+	hang, hung chan struct{}
 
 	// blockCheck makes CheckClient (the first call of every authenticated
 	// request) wait, after closing checkEntered, until checkRelease is
@@ -187,6 +208,10 @@ func (s *serveStub) Serve(ctx context.Context, o service.ServeOptions) error {
 	}
 	select {
 	case <-ctx.Done():
+		if s.hang != nil {
+			close(s.hung)
+			<-s.hang
+		}
 		return s.stopOnCancel
 	case err := <-s.stopWith:
 		o.OnPass(service.WatchPass{Err: err})
@@ -273,6 +298,28 @@ func TestServeRefusesWhenLoggedOut(t *testing.T) {
 	s.neverListened()
 }
 
+// Logged in with no client (all removed): a login would not run again, so
+// the hint is client add (final review I2).
+func TestServeIntroHintsClientAddWhenLoggedIn(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.statusPhase = "ready"
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	s.listening()
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d, want 0\nstderr: %s", code, s.errb.String())
+	}
+	if want := "No CalDAV client: run pcb client add NAME, then use its password in Thunderbird."; !strings.Contains(s.out.String(), want) {
+		t.Errorf("stdout lacks %q: %q", want, s.out.String())
+	}
+	if strings.Contains(s.out.String(), "pcb login") {
+		t.Errorf("a logged-in daemon tells to log in: %q", s.out.String())
+	}
+}
+
 func TestServeRefusesJSONAndABadListen(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{{"--json"}, {"--listen", "1080"}, {"--listen", ":1080"}, {"--listen", "127.0.0.1:99999"}} {
@@ -323,8 +370,9 @@ func TestServeStopsOnSignal(t *testing.T) {
 	if want := "Thunderbird URL: http://localhost:" + port + "/"; lines[0] != want {
 		t.Errorf("first line %q, want %q", lines[0], want)
 	}
-	if !strings.Contains(s.out.String(), "pcb client add NAME") {
-		t.Errorf("stdout lacks the client hint with no client: %q", s.out.String())
+	// Not logged in (decision 0013): the login creates the client default.
+	if want := "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password."; !strings.Contains(s.out.String(), want) {
+		t.Errorf("stdout lacks %q with no client and no login: %q", want, s.out.String())
 	}
 	if strings.Contains(s.out.String(), "fingerprint") {
 		t.Errorf("plain HTTP printed a fingerprint: %q", s.out.String())
@@ -767,4 +815,441 @@ func TestServeWarnsAboutCertificatesToCheck(t *testing.T) {
 			t.Errorf("stderr = %q", errs)
 		}
 	})
+}
+
+// Ruling M5-Rpre8: [log] level and --log-level pick what pcb serve logs; the
+// flag wins. "listener started" is an info line.
+func TestServeHonoursTheLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, config string
+		args         []string
+		wantInfo     bool
+	}{
+		{"default is info", "", nil, true},
+		{"flag warn", "", []string{"--log-level", "warn"}, false},
+		{"config warn", "[log]\nlevel = \"warn\"\n", nil, false},
+		{"flag warn over config debug", "[log]\nlevel = \"debug\"\n", []string{"--log-level", "warn"}, false},
+		{"flag info over config warn", "[log]\nlevel = \"warn\"\n", []string{"--log-level", "info"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := newServeStub()
+			r := stubRig(t, &stub.stubAPI)
+			r.svc = stub
+			if tc.config != "" {
+				f, err := os.OpenFile(config.Path(r.dirs), os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.WriteString("\n" + tc.config); err != nil {
+					t.Fatal(err)
+				}
+				_ = f.Close()
+			}
+			s := startServe(t, r, nil, tc.args...)
+			s.listening()
+			s.stop()
+			if code := s.exit(); code != exitcode.OK {
+				t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+			}
+			logs := s.errb.String()
+			if got := strings.Contains(logs, "listener started"); got != tc.wantInfo {
+				t.Errorf("\"listener started\" logged = %v, want %v:\n%s", got, tc.wantInfo, logs)
+			}
+		})
+	}
+}
+
+func TestServeRefusesABadLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, level := range []string{"loud", "INFO", ""} {
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, nil, "--log-level", level)
+		if code := s.exit(); code != exitcode.Usage {
+			t.Errorf("--log-level %q: exit %d, want 2", level, code)
+		}
+		s.neverListened()
+		select {
+		case <-stub.served:
+			t.Errorf("--log-level %q: the service ran before the usage error", level)
+		default:
+		}
+	}
+}
+
+// pcb serve answers on its control socket while it serves, publishes its
+// CalDAV listener there, and removes the socket when it stops.
+func TestServeServesTheControlSocket(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	stub.statusPhase = "ready"
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	s := startServe(t, r, nil, "--log-level", "debug")
+	addr := s.listening()
+
+	c, err := ctl.Dial(t.Context(), r.dirs.Socket())
+	if err != nil {
+		t.Fatalf("Dial while serving: %v", err)
+	}
+	st, err := c.Status(t.Context())
+	_ = c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(addr)
+	if st.Phase != "ready" || st.Daemon == nil || st.Daemon.PID != os.Getpid() || st.Daemon.LogLevel != "debug" ||
+		st.Daemon.Socket != r.dirs.Socket() || st.Daemon.Version == "" {
+		t.Errorf("status = %+v, daemon %+v", st, st.Daemon)
+	}
+	if st.Listener == nil || st.Listener.URL != "http://localhost:"+port+"/" || st.Listener.TLS || !strings.HasSuffix(st.Listener.Addr, ":"+port) {
+		t.Errorf("listener = %+v, want the CalDAV one on port %s", st.Listener, port)
+	}
+	if fi, err := os.Lstat(r.dirs.Socket()); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("socket: %v, %v; want mode 0600", fi, err)
+	}
+
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+	}
+	if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the socket is still there after the stop: %v", err)
+	}
+	if _, err := ctl.Dial(t.Context(), r.dirs.Socket()); !errors.Is(err, ctl.ErrNoDaemon) {
+		t.Errorf("Dial after the stop: %v, want ErrNoDaemon", err)
+	}
+}
+
+// The socket's directory must grant group and others nothing: pcb serve
+// exits 20 before it binds CalDAV.
+func TestServeRefusesAnOpenStateDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(r.dirs.State, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	s := startServe(t, r, nil)
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if want := "Hint: chmod 700 " + r.dirs.State; !strings.Contains(s.errb.String(), want) {
+		t.Errorf("stderr = %q, want %q", s.errb.String(), want)
+	}
+	s.neverListened()
+}
+
+// A state directory too long for a socket path: exit 20 with the
+// constraint's hint, before CalDAV binds.
+func TestServeRefusesATooLongSocketPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	base := filepath.Dir(r.dirs.State)
+	long := filepath.Join(base, strings.Repeat("s", 120-len(base)))
+	r.env["XDG_STATE_HOME"], r.dirs.State = long, filepath.Join(long, "pcb")
+	s := startServe(t, r, nil)
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if want := "Hint: set PCB_STATE_DIR to a shorter path"; !strings.Contains(s.errb.String(), want) {
+		t.Errorf("stderr = %q, want %q", s.errb.String(), want)
+	}
+	s.neverListened()
+}
+
+// The socket is removed on every exit after Ready, not only on a signal:
+// the sync loop stopping on an error, and the CalDAV listener failing.
+func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	t.Run("sync error", func(t *testing.T) {
+		t.Parallel()
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, nil)
+		s.listening()
+		if _, err := os.Lstat(r.dirs.Socket()); err != nil {
+			t.Fatalf("no socket while serving: %v", err)
+		}
+		stub.stopWith <- &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("Proton ended the session"), Hint: "run pcb login"}
+		if code := s.exit(); code != exitcode.MustAct {
+			t.Fatalf("exit %d, want 10\nstderr: %s", code, s.errb.String())
+		}
+		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the socket outlives a sync error: %v", err)
+		}
+	})
+	t.Run("listener failure", func(t *testing.T) {
+		t.Parallel()
+		stub := newServeStub()
+		r := stubRig(t, &stub.stubAPI)
+		r.svc = stub
+		s := startServe(t, r, func(ln net.Listener) net.Listener { return failingListener{ln} })
+		if code := s.exit(); code != exitcode.Blocked {
+			t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
+		}
+		if !strings.Contains(s.errb.String(), "control socket started") {
+			t.Fatalf("the control socket never started:\n%s", s.errb.String())
+		}
+		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the socket outlives a listener failure: %v", err)
+		}
+	})
+}
+
+// fastPoll is the real service with a short login poll (poll, 0: 20 ms),
+// reporting Serve's states and passes to channels (the CLI's own callbacks
+// still run).
+type fastPoll struct {
+	*service.Local
+	states chan service.ServeState
+	passes chan service.WatchPass
+	poll   time.Duration
+	run    *serveRun // set by serveWaiting
+}
+
+func (f *fastPoll) Serve(ctx context.Context, o service.ServeOptions) error {
+	o.LoginPoll = 20 * time.Millisecond
+	if f.poll > 0 {
+		o.LoginPoll = f.poll
+	}
+	onState, onPass := o.OnState, o.OnPass
+	o.OnState = func(s service.ServeState) {
+		if onState != nil {
+			onState(s)
+		}
+		f.states <- s
+	}
+	o.OnPass = func(p service.WatchPass) {
+		if onPass != nil {
+			onPass(p)
+		}
+		select {
+		case f.passes <- p:
+		default:
+		}
+	}
+	return f.Local.Serve(ctx, o)
+}
+
+func wantServeState(t *testing.T, states chan service.ServeState, want service.ServeState) {
+	t.Helper()
+	select {
+	case s := <-states:
+		if s != want {
+			t.Fatalf("Serve reported %q, want %q", s, want)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Serve never reported %q", want)
+	}
+}
+
+// propfindHome sends Thunderbird's home-set PROPFIND to addr, with the
+// client's password when pw is set.
+func propfindHome(t *testing.T, addr, pw string) (*http.Response, string) {
+	t.Helper()
+	body := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>`
+	req, err := http.NewRequestWithContext(t.Context(), "PROPFIND", "http://"+addr+"/dav/calendars/me/", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Depth", "1")
+	req.Header.Set("Content-Type", "application/xml")
+	if pw != "" {
+		req.SetBasicAuth("me@example.org", pw)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(got)
+}
+
+// Review Focus 2 (rulings M5-P8, M5-P9): Thunderbird polling a pcb serve
+// --wait-for-login that has no login gets 503 + Retry-After: 30 (never a
+// 4xx), 401 without credentials; CTL says it waits; after a pcb login by
+// another process, the same request gets 207 from the same pcb serve.
+func TestServeWaitForLoginAnswers503ThenServes(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	work := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	r.f.AddEvent(work, protontest.Event{UID: "a@x", Start: baseTime, End: baseTime + 3600})
+	sec := addClient(t, r, "Thunderbird")
+	fp := &fastPoll{states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16)}
+	r.mk = func() (service.API, error) { // passes wait for the next interval: no busy loop
+		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+		if err != nil {
+			return nil, err
+		}
+		l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
+			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
+		fp.Local = l
+		return fp, err
+	}
+	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+	addr := s.listening()
+	r.useLocal() // pcb login below runs as another process would
+	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+
+	resp, _ := propfindHome(t, addr, sec.Password)
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "30" {
+		t.Fatalf("PROPFIND while waiting: %d, Retry-After %q; want 503, 30", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if resp, _ := propfindHome(t, addr, ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("PROPFIND without credentials while waiting: %d, want 401", resp.StatusCode)
+	}
+	if runtime.GOOS != "windows" {
+		c, err := ctl.Dial(t.Context(), r.dirs.Socket())
+		if err != nil {
+			t.Fatalf("Dial while waiting: %v", err)
+		}
+		st, err := c.Status(t.Context())
+		_ = c.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		needsLogin := false
+		for _, a := range st.Alerts {
+			needsLogin = needsLogin || a.Code == "needs-login"
+		}
+		if st.Health == nil || st.Health.Serve != service.ServeWaitingForLogin || !needsLogin {
+			t.Errorf("CTL status while waiting: health %+v, alerts %+v; want waiting-for-login and needs-login", st.Health, st.Alerts)
+		}
+	}
+	out := s.out.String()
+	if lines := strings.Split(out, "\n"); !strings.HasPrefix(lines[0], "Thunderbird URL: http://localhost:") ||
+		!strings.Contains(out, "\nWaiting for a login: run pcb login\n") {
+		t.Errorf("stdout = %q, want the intro then the waiting line", out)
+	}
+	if !strings.Contains(s.errb.String(), "waiting for a login") {
+		t.Errorf("the wait is not logged:\n%s", s.errb.String())
+	}
+
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	wantServeState(t, fp.states, service.ServeServing)
+	select {
+	case p := <-fp.passes:
+		if p.Err != nil {
+			t.Fatalf("first pass after the login: %v", p.Err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no pass after the login")
+	}
+	resp, got := propfindHome(t, addr, sec.Password)
+	if resp.StatusCode != http.StatusMultiStatus || !strings.Contains(got, "<D:displayname>Work</D:displayname>") {
+		t.Fatalf("PROPFIND after the login = %d\n%s", resp.StatusCode, got)
+	}
+	select {
+	case c := <-s.code:
+		t.Fatalf("pcb serve exited %d around the login", c)
+	default:
+	}
+	if n := strings.Count(s.out.String(), "Thunderbird URL:"); n != 1 {
+		t.Errorf("the intro printed %d times, want once (no restart)", n)
+	}
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
+	}
+}
+
+// Ruling M5-P22: a second SIGINT or SIGTERM while pcb serve stops (here the
+// sync loop never ends) exits 20 at once.
+func TestSecondSignalForcesExit(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.hang, stub.hung = make(chan struct{}), make(chan struct{})
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	closed := make(chan struct{})
+	sigs := make(chan os.Signal, 2)
+	s := startServeWith(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} }, sigs)
+	t.Cleanup(func() { close(stub.hang) })
+	s.listening()
+	sigs <- syscall.SIGTERM // the stop begins: the listener drains, then the loop is cancelled and waited for
+	<-closed
+	<-stub.hung
+	select {
+	case c := <-s.code:
+		t.Fatalf("pcb serve exited %d after one signal, before its sync loop ended", c)
+	default:
+	}
+	sigs <- syscall.SIGINT
+	if code := s.exit(); code != exitcode.Blocked {
+		t.Fatalf("exit %d after the second signal, want 20\nstderr: %s", code, s.errb.String())
+	}
+	if want := "Hint: the sync loop was cut; run pcb serve again"; !strings.Contains(s.errb.String(), want) {
+		t.Errorf("stderr = %q, want %q", s.errb.String(), want)
+	}
+	select {
+	case <-stub.served:
+		t.Error("the sync loop ended: the test did not reach the forced exit")
+	default:
+	}
+}
+
+// Ruling M5-P22, one real signal: it reaches both Execute's NotifyContext
+// (the end of the context) and IO.Signals, and is still one signal: the
+// listener drains (the request in flight gets its answer) and pcb serve
+// exits 0, never 20.
+func TestOneSignalOnBothPathsStopsCleanly(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.blockCheck = true
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	closed := make(chan struct{})
+	sigs := make(chan os.Signal) // unbuffered: a send returns once pcb serve took it
+	s := startServeWith(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} }, sigs)
+	addr := s.listening()
+	status := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(context.Background(), "PROPFIND", "http://"+addr+"/dav/calendars/me/", nil)
+		req.SetBasicAuth("u", "p")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	<-stub.checkEntered
+	s.stop()                // SIGTERM through NotifyContext
+	<-closed                // the drain has begun
+	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
+	close(stub.checkRelease)
+	if got := <-status; got != http.StatusUnauthorized {
+		t.Errorf("the request in flight got %d, want its own answer (401)", got)
+	}
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d after one signal, want 0\nstderr: %s", code, s.errb.String())
+	}
+	if logs := s.errb.String(); !strings.Contains(logs, "listener stopped") || strings.Contains(logs, "cut") {
+		t.Errorf("logs = %s; want the drain to end, nothing cut", logs)
+	}
 }

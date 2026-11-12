@@ -65,3 +65,55 @@ func (l *Local) SetPreSendBudget(d time.Duration) { l.preSend = d }
 // Proton answered as created, before the read-back) and "store" (the rows
 // read back); a nil return lets the step run. Set it before Serve.
 func (l *Local) SetWriteFault(fn func(stage string) error) { l.writeFault = fn }
+
+// ErrorClass exposes errorClass.
+func ErrorClass(err error) string { return errorClass(err) }
+
+// MapError exposes mapError with no key file named: the mapped error carries
+// its class, as a pass's failure does.
+func MapError(err error) error { return mapError(err, "") }
+
+// WakePending reports whether a wake waits in Serve's channel, not yet taken
+// by the loop.
+func (l *Local) WakePending() bool {
+	v := l.liveState()
+	return v != nil && len(v.wake) > 0
+}
+
+// WakesSent counts the wakes Serve's loop was sent (a request that found it idle).
+func (l *Local) WakesSent() int64 {
+	if v := l.liveState(); v != nil {
+		return v.wakes.Load()
+	}
+	return 0
+}
+
+// OnHumanNeeded makes f run when a needs-login mark is decided (state.json
+// still describes the failed login), before it is written. Set it before
+// the first call.
+func (l *Local) OnHumanNeeded(f func()) { l.humanHook = f }
+
+// SetStateTimeout bounds humanNeeded's wait for state.lock.
+func (l *Local) SetStateTimeout(d time.Duration) { l.stateTimeout = d }
+
+// OnLoginCheck makes f run at each login check of a Serve waiting for a
+// login (the first one, each poll and each wake). Set it before Serve.
+func (l *Local) OnLoginCheck(f func()) { l.checkHook = f }
+
+// OnWipe makes f run in Logout just before the local wipe.
+func (l *Local) OnWipe(f func()) { l.wipeHook = f }
+
+// BeforeServe makes f run each time a Serve waiting for a login found one
+// ready, before it opens the cache. Set it before Serve.
+func (l *Local) BeforeServe(f func()) { l.serveHook = f }
+
+// SetLoginPollTimer replaces the timer between two login checks: f gets the
+// interval and returns the channel that ends the wait. Set it before Serve.
+func (l *Local) SetLoginPollTimer(f func(d time.Duration) <-chan time.Time) { l.pollHook = f }
+
+// ServingHandle reports whether Serve holds its cache handle for the reads.
+func (l *Local) ServingHandle() bool {
+	l.smu.RLock()
+	defer l.smu.RUnlock()
+	return l.served != nil
+}

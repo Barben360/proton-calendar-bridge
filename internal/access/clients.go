@@ -1,7 +1,9 @@
 // Package access holds the CalDAV app passwords: who may read the bridge.
 // Each client (a Thunderbird, a phone) has a name and a random password
-// printed once by Add; only sha256(salt ‖ password) is stored, in
-// <state>/clients.json (0600, written atomically).
+// made by Add. <state>/clients.json (0600, written atomically) keeps
+// sha256(salt ‖ password) for the constant-time check and, since decision
+// 0013, a copy of the password sealed by the Store's Sealer (the key of
+// secrets.sealed), so that it can be shown again (Reveal).
 package access
 
 import (
@@ -33,12 +35,35 @@ var (
 	ErrInvalidName = errors.New("invalid client name")
 	ErrDuplicate   = errors.New("a client with this name already exists")
 	ErrNotFound    = errors.New("no such client")
+	// ErrNotRecoverable is Reveal's refusal: the cause it wraps says why
+	// (ErrNoSealedCopy, or the sealer's error: seal.ErrNoKey, seal.ErrCorrupt...).
+	ErrNotRecoverable = errors.New("the client's password cannot be shown")
+	// ErrNoSealedCopy: the client was made before pcb kept a sealed copy
+	// (a version 1 record), or with no Sealer; only rotating it gives one.
+	ErrNoSealedCopy = errors.New("no sealed copy of it is kept")
+	// ErrStale: the sealed copy opens but is not the password the hash
+	// checks (a hand-edited file).
+	ErrStale = errors.New("its sealed copy does not match its hash")
+	// ErrSeal: a new password could not be sealed (the Sealer's error is
+	// wrapped too); nothing was stored.
+	ErrSeal = errors.New("the client's password could not be sealed")
 )
+
+// Sealer seals a client's password beside its hash; seal.Sealer satisfies
+// it. Name is in the AAD.
+type Sealer interface {
+	Name() string
+	Seal(plaintext, aad []byte) ([]byte, error)
+}
+
+// aad binds a sealed password to its sealer and its client: a sealed copy
+// moved to another record does not open.
+func aad(sealer, id string) []byte { return []byte("pcb-clients/v2/" + sealer + "/" + id) }
 
 const (
 	fileName    = "clients.json"
 	lockName    = "clients.lock"
-	fileVersion = 1
+	fileVersion = 2 // written; version 1 (no sealed copies) still reads
 	maxNameLen  = 64
 	passwordLen = 24 // bytes of entropy
 	saltLen     = 16
@@ -55,14 +80,17 @@ type Client struct {
 }
 
 type record struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Salt     string    `json:"salt"` // base64
-	Hash     string    `json:"hash"` // base64 of sha256(salt ‖ password)
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Salt string `json:"salt"` // base64
+	Hash string `json:"hash"` // base64 of sha256(salt ‖ password)
+	// Sealed is base64 of the password sealed with aad(sealer, ID); empty
+	// in a version 1 record, which stays valid but cannot be shown.
+	Sealed   string    `json:"sealed,omitempty"`
 	Created  time.Time `json:"created"`
 	LastUsed time.Time `json:"last_used,omitzero"`
 
-	salt, hash []byte // decoded
+	salt, hash, sealed []byte // decoded
 }
 
 type fileFormat struct {
@@ -96,6 +124,10 @@ func (a fileState) same(b fileState) bool {
 type Store struct {
 	dir string
 	now func() time.Time
+
+	// Sealer, set before first use, seals each new password beside its
+	// hash (Add, AddFirst, Rotate); nil keeps the hash only.
+	Sealer Sealer
 
 	mu      sync.Mutex
 	loaded  bool
@@ -158,16 +190,20 @@ func (s *Store) refresh(force bool) error {
 		s.loadErr = errors.New("client list is not valid JSON")
 		return s.loadErr
 	}
-	if f.Version != fileVersion {
-		s.loadErr = fmt.Errorf("client list has format version %d, this pcb reads %d", f.Version, fileVersion)
+	if f.Version != 1 && f.Version != fileVersion {
+		s.loadErr = fmt.Errorf("client list has format version %d, this pcb reads 1 and %d", f.Version, fileVersion)
 		return s.loadErr
 	}
 	for i := range f.Clients {
 		r := &f.Clients[i]
-		var e1, e2 error
+		var e1, e2, e3 error
 		r.salt, e1 = base64.StdEncoding.DecodeString(r.Salt)
 		r.hash, e2 = base64.StdEncoding.DecodeString(r.Hash)
-		if e1 != nil || e2 != nil || len(r.hash) != sha256.Size {
+		r.sealed, e3 = base64.StdEncoding.DecodeString(r.Sealed)
+		if f.Version == 1 && r.Sealed != "" {
+			e3 = errors.New("a sealed copy in a version 1 file")
+		}
+		if e1 != nil || e2 != nil || e3 != nil || len(r.hash) != sha256.Size {
 			s.loadErr = errors.New("client list holds a malformed entry")
 			return s.loadErr
 		}
@@ -263,41 +299,201 @@ func randomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// Add creates a client named name and returns its ID and its password, which
-// is shown this once: only a salted hash is stored.
+// credential is a new password with its salt, hash and sealed copy for
+// the client id.
+type credential struct {
+	password           string
+	salt, hash, sealed string // base64, as stored
+}
+
+// newCredential makes a random password for client id, sealed with s.Sealer
+// when there is one. A sealing failure is returned: a client is never
+// stored without the copy the Store was asked to keep.
+func (s *Store) newCredential(id string) (credential, error) {
+	raw, err := randomBytes(passwordLen)
+	if err != nil {
+		return credential{}, err
+	}
+	salt, err := randomBytes(saltLen)
+	if err != nil {
+		return credential{}, err
+	}
+	c := credential{
+		password: base64.RawURLEncoding.EncodeToString(raw),
+		salt:     base64.StdEncoding.EncodeToString(salt),
+	}
+	c.hash = base64.StdEncoding.EncodeToString(digest(salt, c.password))
+	if s.Sealer != nil {
+		sealed, err := s.Sealer.Seal([]byte(c.password), aad(s.Sealer.Name(), id))
+		if err != nil {
+			return credential{}, fmt.Errorf("%w: %w", ErrSeal, err)
+		}
+		c.sealed = base64.StdEncoding.EncodeToString(sealed)
+	}
+	return c, nil
+}
+
+func newID() (string, error) {
+	idb, err := randomBytes(8)
+	if err != nil {
+		return "", err
+	}
+	return "c" + hex.EncodeToString(idb), nil
+}
+
+// newRecord is a client named name with a new credential.
+func (s *Store) newRecord(name string) (record, string, error) {
+	id, err := newID()
+	if err != nil {
+		return record{}, "", err
+	}
+	c, err := s.newCredential(id)
+	if err != nil {
+		return record{}, "", err
+	}
+	return record{
+		ID: id, Name: name, Created: s.now().UTC().Truncate(time.Second),
+		Salt: c.salt, Hash: c.hash, Sealed: c.sealed,
+	}, c.password, nil
+}
+
+// Add creates a client named name and returns its ID and its password. The
+// file keeps a salted hash and, with a Sealer, a sealed copy (Reveal).
 func (s *Store) Add(ctx context.Context, name string) (id, password string, err error) {
 	if err := ValidateName(name); err != nil {
 		return "", "", err
 	}
-	raw, err := randomBytes(passwordLen)
+	rec, password, err := s.newRecord(name)
 	if err != nil {
 		return "", "", err
 	}
-	salt, err := randomBytes(saltLen)
-	if err != nil {
-		return "", "", err
-	}
-	idb, err := randomBytes(8)
-	if err != nil {
-		return "", "", err
-	}
-	id, password = "c"+hex.EncodeToString(idb), base64.RawURLEncoding.EncodeToString(raw)
 	err = s.mutate(ctx, func(cs []record) ([]record, bool, error) {
 		for _, c := range cs {
 			if strings.EqualFold(c.Name, name) {
 				return nil, false, fmt.Errorf("%w: %q", ErrDuplicate, c.Name)
 			}
 		}
-		h := digest(salt, password)
-		return append(cs[:len(cs):len(cs)], record{
-			ID: id, Name: name, Created: s.now().UTC().Truncate(time.Second),
-			Salt: base64.StdEncoding.EncodeToString(salt), Hash: base64.StdEncoding.EncodeToString(h),
-		}), true, nil
+		return append(cs[:len(cs):len(cs)], rec), true, nil
 	})
 	if err != nil {
 		return "", "", err
 	}
-	return id, password, nil
+	return rec.ID, password, nil
+}
+
+// AddFirst adds a client named name only when the list holds no client,
+// deciding under the clients lock, so racing callers (in any process) add
+// it once. added is false, with no error, when a client exists.
+func (s *Store) AddFirst(ctx context.Context, name string) (id, password string, added bool, err error) {
+	if err := ValidateName(name); err != nil {
+		return "", "", false, err
+	}
+	rec, password, err := s.newRecord(name)
+	if err != nil {
+		return "", "", false, err
+	}
+	err = s.mutate(ctx, func(cs []record) ([]record, bool, error) {
+		if len(cs) > 0 {
+			return nil, false, nil
+		}
+		added = true
+		return []record{rec}, true, nil
+	})
+	if err != nil || !added {
+		return "", "", false, err
+	}
+	return rec.ID, password, true, nil
+}
+
+// find is the index of the client whose ID is idOrName, or else whose name
+// is (case-insensitively); -1 when none.
+func find(cs []record, idOrName string) int {
+	for i, c := range cs {
+		if c.ID == idOrName {
+			return i
+		}
+	}
+	for i, c := range cs {
+		if strings.EqualFold(c.Name, idOrName) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Get returns the client whose ID is idOrName, or else whose name is
+// (case-insensitively).
+func (s *Store) Get(idOrName string) (Client, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refresh(false); err != nil {
+		return Client{}, err
+	}
+	at := find(s.clients, idOrName)
+	if at < 0 {
+		return Client{}, fmt.Errorf("%w: %q", ErrNotFound, idOrName)
+	}
+	return s.clients[at].client(), nil
+}
+
+// Rotate gives the client whose ID is idOrName, or else whose name is, a
+// new password: a new salt, hash and sealed copy in one write. The old
+// password fails the next check of every Store (they reload on change). A
+// version 1 record becomes recoverable.
+func (s *Store) Rotate(ctx context.Context, idOrName string) (Client, string, error) {
+	var out Client
+	var password string
+	err := s.mutate(ctx, func(cs []record) ([]record, bool, error) {
+		at := find(cs, idOrName)
+		if at < 0 {
+			return nil, false, fmt.Errorf("%w: %q", ErrNotFound, idOrName)
+		}
+		c, err := s.newCredential(cs[at].ID)
+		if err != nil {
+			return nil, false, err
+		}
+		next := append([]record(nil), cs...)
+		next[at].Salt, next[at].Hash, next[at].Sealed = c.salt, c.hash, c.sealed
+		out, password = next[at].client(), c.password
+		return next, true, nil
+	})
+	if err != nil {
+		return Client{}, "", err
+	}
+	return out, password, nil
+}
+
+// Reveal opens the sealed copy of client id's password with open (the
+// Store's Sealer's Open). It fails with ErrNotFound for an unknown ID, and
+// with ErrNotRecoverable wrapping the cause for a record with no sealed
+// copy (ErrNoSealedCopy), one the key cannot open (open's error), or one
+// that is not the password the hash checks. Errors never carry a password.
+func (s *Store) Reveal(id string, open func(sealed, aad []byte) ([]byte, error)) (password string, err error) {
+	s.mu.Lock()
+	if err := s.refresh(false); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	at := find(s.clients, id)
+	if at < 0 || s.clients[at].ID != id {
+		s.mu.Unlock()
+		return "", fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
+	r := s.clients[at]
+	s.mu.Unlock()
+	if len(r.sealed) == 0 || s.Sealer == nil {
+		return "", fmt.Errorf("%w: %w", ErrNotRecoverable, ErrNoSealedCopy)
+	}
+	plain, err := open(r.sealed, aad(s.Sealer.Name(), r.ID))
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrNotRecoverable, err)
+	}
+	password = string(plain)
+	clear(plain)
+	if subtle.ConstantTimeCompare(digest(r.salt, password), r.hash) != 1 {
+		return "", fmt.Errorf("%w: %w", ErrNotRecoverable, ErrStale)
+	}
+	return password, nil
 }
 
 func (r record) client() Client {
@@ -323,21 +519,7 @@ func (s *Store) List() ([]Client, error) {
 func (s *Store) Remove(ctx context.Context, idOrName string) (Client, error) {
 	var gone Client
 	err := s.mutate(ctx, func(cs []record) ([]record, bool, error) {
-		at := -1
-		for i, c := range cs {
-			if c.ID == idOrName {
-				at = i
-				break
-			}
-		}
-		if at < 0 {
-			for i, c := range cs {
-				if strings.EqualFold(c.Name, idOrName) {
-					at = i
-					break
-				}
-			}
-		}
+		at := find(cs, idOrName)
 		if at < 0 {
 			return nil, false, fmt.Errorf("%w: %q", ErrNotFound, idOrName)
 		}
