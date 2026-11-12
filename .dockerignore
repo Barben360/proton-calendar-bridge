@@ -6,6 +6,6 @@ bin
 spec
 **/*.md
 !README.md
-.env*
+**/.env*
 **/*.sealed
 **/*.key
