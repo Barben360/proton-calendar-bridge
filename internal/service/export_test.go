@@ -136,3 +136,19 @@ func (l *Local) SkipSRP(session func(username string) (api.Tokens, string)) {
 // SetKeyPassHook makes fn see the key passphrase a login derives, before it
 // is sealed (to check that it is zeroed after). Set it before Login.
 func (l *Local) SetKeyPassHook(fn func(keyPass []byte)) { l.keyPassHook = fn }
+
+// SkipSRP makes the logins of every Local the Hub holds or opens take their
+// session from session instead of SRP, as Local.SkipSRP does. nil restores
+// SRP.
+func (h *Hub) SkipSRP(session func(username string) (api.Tokens, string)) {
+	h.mu.Lock()
+	h.onOpen = func(l *Local) { l.SkipSRP(session) }
+	locals := make([]*Local, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		locals = append(locals, a.local)
+	}
+	h.mu.Unlock()
+	for _, l := range locals {
+		l.SkipSRP(session)
+	}
+}

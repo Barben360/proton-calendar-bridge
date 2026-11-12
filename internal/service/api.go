@@ -178,6 +178,32 @@ type LoginResult struct {
 	// DefaultClientCreated: this login created the CalDAV client named
 	// default, the list being empty (decision 0013; pcb client show).
 	DefaultClientCreated bool `json:"default_client_created,omitempty"`
+	// Account is the local ID of the account the login is for (Hub only).
+	Account string `json:"account"`
+}
+
+// AccountInfo is one account of a Hub. ID is its local ID; Address its
+// Proton address (the username it was added with); Phase is Status.Phase.
+// Pending: an add that has not completed its first login (it waits for a
+// CAPTCHA or a 2FA code); it does not count for the account selector.
+// CalDAV is the account's CalDAV switch. Stopped is set while its serve
+// loop is parked on an error a login cannot fix.
+type AccountInfo struct {
+	ID      string    `json:"id"`
+	Address string    `json:"address"`
+	Phase   string    `json:"phase"`
+	Pending bool      `json:"pending"`
+	CalDAV  bool      `json:"caldav"`
+	Stopped *StopInfo `json:"stopped,omitempty"`
+}
+
+// StopInfo is why and when an account's serve loop stopped: the exit code,
+// message and hint of its error.
+type StopInfo struct {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Hint    string    `json:"hint"`
+	At      time.Time `json:"at"`
 }
 
 // LogoutRequest asks for a logout. Discard forgets a stored session this

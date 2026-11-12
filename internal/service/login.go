@@ -47,12 +47,17 @@ func (pl *pendingLogin) release() {
 	clear(pl.password)
 }
 
+// loginWho is whom a login waiting for its code is for: the username it
+// was given and the Proton user ID SRP answered.
+type loginWho struct{ username, userID string }
+
 // hold makes pl the login waiting for its code. It holds mu. The first time,
 // it arms the expiry timer; a rejected code keeps the first deadline.
 func (l *Local) hold(pl *pendingLogin) {
 	l.pending = pl
 	exp := pl.expires
 	l.waiting.Store(&exp)
+	l.who.Store(&loginWho{username: pl.username, userID: pl.p.UserID})
 	if pl.stop == nil {
 		pl.stop = l.o.AfterFunc(pendingTTL, func() { l.expire(pl) })
 	}
@@ -62,7 +67,11 @@ func (l *Local) hold(pl *pendingLogin) {
 func (l *Local) unhold() {
 	l.pending = nil
 	l.waiting.Store(nil)
+	l.who.Store(nil)
 }
+
+// waitingLogin is whom the login waiting for its code is for, nil if none.
+func (l *Local) waitingLogin() *loginWho { return l.who.Load() }
 
 // expire ends pl once pendingTTL has passed: its half session revoked
 // (best effort, within revokeTimeout), its password zeroed, and SubmitTOTP

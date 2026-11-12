@@ -85,6 +85,7 @@ type Local struct {
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
 	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
+	who     atomic.Pointer[loginWho]  // pending's username and user ID while pending != nil, readable without mu
 	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
 	closed  atomic.Bool
 

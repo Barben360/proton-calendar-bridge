@@ -1,0 +1,755 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
+)
+
+const (
+	// pendingExpiry is how long a pending add (stopped by a CAPTCHA) is
+	// kept: the first Hub open after it removes the account (design §4.3).
+	pendingExpiry = 24 * time.Hour
+	// abandonedAge is the age past which OpenHub removes an abandoned add's
+	// directory (ruling R11): a younger one may be another process's add,
+	// waiting for its 2FA code for up to pendingTTL.
+	abandonedAge = pendingTTL + time.Minute
+	// layoutLockName serialises the migrations of the state layout.
+	layoutLockName = "layout.lock"
+)
+
+// HubOptions build a Hub: the Options every account's Local shares, with
+// Dirs.State the state root. GuardDir is the root and the Limiter and the
+// Sealer are one for every account.
+type HubOptions struct {
+	Options
+}
+
+// Hub holds every account of a state directory, one Local per account
+// directory (accounts/<local-id>/). It adds an account by login, signs one
+// out, removes it and switches its CalDAV adapter.
+//
+// An account is pending while its add has not completed a first login:
+// stopped by a CAPTCHA (it expires pendingExpiry after its creation), or
+// waiting for its 2FA code in this Hub. An abandoned add (no Proton user,
+// never logged in, no data, no CAPTCHA and no 2FA code awaited here) is
+// removed lazily (ruling R11).
+type Hub struct {
+	o    Options // shared by every Local; Dirs.State is the root
+	root string
+
+	logins atomic.Bool // a Login or SubmitTOTP runs: another is refused
+	ops    sync.Mutex  // serialises what changes the accounts: logins, sign-outs, removals, switches, sweeps
+
+	mu       sync.Mutex // guards accounts, closed, changes and onOpen; never held across a Local call
+	accounts map[string]*hubAccount
+	closed   bool
+	changes  []func()
+	onOpen   func(*Local) // tests only: runs on every Local the Hub opens
+}
+
+// hubAccount is one account of the Hub.
+type hubAccount struct {
+	id, dir string
+	local   *Local
+	stopped *StopInfo // set by Serve (Task 4); guarded by Hub.mu
+}
+
+// OpenHub opens the accounts of o.Dirs.State. A state without layout.json
+// (M5's, or a new one) is first moved to the per-account layout, under the
+// root's layout.lock and sync.lock, both taken without waiting: an M5 pcb
+// holding sync.lock is Blocked (ruling R2: with the layout in place neither
+// is touched). It removes the pending adds older than pendingExpiry and
+// the abandoned adds older than abandonedAge, and opens a Local per other
+// account directory.
+func OpenHub(o HubOptions) (*Hub, error) {
+	base := o.Options
+	if base.Dirs.State == "" || base.Config.Proton.BaseURL == "" || base.Config.Secrets.KeyFile == "" {
+		return nil, usage("the service needs the state directory, the Proton base URL and the key file", "load the configuration with config.Load")
+	}
+	if base.Now == nil {
+		base.Now = time.Now
+	}
+	if base.Sealer == nil {
+		base.Sealer = &seal.KeyFile{Path: base.Config.Secrets.KeyFile}
+	}
+	if base.Limiter == nil {
+		base.Limiter = access.NewLimiter(base.Now)
+	}
+	root := base.Dirs.State
+	base.GuardDir = root
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, blocked("cannot create the state directory "+root, "make sure its parent directory is writable by this user")
+	}
+	info, err := store.ReadLayout(root)
+	if err == nil && info.Version != store.LayoutVersion {
+		if err = migrateLayout(root); err == nil {
+			info, err = store.ReadLayout(root)
+		}
+	}
+	if err != nil {
+		return nil, layoutError(err, root, info.Legacy)
+	}
+	h := &Hub{o: base, root: root, accounts: map[string]*hubAccount{}}
+	now := base.Now()
+	for _, id := range info.Accounts {
+		dir := store.AccountDir(root, id)
+		switch classify(dir, now) {
+		case dirRemove:
+			_ = os.RemoveAll(dir)
+			continue
+		case dirSkip:
+			continue
+		}
+		l, err := h.newLocal(dir)
+		if err != nil {
+			_ = h.Close()
+			return nil, err
+		}
+		h.accounts[id] = &hubAccount{id: id, dir: dir, local: l}
+	}
+	return h, nil
+}
+
+// migrateLayout moves root to the per-account layout under its layout.lock
+// and its sync.lock, neither waited for.
+func migrateLayout(root string) error {
+	unlockLayout, err := tryLock(root, layoutLockName, "another pcb is moving the state to the per-account layout", "run the command again in a moment")
+	if err != nil {
+		return err
+	}
+	defer unlockLayout()
+	unlockSync, err := tryLock(root, syncLockName, "another pcb holds the state", "stop the running pcb first")
+	if err != nil {
+		return err
+	}
+	defer unlockSync()
+	_, _, err = store.Migrate(root, func() (string, error) {
+		return store.NewLocalID(func(id string) bool { return exists(store.AccountDir(root, id)) })
+	})
+	return err
+}
+
+// tryLock takes dir/name without waiting; held, it is Blocked with msg and
+// hint. Off Unix there is no lock to take.
+func tryLock(dir, name, msg, hint string) (func(), error) {
+	unlock, ok, err := filelock.TryLock(filepath.Join(dir, name))
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+		return func() {}, nil
+	case err != nil:
+		return nil, blocked("cannot take "+name+" in "+dir, "make sure "+dir+" is writable by this user")
+	case !ok:
+		return nil, blocked(msg, hint)
+	}
+	return unlock, nil
+}
+
+// exists reports whether path exists; a doubt counts as existing.
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// What OpenHub does with an account directory.
+type dirAction int
+
+const (
+	dirOpen   dirAction = iota // an account
+	dirRemove                  // an expired pending add, or an old abandoned one
+	dirSkip                    // a young abandoned add: maybe another process's in flight
+)
+
+func classify(dir string, now time.Time) dirAction {
+	st, err := store.LoadState(dir)
+	switch {
+	case err != nil:
+		return dirOpen
+	case neverLoggedIn(st) && st.Phase == store.PhaseNeedsCaptcha:
+		if !st.Created.IsZero() && now.Sub(st.Created) > pendingExpiry {
+			return dirRemove
+		}
+		return dirOpen
+	case abandonedState(dir, st):
+		fi, err := os.Stat(dir)
+		if err != nil {
+			return dirOpen
+		}
+		if now.Sub(fi.ModTime()) > abandonedAge {
+			return dirRemove
+		}
+		return dirSkip
+	}
+	return dirOpen
+}
+
+// neverLoggedIn reports whether st is an account's that never completed a
+// login: no Proton user and no secrets ever sealed (a sign-out keeps the
+// sealed generation, so a signed-out account is not one).
+func neverLoggedIn(st store.State) bool { return st.AccountID == "" && st.SecretsGeneration == 0 }
+
+// abandonedState reports whether the account directory dir, whose
+// state.json is st, is an abandoned add (ruling R11): never logged in, not
+// stopped by a CAPTCHA, and holding no data (sealed secrets, CalDAV
+// clients, event cache). Whether a 2FA code is awaited is the caller's.
+func abandonedState(dir string, st store.State) bool {
+	if !neverLoggedIn(st) || st.Phase == store.PhaseNeedsCaptcha {
+		return false
+	}
+	db := cache.Path(dir)
+	for _, p := range []string{filepath.Join(dir, "secrets.sealed"), filepath.Join(dir, "clients.json"), db, db + "-wal", db + "-shm"} {
+		if exists(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// newLocal opens the Local of the account directory dir.
+func (h *Hub) newLocal(dir string) (*Local, error) {
+	o := h.o
+	o.Dirs.State = dir
+	l, err := NewLocal(o)
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	hook := h.onOpen
+	h.mu.Unlock()
+	if hook != nil {
+		hook(l)
+	}
+	return l, nil
+}
+
+// list is the Hub's accounts, none once closed.
+func (h *Hub) list() []*hubAccount {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]*hubAccount, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		out = append(out, a)
+	}
+	return out
+}
+
+func (h *Hub) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
+// described is what an account's files and its Local say of it, with no
+// network call and no secret opened.
+type described struct {
+	st       store.State
+	readable bool      // state.json could be read
+	held     *loginWho // the login waiting for its 2FA code, nil if none
+	address  string
+	pending  bool
+}
+
+func inspect(a *hubAccount) described {
+	d := described{held: a.local.waitingLogin()}
+	st, err := store.LoadState(a.dir)
+	d.st, d.readable = st, err == nil
+	d.address = st.Address
+	if d.address == "" && d.held != nil {
+		d.address = d.held.username
+	}
+	d.pending = d.readable && neverLoggedIn(st) && (st.Phase == store.PhaseNeedsCaptcha || d.held != nil)
+	return d
+}
+
+// info is a's AccountInfo. Its phase is Status's; a state.json that
+// cannot be read is needs-login, as Status says of unreadable secrets.
+func (h *Hub) info(a *hubAccount) AccountInfo {
+	d := inspect(a)
+	info := AccountInfo{ID: a.id, Address: d.address, Pending: d.pending, CalDAV: d.st.CalDAV == nil || *d.st.CalDAV}
+	h.mu.Lock()
+	if a.stopped != nil {
+		s := *a.stopped
+		info.Stopped = &s
+	}
+	h.mu.Unlock()
+	if s, err := a.local.Status(context.Background()); err == nil {
+		info.Phase = s.Phase
+	} else {
+		info.Phase = string(store.PhaseNeedsLogin)
+	}
+	return info
+}
+
+func (h *Hub) infos(list []*hubAccount) []AccountInfo {
+	out := make([]AccountInfo, 0, len(list))
+	for _, a := range list {
+		out = append(out, h.info(a))
+	}
+	slices.SortFunc(out, func(x, y AccountInfo) int {
+		if c := strings.Compare(strings.ToLower(x.Address), strings.ToLower(y.Address)); c != 0 {
+			return c
+		}
+		return strings.Compare(x.ID, y.ID)
+	})
+	return out
+}
+
+// Accounts lists the accounts, pending ones included, sorted by address.
+func (h *Hub) Accounts() []AccountInfo {
+	h.sweep()
+	return h.infos(h.list())
+}
+
+// Account chooses an account: selector is its local ID or its address
+// (case-insensitive), a pending account included; empty, it is the only
+// account that is not pending. Unknown, none or several are Usage errors;
+// several carry a *SeveralAccountsError listing them.
+func (h *Hub) Account(selector string) (API, AccountInfo, error) {
+	h.sweep()
+	a, err := h.pick(selector)
+	if err != nil {
+		return nil, AccountInfo{}, err
+	}
+	return a.local, h.info(a), nil
+}
+
+func (h *Hub) pick(selector string) (*hubAccount, error) {
+	if h.isClosed() {
+		return nil, errClosed()
+	}
+	list := h.list()
+	if selector != "" {
+		if a := find(list, selector); a != nil {
+			return a, nil
+		}
+		return nil, usage("no account "+selector, "see pcb account list")
+	}
+	var ready []*hubAccount
+	pending := 0
+	for _, a := range list {
+		if inspect(a).pending {
+			pending++
+		} else {
+			ready = append(ready, a)
+		}
+	}
+	switch len(ready) {
+	case 1:
+		return ready[0], nil
+	case 0:
+		if pending > 0 {
+			return nil, usage("no account", "finish the pending login (pcb login resume), or add an account with pcb login")
+		}
+		return nil, usage("no account", "add one with pcb login")
+	}
+	return nil, severalAccounts(h.infos(ready))
+}
+
+// find is the account of list whose local ID is selector, else whose
+// address is (case-insensitively), nil if none.
+func find(list []*hubAccount, selector string) *hubAccount {
+	for _, a := range list {
+		if a.id == selector {
+			return a
+		}
+	}
+	for _, a := range list {
+		if strings.EqualFold(inspect(a).address, selector) {
+			return a
+		}
+	}
+	return nil
+}
+
+// sweep removes the abandoned adds, unless an operation that changes the
+// accounts runs (a login sweeps itself).
+func (h *Hub) sweep() {
+	if !h.ops.TryLock() {
+		return
+	}
+	changed := h.sweepLocked()
+	h.ops.Unlock()
+	h.notify(changed)
+}
+
+// sweepLocked removes the abandoned adds. It holds ops.
+func (h *Hub) sweepLocked() bool {
+	changed := false
+	for _, a := range h.list() {
+		if abandoned(a) {
+			h.drop(a)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// abandoned reports whether a is an abandoned add (ruling R11).
+func abandoned(a *hubAccount) bool {
+	if a.local.waitingLogin() != nil {
+		return false
+	}
+	st, err := store.LoadState(a.dir)
+	return err == nil && abandonedState(a.dir, st)
+}
+
+// drop takes a out of the Hub and deletes its directory.
+func (h *Hub) drop(a *hubAccount) {
+	h.mu.Lock()
+	delete(h.accounts, a.id)
+	h.mu.Unlock()
+	discard(a)
+}
+
+// discard closes a's Local and deletes its directory, best effort: what
+// is left is removed by a later OpenHub.
+func discard(a *hubAccount) {
+	_ = a.local.Close()
+	_ = os.RemoveAll(a.dir)
+}
+
+// insert adds a to the Hub; closed meanwhile, it closes a's Local instead
+// and reports false.
+func (h *Hub) insert(a *hubAccount) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		_ = a.local.Close()
+		return false
+	}
+	h.accounts[a.id] = a
+	return true
+}
+
+// OnChange makes f run after an account is added (pending included),
+// completes its first login, is removed or has its CalDAV switched. f runs
+// on the goroutine of the change, outside the Hub's locks: it may call the
+// Hub.
+func (h *Hub) OnChange(f func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.changes = append(h.changes, f)
+}
+
+func (h *Hub) notify(changed bool) {
+	if !changed {
+		return
+	}
+	h.mu.Lock()
+	callbacks := slices.Clone(h.changes)
+	h.mu.Unlock()
+	for _, f := range callbacks {
+		f()
+	}
+}
+
+// begin takes the login slot and ops: a second login is refused at once,
+// as ctl's oneLogin does.
+func (h *Hub) begin() (func(), error) {
+	if !h.logins.CompareAndSwap(false, true) {
+		return nil, mustAct("a login is already in progress", "wait for it to end, then see pcb status")
+	}
+	h.ops.Lock()
+	return func() {
+		h.ops.Unlock()
+		h.logins.Store(false)
+	}, nil
+}
+
+// Login logs in to the account whose address is req.Username
+// (case-insensitive), pending or not; with none it adds an account: a new
+// directory, removed again if the login fails, kept as a pending account
+// when Proton asks for a CAPTCHA or a 2FA code. A Proton user that is
+// already another account's is refused (MustAct naming it): the session
+// the login opened is revoked and an add's directory removed. One login
+// runs at a time. The result's Account is the local ID.
+func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) {
+	res, changed, err := h.login(ctx, req)
+	h.notify(changed)
+	return res, err
+}
+
+func (h *Hub) login(ctx context.Context, req LoginRequest) (LoginResult, bool, error) {
+	end, err := h.begin()
+	if err != nil {
+		return LoginResult{}, false, err
+	}
+	defer end()
+	if h.isClosed() {
+		return LoginResult{}, false, errClosed()
+	}
+	if req.Username == "" || req.Password == "" {
+		return LoginResult{}, false, usage("a username and a password are required", "pass the username and the password (PCB_USERNAME, PCB_PASSWORD or the prompt)")
+	}
+	swept := h.sweepLocked()
+	var a *hubAccount
+	for _, b := range h.list() {
+		if strings.EqualFold(inspect(b).address, req.Username) {
+			a = b
+			break
+		}
+	}
+	added := a == nil
+	if added {
+		if a, err = h.add(); err != nil {
+			return LoginResult{}, swept, err
+		}
+	}
+	fresh := added || freshDir(a.dir)
+	res, err := a.local.Login(ctx, req)
+	res, changed, err := h.settle(ctx, a, added, fresh, res, err)
+	return res, swept || changed, err
+}
+
+// freshDir reports whether the account directory dir never completed a login.
+func freshDir(dir string) bool {
+	st, err := store.LoadState(dir)
+	return err == nil && neverLoggedIn(st)
+}
+
+// add makes a new account directory and its Local, not in the Hub yet.
+func (h *Hub) add() (*hubAccount, error) {
+	id, err := store.NewLocalID(func(id string) bool {
+		h.mu.Lock()
+		_, taken := h.accounts[id]
+		h.mu.Unlock()
+		return taken || exists(store.AccountDir(h.root, id)) || exists(store.AccountDir(h.root, id)+".migrating")
+	})
+	if err != nil {
+		return nil, blocked("cannot draw a local account ID", "run the command again")
+	}
+	dir := store.AccountDir(h.root, id)
+	if err := os.MkdirAll(store.AccountsDir(h.root), 0o700); err != nil {
+		return nil, blocked("cannot create "+store.AccountsDir(h.root), "make sure "+h.root+" is writable by this user")
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return nil, blocked("cannot create the account directory "+dir, "make sure "+h.root+" is writable by this user")
+	}
+	l, err := h.newLocal(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	return &hubAccount{id: id, dir: dir, local: l}, nil
+}
+
+// settle applies the Hub's rules to what a's Login or SubmitTOTP answered.
+// added: a is a new directory, not in the Hub yet; fresh: a had never
+// completed a login. It reports whether the accounts changed.
+func (h *Hub) settle(ctx context.Context, a *hubAccount, added, fresh bool, res LoginResult, err error) (LoginResult, bool, error) {
+	if err != nil {
+		switch {
+		case added && a.local.waitingLogin() != nil:
+			// A code given with the login was rejected: the login waits
+			// for the next one.
+			return LoginResult{}, h.insert(a), err
+		case added:
+			discard(a)
+		case fresh && abandoned(a):
+			h.drop(a)
+			return LoginResult{}, true, err
+		}
+		return LoginResult{}, false, err
+	}
+	if res.AccountID != "" {
+		if other := h.userAccount(res.AccountID, a); other != "" {
+			// Ruling R12: the session this login opened is revoked, then
+			// an add's directory goes.
+			_, _ = a.local.Logout(ctx, LogoutRequest{})
+			changed := false
+			switch {
+			case added:
+				discard(a)
+			case fresh:
+				h.drop(a)
+				changed = true
+			}
+			return LoginResult{}, changed, mustAct("this Proton account is already added as "+other,
+				"use that account, or remove it first (pcb account remove --account "+other+")")
+		}
+	}
+	changed := fresh && res.State == StateReady
+	if added {
+		if !h.insert(a) {
+			return LoginResult{}, false, errClosed()
+		}
+		changed = true
+	}
+	res.Account = a.id
+	return res, changed, nil
+}
+
+// userAccount is the address (else the local ID) of the account other than
+// except whose Proton user is userID, "" if none.
+func (h *Hub) userAccount(userID string, except *hubAccount) string {
+	for _, b := range h.list() {
+		if b == except {
+			continue
+		}
+		d := inspect(b)
+		if d.st.AccountID == userID || (d.held != nil && d.held.userID == userID) {
+			if d.address != "" {
+				return d.address
+			}
+			return b.id
+		}
+	}
+	return ""
+}
+
+// SubmitTOTP finishes the login of the account selector names that waits
+// for its 2FA code, with the rules of Login. An empty selector is the only
+// account whose login waits for a code.
+func (h *Hub) SubmitTOTP(ctx context.Context, selector, code string) (LoginResult, error) {
+	res, changed, err := h.submitTOTP(ctx, selector, code)
+	h.notify(changed)
+	return res, err
+}
+
+func (h *Hub) submitTOTP(ctx context.Context, selector, code string) (LoginResult, bool, error) {
+	end, err := h.begin()
+	if err != nil {
+		return LoginResult{}, false, err
+	}
+	defer end()
+	a, err := h.pickWaiting(selector)
+	if err != nil {
+		return LoginResult{}, false, err
+	}
+	fresh := freshDir(a.dir)
+	res, err := a.local.SubmitTOTP(ctx, code)
+	return h.settle(ctx, a, false, fresh, res, err)
+}
+
+func (h *Hub) pickWaiting(selector string) (*hubAccount, error) {
+	if h.isClosed() {
+		return nil, errClosed()
+	}
+	list := h.list()
+	if selector != "" {
+		if a := find(list, selector); a != nil {
+			return a, nil
+		}
+		return nil, usage("no account "+selector, "see pcb account list")
+	}
+	var waiting []*hubAccount
+	for _, a := range list {
+		if a.local.waitingLogin() != nil {
+			waiting = append(waiting, a)
+		}
+	}
+	switch len(waiting) {
+	case 0:
+		return nil, mustAct("no login is waiting for a 2FA code", "run pcb login first")
+	case 1:
+		return waiting[0], nil
+	}
+	return nil, severalAccounts(h.infos(waiting))
+}
+
+// SignOut signs the account out (Local.Logout): its session revoked, its
+// secrets and event cache gone; its directory, address and CalDAV clients
+// stay.
+func (h *Hub) SignOut(ctx context.Context, selector string, req LogoutRequest) (LogoutResult, error) {
+	h.ops.Lock()
+	defer h.ops.Unlock()
+	a, err := h.pick(selector)
+	if err != nil {
+		return LogoutResult{}, err
+	}
+	return a.local.Logout(ctx, req)
+}
+
+// Remove signs the account out, then deletes its directory. A sign-out it
+// refuses leaves the account as it was.
+func (h *Hub) Remove(ctx context.Context, selector string, req LogoutRequest) (AccountInfo, error) {
+	info, changed, err := h.remove(ctx, selector, req)
+	h.notify(changed)
+	return info, err
+}
+
+func (h *Hub) remove(ctx context.Context, selector string, req LogoutRequest) (AccountInfo, bool, error) {
+	h.ops.Lock()
+	defer h.ops.Unlock()
+	a, err := h.pick(selector)
+	if err != nil {
+		return AccountInfo{}, false, err
+	}
+	if _, err := a.local.Logout(ctx, req); err != nil {
+		return AccountInfo{}, false, err
+	}
+	info := h.info(a)
+	h.mu.Lock()
+	delete(h.accounts, a.id)
+	h.mu.Unlock()
+	_ = a.local.Close()
+	if err := os.RemoveAll(a.dir); err != nil {
+		return info, true, blocked("the account is signed out but its directory could not be removed", "remove "+a.dir)
+	}
+	return info, true, nil
+}
+
+// SetCalDAV switches the account's CalDAV adapter, in its state.json. It
+// is refused while a login of the account waits for its 2FA code (that
+// login would write the switch back as it found it).
+func (h *Hub) SetCalDAV(ctx context.Context, selector string, on bool) (AccountInfo, error) {
+	info, err := h.setCalDAV(ctx, selector, on)
+	h.notify(err == nil)
+	return info, err
+}
+
+func (h *Hub) setCalDAV(ctx context.Context, selector string, on bool) (AccountInfo, error) {
+	h.ops.Lock()
+	defer h.ops.Unlock()
+	a, err := h.pick(selector)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	if a.local.waitingLogin() != nil {
+		return AccountInfo{}, mustAct("a login of this account waits for its 2FA code", "finish it (pcb login resume) or let it expire, then switch CalDAV again")
+	}
+	if _, err := store.LoadState(a.dir); err != nil {
+		return AccountInfo{}, stateError(err)
+	}
+	if err := store.UpdateStateContext(ctx, a.dir, func(s *store.State) error {
+		s.CalDAV = &on
+		return nil
+	}); err != nil {
+		return AccountInfo{}, a.local.stateWriteError(err)
+	}
+	return h.info(a), nil
+}
+
+// Close closes every account's Local, aborting the logins waiting for a
+// code. It is idempotent; the Hub then refuses its calls.
+func (h *Hub) Close() error {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil
+	}
+	h.closed = true
+	list := make([]*hubAccount, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		list = append(list, a)
+	}
+	clear(h.accounts)
+	h.mu.Unlock()
+	for _, a := range list {
+		_ = a.local.Close()
+	}
+	return nil
+}

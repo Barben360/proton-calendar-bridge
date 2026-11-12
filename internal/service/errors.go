@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -448,4 +449,43 @@ func cacheFailure(err error) *exitcode.Error {
 		return fail(exitcode.Blocked, "the event cache could not be updated", "run pcb doctor to check it, then pcb sync again")
 	}
 	return nil
+}
+
+// SeveralAccountsError is the cause of a refusal to choose an account when
+// several could be meant and none is named. Accounts lists them, sorted by
+// address (--json: data.accounts).
+type SeveralAccountsError struct {
+	Accounts []AccountInfo
+}
+
+func (*SeveralAccountsError) Error() string { return "several accounts: name one with --account" }
+
+func severalAccounts(list []AccountInfo) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: &SeveralAccountsError{Accounts: list},
+		Hint: "name one with --account or PCB_ACCOUNT (pcb account list)"}
+}
+
+// layoutError maps a failure to read or migrate the state layout of root.
+// legacy names the account files of an older pcb at the root.
+func layoutError(err error, root string, legacy []string) error {
+	var (
+		ee *exitcode.Error
+		pe *fs.PathError
+	)
+	switch {
+	case errors.As(err, &ee):
+		return err
+	case errors.Is(err, store.ErrLegacyBesideLayout):
+		msg := "account files of an older pcb are beside the per-account layout"
+		if len(legacy) > 0 {
+			msg += ": " + strings.Join(legacy, ", ")
+		}
+		return blocked(msg+" in "+root, "remove them or move the state directory aside: no downgrade after M6")
+	case errors.Is(err, store.ErrNewerLayout):
+		return blocked("the state layout (layout.json) was written by a newer pcb", "upgrade pcb")
+	case errors.As(err, &pe):
+		return blocked("cannot use the state layout: "+pe.Op+" "+pe.Path+": "+pe.Err.Error(),
+			"check the permissions of "+root+" and of the files in it")
+	}
+	return blocked("the state layout in "+root+" is damaged (layout.json, accounts/)", "run pcb doctor")
 }
