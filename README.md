@@ -257,7 +257,7 @@ when its SHA-256 fingerprint is the printed one (again after a replacement; `pcb
 
 ```sh
 make build        # bin/pcb
-make lint test    # gofmt, go vet, golangci-lint, go test -race
+make lint test    # gofmt, go vet, golangci-lint, go test -race, on JOBS CPUs (4 at most by default)
 make install      # bin/pcb -> $(PREFIX)/bin/pcb, PREFIX ?= ~/.local
 make image        # the container image, pcb:local
 make container-smoke systemd-smoke   # throwaway containers; each prints PASS last
