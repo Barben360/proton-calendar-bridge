@@ -535,7 +535,7 @@ survive them; only `pcb uninstall --delete-data` removes the key (§13) [verifie
 `secrets.sealed` present, `pcb client add` and `pcb client rotate` refuse (exit 10, naming the key file; the fix is
 `pcb logout` then `pcb login`), because minting a key would turn "key missing" into "secrets corrupt" [verified:
 `TestClientsRefuseToMintAKeyWhileTheSessionsKeyIsMissing`]; the stat-then-seal window (a key deleted between the check
-and the seal) is accepted (OPEN, later).
+and the seal) is accepted (`spec/OPEN.md`, "Parked by M5").
 M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAndIsMirrored`, `TestRestoredOlderSecretsAreRefused`,
 `TestFileRemovedByLogoutIsRefusedIfRestored`, `TestV1FileIsReadAndUpgraded`, `TestSealedAheadOfMirrorIsAccepted`,
 `TestEditedVersionFieldDoesNotDowngrade`, `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`,
@@ -1075,9 +1075,18 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
   Text lines: `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`, `listener:`, one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
-  the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5). `pcb doctor` adds a `service`
+  the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the
+  host: `pcb service start` where a unit is installed, the container's restart where `/.dockerenv` or `/run/.containerenv`
+  exists, else `pcb serve` (final review M2) [verified: `TestStatusDaemonHintFitsTheHost`]. `pcb doctor` adds a `service`
   result (the installed unit's state) and a `daemon` result and lists the alerts when a daemon answers; offline it shows
-  none (a fresh, logged-out install must not exit 20) [verified: `TestStatusShowsTheDaemon`,
+  none (a fresh, logged-out install must not exit 20). With a daemon answering, its `caldav listener` and `tls certificate`
+  report the daemon's listener (address, TLS, fingerprint, certificate end) rather than what `config.toml` predicts, and warn
+  when the daemon serves another certificate than the one on disk (M5-R15 C4) [verified: `TestDoctorUsesTheDaemonsListener`,
+  `TestCalDAVChecksPreferTheDaemonsListener`]. Its `key file` check opens and reads the key as pcb does: a key this user cannot
+  read fails with the cause (`not readable by this user (uid N): permission denied`), and so does a wrong size (M5-R15 C3)
+  [verified: `TestKeyFileCheckReadsTheKey`]. Key errors of `pcb login`, `client add` and `client show` carry the OS cause or
+  the mode refusal, never a secret (M5-R15 C2) [verified: `TestAddClientNamesWhyTheKeyCannotBeUsed`,
+  `TestLoginNamesWhyTheKeyCannotBeRead`] [verified: `TestStatusShowsTheDaemon`,
   `TestStatusShowsADaemonWaitingForALogin`, `TestStatusFallsBackOffline`, `TestStatusDaemonFlagNeedsADaemon`,
   `TestOnlyNoDaemonFallsBackOffline`, `TestDoctorListsAlerts`, `TestDoctorReportsTheService`,
   `TestServeServesTheControlSocket`, `TestHealthReportsGatesWithReasons`, `TestHumanVerificationIsHeldUntilAWriteLands`].

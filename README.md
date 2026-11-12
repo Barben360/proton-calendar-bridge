@@ -146,9 +146,7 @@ services:
         target: /data/config/config.toml
     secrets:
       - source: pcb_key
-        target: pcb_key               # mounted at /run/secrets/pcb_key
-        uid: "65532"
-        mode: 0400
+        target: pcb_key               # /run/secrets/pcb_key, with the host file's owner and mode (no uid/mode outside swarm)
 volumes:
   pcb-data:
 configs:
@@ -167,10 +165,14 @@ hostnames = ["pcb.lan"]               # names clients use: in the certificate, t
 key_file = "/run/secrets/pcb_key"     # the key on another mount than the sealed data
 ```
 
-Without `[secrets] key_file` the key lives in `/data/config`, beside the data it protects. If compose does not apply `uid` and `mode`
-to the secret, `chown 65532 pcb_key && chmod 600 pcb_key` on the host (pcb refuses a key file others can read).
+Without `[secrets] key_file` the key lives in `/data/config`, beside the data it protects. Outside swarm, compose bind-mounts a file
+secret with the host file's owner and mode and ignores `uid`, `gid` and `mode`, so give the key to UID 65532 on the host before the
+first start, always: pcb runs as 65532 and refuses a key file others can read (mode 0444 included). A key it cannot read stops
+`pcb login` and `pcb client add` with "permission denied", and `pcb doctor` says so on its `key file` line.
 
 ```sh
+head -c 32 /dev/urandom > pcb_key
+sudo chown 65532:65532 pcb_key && sudo chmod 600 pcb_key   # unconditional: compose keeps the host owner and mode
 docker compose up -d
 docker exec -it pcb pcb login     # asks for the username, password and 2FA code; creates the client "default"
 docker exec pcb pcb client show   # URL, username, password and the certificate fingerprint for Thunderbird
@@ -180,7 +182,29 @@ docker exec pcb pcb status        # live state; docker exec pcb pcb doctor for t
 `pcb client show` prints the URL with the first of `hostnames` and the fingerprint to compare in Thunderbird's certificate exception
 dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no login, 401 and 503
 over TLS, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
-container are `spec/HUMAN-CHECKS.md` step 7.2, not run yet.
+container are `spec/HUMAN-CHECKS.md` step 7.2, not run yet. Five wrong passwords from one IP in a minute lock that IP for the minute:
+Docker's port publishing keeps the client's source IP, but with the userland proxy (rootless Docker, some setups) every client shares
+one IP, so one device's typos lock them all for that minute (`spec/OPEN.md`).
+
+**When the container stops or restarts in a loop.** `docker logs pcb` ends with the error and its hint. Exit 10 is a fault you
+must repair (a lost or unreadable key, a damaged cache, an unreadable `state.json`, a bad `config.toml`), exit 20 one that may pass
+(the port in use, `/data` not writable by 65532). `restart: unless-stopped` restarts after either, as Docker has no equivalent of the
+units' `RestartPreventExitStatus=10`, and `docker exec` cannot reach a stopped container. So stop it, run the CLI in a one-off
+container on the same volume, secret and config, then start it again:
+
+```sh
+docker compose stop pcb
+docker compose run --rm --no-deps --entrypoint pcb pcb doctor   # every check, with the fix; also: status, logout
+docker compose up -d
+```
+
+- `the sealing key file /run/secrets/pcb_key is missing`, or `the stored secrets cannot be opened with the key file ...` (a
+  different key): restore `pcb_key` from a backup, or
+  discard the stored session with `docker compose run --rm --no-deps --entrypoint pcb pcb logout`, start it, then
+  `docker exec -it pcb pcb login`. Clients sealed with the lost key cannot be shown again: `pcb client show` names
+  `pcb client rotate NAME` for them.
+- `permission denied` or `mode 0444` on the key file: the host file's owner or mode; `sudo chown 65532:65532 pcb_key && sudo chmod 600 pcb_key`.
+- Anything else: the hint in the log, run through `docker compose run` as above.
 
 ## Writes from Thunderbird
 
