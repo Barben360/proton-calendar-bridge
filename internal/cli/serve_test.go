@@ -1182,3 +1182,45 @@ func TestSecondSignalForcesExit(t *testing.T) {
 	default:
 	}
 }
+
+// Ruling M5-P22, one real signal: it reaches both Execute's NotifyContext
+// (the end of the context) and IO.Signals, and is still one signal: the
+// listener drains (the request in flight gets its answer) and pcb serve
+// exits 0, never 20.
+func TestOneSignalOnBothPathsStopsCleanly(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.blockCheck = true
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	closed := make(chan struct{})
+	sigs := make(chan os.Signal) // unbuffered: a send returns once pcb serve took it
+	s := startServeWith(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} }, sigs)
+	addr := s.listening()
+	status := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(context.Background(), "PROPFIND", "http://"+addr+"/dav/calendars/me/", nil)
+		req.SetBasicAuth("u", "p")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	<-stub.checkEntered
+	s.stop()                // SIGTERM through NotifyContext
+	<-closed                // the drain has begun
+	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
+	close(stub.checkRelease)
+	if got := <-status; got != http.StatusUnauthorized {
+		t.Errorf("the request in flight got %d, want its own answer (401)", got)
+	}
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d after one signal, want 0\nstderr: %s", code, s.errb.String())
+	}
+	if logs := s.errb.String(); !strings.Contains(logs, "listener stopped") || strings.Contains(logs, "cut") {
+		t.Errorf("logs = %s; want the drain to end, nothing cut", logs)
+	}
+}

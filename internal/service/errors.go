@@ -39,6 +39,7 @@ type detail struct {
 	final      bool          // a retry cannot help: a person must change something
 	class      string        // the error class Health reports (errorClass), "" when the code says enough
 	login      bool          // a MustAct a login fixes (loginFixes)
+	switched   bool          // another account is logged in than Serve serves (accountSwitched)
 }
 
 func (d *detail) Error() string { return d.msg }
@@ -85,6 +86,22 @@ func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
 func loginFixes(err error) bool {
 	var d *detail
 	return exitcode.From(err) == exitcode.MustAct && errors.As(err, &d) && d.login
+}
+
+// switchedAccount is the stop of a pass on Serve's cache once another
+// process logged in to another account: final without WaitForLogin (exit
+// 20, restart pcb serve); with it, Serve waits and serves the new account
+// (ruling M5-R10).
+func switchedAccount() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked,
+		Err:  &detail{msg: "pcb is now logged in to another Proton account than pcb serve started with", final: true, switched: true},
+		Hint: "restart pcb serve"}
+}
+
+// accountSwitched reports whether err is switchedAccount's, by type.
+func accountSwitched(err error) bool {
+	var d *detail
+	return errors.As(err, &d) && d.switched
 }
 
 // final is a Blocked error that no retry can fix.

@@ -415,13 +415,16 @@ type waitRig struct {
 	states chan service.ServeState
 	passes chan service.WatchPass
 	polls  atomic.Int64
+	work   string // the calendar Work
+	// atState, when set, runs in OnState before the state is sent.
+	atState func(service.ServeState)
 }
 
 func newWaitRig(t *testing.T) *waitRig {
 	t.Helper()
 	e := newEnv(t, protontest.Options{})
-	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
-	r := &waitRig{env: e, tick: make(chan struct{}), states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16)}
+	work := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	r := &waitRig{env: e, tick: make(chan struct{}), states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16), work: work}
 	e.svc = r.openTicked(t)
 	e.svc.OnLoginCheck(func() { r.polls.Add(1) })
 	return r
@@ -452,7 +455,12 @@ func (r *waitRig) serve(t *testing.T, o service.ServeOptions) (done chan error, 
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done = make(chan error, 1)
-	o.OnState = func(s service.ServeState) { r.states <- s }
+	o.OnState = func(s service.ServeState) {
+		if r.atState != nil {
+			r.atState(s)
+		}
+		r.states <- s
+	}
 	o.OnPass = func(p service.WatchPass) { r.passes <- p }
 	go func() { done <- r.svc.Serve(ctx, o) }()
 	var once sync.Once
@@ -577,20 +585,35 @@ func TestEveryReadAndWriteWaitsForTheLogin(t *testing.T) {
 }
 
 // Another process's login (a second Local on the same directories) is
-// noticed by the poll: serving starts at the first check after it.
+// noticed by the poll: the wait between checks is LoginPoll, and serving
+// starts at the first check after the login, the one that poll ends.
 func TestServeNoticesALoginFromAnotherProcess(t *testing.T) {
 	t.Parallel()
 	r := newWaitRig(t)
-	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: 10 * time.Millisecond})
+	waits, fire := make(chan time.Duration, 4), make(chan time.Time)
+	r.svc.SetLoginPollTimer(func(d time.Duration) <-chan time.Time {
+		waits <- d
+		return fire
+	})
+	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: 7 * time.Second})
 	r.wantState(t, service.ServeWaitingForLogin)
+	select {
+	case d := <-waits:
+		if d != 7*time.Second {
+			t.Fatalf("the wait between login checks is %v, want LoginPoll (7s)", d)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("Serve never waited for its poll")
+	}
 	other := r.open(t)
 	if _, err := other.Login(t.Context(), r.req()); err != nil {
 		t.Fatal(err)
 	}
 	checks := r.polls.Load()
+	fire <- time.Now() // the poll ends
 	r.wantState(t, service.ServeServing)
-	if n := r.polls.Load() - checks; n > 1 {
-		t.Errorf("serving started %d checks after the login, want within one poll", n)
+	if n := r.polls.Load() - checks; n != 1 {
+		t.Errorf("serving started after %d checks once the poll ended, want exactly 1", n)
 	}
 	if p := r.wantPass(t); p.Err != nil {
 		t.Errorf("first pass: %v", p.Err)
@@ -812,5 +835,287 @@ func TestDamagedCacheEndsServeUnderTheFlag(t *testing.T) {
 		if s := <-r.states; s == service.ServeWaitingForLogin {
 			t.Error("Serve reported waiting for a login over a damaged cache")
 		}
+	}
+}
+
+// Ruling M5-R9: after a logout and a new login, Serve opens a fresh cache;
+// until its first pass gets through (here the calendar listing fails and
+// waits for its retry), a calendar Thunderbird knows is pending (503),
+// never missing (404). Once the pass got through, an unknown calendar is
+// missing again.
+func TestUnknownCalendarIsPendingUntilTheFirstPassAfterALogin(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+	r.wantState(t, service.ServeServing)
+	r.wantPass(t)
+	if _, err := r.svc.Logout(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	r.wantState(t, service.ServeWaitingForLogin)
+	r.f.FailNext(http.MethodGet, "/calendar/v1", http.StatusServiceUnavailable, 0, 0)
+	r.clk.advance(time.Minute)
+	r.login(t, r.req())
+	r.wantState(t, service.ServeServing) // the pass waits in the listing's retry (tick)
+	_, _, err := r.svc.Objects(t.Context(), r.work)
+	if !errors.Is(err, service.ErrCalendarPending) || exitcode.From(err) != exitcode.Blocked {
+		t.Fatalf("Objects(Work) before the first pass = %v, want ErrCalendarPending (503), never a 4xx", err)
+	}
+	r.tick <- struct{}{}
+	if p := r.wantPass(t); p.Err != nil {
+		t.Fatalf("pass after the retry: %v", p.Err)
+	}
+	if _, _, err := r.svc.Objects(t.Context(), r.work); err != nil {
+		t.Errorf("Objects(Work) after the pass = %v", err)
+	}
+	if _, _, err := r.svc.Objects(t.Context(), "no-such-calendar"); !errors.Is(err, service.ErrNoSuchCalendar) {
+		t.Errorf("Objects(unknown) after the pass = %v, want ErrNoSuchCalendar (404)", err)
+	}
+}
+
+// holdWipe makes the next Logout of svc stop just before its wipe: it
+// returns once that Logout is there, and release lets it go on and
+// returns its error.
+func holdWipe(t *testing.T, svc *service.Local) (release func() error) {
+	t.Helper()
+	in, out, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	svc.OnWipe(func() {
+		once.Do(func() {
+			close(in)
+			<-out
+		})
+	})
+	go func() {
+		_, err := svc.Logout(context.Background())
+		done <- err
+	}()
+	select {
+	case <-in:
+	case <-time.After(waitLimit):
+		t.Fatal("Logout never reached its wipe")
+	}
+	var rel sync.Once
+	var err error
+	release = func() error {
+		rel.Do(func() {
+			close(out)
+			err = <-done
+		})
+		return err
+	}
+	t.Cleanup(func() { _ = release() })
+	return release
+}
+
+// noServing fails the test if Serve reported serving.
+func (r *waitRig) noServing(t *testing.T) {
+	t.Helper()
+	for len(r.states) > 0 {
+		if s := <-r.states; s == service.ServeServing {
+			t.Error("Serve served during a logout")
+		}
+	}
+}
+
+// M5-P10: a Serve (no flag) that starts while a Logout wipes refuses to
+// serve, even though the stored login still reads ready: no cache opened.
+func TestServeRefusesWhileALogoutWipes(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	release := holdWipe(t, r.svc)
+	done, _ := r.serve(t, service.ServeOptions{})
+	select {
+	case err := <-done:
+		done <- err
+		if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "not logged in to Proton" {
+			t.Errorf("Serve during the wipe = %v", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("Serve served while a logout wiped")
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	r.noServing(t)
+	if _, err := os.Stat(cache.Path(r.dirs.State)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("pcb.db after the logout: %v, want absent", err)
+	}
+}
+
+// M5-P10: a whole Logout that lands between the login check and the
+// opening of the cache refuses serving: no empty pcb.db outlives it.
+func TestLogoutBetweenTheCheckAndServingRefusesIt(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	var once sync.Once
+	r.svc.BeforeServe(func() {
+		once.Do(func() {
+			if _, err := r.svc.Logout(context.Background()); err != nil {
+				t.Errorf("Logout: %v", err)
+			}
+		})
+	})
+	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+	r.wantState(t, service.ServeWaitingForLogin)
+	r.noServing(t)
+	running(t, done)
+	if _, err := os.Stat(cache.Path(r.dirs.State)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("pcb.db after the logout: %v, want absent", err)
+	}
+}
+
+// M5-P10: while a Logout wipes, a waiting Serve does not trust the stored
+// login (still ready until the wipe): it never tries to serve it.
+func TestWaitIgnoresTheLoginWhileALogoutWipes(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	checks := make(chan struct{}, 64)
+	r.svc.OnLoginCheck(func() {
+		r.polls.Add(1)
+		select {
+		case checks <- struct{}{}:
+		default:
+		}
+	})
+	var tries atomic.Int32
+	r.svc.BeforeServe(func() { tries.Add(1) })
+	release := holdWipe(t, r.svc)
+	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Millisecond})
+	r.wantState(t, service.ServeWaitingForLogin)
+	for range 3 {
+		select {
+		case <-checks:
+		case <-time.After(waitLimit):
+			t.Fatal("the wait stopped checking")
+		}
+	}
+	if n := tries.Load(); n != 0 {
+		t.Errorf("Serve tried to serve %d times while the logout wiped", n)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	r.noServing(t)
+	running(t, done)
+}
+
+// M5-P10: when a stop leaves Serve waiting, the wait begins while Serve
+// still holds its handle (a read is refused, never opens its own), then
+// the handle goes.
+func TestWaitBeginsBeforeTheHandleIsCleared(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	var held atomic.Int32 // 1: held at the wait, 2: not held
+	served := false
+	r.atState = func(s service.ServeState) {
+		switch {
+		case s == service.ServeServing:
+			served = true
+		case served && held.Load() == 0:
+			if r.svc.ServingHandle() {
+				held.Store(1)
+			} else {
+				held.Store(2)
+			}
+		}
+	}
+	r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Hour})
+	r.wantState(t, service.ServeServing)
+	r.wantPass(t)
+	if _, err := r.svc.Logout(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	r.wantState(t, service.ServeWaitingForLogin)
+	if held.Load() != 1 {
+		t.Error("the wait began after Serve cleared its handle: a read could open its own meanwhile")
+	}
+	if r.svc.ServingHandle() {
+		t.Error("Serve still holds its handle while it waits")
+	}
+}
+
+// Ruling M5-R10: a stored login no login fixes ends Serve under
+// WaitForLogin, exit 10 with its own hint, never "run pcb login".
+func TestUnfixableStoredLoginEndsServe(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, hint string
+		setup      func(t *testing.T, r *waitRig)
+	}{
+		{"state file unreadable", "run pcb logout to reset it", func(t *testing.T, r *waitRig) {
+			if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(r.dirs.State, "state.json"), []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"key file missing", "restore it from a backup", func(t *testing.T, r *waitRig) {
+			r.login(t, r.req())
+			if err := os.Remove(r.cfg.Secrets.KeyFile); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newWaitRig(t)
+			tc.setup(t, r)
+			done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Millisecond})
+			select {
+			case err := <-done:
+				done <- err
+				if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, tc.hint) || ee.Hint == "run pcb login" {
+					t.Errorf("Serve = %v, hint %q; want exit 10 with %q", err, ee.Hint, tc.hint)
+				}
+			case <-time.After(waitLimit):
+				t.Fatal("Serve waits for a login a login cannot fix")
+			}
+			for len(r.states) > 0 {
+				if s := <-r.states; s == service.ServeWaitingForLogin {
+					t.Error("Serve reported waiting for a login")
+				}
+			}
+		})
+	}
+}
+
+// Ruling M5-R10: under WaitForLogin, another process switching to another
+// account between two passes sends Serve back to waiting, then it serves
+// the new account (without the flag: exit 20, as before).
+func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
+	t.Parallel()
+	r := newWaitRig(t)
+	r.login(t, r.req())
+	done, _ := r.serve(t, service.ServeOptions{WaitForLogin: true, LoginPoll: time.Millisecond})
+	r.wantState(t, service.ServeServing)
+	r.wantPass(t)
+	other := r.open(t)
+	if _, err := other.Logout(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	r.f.AddUser("other", "other-pass")
+	r.clk.advance(time.Minute)
+	if _, err := other.Login(t.Context(), service.LoginRequest{Username: "other", Password: "other-pass"}); err != nil {
+		t.Fatal(err)
+	}
+	r.tick <- struct{}{}
+	if p := r.wantPass(t); exitcode.From(p.Err) != exitcode.Blocked || !strings.Contains(p.Err.Error(), "another Proton account") {
+		t.Fatalf("pass after the switch: %v, want the account switch", p.Err)
+	}
+	r.wantState(t, service.ServeWaitingForLogin)
+	r.wantState(t, service.ServeServing)
+	if p := r.wantPass(t); p.Err != nil {
+		t.Errorf("first pass of the new account: %v", p.Err)
+	}
+	running(t, done)
+	if st := r.loadState(t); st.AccountID != r.f.UserID("other") {
+		t.Errorf("state.json account %q, want the other one", st.AccountID)
 	}
 }

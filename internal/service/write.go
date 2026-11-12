@@ -389,7 +389,7 @@ func (l *Local) beginWrite(ctx context.Context, calID string) (*write, error) {
 	var typ calendar.Type
 	err := l.onWriter(func(db *cache.Cache, s *served) error {
 		w.account, w.log = s.account, s.log
-		c, err := syncedCalendar(ctx, db, calID)
+		c, err := l.syncedCalendar(ctx, db, calID)
 		typ = calendar.ParseType(c.Type)
 		w.typ = typ
 		return l.fail(err)

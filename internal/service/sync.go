@@ -177,7 +177,7 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 			}
 			defer func() { _ = db.Close() }()
 		case acc.ID != account:
-			return final("pcb is now logged in to another Proton account than pcb serve started with", "restart pcb serve")
+			return switchedAccount()
 		}
 		describe := func(err error) string { return calendarError(ctx, err) }
 		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe,

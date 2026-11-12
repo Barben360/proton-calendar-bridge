@@ -81,11 +81,12 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	if !o.WaitForLogin {
+		gen := l.logoutGen()
 		_, acc, err := l.stored()
 		if err != nil {
 			return err
 		}
-		return l.serveOn(ctx, o, interval, acc)
+		return l.serveOn(ctx, o, interval, acc, gen)
 	}
 	defer l.leaveWaiting()
 	if o.Ready != nil {
@@ -93,17 +94,29 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 	}
 	var stopped error // the stop the loop waits after, nil at the start
 	for {
-		acc, err := l.awaitLogin(ctx, o, stopped)
-		if err != nil {
-			return nil // ctx ended
+		acc, gen, err := l.awaitLogin(ctx, o, stopped)
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case err != nil:
+			return err // a stored login a login does not fix (ruling M5-R10)
 		}
-		err = l.serveOn(ctx, o, interval, acc)
-		if err == nil || !loginFixes(err) {
+		if l.serveHook != nil {
+			l.serveHook()
+		}
+		err = l.serveOn(ctx, o, interval, acc, gen)
+		if err == nil || !waitsAfter(err) {
 			return err // ctx ended, or a stop a login does not fix (ruling M5-R8)
 		}
 		stopped = err
 	}
 }
+
+// waitsAfter reports whether Serve with WaitForLogin waits for a login
+// after the stop err: one a login fixes (ruling M5-R8), or another
+// process logged in to another account (ruling M5-R10: the next login
+// check serves it).
+func waitsAfter(err error) bool { return loginFixes(err) || accountSwitched(err) }
 
 // errLoggedOut ends a serving phase that a Logout stops (ruling M5-P10).
 var errLoggedOut = errors.New("logged out during serve")
@@ -117,28 +130,48 @@ type servePhase struct {
 	done   chan struct{}
 }
 
-// serveOn serves acc: it opens the cache, runs the sync loop on it until
-// ctx ends (nil), a pass needs a person (that error) or a Logout stops it
-// (loggedOut), then closes the cache. Ready is called once the cache is
-// open, unless WaitForLogin called it already. With WaitForLogin, a stop
-// a login fixes leaves Serve waiting before its handle is reported
-// closed, so a Logout returns with Health already waiting.
-func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Duration, acc store.Account) (err error) {
+// logoutGen is the count of the logouts begun in this process: Serve reads
+// it before it reads the stored login, and serveOn refuses a login a
+// logout began after.
+func (l *Local) logoutGen() uint64 {
+	l.gmu.Lock()
+	defer l.gmu.Unlock()
+	return l.logouts
+}
+
+// serveOn serves acc, read when the logout count was gen: it opens the
+// cache, runs the sync loop on it until ctx ends (nil), a pass needs a
+// person (that error) or a Logout stops it (loggedOut), then closes the
+// cache. A logout running, or begun since gen, refuses it before the cache
+// is opened (loggedOut), so no empty pcb.db outlives a wipe. Ready is
+// called once the cache is open, unless WaitForLogin called it already.
+// With WaitForLogin, a stop Serve waits after (waitsAfter) marks Serve
+// waiting before its handle is cleared and closed: a read never opens its
+// own handle in between, and a Logout returns with Health already waiting.
+// Until the first pass that gets through, an unknown calendar is pending,
+// not missing (ruling M5-R9).
+func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Duration, acc store.Account, gen uint64) (err error) {
 	pctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	ph := &servePhase{cancel: cancel, done: make(chan struct{})}
 	l.gmu.Lock()
-	if l.halts > 0 { // a logout is wiping
+	if l.halts > 0 || l.logouts != gen { // a logout is wiping, or wiped since the login was read
 		l.gmu.Unlock()
+		if o.WaitForLogin {
+			l.enterWaiting(o)
+		}
 		return loggedOut()
 	}
 	l.phase = ph
 	l.waitSince = nil
 	l.gmu.Unlock()
-	defer func() {
-		if o.WaitForLogin && ctx.Err() == nil && loginFixes(err) {
-			l.enterWaiting(o) // Serve waits next: say so before done
+	waitNext := func() {
+		if o.WaitForLogin && ctx.Err() == nil && waitsAfter(err) {
+			l.enterWaiting(o) // Serve waits next: say so before the handle goes
 		}
+	}
+	defer func() {
+		waitNext() // no-op when done already; covers a cache that did not open
 		l.gmu.Lock()
 		l.phase = nil
 		l.gmu.Unlock()
@@ -152,6 +185,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	l.hmu.Lock()
 	l.human = nil
 	l.hmu.Unlock()
+	l.unlisted.Store(db)
 	l.smu.Lock()
 	l.served = &served{db: db, account: acc.ID, log: o.Logger}
 	l.smu.Unlock()
@@ -159,12 +193,14 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	l.live = v
 	l.lmu.Unlock()
 	defer func() {
+		waitNext()
 		l.lmu.Lock()
 		l.live = nil
 		l.lmu.Unlock()
 		l.smu.Lock()
 		l.served = nil
 		l.smu.Unlock()
+		l.unlisted.CompareAndSwap(db, nil)
 		_ = db.Close()
 	}()
 	if o.Ready != nil && !o.WaitForLogin {
@@ -185,6 +221,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	err = l.watch(pctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
 		res, err := l.syncPassOn(ctx, req, db, acc.ID)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
+			l.unlisted.CompareAndSwap(db, nil) // the calendars are listed: an unknown one is missing now
 			if cals, cerr := db.Calendars(ctx); cerr == nil {
 				live := make(map[string]calendar.Type, len(cals))
 				for _, c := range cals {
@@ -201,14 +238,16 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	return err
 }
 
-// awaitLogin returns the ready login Serve can serve, checking at once
-// (after a stop: at the next poll or wake), then every o.LoginPoll and at once
-// when a login completes in this process. While no login is ready, and no
-// logout is wiping, Serve waits: Health says so, the reads answer
-// ErrWaitingForLogin, and the wait is logged once with its reason. It
-// returns an error only when ctx ends. After a stop, the first check
-// waits for a poll or a wake: the stop's cause is usually still there.
-func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (store.Account, error) {
+// awaitLogin returns the ready login Serve can serve and the logout count
+// read before it (serveOn), checking at once (after a stop: at the next
+// poll or wake, as the stop's cause is usually still there), then every
+// o.LoginPoll and at once when a login completes in this process. While
+// no login is ready, or a logout is wiping, Serve waits: Health says so,
+// the reads answer ErrWaitingForLogin, and the wait is logged once with
+// its reason. A stored login a login does not fix (an unreadable state
+// file, a missing key file, a generation out of range) is returned as a
+// MustAct with its own hint (ruling M5-R10). ctx's end returns its error.
+func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (store.Account, uint64, error) {
 	poll := o.LoginPoll
 	if poll <= 0 {
 		poll = DefaultLoginPoll
@@ -221,28 +260,32 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 	}
 	for {
 		if wait {
-			t := time.NewTimer(poll)
+			tick, stop := l.pollTimer(poll)
 			select {
 			case <-ctx.Done():
-				t.Stop()
-				return store.Account{}, ctx.Err()
+				stop()
+				return store.Account{}, 0, ctx.Err()
 			case <-l.loginWake:
-			case <-t.C:
+			case <-tick:
 			}
-			t.Stop()
+			stop()
 		}
 		wait = true
 		if l.checkHook != nil {
 			l.checkHook()
 		}
 		l.gmu.Lock()
-		halted := l.halts > 0
+		halted, gen := l.halts > 0, l.logouts
 		l.gmu.Unlock()
 		var err error
 		if !halted {
 			var acc store.Account
-			if _, acc, err = l.stored(); err == nil {
-				return acc, nil
+			_, acc, err = l.stored()
+			switch {
+			case err == nil:
+				return acc, gen, nil
+			case !loginFixes(err):
+				return store.Account{}, 0, persistent(err)
 			}
 		}
 		l.enterWaiting(o)
@@ -251,6 +294,27 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 			logged = true
 		}
 	}
+}
+
+// persistent is err, a failure to read the stored login that no login and
+// no retry fixes (files only), as a MustAct with its message and hint: pcb
+// serve exits 10 and is not restarted in a loop (ruling M5-R10).
+func persistent(err error) error {
+	var ee *exitcode.Error
+	if !errors.As(err, &ee) {
+		return err
+	}
+	return &exitcode.Error{Code: exitcode.MustAct, Err: ee.Err, Hint: ee.Hint}
+}
+
+// pollTimer is the wait between two login checks: a timer of d, or the
+// test's (SetLoginPollTimer). stop releases it.
+func (l *Local) pollTimer(d time.Duration) (tick <-chan time.Time, stop func()) {
+	if l.pollHook != nil {
+		return l.pollHook(d), func() {}
+	}
+	t := time.NewTimer(d)
+	return t.C, func() { t.Stop() }
 }
 
 // enterWaiting marks Serve waiting for a login, reporting it to OnState
@@ -311,6 +375,7 @@ func (l *Local) wakeLogin() {
 func (l *Local) haltServe() (release func()) {
 	l.gmu.Lock()
 	l.halts++
+	l.logouts++
 	ph := l.phase
 	l.gmu.Unlock()
 	if ph != nil {

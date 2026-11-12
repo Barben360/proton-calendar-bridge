@@ -102,3 +102,18 @@ func (l *Local) OnLoginCheck(f func()) { l.checkHook = f }
 
 // OnWipe makes f run in Logout just before the local wipe.
 func (l *Local) OnWipe(f func()) { l.wipeHook = f }
+
+// BeforeServe makes f run each time a Serve waiting for a login found one
+// ready, before it opens the cache. Set it before Serve.
+func (l *Local) BeforeServe(f func()) { l.serveHook = f }
+
+// SetLoginPollTimer replaces the timer between two login checks: f gets the
+// interval and returns the channel that ends the wait. Set it before Serve.
+func (l *Local) SetLoginPollTimer(f func(d time.Duration) <-chan time.Time) { l.pollHook = f }
+
+// ServingHandle reports whether Serve holds its cache handle for the reads.
+func (l *Local) ServingHandle() bool {
+	l.smu.RLock()
+	defer l.smu.RUnlock()
+	return l.served != nil
+}

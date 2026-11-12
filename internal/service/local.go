@@ -75,11 +75,16 @@ type Local struct {
 	lmu  sync.Mutex // guards live
 	live *live      // Serve's live state, nil outside Serve (Health)
 
-	gmu       sync.Mutex    // guards waitSince, halts and phase
+	gmu       sync.Mutex    // guards waitSince, halts, logouts and phase
 	waitSince *time.Time    // when Serve began waiting for a login, nil when it does not wait
 	halts     int           // logouts in progress: Serve does not start serving meanwhile
+	logouts   uint64        // logouts begun in this process (serveOn refuses a login read before one)
 	phase     *servePhase   // Serve's serving phase, nil when it does not serve
 	loginWake chan struct{} // a login completed in this process (capacity 1)
+
+	// unlisted is Serve's cache handle until its first pass that got
+	// through: an unknown calendar is pending meanwhile (ruling M5-R9).
+	unlisted atomic.Pointer[cache.Cache]
 
 	hmu   sync.Mutex           // guards human
 	human map[string]time.Time // unanswered human verifications by source, since when
@@ -90,10 +95,12 @@ type Local struct {
 	// otherwise), and a failure injected at a write's cache steps (fault).
 	preSend      time.Duration
 	writeFault   func(stage string) error
-	humanHook    func()        // runs once a needs-login mark is decided, before its write
-	stateTimeout time.Duration // bounds humanNeeded's wait for state.lock when set
-	checkHook    func()        // runs at each login check of a Serve waiting for a login
-	wipeHook     func()        // runs in Logout just before the wipe
+	humanHook    func()                                 // runs once a needs-login mark is decided, before its write
+	stateTimeout time.Duration                          // bounds humanNeeded's wait for state.lock when set
+	checkHook    func()                                 // runs at each login check of a Serve waiting for a login
+	wipeHook     func()                                 // runs in Logout just before the wipe
+	serveHook    func()                                 // runs between a ready login check and serveOn
+	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and

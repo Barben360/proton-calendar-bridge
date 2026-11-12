@@ -72,7 +72,21 @@ func notSynced() error { return mustAct("no events are cached yet", "run pcb syn
 // logged account. Release it before any Proton call: Serve waits for the
 // readers to close its handle.
 func (l *Local) readCache() (db *cache.Cache, release func(), err error) {
+	return l.readCacheFor(false)
+}
+
+// readCacheFor is readCache; for a read of the CalDAV API (reads), while
+// Serve waits for a login, it is ErrWaitingForLogin, decided under smu: Serve
+// marks the wait before it clears its handle, so such a read never opens a
+// handle of its own while a logout wipes the cache (ruling M5-P10).
+func (l *Local) readCacheFor(reads bool) (db *cache.Cache, release func(), err error) {
 	l.smu.RLock()
+	if reads {
+		if err := l.waitingErr(); err != nil {
+			l.smu.RUnlock()
+			return nil, nil, err
+		}
+	}
 	if s := l.served; s != nil {
 		st, err := store.LoadState(l.o.Dirs.State)
 		if err != nil {
@@ -94,9 +108,10 @@ func (l *Local) readCache() (db *cache.Cache, release func(), err error) {
 }
 
 // withCache runs fn on the cache to read (readCache), released when fn
-// returns; no cache is a MustAct. fn must not call Proton.
+// returns; no cache is a MustAct, and Serve waiting for a login is
+// ErrWaitingForLogin. fn must not call Proton.
 func (l *Local) withCache(fn func(*cache.Cache) error) error {
-	db, release, err := l.readCache()
+	db, release, err := l.readCacheFor(true)
 	if err != nil {
 		return err
 	}
@@ -107,10 +122,12 @@ func (l *Local) withCache(fn func(*cache.Cache) error) error {
 	return fn(db)
 }
 
-// syncedCalendar returns calendar id of the cache; ErrNoSuchCalendar when
-// the cache has no such calendar, ErrCalendarPending when it has not synced
-// it yet (ruling M3-R25).
-func syncedCalendar(ctx context.Context, db *cache.Cache, id string) (cache.Calendar, error) {
+// syncedCalendar returns calendar id of the cache; ErrCalendarPending when
+// it has not synced it yet (ruling M3-R25), or when the cache has no such
+// calendar before Serve's first pass on it got through (ruling M5-R9: a
+// fresh cache, after a logout, is not a missing calendar); else
+// ErrNoSuchCalendar for a calendar the cache does not hold.
+func (l *Local) syncedCalendar(ctx context.Context, db *cache.Cache, id string) (cache.Calendar, error) {
 	cals, err := db.Calendars(ctx)
 	if err != nil {
 		return cache.Calendar{}, cacheError(err)
@@ -122,6 +139,9 @@ func syncedCalendar(ctx context.Context, db *cache.Cache, id string) (cache.Cale
 			}
 			return c, nil
 		}
+	}
+	if l.unlisted.Load() == db {
+		return cache.Calendar{}, calendarPending()
 	}
 	return cache.Calendar{}, noSuchCalendar()
 }
@@ -252,9 +272,6 @@ func (l *Local) Collections(ctx context.Context) ([]Collection, error) {
 	if l.closed.Load() {
 		return nil, errClosed()
 	}
-	if err := l.waitingErr(); err != nil {
-		return nil, err
-	}
 	var known []cache.Calendar
 	ids := map[string]calendar.Type{}
 	err := l.withCache(func(db *cache.Cache) error {
@@ -330,12 +347,9 @@ func (l *Local) calendarRead(ctx context.Context, calID string, fn func(*cache.C
 	if l.closed.Load() {
 		return errClosed()
 	}
-	if err := l.waitingErr(); err != nil {
-		return err
-	}
 	var typ calendar.Type
 	err := l.withCache(func(db *cache.Cache) error {
-		c, err := syncedCalendar(ctx, db, calID)
+		c, err := l.syncedCalendar(ctx, db, calID)
 		typ = calendar.ParseType(c.Type)
 		return l.fail(err)
 	})
