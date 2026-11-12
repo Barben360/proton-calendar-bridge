@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
-	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -76,66 +74,7 @@ func daemonAccount(ctx context.Context, c *ctl.Client, selector string) (service
 	if err != nil {
 		return service.AccountInfo{}, err
 	}
-	return chooseAccount(list, selector, anyAccount)
-}
-
-// anyAccount makes every account eligible for chooseAccount.
-func anyAccount(service.AccountInfo) bool { return true }
-
-// chooseAccount is the account of list selector names; empty, the only
-// one of list that is not pending, among those eligible (the others are
-// passed over).
-func chooseAccount(list []service.AccountInfo, selector string, eligible func(service.AccountInfo) bool) (service.AccountInfo, error) {
-	if selector != "" {
-		if info, ok := findAccount(list, selector); ok {
-			return info, nil
-		}
-		return service.AccountInfo{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account " + selector), Hint: "see pcb account list"}
-	}
-	var ready []service.AccountInfo
-	pending := 0
-	for _, info := range list {
-		switch {
-		case !eligible(info):
-		case info.Pending:
-			pending++
-		default:
-			ready = append(ready, info)
-		}
-	}
-	switch len(ready) {
-	case 1:
-		return ready[0], nil
-	case 0:
-		hint := "add one with pcb login"
-		if pending > 0 {
-			hint = "finish the pending login (pcb login resume), or add an account with pcb login"
-		}
-		return service.AccountInfo{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account"), Hint: hint}
-	}
-	return service.AccountInfo{}, severalAccounts(ready)
-}
-
-// findAccount is the account of list whose local ID is selector, else
-// whose address is (case-insensitively).
-func findAccount(list []service.AccountInfo, selector string) (service.AccountInfo, bool) {
-	for _, info := range list {
-		if info.ID == selector {
-			return info, true
-		}
-	}
-	for _, info := range list {
-		if strings.EqualFold(info.Address, selector) {
-			return info, true
-		}
-	}
-	return service.AccountInfo{}, false
-}
-
-// severalAccounts is the refusal to choose among list, as the Hub words it.
-func severalAccounts(list []service.AccountInfo) error {
-	return &exitcode.Error{Code: exitcode.Usage, Err: &service.SeveralAccountsError{Accounts: list},
-		Hint: "name one with --account or PCB_ACCOUNT (pcb account list)"}
+	return service.SelectAccount(list, selector)
 }
 
 // accountName is how a line names an account: its address and local ID,

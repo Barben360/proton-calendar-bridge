@@ -460,9 +460,28 @@ type SeveralAccountsError struct {
 
 func (*SeveralAccountsError) Error() string { return "several accounts: name one with --account" }
 
+// SeveralAccounts is the refusal (Usage) to choose among list, sorted by
+// address, when none is named: its cause is a *SeveralAccountsError.
+func SeveralAccounts(list []AccountInfo) error { return severalAccounts(list) }
+
 func severalAccounts(list []AccountInfo) *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.Usage, Err: &SeveralAccountsError{Accounts: list},
 		Hint: "name one with --account or PCB_ACCOUNT (pcb account list)"}
+}
+
+// ErrNoAccount is the cause of a refusal to choose an account when none
+// matches: the selector names none (or one since removed), or none is
+// ready to be chosen without a selector.
+var ErrNoAccount = errors.New("no account")
+
+// noAccount is the refusal (Usage) to choose the account selector names
+// ("": the only ready one), with hint.
+func noAccount(selector, hint string) *exitcode.Error {
+	err := ErrNoAccount
+	if selector != "" {
+		err = fmt.Errorf("%w %s", ErrNoAccount, selector)
+	}
+	return &exitcode.Error{Code: exitcode.Usage, Err: err, Hint: hint}
 }
 
 // layoutError maps a failure to read or migrate the state layout of root.

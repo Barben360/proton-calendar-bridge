@@ -3,6 +3,7 @@ package cli_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -89,9 +90,9 @@ func (h *stubHub) Accounts() []service.AccountInfo {
 
 func noAccount(selector string) error {
 	if selector == "" {
-		return &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account"), Hint: "add one with pcb login"}
+		return &exitcode.Error{Code: exitcode.Usage, Err: service.ErrNoAccount, Hint: "add one with pcb login"}
 	}
-	return &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account " + selector), Hint: "see pcb account list"}
+	return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%w %s", service.ErrNoAccount, selector), Hint: "see pcb account list"}
 }
 
 // pick chooses as service.Hub.Account does.

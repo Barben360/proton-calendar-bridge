@@ -318,3 +318,47 @@ func TestDoctorRefusedControlSocketIsExit10(t *testing.T) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 }
+
+// Ruling R34: a move to the per-account layout that stopped midway is a
+// warning naming it (the next command finishes it), not "no account"; an
+// unreadable layout is an error with its own fix.
+func TestDoctorNamesTheLayoutsState(t *testing.T) {
+	cfg := isolate(t)
+	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
+	staged := filepath.Join(state, "accounts", "aaaaaaaa.migrating")
+	if err := os.MkdirAll(staged, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result := func(t *testing.T, want exitcode.Code) (status, message, fix string) {
+		t.Helper()
+		code, out, _ := run("doctor", "--json")
+		if code != want {
+			t.Fatalf("exit %d, want %d: %s", code, want, out)
+		}
+		var env struct {
+			Data struct {
+				Results []struct{ Name, Status, Message, Fix string } `json:"results"`
+			} `json:"data"`
+		}
+		mustUnmarshal(t, []byte(out), &env)
+		for _, r := range env.Data.Results {
+			if r.Name == "accounts" {
+				return r.Status, r.Message, r.Fix
+			}
+		}
+		t.Fatalf("no accounts result: %s", out)
+		return "", "", ""
+	}
+	if st, msg, fix := result(t, exitcode.OK); st != "warn" || !strings.Contains(msg, staged) || !strings.Contains(msg, "the next pcb command that opens the state finishes it") || fix != "pcb status" {
+		t.Errorf("interrupted move: %s %q fix %q", st, msg, fix)
+	}
+	if err := os.WriteFile(filepath.Join(state, "layout.json"), []byte(`{"version": 3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, fix := result(t, exitcode.MustAct); st != "error" || fix != "upgrade pcb" {
+		t.Errorf("newer layout: %s, fix %q", st, fix)
+	}
+}

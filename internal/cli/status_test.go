@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -388,5 +389,48 @@ func TestStatusRefusesAForeignSocketPath(t *testing.T) {
 	r.want(exitcode.Blocked, "status", "--json")
 	if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, "is not a socket") || e.Hint == "" {
 		t.Errorf("error = %+v", e)
+	}
+}
+
+// usageStatus is an account whose Status refuses with a Usage error that
+// is not the Hub's "no account".
+type usageStatus struct{ stubAPI }
+
+func (*usageStatus) Status(context.Context) (service.Status, error) {
+	return service.Status{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("the account's settings are invalid"), Hint: "fix them"}
+}
+
+// ghostHub lists, besides its accounts, one the Hub then says is gone (as
+// one removed between Accounts and Account).
+type ghostHub struct{ *stubHub }
+
+func (h ghostHub) Accounts() []service.AccountInfo {
+	return append(h.stubHub.Accounts(), service.AccountInfo{ID: "99999999", Address: "ghost@x.test"})
+}
+
+// Ruling R34: the offline status drops an account only when the Hub says
+// it is gone ("no account"); one whose Status fails, even with exit 2,
+// keeps its entry with an account-unreadable alert.
+func TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	hub := newStubHub(&usageStatus{}, &daemonAPI{status: service.Status{Phase: "ready"}})
+	hub.accounts[0].address, hub.accounts[1].address = userA, userB
+	r.open = func() (cli.Hub, error) { return ghostHub{hub}, nil }
+	r.want(exitcode.Usage, "status", "--json")
+	var data ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &data)
+	got := map[string][]ctl.Alert{}
+	for _, as := range data.Accounts {
+		got[as.ID] = as.Alerts
+	}
+	if _, ok := got["99999999"]; ok || len(data.Accounts) != 2 {
+		t.Fatalf("accounts = %+v; want both real ones, not the gone one", data.Accounts)
+	}
+	if a := got["00000000"]; len(a) != 1 || a[0].Code != ctl.CodeAccountUnreadable || a[0].Message != "the account's settings are invalid" || a[0].Fix != "fix them" {
+		t.Errorf("alerts of the failing account = %+v", a)
+	}
+	if _, ok := got["00000001"]; !ok {
+		t.Errorf("the ready account is missing: %+v", data.Accounts)
 	}
 }

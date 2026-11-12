@@ -5,12 +5,14 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // newerStore logs r in, then makes secrets.sealed one a newer pcb wrote.
@@ -131,4 +133,45 @@ func TestRootRefusesAnotherUsersState(t *testing.T) {
 	// Not concerned: a command that does not open the state (pcb install,
 	// uninstall and service as root: TestUninstallSystemDeleteData).
 	r.want(exitcode.OK, "version")
+}
+
+// Ruling R34: pcb logout with no account named, when the only account is
+// a pending one (an M5 state left waiting for a CAPTCHA moves to it), acts
+// on that account and exits 0, as M5 did; in process and through a daemon.
+func TestLogoutOfTheOnlyPendingAccount(t *testing.T) {
+	t.Parallel()
+	pending := func(t *testing.T) *rig {
+		t.Helper()
+		r := newRig(t, &protontest.Options{Captcha: "T1"})
+		r.want(exitcode.MustAct, "login", "--non-interactive")
+		r.want(exitcode.OK, "account", "list", "--json")
+		if got := r.out.String(); !strings.Contains(got, `"pending": true`) {
+			t.Fatalf("account list after the CAPTCHA wait = %s", got)
+		}
+		return r
+	}
+	t.Run("in process", func(t *testing.T) {
+		t.Parallel()
+		r := pending(t)
+		r.want(exitcode.OK, "logout")
+		if got := r.out.String(); got != "Not logged in.\n" {
+			t.Errorf("stdout = %q", got)
+		}
+		r.want(exitcode.OK, "status", "--json")
+		if got := r.out.String(); strings.Contains(got, "needs-captcha") {
+			t.Errorf("status after logout still waits for the CAPTCHA: %s", got)
+		}
+	})
+	t.Run("daemon", func(t *testing.T) {
+		t.Parallel()
+		r := pending(t)
+		hub := newStubHub(&daemonAPI{status: service.Status{Phase: "needs-captcha"}})
+		hub.accounts[0].address, hub.accounts[0].pending = userA, true
+		startDaemon(t, r, hub, nil)
+		noInProcess(t, r)
+		r.want(exitcode.OK, "logout")
+		if !slices.Equal(hub.calls(), []string{"signout 00000000"}) {
+			t.Errorf("daemon calls = %v, want the pending account's logout", hub.calls())
+		}
+	})
 }

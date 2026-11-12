@@ -171,9 +171,9 @@ func (d *daemonLogin) Status(ctx context.Context) (service.Status, error) {
 	for _, a := range st.Accounts {
 		infos = append(infos, a.AccountInfo)
 	}
-	info, ok := findAccount(infos, d.sel)
-	if !ok {
-		return service.Status{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("no account " + d.sel), Hint: "see pcb account list"}
+	info, err := service.SelectAccount(infos, d.sel)
+	if err != nil {
+		return service.Status{}, err
 	}
 	for _, a := range st.Accounts {
 		if a.ID == info.ID {
@@ -206,7 +206,7 @@ func waitingForCode(ctx context.Context, c *ctl.Client) (string, error) {
 	case 1:
 		return waiting[0].ID, nil
 	}
-	return "", severalAccounts(waiting)
+	return "", service.SeveralAccounts(waiting)
 }
 
 func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error {
@@ -292,7 +292,7 @@ func (a *app) resumeUsername(cmd *cobra.Command, svc loginAPI, flagUser string) 
 	captcha := func(info service.AccountInfo) bool { return info.Phase == string(service.StateNeedsCaptcha) }
 	var info service.AccountInfo
 	if sel != "" {
-		if info, err = chooseAccount(list, sel, captcha); err != nil {
+		if info, err = service.SelectAccount(list, sel); err != nil {
 			return "", err
 		}
 		if !captcha(info) {
@@ -311,7 +311,7 @@ func (a *app) resumeUsername(cmd *cobra.Command, svc loginAPI, flagUser string) 
 		case 1:
 			info = waiting[0]
 		default:
-			return "", severalAccounts(waiting)
+			return "", service.SeveralAccounts(waiting)
 		}
 	}
 	if flagUser != "" && info.Address != "" && !strings.EqualFold(flagUser, info.Address) {

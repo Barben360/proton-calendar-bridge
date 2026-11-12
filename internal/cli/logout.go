@@ -58,7 +58,7 @@ func (a *app) logout(cmd *cobra.Command, yes bool) (service.LogoutResult, error)
 		if err != nil || (sel == "" && len(list) == 0) {
 			return service.LogoutResult{}, err // no account: not logged in
 		}
-		info, err := chooseAccount(list, sel, anyAccount)
+		info, err := logoutTarget(list, sel)
 		if err != nil {
 			return service.LogoutResult{}, err
 		}
@@ -85,7 +85,11 @@ func (a *app) logout(cmd *cobra.Command, yes bool) (service.LogoutResult, error)
 	if sel == "" && len(h.Accounts()) == 0 {
 		return service.LogoutResult{}, nil // no account: not logged in
 	}
-	api, info, err := h.Account(sel)
+	info, err := logoutTarget(h.Accounts(), sel)
+	if err != nil {
+		return service.LogoutResult{}, err
+	}
+	api, _, err := h.Account(info.ID)
 	if err != nil {
 		return service.LogoutResult{}, err
 	}
@@ -118,4 +122,15 @@ func (a *app) logoutWith(cmd *cobra.Command, yes bool, status func(context.Conte
 		}
 	}
 	return logout(ctx, service.LogoutRequest{Discard: discard})
+}
+
+// logoutTarget is the account of list pcb logout signs out: the one
+// selector names, else the only ready one, else (ruling R34) the only
+// account when it is pending: an M5 state left waiting for a CAPTCHA moves
+// to one, and M5 logged it out.
+func logoutTarget(list []service.AccountInfo, selector string) (service.AccountInfo, error) {
+	if selector == "" && len(list) == 1 && list[0].Pending {
+		return list[0], nil
+	}
+	return service.SelectAccount(list, selector)
 }

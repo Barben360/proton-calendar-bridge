@@ -185,14 +185,19 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
 		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
 		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live})
-	accounts, err := doctor.Accounts(dirs.State)
-	if err != nil {
-		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: err.Error(), Fix: "pcb doctor reads it again once fixed"})
+	layout, err := doctor.Accounts(dirs.State)
+	var lerr *doctor.LayoutError
+	switch {
+	case errors.As(err, &lerr):
+		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: lerr.Error(), Fix: lerr.Fix})
+	case layout.Interrupted != "":
+		checks = append(checks, warnCheck{label: "accounts", message: "the move to the per-account layout stopped midway (" + layout.Interrupted +
+			"): the next pcb command that opens the state finishes it", fix: "pcb status"})
+	case len(layout.Accounts) == 0:
+		checks = append(checks, warnCheck{label: "accounts", message: "no account: nothing can sign in to pcb serve",
+			fix: "pcb login (it creates the client default), then pcb client show"})
 	}
-	if len(accounts) == 0 && err == nil {
-		checks = append(checks, noAccountCheck{})
-	}
-	for _, acct := range accounts {
+	for _, acct := range layout.Accounts {
 		prefix := ""
 		if acct.Label != "" {
 			prefix = acct.Label + ": "
@@ -210,15 +215,13 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 	return checks
 }
 
-// noAccountCheck is the account checks of a state with no account: there
-// is nothing to check, and nothing CalDAV can serve.
-type noAccountCheck struct{}
+// warnCheck is a warning found without a check of its own to run.
+type warnCheck struct{ label, message, fix string }
 
-func (noAccountCheck) Name() string { return "accounts" }
+func (c warnCheck) Name() string { return c.label }
 
-func (noAccountCheck) Run(context.Context) doctor.Result {
-	return doctor.Result{Name: "accounts", Status: doctor.StatusWarn, Message: "no account: nothing can sign in to pcb serve",
-		Fix: "pcb login (it creates the client default), then pcb client show"}
+func (c warnCheck) Run(context.Context) doctor.Result {
+	return doctor.Result{Name: c.label, Status: doctor.StatusWarn, Message: c.message, Fix: c.fix}
 }
 
 // named is a check whose results are named with prefix first (the

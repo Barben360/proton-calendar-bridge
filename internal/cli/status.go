@@ -77,7 +77,7 @@ func narrow(st ctl.Status, selector string) (*ctl.Status, error) {
 	for _, as := range st.Accounts {
 		infos = append(infos, as.AccountInfo)
 	}
-	info, err := chooseAccount(infos, selector, anyAccount)
+	info, err := service.SelectAccount(infos, selector)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func offlineStatus(ctx context.Context, h Hub, selector string) (*ctl.Status, er
 		switch {
 		case err == nil:
 			as.Alerts = ctl.Alerts(ctl.AlertInput{Account: info.ID, Login: as.Login, Stopped: info.Stopped, Now: now})
-		case exitcode.From(err) == exitcode.Usage:
+		case errors.Is(err, service.ErrNoAccount):
 			continue // removed since Accounts listed it
 		default:
 			as.Alerts = []ctl.Alert{{Account: info.ID, Code: ctl.CodeAccountUnreadable, Severity: ctl.SeverityError,

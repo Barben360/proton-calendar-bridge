@@ -102,7 +102,7 @@ func (a *hubAccount) enter() (func(), error) {
 	a.gate.RLock()
 	if a.removed {
 		a.gate.RUnlock()
-		return nil, usage("no account "+a.id, "see pcb account list")
+		return nil, noAccount(a.id, "see pcb account list")
 	}
 	return a.gate.RUnlock, nil
 }
@@ -455,19 +455,45 @@ func (h *Hub) pick(selector string) (*hubAccount, error) {
 		return nil, errClosed()
 	}
 	list := h.list()
-	if selector != "" {
-		if a := find(list, selector); a != nil {
-			return a, nil
-		}
-		return nil, usage("no account "+selector, "see pcb account list")
+	info, err := SelectAccount(lightInfos(list), selector)
+	var several *SeveralAccountsError
+	if errors.As(err, &several) {
+		return nil, severalAccounts(h.infos(byIDs(list, several.Accounts)))
 	}
-	var ready []*hubAccount
+	if err != nil {
+		return nil, err
+	}
+	return byIDs(list, []AccountInfo{info})[0], nil
+}
+
+// SelectAccount is the account of list that selector names: its local ID,
+// else its address (case-insensitively), a pending account included.
+// Empty, it is the only account of list that is not pending. It refuses
+// (Usage) a selector that names none and an empty one with no account
+// ready, both with ErrNoAccount as cause, and an empty one with several
+// ready, with a *SeveralAccountsError listing them in list's order.
+// Hub.Account chooses with it; so does the CLI, over a daemon's list.
+func SelectAccount(list []AccountInfo, selector string) (AccountInfo, error) {
+	if selector != "" {
+		for _, info := range list {
+			if info.ID == selector {
+				return info, nil
+			}
+		}
+		for _, info := range list {
+			if strings.EqualFold(info.Address, selector) {
+				return info, nil
+			}
+		}
+		return AccountInfo{}, noAccount(selector, "see pcb account list")
+	}
+	var ready []AccountInfo
 	pending := 0
-	for _, a := range list {
-		if inspect(a).pending {
+	for _, info := range list {
+		if info.Pending {
 			pending++
 		} else {
-			ready = append(ready, a)
+			ready = append(ready, info)
 		}
 	}
 	switch len(ready) {
@@ -475,27 +501,35 @@ func (h *Hub) pick(selector string) (*hubAccount, error) {
 		return ready[0], nil
 	case 0:
 		if pending > 0 {
-			return nil, usage("no account", "finish the pending login (pcb login resume), or add an account with pcb login")
+			return AccountInfo{}, noAccount("", "finish the pending login (pcb login resume), or add an account with pcb login")
 		}
-		return nil, usage("no account", "add one with pcb login")
+		return AccountInfo{}, noAccount("", "add one with pcb login")
 	}
-	return nil, severalAccounts(h.infos(ready))
+	return AccountInfo{}, severalAccounts(ready)
 }
 
-// find is the account of list whose local ID is selector, else whose
-// address is (case-insensitively), nil if none.
-func find(list []*hubAccount, selector string) *hubAccount {
+// lightInfos is what SelectAccount needs of each account of list (its
+// local ID, address and pending flag), read without asking its Local.
+func lightInfos(list []*hubAccount) []AccountInfo {
+	out := make([]AccountInfo, 0, len(list))
 	for _, a := range list {
-		if a.id == selector {
-			return a
+		d := inspect(a)
+		out = append(out, AccountInfo{ID: a.id, Address: d.address, Pending: d.pending})
+	}
+	return out
+}
+
+// byIDs is the accounts of list that infos name, in infos' order.
+func byIDs(list []*hubAccount, infos []AccountInfo) []*hubAccount {
+	out := make([]*hubAccount, 0, len(infos))
+	for _, info := range infos {
+		for _, a := range list {
+			if a.id == info.ID {
+				out = append(out, a)
+			}
 		}
 	}
-	for _, a := range list {
-		if strings.EqualFold(inspect(a).address, selector) {
-			return a
-		}
-	}
-	return nil
+	return out
 }
 
 // sweep removes the abandoned adds, unless an operation that changes the
@@ -795,10 +829,11 @@ func (h *Hub) pickWaiting(selector string) (*hubAccount, error) {
 	}
 	list := h.list()
 	if selector != "" {
-		if a := find(list, selector); a != nil {
-			return a, nil
+		info, err := SelectAccount(lightInfos(list), selector)
+		if err != nil {
+			return nil, err
 		}
-		return nil, usage("no account "+selector, "see pcb account list")
+		return byIDs(list, []AccountInfo{info})[0], nil
 	}
 	var waiting []*hubAccount
 	for _, a := range list {
