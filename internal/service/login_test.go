@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -1165,10 +1167,11 @@ func mustJSON(t *testing.T, v any) string {
 
 // The session pcb holds in memory when the store is found rolled back is
 // its newest, sealed only in the file the restore replaced: it is revoked
-// (ruling M5-R3), and the restored file's session is not.
+// (ruling M5-R3), also when its access token has expired (the refresh before
+// the revoke stays in memory: the rolled-back store refuses it).
 func TestRolledBackSecretsRevokeTheHeldSession(t *testing.T) {
 	t.Parallel()
-	for name, detect := range map[string]func(t *testing.T, e *env){
+	detects := map[string]func(t *testing.T, e *env){
 		"operation": func(t *testing.T, e *env) {
 			_, err := e.svc.Calendars(t.Context())
 			if ee := wantExit(t, err, exitcode.MustAct); ee.Hint != rolledBackHint {
@@ -1180,39 +1183,86 @@ func TestRolledBackSecretsRevokeTheHeldSession(t *testing.T) {
 				t.Fatalf("Logout = %+v, %v", res, err)
 			}
 		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			e := newEnv(t, protontest.Options{})
-			e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
-			e.login(t, e.req())
-			old, err := os.ReadFile(e.secrets().Path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			e.f.ExpireAccessTokens()
-			if got := e.calendars(t); len(got) != 1 { // refreshes: the held client has the newest tokens
-				t.Fatalf("calendars = %+v", got)
-			}
-			newest := e.account(t)
-			if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if !sessionAlive(t, e, tokensOf(newest)) {
-				t.Fatal("the newest session is not alive before the check")
-			}
-			detect(t, e)
-			if sessionAlive(t, e, tokensOf(newest)) {
-				t.Error("the newest session, held in memory, is still alive")
-			}
-			if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
-				t.Errorf("%d revocations, want 1 (the held session)", n)
-			}
-			// A second detection has nothing left to revoke.
-			_, _ = e.svc.Calendars(t.Context())
-			if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
-				t.Errorf("%d revocations after a second detection, want 1", n)
-			}
-		})
+	}
+	for name, detect := range detects {
+		for _, expired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/expired=%v", name, expired), func(t *testing.T) {
+				t.Parallel()
+				e := newEnv(t, protontest.Options{})
+				e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "A"})
+				e.login(t, e.req())
+				old, err := os.ReadFile(e.secrets().Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.f.ExpireAccessTokens()
+				if got := e.calendars(t); len(got) != 1 { // refreshes: the held client has the newest tokens
+					t.Fatalf("calendars = %+v", got)
+				}
+				newest := e.account(t)
+				if err := os.WriteFile(e.secrets().Path, old, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if !sessionAlive(t, e, tokensOf(newest)) {
+					t.Fatal("the newest session is not alive before the check")
+				}
+				if expired {
+					e.f.ExpireAccessTokens()
+				}
+				refreshes := e.f.Calls("POST", "/auth/v4/refresh")
+				detect(t, e)
+				if sessionRefreshable(t, e, tokensOf(newest)) {
+					t.Error("the newest session, held in memory, is still alive")
+				}
+				if expired && e.f.Calls("POST", "/auth/v4/refresh") == refreshes {
+					t.Error("no in-memory refresh before revoking an expired session")
+				}
+				// A second detection has nothing left to revoke.
+				deletes := e.f.Calls("DELETE", "/auth/v4")
+				_, _ = e.svc.Calendars(t.Context())
+				if n := e.f.Calls("DELETE", "/auth/v4"); n != deletes {
+					t.Errorf("%d revocations after a second detection, want %d", n, deletes)
+				}
+			})
+		}
+	}
+}
+
+// sessionRefreshable reports whether tok's refresh token still opens its
+// session on the fake (it rotates it: call it last).
+func sessionRefreshable(t *testing.T, e *env, tok api.Tokens) bool {
+	t.Helper()
+	m := auth.NewManager(e.f.URL, e.cfg.Proton.AppVersion)
+	defer m.Close()
+	_, err := auth.Refresh(t.Context(), m, tok)
+	return err == nil
+}
+
+// A mirror edited to exactly the bound is valid but makes the store rolled
+// back; a single logout recovers (the next generation saturates).
+func TestLogoutAtTheGenerationBoundRecovers(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	st := e.loadState(t)
+	st.SecretsGeneration = store.MaxSecretsGeneration
+	if err := store.SaveState(e.dirs.State, st); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "rolled-back" {
+		t.Fatalf("Status = %+v, %v", s, err)
+	}
+	if _, err := e.svc.Logout(t.Context()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Phase != "logged-out" {
+		t.Fatalf("Status after one logout = %+v, %v", s, err)
+	}
+	e.clk.advance(61 * time.Second)
+	if res := e.login(t, e.req()); res.State != service.StateReady {
+		t.Fatalf("login: %+v", res)
+	}
+	if s, err := e.svc.Status(t.Context()); err != nil || s.Secrets != "sealed" || s.Phase != "ready" {
+		t.Errorf("Status after the login = %+v, %v", s, err)
 	}
 }

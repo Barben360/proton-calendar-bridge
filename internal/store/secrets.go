@@ -94,6 +94,18 @@ func aad(version int, sealer string) []byte {
 	return []byte("pcb-secrets/v" + strconv.Itoa(version) + "/" + sealer)
 }
 
+// nextGeneration is the generation after the file's gen and the mirror,
+// saturating at MaxSecretsGeneration so pcb never writes a mirror its own
+// LoadState refuses: a mirror edited to the bound recovers with one logout.
+// (At saturation a file one write old reads as current: the bound is only
+// reachable by editing state.json, the M5-P14 residual.)
+func nextGeneration(gen, mirror uint64) uint64 {
+	if last := max(gen, mirror); last < MaxSecretsGeneration {
+		return last + 1
+	}
+	return MaxSecretsGeneration
+}
+
 func (s *Secrets) stateDir() string { return filepath.Dir(s.Path) }
 
 // mirror is the generation state.json mirrors, 0 when it has none. A
@@ -202,7 +214,7 @@ func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Accoun
 	if err := fn(accounts); err != nil {
 		return err
 	}
-	next := max(gen, mirror) + 1
+	next := nextGeneration(gen, mirror)
 	if len(accounts) == 0 {
 		removed, err := s.wipe()
 		if removed {
@@ -273,7 +285,7 @@ func (s *Secrets) Wipe(ctx context.Context) (next uint64, err error) {
 	if !removed {
 		return 0, err
 	}
-	next = max(gen, mirror) + 1
+	next = nextGeneration(gen, mirror)
 	s.setMirror(ctx, next)
 	return next, err
 }

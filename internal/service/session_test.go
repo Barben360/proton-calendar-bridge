@@ -622,3 +622,46 @@ func TestHumanNeededReportsAHeldStateLock(t *testing.T) {
 		t.Errorf("state.json written without the lock:\n%s", after)
 	}
 }
+
+// afterRoundTrip runs after each response, before the client reads it.
+type afterRoundTrip func(resp *http.Response)
+
+func (a afterRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err == nil {
+		a(resp)
+	}
+	return resp, err
+}
+
+// The needs-login mark is durable: a request cancelled once the session is
+// known to have ended still writes it.
+func TestHumanNeededMarksEvenWhenTheRequestIsCancelled(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(2 * time.Minute)
+	e.f.RevokeSessions()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s, err := service.NewLocal(service.Options{
+		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: afterRoundTrip(func(resp *http.Response) {
+			if resp.StatusCode == http.StatusUnauthorized { // Proton has answered that the session ended
+				cancel()
+			}
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	_, err = s.Calendars(ctx)
+	_ = wantExit(t, err, exitcode.MustAct)
+	if ctx.Err() == nil {
+		t.Fatal("the request was not cancelled: the test proves nothing")
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseNeedsLogin || st.Reason != "the Proton session has ended" {
+		t.Errorf("state = %+v, want needs-login", st)
+	}
+}

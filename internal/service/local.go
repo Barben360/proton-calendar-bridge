@@ -175,7 +175,10 @@ func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.T
 // revokeTimeout, and drops the client. It runs when secrets.sealed is found
 // rolled back: that session is pcb's newest, sealed only in the file the
 // restore replaced, so it is revoked rather than left live and forgotten
-// (ruling M5-R3). The restored file's own session is not revoked.
+// (ruling M5-R3). The restored file's own session is not revoked. The
+// revoke runs on a client of the held tokens that refreshes in memory only
+// (client): the cached client's refresh goes through the rolled-back store,
+// which refuses it, so an expired access token would leave the session alive.
 func (l *Local) revokeHeld() {
 	l.cmu.Lock()
 	cc := l.cached
@@ -186,7 +189,7 @@ func (l *Local) revokeHeld() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
-	_ = auth.Logout(ctx, cc.c)
+	_ = auth.Logout(ctx, l.client(cc.c.Tokens()))
 }
 
 // revoke ends acc's session, best effort within revokeTimeout.

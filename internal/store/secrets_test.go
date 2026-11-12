@@ -637,3 +637,32 @@ func TestFailedMirrorWriteIsLogged(t *testing.T) {
 		}
 	}
 }
+
+// A mirror at the bound (only an edit puts it there) saturates instead of
+// moving past what LoadState accepts: one wipe and a new login recover.
+func TestGenerationSaturatesAtTheBound(t *testing.T) {
+	f := newFixture(t)
+	put(t, f.secrets, fullAccount("userA"))
+	if err := store.SaveState(f.state, store.State{Phase: store.PhaseReady, SecretsGeneration: store.MaxSecretsGeneration}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.secrets.Load()
+	wantRolledBack(t, err, 1, store.MaxSecretsGeneration)
+	next, err := f.secrets.Wipe(ctx(t))
+	if err != nil || next != store.MaxSecretsGeneration {
+		t.Fatalf("Wipe = %d, %v; want the bound", next, err)
+	}
+	if err := store.SaveState(f.state, store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next}); err != nil {
+		t.Fatal(err)
+	}
+	if m := mirrorOf(t, f); m != store.MaxSecretsGeneration {
+		t.Fatalf("mirror %d", m)
+	}
+	put(t, f.secrets, fullAccount("userB"))
+	if g, m := sealedGeneration(t, f), mirrorOf(t, f); g != store.MaxSecretsGeneration || m != store.MaxSecretsGeneration {
+		t.Fatalf("sealed %d mirror %d, want both at the bound", g, m)
+	}
+	if got, err := f.secrets.Load(); err != nil || len(got) != 1 {
+		t.Fatalf("Load = %d accounts, %v", len(got), err)
+	}
+}
