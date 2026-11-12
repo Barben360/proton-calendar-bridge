@@ -68,7 +68,7 @@ func (l *Local) clientsError(err error) error {
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
-		return blocked(msg+", so nothing was stored", keyFix)
+		return keyFailure(err, msg+", so nothing was stored", keyFix)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
@@ -303,11 +303,12 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 }
 
 // unrevealable is the MustAct of a sealed copy the key does not open. A
-// key file that exists but cannot be used (unreadable, a loose mode) is
-// Blocked with its cause: the key is not lost, so rotate is no way out.
+// key file that exists but cannot be used (unreadable, a loose mode, a
+// wrong size) names its cause (keyFailure): the key is not lost, so rotate
+// is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return blocked(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
 	}
 	why := "its sealed copy does not open with the key file " + l.keyFile()
 	switch {

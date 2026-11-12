@@ -397,3 +397,30 @@ func TestClientShowNamesAnUnknownURL(t *testing.T) {
 		t.Errorf("JSON url = %v, want none", data["url"])
 	}
 }
+
+// ux Minor: empty lists say so, with the next step, instead of a bare
+// header: clients, calendars, and cached events (with and without a range).
+func TestEmptyListsSaySo(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	r.useLocal()
+	r.want(exitcode.OK, "client", "list")
+	if got, want := r.out.String(), "No CalDAV client yet.\nHint: run pcb client add NAME\n"; got != want {
+		t.Errorf("pcb client list: stdout %q, want %q", got, want)
+	}
+	s := stubRig(t, &stubAPI{})
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"calendar", "list"}, "No calendar yet.\nHint: create one in the Proton Calendar web app, then run pcb calendar list again\n"},
+		{[]string{"event", "list", "--calendar", "Work"}, "No event cached for this calendar.\nHint: run pcb sync to bring the cache up to date\n"},
+		{[]string{"event", "list", "--calendar", "Work", "--from", "2026-11-01"},
+			"No cached event in that range.\nHint: widen --from and --to, or run pcb sync to bring the cache up to date\n"},
+	} {
+		s.want(exitcode.OK, c.args...)
+		if got := s.out.String(); got != c.want {
+			t.Errorf("pcb %s: stdout %q, want %q", strings.Join(c.args, " "), got, c.want)
+		}
+	}
+}

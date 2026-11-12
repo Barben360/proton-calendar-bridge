@@ -1,7 +1,9 @@
 package cli_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,7 +36,7 @@ func TestDoctorExitCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, errs := run("doctor", "--json")
-	if code != exitcode.Blocked || errs != "" {
+	if code != exitcode.MustAct || errs != "" { // ux-I2: a mode to fix is the person's
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	var env struct {
@@ -44,7 +46,10 @@ func TestDoctorExitCode(t *testing.T) {
 				Name, Status, Fix string
 			} `json:"results"`
 		} `json:"data"`
-		Error struct{ Code int } `json:"error"`
+		Error struct {
+			Code          int
+			Message, Hint string
+		} `json:"error"`
 	}
 	dec := json.NewDecoder(strings.NewReader(out))
 	if err := dec.Decode(&env); err != nil {
@@ -53,7 +58,8 @@ func TestDoctorExitCode(t *testing.T) {
 	if dec.More() {
 		t.Fatalf("more than one JSON value: %q", out)
 	}
-	if env.OK || env.Error.Code != 20 {
+	if env.OK || env.Error.Code != 10 || env.Error.Message != "pcb doctor found 1 error" ||
+		env.Error.Hint != "fix what the failed checks name (marked ✗), then run pcb doctor again" {
 		t.Fatalf("bad envelope: %+v", env)
 	}
 	var names, statuses []string
@@ -130,7 +136,7 @@ func TestDoctorTextShowsFix(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, _ := run("doctor")
-	if code != exitcode.Blocked || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: chmod 700 "+cfg) {
+	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: chmod 700 "+cfg) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }
@@ -141,11 +147,14 @@ func TestDoctorReportsUnresolvableDirs(t *testing.T) {
 	t.Setenv("PCB_CONFIG_DIR", "")
 	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("HOME", "")
-	code, out, _ := run("doctor")
-	if code != exitcode.Blocked || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
+	code, out, errs := run("doctor")
+	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
 		!strings.Contains(out, "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path") ||
 		!strings.Contains(out, "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path") {
 		t.Fatalf("code=%d stdout=%q", code, out)
+	}
+	if want := "Error: pcb doctor found 2 errors\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; errs != want {
+		t.Errorf("stderr = %q, want %q", errs, want)
 	}
 }
 
@@ -159,13 +168,15 @@ func TestDoctorFlagsBadConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, out, _ := run("doctor")
-	if code != exitcode.Blocked || !strings.Contains(out, "✗  config file: unknown key proton.appversion") || !strings.Contains(out, "   fix: edit "+p) {
+	// ux-I2: a bad config.toml is exit 10, as in every other command.
+	if code != exitcode.MustAct || !strings.Contains(out, "✗  config file: unknown key proton.appversion") || !strings.Contains(out, "   fix: edit "+p) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }
 
 // With a daemon, doctor lists its alerts: an error is ✗ with its fix and
-// exit 20; a warning is ! and leaves the exit code alone.
+// exit 10 (a person acts on every error alert); a warning is ! and leaves
+// the exit code alone.
 func TestDoctorListsAlerts(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{})
@@ -186,12 +197,12 @@ func TestDoctorListsAlerts(t *testing.T) {
 	}
 
 	api.status = service.Status{Phase: "needs-login", Reason: "Proton ended the session"}
-	r.want(exitcode.Blocked, "doctor")
+	r.want(exitcode.MustAct, "doctor")
 	if want := "✗  alert needs-login: Proton ended the session\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
 		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 
-	r.want(exitcode.Blocked, "doctor", "--json")
+	r.want(exitcode.MustAct, "doctor", "--json")
 	var data struct {
 		Results []struct{ Name, Status, Message, Fix string } `json:"results"`
 	}
@@ -223,5 +234,66 @@ func TestDoctorUsesTheDaemonsListener(t *testing.T) {
 		if !strings.Contains(r.out.String(), want) {
 			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 		}
+	}
+}
+
+// ux-I2: the daemon of a fresh install waits for a login: its needs-login
+// alert is a warning in pcb doctor (exit 0), as HUMAN-CHECKS 7.4 expects.
+// Without the wait, it stays an error (exit 10).
+func TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	api := &daemonAPI{status: service.Status{Phase: "logged-out"}, health: service.Health{Serve: service.ServeWaitingForLogin}}
+	startDaemon(t, r, api, nil)
+	r.want(exitcode.OK, "doctor")
+	if want := "!  alert needs-login: not logged in to Proton\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+	api.health.Serve = service.ServeServing
+	r.want(exitcode.MustAct, "doctor")
+	if want := "✗  alert needs-login: not logged in to Proton\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+}
+
+// ux-I2: a daemon that does not answer its control socket cleanly is the
+// one error that may pass by itself: exit 20 when it is the only one.
+func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	r.dial = func(context.Context, string) (*ctl.Client, error) {
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("pcb serve did not answer in time"), Hint: "run pcb doctor again"}
+	}
+	r.want(exitcode.Blocked, "doctor")
+	if want := "✗  daemon: pcb serve did not answer in time\n   fix: run pcb doctor again\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+	if want := "Error: pcb doctor found 1 error\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; r.errb.String() != want {
+		t.Errorf("stderr = %q, want %q", r.errb.String(), want)
+	}
+	// With a mode to fix as well, a person must act: 10.
+	if err := os.MkdirAll(r.dirs.Config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(r.dirs.Config, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	r.want(exitcode.MustAct, "doctor")
+}
+
+// ux Minor: pcb doctor warns per client whose sealed password the key
+// file no longer opens (here: a new key file), with the rotation to run.
+func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	r.useLocal()
+	r.want(exitcode.OK, "client", "add", "phone")
+	key := filepath.Join(r.dirs.Config, "secrets.key")
+	if err := os.WriteFile(key, []byte(strings.Repeat("k", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.want(exitcode.OK, "doctor")
+	if want := "!  caldav client phone: password cannot be shown\n   fix: pcb client rotate phone\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 	}
 }

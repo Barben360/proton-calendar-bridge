@@ -45,3 +45,17 @@ func (e *KeyModeError) Error() string {
 
 // Is makes errors.Is(err, ErrKeyMode) hold.
 func (e *KeyModeError) Is(target error) bool { return target == ErrKeyMode }
+
+// KeySizeError is a key file refused for its size: it does not hold a key
+// of 32 bytes. errors.Is(err, ErrCorrupt) holds for it.
+type KeySizeError struct {
+	Path string
+	Size int64 // the file's size in bytes
+}
+
+func (e *KeySizeError) Error() string {
+	return fmt.Sprintf("%s: key file %s is not %d bytes", ErrCorrupt, e.Path, keySize)
+}
+
+// Is makes errors.Is(err, ErrCorrupt) hold.
+func (e *KeySizeError) Is(target error) bool { return target == ErrCorrupt }

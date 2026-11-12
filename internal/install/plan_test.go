@@ -217,8 +217,8 @@ func TestPlanRefusesAPathAUnitCannotHold(t *testing.T) {
 		s := newSys(t)
 		s.env["HOME"] = home
 		_, err := install.Plan(context.Background(), s.host(), install.Request{Scope: install.ScopeUser})
-		if exitcode.From(err) != exitcode.Blocked || !strings.Contains(fmt.Sprint(err), "only paths made of ASCII letters, digits and /._-+@,:=~") {
-			t.Errorf("HOME=%q: err = %v, want a refusal (exit 20)", home, err)
+		if exitcode.From(err) != exitcode.MustAct || !strings.Contains(fmt.Sprint(err), "only paths made of ASCII letters, digits and /._-+@,:=~") {
+			t.Errorf("HOME=%q: err = %v, want a refusal (exit 10)", home, err)
 		}
 	}
 	s := newSys(t)

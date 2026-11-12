@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -745,6 +746,39 @@ func TestNoDaemonNoteNotBeforeADirectoryError(t *testing.T) {
 		r.want(exitcode.Blocked, args...)
 		if strings.Contains(r.errb.String(), "Note:") || !strings.Contains(r.errb.String(), "PCB_STATE_DIR") {
 			t.Errorf("pcb %s: stderr %q; want the directory error without the no-daemon note", strings.Join(args, " "), r.errb.String())
+		}
+	}
+}
+
+// Ruling A2 (1): outside pcb serve, the service's warnings reach stderr in
+// pcb's message style (here: a last login time in the future), and never
+// stdout, so a --json envelope stays alone.
+func TestCommandsPrintTheServiceWarningsOnStderr(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.mk = nil // the default service, as pcb opens it (real clock)
+	stamp := filepath.Join(r.dirs.State, "last-login")
+	future := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+	for _, args := range [][]string{{"login", "--non-interactive"}, {"login", "--non-interactive", "--json"}} {
+		if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stamp, []byte(future.Format(time.RFC3339Nano)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.want(exitcode.OK, args...)
+		want := "Warning: the last login time is in the future: the clock was set back; ignoring it (file: " + stamp +
+			", last_login: " + future.Format(time.RFC3339) + ", now: "
+		got := strings.TrimPrefix(r.errb.String(), noDaemonNote)
+		if !strings.HasPrefix(got, want) || !strings.HasSuffix(strings.SplitN(got, "\n", 2)[0], ")") || strings.Count(got, "Warning:") != 1 {
+			t.Errorf("pcb %s: stderr %q, want one line starting %q", strings.Join(args, " "), got, want)
+		}
+		if args[len(args)-1] == "--json" {
+			if e := r.envelope(); !e.OK {
+				t.Errorf("envelope = %+v", e)
+			}
+		} else if strings.Contains(r.out.String(), "Warning") {
+			t.Errorf("stdout %q holds the warning", r.out.String())
 		}
 	}
 }

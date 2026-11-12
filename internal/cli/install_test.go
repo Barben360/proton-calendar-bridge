@@ -995,3 +995,21 @@ func TestInstallSystemFollowsASymlinkedStateDir(t *testing.T) {
 		}
 	}
 }
+
+// ux Minor: a home a systemd unit cannot hold (a space, a non-ASCII
+// letter) is refused with its reason, exit 10: a person picks other paths,
+// and --plan shows the refusal as it is.
+func TestInstallPlanRefusesAPathAUnitCannotHoldWithExit10(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ home, char string }{{"/home/alice smith", `' ' (U+0020)`}, {"/home/josé", `'é' (U+00E9)`}} {
+		s := newSysRig(t)
+		s.env["HOME"] = c.home
+		s.want(exitcode.MustAct, "install", "--plan")
+		want := "Error: the config directory, " + c.home + "/.config/pcb, holds " + c.char +
+			": pcb writes into a systemd unit only paths made of ASCII letters, digits and /._-+@,:=~\n" +
+			"Hint: set PCB_CONFIG_DIR and PCB_STATE_DIR, or move the binary, to such paths\n"
+		if got := s.errb.String(); got != want {
+			t.Errorf("HOME=%q: stderr %q, want %q", c.home, got, want)
+		}
+	}
+}

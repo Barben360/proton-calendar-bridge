@@ -61,15 +61,21 @@ func read(ctx context.Context, f func() (string, error)) (string, error) {
 	}
 }
 
+// ReadLine implements Terminal. A read that gets no answer (Ctrl-D, Ctrl-C)
+// ends the prompt's line, so the error that follows starts a line of its own.
 func (t *osTerminal) ReadLine(ctx context.Context, prompt string) (string, error) {
 	fmt.Fprint(t.out, prompt)
-	return read(ctx, func() (string, error) {
+	s, err := read(ctx, func() (string, error) {
 		line, err := t.in.ReadString('\n')
 		if err != nil && (!errors.Is(err, io.EOF) || line == "") {
 			return "", err
 		}
 		return strings.TrimRight(line, "\r\n"), nil
 	})
+	if err != nil {
+		fmt.Fprintln(t.out)
+	}
+	return s, err
 }
 
 func (t *osTerminal) ReadSecret(ctx context.Context, prompt string) (string, error) {

@@ -222,9 +222,9 @@ func mapError(err error, keyFile string) error {
 	case errors.As(err, &use):
 		return unsupportedStore(use)
 	case errors.Is(err, seal.ErrNoKey):
-		return blocked("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
+		return mustAct("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
-		return blocked("the stored secrets cannot be opened with the key file "+keyFile, "restore both from a backup, or run pcb logout to discard the stored session and log in again")
+		return mustAct("the stored secrets cannot be opened with the key file "+keyFile, "restore both from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.As(err, &ts):
 		return blocked(ts.Error(), "retry in "+ts.Wait.Round(time.Second).String())
 	case errors.As(err, &ae):
@@ -299,18 +299,42 @@ func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, 
 func keyCause(err error) string {
 	var (
 		me *seal.KeyModeError
+		se *seal.KeySizeError
 		pe *fs.PathError
 		le *os.LinkError
 	)
 	switch {
 	case errors.As(err, &me):
 		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
+	case errors.As(err, &se):
+		return fmt.Sprintf("it holds %d bytes, not a 32-byte key", se.Size)
 	case errors.As(err, &pe):
 		return pe.Error()
 	case errors.As(err, &le):
 		return le.Error()
 	}
 	return ""
+}
+
+// keyFault reports whether err, a failure to use the key file or the
+// sealed store, is one a person repairs (ux-I3): a key file that is
+// missing, refused for its mode or size, not for this data, or that this
+// user may not read or write. It is exit 10 in every command (MustAct, so
+// systemd does not restart pcb serve); any other cause (a full disk) stays
+// Blocked, as it may pass.
+func keyFault(err error) bool {
+	var me *seal.KeyModeError
+	return errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || // a wrong size is ErrCorrupt
+		errors.As(err, &me) || errors.Is(err, fs.ErrPermission)
+}
+
+// keyFailure is a failure to use the key file or the sealed store, with
+// msg and hint: MustAct for a keyFault, else Blocked.
+func keyFailure(err error, msg, hint string) *exitcode.Error {
+	if keyFault(err) {
+		return mustAct(msg, hint)
+	}
+	return blocked(msg, hint)
 }
 
 // keyFix is the hint for a key file that cannot be used.
@@ -329,7 +353,7 @@ func storeError(err error, keyFile string) error {
 		return mapError(err, keyFile)
 	}
 	if cause := keyCause(err); cause != "" {
-		return blocked("cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
+		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
 }
@@ -347,7 +371,7 @@ func stateError(err error) error {
 	case errors.Is(err, store.ErrGenerationOutOfRange):
 		return mustAct("the login state file holds a secrets generation out of range: it was edited or damaged", "run pcb logout, then pcb login")
 	}
-	return blocked("the login state file cannot be read", "run pcb logout to reset it")
+	return mustAct("the login state file cannot be read", "run pcb logout to reset it")
 }
 
 // stateLockError maps a state-file lock that could not be taken

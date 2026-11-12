@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/output"
@@ -23,8 +24,27 @@ func Root(use, short string, subs ...*cobra.Command) *cobra.Command {
 	root.SilenceErrors = true
 	root.PersistentFlags().Bool("json", false, "print one JSON envelope instead of text")
 	root.CompletionOptions.DisableDefaultCmd = true // not part of the usage contract
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return UsageError(err) })
+	root.SetFlagErrorFunc(flagError)
 	return root
+}
+
+// flagError is the usage error of a bad flag. A value the flag cannot
+// parse says what the flag takes, never the parser's Go error (ux Minor:
+// "strconv.ParseInt: parsing ...").
+func flagError(cmd *cobra.Command, err error) error {
+	var ive *pflag.InvalidValueError
+	if !errors.As(err, &ive) {
+		return UsageError(err)
+	}
+	want := map[string]string{
+		"int": "a whole number", "bool": "true or false", "duration": "a duration such as 30s or 5m",
+	}[ive.GetFlag().Value.Type()]
+	if want == "" {
+		want = "a " + ive.GetFlag().Value.Type()
+	}
+	return &exitcode.Error{Code: exitcode.Usage,
+		Err:  fmt.Errorf("invalid value %q for --%s: it takes %s", ive.GetValue(), ive.GetFlag().Name, want),
+		Hint: "run " + cmd.CommandPath() + " --help"}
 }
 
 // groupKey marks the commands Group builds, which have no behaviour of their own.
@@ -55,6 +75,20 @@ func Group(use, short string, subs ...*cobra.Command) *cobra.Command {
 		},
 	}
 	c.AddCommand(subs...)
+	return c
+}
+
+// NoJSON hides the inherited --json from c's help, for a command that
+// refuses it (it runs until stopped, or streams): the help does not offer
+// what the command rejects (ux Minor). It returns c.
+func NoJSON(c *cobra.Command) *cobra.Command {
+	c.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if f := cmd.InheritedFlags().Lookup("json"); f != nil {
+			f.Hidden = true
+			defer func() { f.Hidden = false }()
+		}
+		cmd.Parent().HelpFunc()(cmd, args)
+	})
 	return c
 }
 

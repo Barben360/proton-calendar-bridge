@@ -715,7 +715,7 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := e.svc.AddClient(t.Context(), "Laptop")
-		wantCode(t, err, exitcode.Blocked)
+		wantCode(t, err, exitcode.MustAct) // ux-I3: a key fault is the person's to repair
 		if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), key) {
 			t.Errorf("mode %04o: error %q, want the key file and %q", c.mode, err, c.want)
 		}
@@ -724,6 +724,23 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(exitcode.HintOf(err), "rotate") {
 			t.Errorf("mode %04o: show error %v, hint %q; want %q and no rotate", c.mode, err, exitcode.HintOf(err), c.want)
 		}
+	}
+	// ux-M: a key of the wrong size names its size, as the mode and the
+	// permission do.
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.AddClient(t.Context(), "Laptop")
+	wantCode(t, err, exitcode.MustAct)
+	const want = "the client's password could not be sealed with the key file "
+	if got := err.Error(); got != want+key+" (it holds 5 bytes, not a 32-byte key), so nothing was stored" {
+		t.Errorf("wrong size: error %q, want the size named", got)
+	}
+	if h := exitcode.HintOf(err); h != "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)" {
+		t.Errorf("wrong size: hint %q", h)
 	}
 }
 

@@ -1260,3 +1260,115 @@ func TestOneSignalOnBothPathsStopsCleanly(t *testing.T) {
 		t.Errorf("logs = %s; want the drain to end, nothing cut", logs)
 	}
 }
+
+// slowLocal is the rig's service whose watch waits for its context between
+// passes, so a logged-in pcb serve does not loop on the fake.
+func slowLocal(r *rig) func() (service.API, error) {
+	return func() (service.API, error) {
+		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+		if err != nil {
+			return nil, err
+		}
+		return service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
+			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
+	}
+}
+
+// ux-I1: while pcb serve holds the sync lock and answers on the control
+// socket, pcb sync has nothing to do (exit 0, it says so) and a second
+// pcb serve names the running one (exit 20, as any refused start).
+func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	r := newRig(t, &protontest.Options{})
+	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	r.mk = slowLocal(r)
+	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	s.listening()
+	r.useLocal()
+
+	r.want(exitcode.OK, "sync")
+	if got, want := r.out.String(), "pcb serve is running and already syncs: see pcb status\n"; got != want || r.errb.Len() != 0 {
+		t.Errorf("pcb sync: stdout %q, stderr %q; want %q", got, r.errb.String(), want)
+	}
+	r.want(exitcode.OK, "sync", "--json")
+	var data struct {
+		Calendars   []service.CalendarSync `json:"calendars"`
+		DaemonSyncs bool                   `json:"daemon_syncs"`
+	}
+	e := r.envelope()
+	mustUnmarshal(t, e.Data, &data)
+	if !e.OK || e.Error != nil || !data.DaemonSyncs || data.Calendars == nil || len(data.Calendars) != 0 {
+		t.Errorf("pcb sync --json = %+v, data %s", e, e.Data)
+	}
+	r.want(exitcode.OK, "sync", "--watch")
+	if got := r.out.String(); got != "pcb serve is running and already syncs: see pcb status\n" {
+		t.Errorf("pcb sync --watch: stdout %q", got)
+	}
+
+	second := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	if code := second.exit(); code != exitcode.Blocked {
+		t.Fatalf("second pcb serve: exit %d, want 20\nstderr: %s", code, second.errb.String())
+	}
+	if got, want := second.errb.String(), "Error: pcb serve is already running\nHint: run pcb status to see it\n"; got != want {
+		t.Errorf("second pcb serve: stderr %q, want %q", got, want)
+	}
+	second.neverListened()
+	s.stop()
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("first pcb serve: exit %d\nstderr: %s", code, s.errb.String())
+	}
+}
+
+// ux-I1: logged out, pcb sync says to log in, even while pcb serve
+// --wait-for-login holds the sync lock: the login is checked first.
+func TestSyncChecksTheLoginBeforeTheRunningDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.mk = slowLocal(r)
+	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+	s.listening()
+	r.useLocal()
+	calls := r.f.Calls("", "/")
+	for _, args := range [][]string{{"sync"}, {"sync", "--watch"}} {
+		r.want(exitcode.MustAct, args...)
+		if got, want := r.errb.String(), "Error: not logged in to Proton\nHint: run pcb login\n"; got != want {
+			t.Errorf("pcb %s: stderr %q, want %q", strings.Join(args, " "), got, want)
+		}
+	}
+	if n := r.f.Calls("", "/"); n != calls {
+		t.Errorf("a logged-out pcb sync made %d requests", n-calls)
+	}
+	s.stop()
+	_ = s.exit()
+}
+
+// ux Minor: a port in use names the address once, with the system's
+// reason, never Go's "listen tcp ...: bind:" chain.
+func TestServePortInUseSaysWhyOnce(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows words the reason differently")
+	}
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = busy.Close() })
+	stub := newServeStub()
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	addr := busy.Addr().String()
+	r.want(exitcode.Blocked, "serve", "--listen", addr)
+	want := "Error: cannot listen on " + addr + ": address already in use\n" +
+		"Hint: stop what uses that address, or choose another with --listen or [caldav] listen\n"
+	if got := r.errb.String(); !strings.HasSuffix(got, want) {
+		t.Errorf("stderr = %q, want it to end with %q", got, want)
+	}
+}

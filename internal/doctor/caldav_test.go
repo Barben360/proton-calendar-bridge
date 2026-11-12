@@ -1,11 +1,13 @@
 package doctor_test
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
 
@@ -212,6 +215,59 @@ func TestClientsCheck(t *testing.T) {
 	}
 	if got := (doctor.ClientsCheck{StateDir: state}).Run(ctx); got.Status != doctor.StatusError {
 		t.Errorf("unreadable list: %+v", got)
+	}
+}
+
+// ux Minor (parked M5): a client whose sealed password the key file no
+// longer opens gets one warning, with the rotation that gives a new one.
+// A key file that cannot be read, or one missing beside secrets.sealed,
+// is another check's to report: no warning then.
+func TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens(t *testing.T) {
+	ctx := context.Background()
+	state, cfgDir := t.TempDir(), t.TempDir()
+	key := filepath.Join(cfgDir, "secrets.key")
+	st := access.NewStore(state, nil)
+	st.Sealer = &seal.KeyFile{Path: key}
+	for _, name := range []string{"phone", "my laptop"} {
+		if _, _, err := st.Add(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := doctor.SealedClientsCheck{StateDir: state, KeyFile: key}
+	if got := check.RunAll(ctx); len(got) != 0 {
+		t.Fatalf("every copy opens: %+v, want no result", got)
+	}
+	want := []doctor.Result{
+		{Name: "caldav client phone", Status: doctor.StatusWarn, Message: "password cannot be shown", Fix: "pcb client rotate phone"},
+		{Name: "caldav client my laptop", Status: doctor.StatusWarn, Message: "password cannot be shown", Fix: "pcb client rotate 'my laptop'"},
+	}
+	// Another key: neither copy opens.
+	if err := os.WriteFile(key, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.RunAll(ctx); !slices.Equal(got, want) {
+		t.Errorf("another key: %+v, want %+v", got, want)
+	}
+	// Lost, with no secrets.sealed: a rotation makes a new key.
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.RunAll(ctx); !slices.Equal(got, want) {
+		t.Errorf("lost key: %+v, want %+v", got, want)
+	}
+	// Lost beside secrets.sealed: the secrets check reports it.
+	if err := os.WriteFile(filepath.Join(state, "secrets.sealed"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.RunAll(ctx); len(got) != 0 {
+		t.Errorf("lost key beside secrets.sealed: %+v, want none", got)
+	}
+	// Readable by others: the key file check reports it.
+	if err := os.WriteFile(key, bytes.Repeat([]byte{7}, 32), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := check.RunAll(ctx); len(got) != 0 {
+		t.Errorf("loose key: %+v, want none", got)
 	}
 }
 

@@ -45,6 +45,7 @@ func (a *app) newService() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error { return a.serviceLogs(cmd, scope, follow) },
 	}
 	logs.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new lines")
+	NoJSON(logs)
 	g := Group("service", "Start, stop and inspect the pcb systemd service", append(subs, status, logs)...)
 	scope.add(g, true)
 	return g

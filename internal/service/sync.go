@@ -31,6 +31,11 @@ const syncLockName = "sync.lock"
 
 func partial(msg, hint string) *exitcode.Error { return fail(exitcode.Partial, msg, hint) }
 
+// ErrSyncRunning is the cause of the error a sync, a watch or Serve
+// returns when another process holds the sync lock: pcb serve, or another
+// pcb sync. The CLI asks the control socket which (ux-I1).
+var ErrSyncRunning = errors.New("a sync is already running")
+
 // lockSync takes the sync lock: one sync (or watch) per state directory.
 func (l *Local) lockSync() (func(), error) {
 	if err := os.MkdirAll(l.o.Dirs.State, 0o700); err != nil {
@@ -43,7 +48,7 @@ func (l *Local) lockSync() (func(), error) {
 	case err != nil:
 		return nil, blocked("cannot take the sync lock", "make sure "+l.o.Dirs.State+" is writable by this user")
 	case !ok:
-		return nil, blocked("a sync is already running", "wait for it or stop pcb sync --watch")
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: ErrSyncRunning, Hint: "wait for it or stop pcb sync --watch"}
 	}
 	l.syncHeld.Add(1)
 	var once sync.Once
@@ -59,6 +64,9 @@ func (l *Local) lockSync() (func(), error) {
 func (l *Local) Sync(ctx context.Context, req SyncRequest) (SyncResult, error) {
 	if l.closed.Load() {
 		return SyncResult{}, errClosed()
+	}
+	if _, _, err := l.stored(); err != nil {
+		return SyncResult{}, err // a person must log in first, whoever holds the lock (ux-I1)
 	}
 	unlock, err := l.lockSync()
 	if err != nil {
@@ -79,6 +87,9 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 	interval, err := watchInterval(interval)
 	if err != nil {
 		return err
+	}
+	if _, _, err := l.stored(); err != nil {
+		return err // a person must log in first, whoever holds the lock (ux-I1)
 	}
 	unlock, err := l.lockSync()
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,31 @@ func TestOSTerminalReadLineAnswers(t *testing.T) {
 	}
 	if _, err := term.ReadLine(t.Context(), "? "); !errors.Is(err, io.EOF) {
 		t.Errorf("err = %v, want EOF", err)
+	}
+}
+
+// ux Minor: Ctrl-D at a prompt ends the prompt's line, so "Error: ..."
+// does not follow the prompt on the same line; an answer adds nothing.
+func TestOSTerminalEndOfInputEndsThePromptLine(t *testing.T) {
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rd.Close() })
+	if _, err := wr.WriteString("alice\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = wr.Close()
+	var out strings.Builder
+	term := &osTerminal{stdin: rd, in: bufio.NewReader(rd), out: &out}
+	if got, err := term.ReadLine(t.Context(), "Proton username: "); err != nil || got != "alice" {
+		t.Fatalf("ReadLine = %q, %v", got, err)
+	}
+	if _, err := term.ReadLine(t.Context(), "Proton username: "); !errors.Is(err, io.EOF) {
+		t.Fatalf("err = %v, want EOF", err)
+	}
+	if got, want := out.String(), "Proton username: Proton username: \n"; got != want {
+		t.Errorf("prompts = %q, want %q", got, want)
 	}
 }
 

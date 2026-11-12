@@ -31,8 +31,10 @@ type loginFlags struct {
 }
 
 func addLoginFlags(c *cobra.Command, f *loginFlags) {
-	c.Flags().StringVar(&f.username, "username", "", "Proton username (default: $PCB_USERNAME, else asked)")
-	c.Flags().IntVar(&f.passwordFD, "password-fd", -1, "read the password from this file descriptor until end of input (default: $PCB_PASSWORD, else asked)")
+	c.Flags().StringVar(&f.username, "username", "", "log in as the Proton user `NAME` (without it: $PCB_USERNAME, else a prompt)")
+	// The default is never read (passwordFDSet comes from Changed): 0 keeps
+	// the help free of a sentinel default (ux Minor).
+	c.Flags().IntVar(&f.passwordFD, "password-fd", 0, "read the password from file descriptor `N` until end of input (without it: $PCB_PASSWORD, else a prompt)")
 	c.Flags().BoolVar(&f.unattended, "unattended-relogin", false, "store the credentials so pcb can log in again without you (needs PCB_TOTP as an otpauth:// URI with 2FA)")
 }
 

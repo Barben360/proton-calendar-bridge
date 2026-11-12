@@ -754,7 +754,7 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			e.svc = e.open(t)
 			return login(nil)(t, e)
 		}},
-		{"unreadable store", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+		{"unreadable store", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			e.login(t, e.req())
 			if err := os.Remove(e.cfg.Secrets.KeyFile); err != nil {
 				t.Fatal(err)
@@ -762,7 +762,7 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 			e.clk.advance(61 * time.Second)
 			return login(nil)(t, e)
 		}},
-		{"malformed state", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {
+		{"malformed state", protontest.Options{}, exitcode.MustAct, func(t *testing.T, e *env) error {
 			if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -948,7 +948,7 @@ func TestLogoutOfAStoreThisPcbCannotRead(t *testing.T) {
 }
 
 // A store unreadable for another reason (permissions) is kept, and the
-// hint fixes the cause instead of looping back to logout.
+// hint fixes the cause instead of looping back to logout (exit 10).
 func TestLogoutKeepsAStoreItCannotRead(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
@@ -961,7 +961,7 @@ func TestLogoutKeepsAStoreItCannotRead(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(e.secrets().Path, 0o600) })
 	_, err := e.svc.Logout(t.Context(), service.LogoutRequest{Discard: true})
-	ee := wantExit(t, err, exitcode.Blocked)
+	ee := wantExit(t, err, exitcode.MustAct) // ux-I3: a person fixes the permission
 	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": permission denied), so they were kept"; ee.Error() != want {
 		t.Errorf("message = %q, want %q", ee.Error(), want)
 	}

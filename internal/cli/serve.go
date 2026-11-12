@@ -99,13 +99,17 @@ func (a *app) newServe() *cobra.Command {
 			if !errors.Is(err, errStopCut) { // cut: the process ends with the loop still running
 				a.closeService(svc)
 			}
+			if a.daemonSyncs(cmd, err) {
+				// Exit 20 as any refused start (M5 plan: sync.lock refused).
+				return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("pcb serve is already running"), Hint: "run pcb status to see it"}
+			}
 			return err
 		},
 	}
 	c.Flags().StringVar(&listen, "listen", "", "HOST:PORT to listen on, over [caldav] listen (default "+config.DefaultListen+")")
 	c.Flags().StringVar(&logLevel, "log-level", "", "debug, info, warn or error, over [log] level (default info)")
 	c.Flags().BoolVar(&waitForLogin, "wait-for-login", false, "keep serving (CalDAV answers 503) while logged out or after the session ends, until a login")
-	return c
+	return NoJSON(c)
 }
 
 // waitingLine is what pcb serve --wait-for-login prints while it waits.
@@ -265,7 +269,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 
 	ln, err := a.Listen(listenNetwork(cc.Listen), cc.Listen)
 	if err != nil {
-		return finish(&exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot listen on %s: %w", cc.Listen, err),
+		return finish(&exitcode.Error{Code: exitcode.Blocked, Err: causeError("cannot listen on "+cc.Listen, err),
 			Hint: "stop what uses that address, or choose another with --listen or [caldav] listen"})
 	}
 	ip := bindIP(ln.Addr())
@@ -310,7 +314,7 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 		// below, then finish waits on a loop that has already returned.
 		synced <- result
 	case err := <-served:
-		result = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("the CalDAV listener failed: %w", err),
+		result = &exitcode.Error{Code: exitcode.Blocked, Err: causeError("the CalDAV listener failed", err),
 			Hint: "run pcb serve again"}
 	}
 	if err := unlessCut(log, cut, func() error { stopListener(srv, log, drainTimeout); return nil }); err != nil {
@@ -318,6 +322,34 @@ func (a *app) serve(cmd *cobra.Command, svc service.API, dirs paths.Dirs, cc con
 	}
 	return finish(result)
 }
+
+// causeError is msg, then the operating system's reason for err (such as
+// "address already in use"), without the Go operation and address it
+// repeats ("listen tcp 127.0.0.1:1080: bind: ..."; ux Minor). It unwraps to
+// err.
+func causeError(msg string, err error) error {
+	reason := err.Error()
+	var (
+		se *os.SyscallError
+		oe *net.OpError
+	)
+	switch {
+	case errors.As(err, &se):
+		reason = se.Err.Error()
+	case errors.As(err, &oe) && oe.Err != nil:
+		reason = oe.Err.Error()
+	}
+	return &wrapped{msg: msg + ": " + reason, err: err}
+}
+
+// wrapped is an error whose text is msg and whose cause is err.
+type wrapped struct {
+	msg string
+	err error
+}
+
+func (w *wrapped) Error() string { return w.msg }
+func (w *wrapped) Unwrap() error { return w.err }
 
 // startControl serves the control socket of d (d.Socket) on svc and
 // returns what stops it: it closes the socket, which removes it. Off Unix

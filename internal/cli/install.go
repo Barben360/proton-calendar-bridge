@@ -341,7 +341,7 @@ func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error
 			}
 			return a.Env(k)
 		}
-		svc, err := a.NewService(ctx, env)
+		svc, err := a.NewService(withLogger(ctx, newNoteLogger(a.Stderr)), env)
 		if err != nil {
 			return err
 		}

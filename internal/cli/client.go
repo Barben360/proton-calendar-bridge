@@ -192,7 +192,13 @@ func (a *app) newClientList() *cobra.Command {
 	}
 }
 
+// noClientText is pcb client list with no client (ux Minor: not a bare header).
+const noClientText = "No CalDAV client yet.\nHint: run pcb client add NAME"
+
 func clientTable(list []service.Client) string {
+	if len(list) == 0 {
+		return noClientText
+	}
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tID\tCREATED\tLAST USED")

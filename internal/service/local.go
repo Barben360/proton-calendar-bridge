@@ -324,7 +324,7 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 		if cause := keyCause(err); cause != "" {
 			msg = "cannot read the stored secrets (" + cause + "), so they were kept"
 		}
-		return LogoutResult{}, blocked(msg, "make secrets.sealed in "+l.o.Dirs.State+" readable by the user pcb runs as, then run pcb logout again")
+		return LogoutResult{}, keyFailure(err, msg, "make secrets.sealed in "+l.o.Dirs.State+" readable by the user pcb runs as, then run pcb logout again")
 	default:
 		res.WasLoggedIn = len(accounts) > 0
 		res.Revoked = len(accounts) > 0
