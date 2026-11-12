@@ -89,6 +89,19 @@ type Event struct {
 	// decrypt (ruling M3-R7): alarms come from Notifications, and another
 	// member's personal part may be present.
 	SkippedParts int
+	// shared and calendar are the session keys the row's parts opened with,
+	// for SessionKeys.
+	shared, calendar keyUse
+}
+
+// keyUse is a row's session key and what proves it ours.
+type keyUse struct {
+	key *crypto.SessionKey // nil until an encrypted part opens with it
+	// packet: the row carries a key packet for it.
+	packet bool
+	// parts counts the encrypted parts opened with it, trusted those of
+	// them that are Own and Verified.
+	parts, trusted int
 }
 
 // ErrUndecryptable means a part of the row does not decrypt with the keys
@@ -139,18 +152,22 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 	if w.Color != nil {
 		ev.Color = *w.Color
 	}
+	ev.shared.packet = w.SharedKeyPacket != "" || w.AddressKeyPacket != ""
+	ev.calendar.packet = w.CalendarKeyPacket != ""
 	groups := []struct {
 		parts      []wirePart
 		clear, enc Kind
 		key        func(Kind) (*crypto.SessionKey, error)
+		use        *keyUse
 	}{
-		{w.SharedEvents, SharedSigned, SharedEncrypted, o.sharedKey},
-		{w.CalendarEvents, CalendarSigned, CalendarEncrypted, o.calendarKey},
-		{w.AttendeesEvents, Attendees, Attendees, o.sharedKey},
-		{w.PersonalEvents, Personal, Personal, nil},
+		{w.SharedEvents, SharedSigned, SharedEncrypted, o.sharedKey, &ev.shared},
+		{w.CalendarEvents, CalendarSigned, CalendarEncrypted, o.calendarKey, &ev.calendar},
+		{w.AttendeesEvents, Attendees, Attendees, o.sharedKey, &ev.shared},
+		{w.PersonalEvents, Personal, Personal, nil, nil},
 	}
 	for _, g := range groups {
 		for _, wp := range g.parts {
+			var use *keyUse // set for a part opened with a session key
 			p := Part{Kind: g.clear, Author: wp.Author, Signed: wp.Type&typeSigned != 0}
 			if p.Author == "" {
 				p.Author = w.Author
@@ -177,6 +194,8 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 					return Event{}, o.fail(p.Kind, err)
 				}
 				p.Text = text
+				use = g.use
+				use.key = sk
 			}
 			var kr *crypto.KeyRing
 			if own != nil {
@@ -185,6 +204,12 @@ func Open(raw json.RawMessage, cal *crypto.KeyRing, addrs map[string]*crypto.Key
 			p.Own = kr != nil
 			if p.Signed && p.Own {
 				p.Verified = verify(p.Text, wp.Signature, kr)
+			}
+			if use != nil {
+				use.parts++
+				if p.Own && p.Verified {
+					use.trusted++
+				}
 			}
 			ev.Parts = append(ev.Parts, p)
 		}
