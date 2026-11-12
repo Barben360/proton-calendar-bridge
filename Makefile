@@ -10,6 +10,16 @@ OUT     ?= bin/pcb
 # make install puts pcb in $(PREFIX)/bin (M5-P23); pcb install then sets up
 # the service.
 PREFIX  ?= $(HOME)/.local
+# Every target runs go on JOBS CPUs (make test JOBS=8 for more). Uncapped,
+# go test -race ./... runs a package per core, each binary on every core
+# with up to that many parallel tests: on a 24-core machine the load passed
+# 130 and logins starved past their 30 s deadline (spurious failures).
+# GOMAXPROCS sets go's -p (packages at once), -parallel (tests at once per
+# package) and the threads of each test binary and child. 4 is CI's runner
+# (4 vCPU). At 4 locally the suite takes about 250 s against 200 s uncapped,
+# for half the CPU time (contention under -race doubles the work).
+JOBS    ?= 4
+export GOMAXPROCS := $(JOBS)
 
 .PHONY: build install test lint image container-smoke systemd-smoke
 
@@ -28,12 +38,13 @@ TEST_TIMEOUT ?= 20m
 test:
 	go test -race -timeout $(TEST_TIMEOUT) $(PKGS)
 
-# Formatting, vet, then golangci-lint, as CI runs it.
+# Formatting, vet, then golangci-lint, as CI runs it. golangci-lint sizes
+# its workers by the machine's cores, not by GOMAXPROCS.
 lint:
 	@files=$$(gofmt -l .); \
 		if [ -n "$$files" ]; then echo "gofmt: run gofmt -w on:"; echo "$$files"; exit 1; fi
 	go vet ./...
-	golangci-lint run --allow-parallel-runners
+	golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
 
 # The container image (M5-Rpre7), stamped like make build.
 IMAGE ?= pcb:local
