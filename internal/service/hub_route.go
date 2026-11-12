@@ -41,7 +41,8 @@ var _ Router = (*Hub)(nil)
 // answers 503 with no charge on its URLs; on the compatibility URLs a
 // password no other account holds is then a 503, as it may be that
 // account's. A matched account that is parked or waiting for a login is a
-// 503 with accountRetry. The API handed out is the account's as Account
+// 503 with accountRetry. An account being removed is skipped, never
+// waited for (ruling R39). The API handed out is the account's as Account
 // gives it: a removal waits for its calls in flight.
 func (h *Hub) Route(ctx context.Context, accountID, password, remote string) (API, string, time.Duration, error) {
 	if h.isClosed() {
@@ -93,8 +94,16 @@ func (h *Hub) byID(id string) *hubAccount {
 // gate (a removed account holds none), and whether a has CalDAV on; a
 // client of an account with CalDAV off is not used (no touch, no
 // activity). err is set when a's clients.json or state.json cannot be
-// read.
+// read. An account being removed holds none either, and is not waited
+// for (ruling R39): its removal holds the gate while it revokes the
+// session, which would hold every request on the compatibility URLs.
 func (h *Hub) verify(a *hubAccount, password string) (found, on bool, err error) {
+	a.lmu.Lock()
+	removing := a.removing
+	a.lmu.Unlock()
+	if removing {
+		return false, false, nil
+	}
 	leave, err := a.enter()
 	if err != nil {
 		return false, false, nil

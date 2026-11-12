@@ -1,8 +1,11 @@
 package service_test
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -217,5 +220,85 @@ func TestRouteUnreadableStateIs503Uncharged(t *testing.T) {
 	}
 	if api, id, wait, _ := h.Route(t.Context(), a, passA, remote); api == nil || id != a {
 		t.Errorf("a once state.json is readable = %v, %q, wait %v; want a (no charge)", api != nil, id, wait)
+	}
+}
+
+// holdRevoke holds the first revoke of a session (DELETE /auth/v4) until
+// release is closed; entered is closed once it is held.
+type holdRevoke struct {
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (h *holdRevoke) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/auth/v4") {
+		held := false
+		h.once.Do(func() { held = true; close(h.entered) })
+		if held {
+			<-h.release
+		}
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// Ruling R39: while an account is removed (its session's revoke may take
+// seconds) a request on the compatibility URLs with another account's
+// password is routed at once: the account being removed is skipped, not
+// waited for.
+func TestCompatibilityRouteSkipsAnAccountBeingRemoved(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	hold := &holdRevoke{entered: make(chan struct{}), release: make(chan struct{})}
+	e.http = &http.Client{Transport: hold}
+	h := e.open(t)
+	a, b := e.loginBoth(t, h)
+	api, _, err := h.Account(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := api.ShowClient(t.Context(), "default")
+	if err != nil || creds.Password == "" {
+		t.Fatalf("ShowClient(b) = %v, %v", creds.Password != "", err)
+	}
+	removed := make(chan error, 1)
+	go func() {
+		_, err := h.Remove(context.WithoutCancel(t.Context()), a, service.LogoutRequest{})
+		removed <- err
+	}()
+	select {
+	case <-hold.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the removal of a never revoked its session")
+	}
+	// The accounts are tried in the map's order: several requests make it
+	// near certain that one tries a first.
+	routed := make(chan string, 1)
+	go func() {
+		for range 20 {
+			api, id, wait, err := h.Route(context.WithoutCancel(t.Context()), "", creds.Password, "192.0.2.1:1")
+			if api == nil || id != b || wait != 0 || err != nil {
+				routed <- "a refusal or another account: " + id
+				return
+			}
+		}
+		routed <- b
+	}()
+	select {
+	case got := <-routed:
+		if got != b {
+			t.Errorf("b's password during a's removal: %s; want b", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("b's password on the compatibility URL waited for a's removal")
+		close(hold.release)
+		<-routed
+		if err := <-removed; err != nil {
+			t.Errorf("Remove(a): %v", err)
+		}
+		return
+	}
+	close(hold.release)
+	if err := <-removed; err != nil {
+		t.Fatalf("Remove(a): %v", err)
 	}
 }
