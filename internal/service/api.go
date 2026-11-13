@@ -178,6 +178,32 @@ type LoginResult struct {
 	// DefaultClientCreated: this login created the CalDAV client named
 	// default, the list being empty (decision 0013; pcb client show).
 	DefaultClientCreated bool `json:"default_client_created,omitempty"`
+	// Account is the local ID of the account the login is for (Hub only).
+	Account string `json:"account"`
+}
+
+// AccountInfo is one account of a Hub. ID is its local ID; Address its
+// Proton address (the username it was added with); Phase is Status.Phase.
+// Pending: an add that has not completed its first login (it waits for a
+// CAPTCHA or a 2FA code); it does not count for the account selector.
+// CalDAV is the account's CalDAV switch. Stopped is set while its serve
+// loop is parked on an error a login cannot fix.
+type AccountInfo struct {
+	ID      string    `json:"id"`
+	Address string    `json:"address"`
+	Phase   string    `json:"phase"`
+	Pending bool      `json:"pending"`
+	CalDAV  bool      `json:"caldav"`
+	Stopped *StopInfo `json:"stopped,omitempty"`
+}
+
+// StopInfo is why and when an account's serve loop stopped: the exit code,
+// message and hint of its error.
+type StopInfo struct {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Hint    string    `json:"hint"`
+	At      time.Time `json:"at"`
 }
 
 // LogoutRequest asks for a logout. Discard forgets a stored session this
@@ -191,6 +217,12 @@ type LogoutRequest struct {
 // written by a newer pcb, or sealed by another sealer.
 const SecretsUnsupported = "unsupported"
 
+// SecretsKeyringUnavailable is Status.Secrets for a secret-service state
+// whose desktop keyring does not answer (no Secret Service on the session
+// bus, or no session bus): the session is intact, the phase is kept
+// (ruling R15).
+const SecretsKeyringUnavailable = "keyring-unavailable"
+
 // LogoutResult says what Logout did. Revoked is false when Proton could not
 // be told (the local secrets are gone anyway).
 // SyncRunning: another pcb process held the sync lock (pcb sync, its
@@ -203,24 +235,30 @@ type LogoutResult struct {
 
 // Status is the login as the files describe it. Phase is the store's phase
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none", "unreadable",
+// waits for its code. Secrets is "sealed", "none", "unreadable", "locked" (the desktop keyring is locked),
+// "keyring-unavailable" (no desktop keyring answers: SecretsKeyringUnavailable),
 // "unsupported" (written by a newer pcb, or sealed by another sealer: Reason
 // names which) or "rolled-back" (secrets.sealed older than the last one pcb
 // wrote).
 type Status struct {
-	Phase     string `json:"phase"`
-	Reason    string `json:"reason,omitempty"`
-	Username  string `json:"username,omitempty"`
+	Phase    string `json:"phase"`
+	Reason   string `json:"reason,omitempty"`
+	Username string `json:"username,omitempty"`
+	// Address is the account's Proton address from state.json, shown logged
+	// out too.
+	Address   string `json:"address,omitempty"`
 	AccountID string `json:"account_id,omitempty"`
 	Secrets   string `json:"secrets"`
 	KeyFile   string `json:"key_file"`
 	// KeyFileAbsent: no file at KeyFile (before the first login, or once
 	// deleted); another stat failure is not absence.
-	KeyFileAbsent bool       `json:"key_file_absent"`
-	Unattended    bool       `json:"unattended"`
-	CaptchaURL    string     `json:"captcha_url,omitempty"`
-	LastLogin     *time.Time `json:"last_login,omitempty"`
-	LastRelogin   *time.Time `json:"last_relogin,omitempty"`
+	KeyFileAbsent bool `json:"key_file_absent"`
+	// Sealer is what seals the secrets: "keyfile" or "secret-service".
+	Sealer      string     `json:"sealer"`
+	Unattended  bool       `json:"unattended"`
+	CaptchaURL  string     `json:"captcha_url,omitempty"`
+	LastLogin   *time.Time `json:"last_login,omitempty"`
+	LastRelogin *time.Time `json:"last_relogin,omitempty"`
 	// LoginExpires is set with needs-totp: when the login waiting for its
 	// code ends.
 	LoginExpires *time.Time `json:"login_expires,omitempty"`

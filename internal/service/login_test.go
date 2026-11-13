@@ -18,6 +18,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
@@ -1600,5 +1601,97 @@ func TestStatusKeyFileUnreadableIsNotAbsent(t *testing.T) {
 	}
 	if st.KeyFileAbsent {
 		t.Error("KeyFileAbsent with the key file present but not stat-able, want false")
+	}
+}
+
+// otherAccount opens a second account on its own directory, sharing the guard
+// directory of the first env's service when guard is set.
+func (e *env) otherAccount(t *testing.T, guard string, lim *access.Limiter) (*service.Local, paths.Dirs) {
+	t.Helper()
+	dirs := paths.Dirs{Config: e.dirs.Config, State: filepath.Join(filepath.Dir(e.dirs.State), "accounts", "second")}
+	s, err := service.NewLocal(service.Options{Dirs: dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, GuardDir: guard, Limiter: lim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, dirs
+}
+
+func TestGuardDirIsShared(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	guard := filepath.Join(filepath.Dir(e.dirs.State), "guard")
+	first, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, GuardDir: guard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, _ := e.otherAccount(t, guard, nil)
+	for _, s := range []*service.Local{first, second} {
+		s.SkipSRP(func(username string) (api.Tokens, string) { return e.f.Login(t, username), e.f.UserID(username) })
+	}
+	if _, err := first.Login(t.Context(), e.req()); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	e.clk.advance(10 * time.Second)
+	_, err = second.Login(t.Context(), e.req())
+	ee := wantExit(t, err, exitcode.Blocked)
+	if ee.Hint != "retry in 50s" {
+		t.Errorf("hint = %q, want retry in 50s", ee.Hint)
+	}
+	if _, err := os.Stat(filepath.Join(guard, "login.lock")); err != nil {
+		t.Errorf("no login guard file in the guard directory: %v", err)
+	}
+	// The guard is not the account directory's.
+	e.clk.advance(time.Minute)
+	if _, err := second.Login(t.Context(), e.req()); err != nil {
+		t.Fatalf("login after the interval: %v", err)
+	}
+}
+
+func TestAddressSurvivesLogout(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.signIn(t)
+	if got := e.loadState(t); got.Address != e.f.Username || got.Created.IsZero() {
+		t.Fatalf("state after login = %+v, want the address and a creation time", got)
+	}
+	created := e.loadState(t).Created
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Phase != string(store.PhaseLoggedOut) || st.Address != e.f.Username {
+		t.Errorf("Status = phase %q address %q, want logged-out and %q", st.Phase, st.Address, e.f.Username)
+	}
+	if got := e.loadState(t); !got.Created.Equal(created) {
+		t.Errorf("Created = %v after logout, want %v", got.Created, created)
+	}
+}
+
+func TestLoginKeepsTheCalDAVSwitch(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	off := false
+	created := t0.Add(-time.Hour)
+	if err := store.SaveState(e.dirs.State, store.State{Phase: store.PhaseLoggedOut, CalDAV: &off, Created: created}); err != nil {
+		t.Fatal(err)
+	}
+	e.signIn(t)
+	st := e.loadState(t)
+	if st.CalDAV == nil || *st.CalDAV {
+		t.Errorf("CalDAV = %v after login, want false", st.CalDAV)
+	}
+	if !st.Created.Equal(created) {
+		t.Errorf("Created = %v, want the earlier %v", st.Created, created)
+	}
+	if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.loadState(t); st.CalDAV == nil || *st.CalDAV {
+		t.Errorf("CalDAV = %v after logout, want false", st.CalDAV)
 	}
 }

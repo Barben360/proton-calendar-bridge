@@ -102,16 +102,10 @@ func TestAlerts(t *testing.T) {
 		{"gate closed is no alert", ctl.AlertInput{Login: ready, Health: serving(cal(func(c *service.CalendarHealth) {
 			c.Gate, c.GateReason = "closed", "our member lacks the Write permission"
 		}))}, nil},
-		{"certificate within 30 days", ctl.AlertInput{Login: ready, Listener: tlsListener(now.Add(30*24*time.Hour - time.Minute))},
-			[]ctl.Alert{{Code: "tls-certificate-expiring", Severity: "warning", Message: "the CalDAV certificate expires on 2026-12-12", Fix: certFix}}},
-		{"certificate at exactly 30 days", ctl.AlertInput{Login: ready, Listener: tlsListener(now.Add(30 * 24 * time.Hour))},
-			[]ctl.Alert{{Code: "tls-certificate-expiring", Severity: "warning", Message: "the CalDAV certificate expires on 2026-12-12", Fix: certFix}}},
-		{"certificate past 30 days", ctl.AlertInput{Login: ready, Listener: tlsListener(now.Add(30*24*time.Hour + time.Minute))}, nil},
-		{"certificate expiring now is expired", ctl.AlertInput{Login: ready, Listener: tlsListener(now)},
-			[]ctl.Alert{{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-12", Fix: certFix}}},
-		{"certificate expired", ctl.AlertInput{Login: ready, Listener: tlsListener(now.Add(-48 * time.Hour))},
-			[]ctl.Alert{{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-10", Fix: certFix}}},
-		{"plain HTTP has no certificate", ctl.AlertInput{Login: ready, Listener: &ctl.Listener{Addr: "127.0.0.1:1080", URL: "http://localhost:1080/"}}, nil},
+		{"a stopped account", ctl.AlertInput{Account: "ab12cd34", Login: ready, Stopped: &service.StopInfo{Code: 20, Message: "the cache is damaged", Hint: "remove pcb.db", At: now}},
+			[]ctl.Alert{{Account: "ab12cd34", Code: "account-stopped", Severity: "error", Message: "the cache is damaged", Fix: "remove pcb.db"}}},
+		{"every alert names its account", ctl.AlertInput{Account: "ab12cd34", Login: service.Status{Phase: "logged-out"}},
+			[]ctl.Alert{{Account: "ab12cd34", Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: loginFix}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -197,8 +191,7 @@ func TestAlertsAreOrdered(t *testing.T) {
 			{ID: "cal-b", Name: "B", Gate: "undecided", GateReason: "r", KeysError: "k"},
 			{ID: "cal-a", Name: "A", Gate: "undecided", GateReason: "r", KeysError: "k"},
 		}}
-	got := ctl.Alerts(ctl.AlertInput{Login: service.Status{Phase: "needs-login"}, Health: h,
-		Listener: tlsListener(now.Add(24 * time.Hour)), Now: now})
+	got := ctl.Alerts(ctl.AlertInput{Login: service.Status{Phase: "needs-login"}, Health: h, Now: now})
 	var order []string
 	for _, a := range got {
 		order = append(order, a.Severity+" "+a.Code+" "+a.Calendar)
@@ -210,11 +203,96 @@ func TestAlertsAreOrdered(t *testing.T) {
 		"error needs-login ",
 		"warning sync-stalled cal-a",
 		"warning sync-stalled cal-b",
-		"warning tls-certificate-expiring ",
 		"warning write-gate-undecided cal-a",
 		"warning write-gate-undecided cal-b",
 	}
 	if !slices.Equal(order, want) {
 		t.Errorf("order =\n%q\nwant\n%q", order, want)
+	}
+}
+
+// The certificate's alerts belong to the process, not to an account.
+func TestProcessAlerts(t *testing.T) {
+	t.Parallel()
+	ready := []ctl.AccountStatus{{AccountInfo: service.AccountInfo{ID: "a1", Phase: "ready"}}}
+	for _, tc := range []struct {
+		name string
+		l    *ctl.Listener
+		want []ctl.Alert // empty: no alert
+	}{
+		{"within 30 days", tlsListener(now.Add(30*24*time.Hour - time.Minute)),
+			[]ctl.Alert{{Code: "tls-certificate-expiring", Severity: "warning", Message: "the CalDAV certificate expires on 2026-12-12", Fix: certFix}}},
+		{"at exactly 30 days", tlsListener(now.Add(30 * 24 * time.Hour)),
+			[]ctl.Alert{{Code: "tls-certificate-expiring", Severity: "warning", Message: "the CalDAV certificate expires on 2026-12-12", Fix: certFix}}},
+		{"past 30 days", tlsListener(now.Add(30*24*time.Hour + time.Minute)), nil},
+		{"expiring now is expired", tlsListener(now),
+			[]ctl.Alert{{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-12", Fix: certFix}}},
+		{"expired", tlsListener(now.Add(-48 * time.Hour)),
+			[]ctl.Alert{{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-10", Fix: certFix}}},
+		{"plain HTTP has no certificate", &ctl.Listener{Addr: "127.0.0.1:1080", URL: "http://localhost:1080"}, nil},
+		{"no listener", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ctl.ProcessAlerts(tc.l, ready, now)
+			if got == nil {
+				t.Fatal("ProcessAlerts returned nil; want an empty list (alerts: [])")
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("ProcessAlerts =\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Ruling R44: with no account at all (a fresh install), the process says
+// it needs a login, as M5's one account did; an account that exists says
+// it itself (its own needs-login, needs-captcha or account-unreadable), so
+// the process never repeats it.
+func TestProcessNeedsLoginWithNoAccount(t *testing.T) {
+	t.Parallel()
+	needsLogin := ctl.Alert{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: loginFix}
+	expired := ctl.Alert{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-10", Fix: certFix}
+	account := func(phase string, pending bool) []ctl.AccountStatus {
+		return []ctl.AccountStatus{{AccountInfo: service.AccountInfo{ID: "a1", Phase: phase, Pending: pending}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		l        *ctl.Listener
+		accounts []ctl.AccountStatus
+		want     []ctl.Alert
+	}{
+		{"no account", nil, nil, []ctl.Alert{needsLogin}},
+		{"an empty list", nil, []ctl.AccountStatus{}, []ctl.Alert{needsLogin}},
+		{"no account, errors sorted by code", tlsListener(now.Add(-48 * time.Hour)), nil, []ctl.Alert{needsLogin, expired}},
+		{"a ready account", nil, account("ready", false), nil},
+		{"a pending account", nil, account("needs-captcha", true), nil},
+		{"a logged-out account says it itself", nil, account("logged-out", false), nil},
+		{"a login waiting for its 2FA code", nil, account("needs-totp", false), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ctl.ProcessAlerts(tc.l, tc.accounts, now)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("ProcessAlerts =\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKeyringLockedAlert(t *testing.T) {
+	t.Parallel()
+	got := ctl.Alerts(ctl.AlertInput{Account: "acc1", Login: service.Status{Phase: "ready", Secrets: "locked"}, Now: now})
+	want := []ctl.Alert{{Account: "acc1", Code: "keyring-locked", Severity: "error", Message: "the desktop keyring is locked",
+		Fix: "unlock it (log in to the desktop session), pcb retries every 30 s"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("Alerts = %+v, want %+v", got, want)
+	}
+	if ctl.CodeKeyringLocked != "keyring-locked" {
+		t.Errorf("CodeKeyringLocked = %q", ctl.CodeKeyringLocked)
+	}
+	// A sealed store raises none.
+	if got := ctl.Alerts(ctl.AlertInput{Login: service.Status{Phase: "ready", Secrets: "sealed"}, Now: now}); len(got) != 0 {
+		t.Errorf("sealed: Alerts = %+v, want none", got)
 	}
 }

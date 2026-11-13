@@ -34,10 +34,15 @@ type Captcha struct {
 	At    time.Time `json:"at,omitzero"`
 }
 
-// State is the login state in state.json. It is not sealed, so it never
-// holds a username, token or password. SecretsGeneration mirrors the
+// State is the login state in state.json. It is not sealed: the address is
+// not a secret; never a token or password. SecretsGeneration mirrors the
 // generation sealed in secrets.sealed (Secrets): a sealed file below it was
 // restored or replaced (ErrRolledBack).
+//
+// Address is the account's Proton address, kept after a sign-out so a
+// signed-out account still shows its name. CalDAV is the account's CalDAV
+// switch: nil (an M5 state.json) is on. Created is when the account was
+// added.
 type State struct {
 	AccountID   string    `json:"account_id,omitempty"`
 	Phase       Phase     `json:"phase"`
@@ -46,6 +51,9 @@ type State struct {
 	Unattended  bool      `json:"unattended,omitempty"`
 	LastLogin   time.Time `json:"last_login,omitzero"`
 	LastRelogin time.Time `json:"last_relogin,omitzero"`
+	Address     string    `json:"address,omitempty"`
+	CalDAV      *bool     `json:"caldav,omitempty"`
+	Created     time.Time `json:"created,omitzero"`
 
 	SecretsGeneration uint64 `json:"secrets_generation,omitempty"`
 }

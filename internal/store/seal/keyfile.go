@@ -1,8 +1,6 @@
 package seal
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -31,15 +29,7 @@ func (k *KeyFile) Seal(plaintext, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize(), gcm.NonceSize()+len(plaintext)+gcm.Overhead())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("random nonce: %w", err)
-	}
-	return gcm.Seal(nonce, nonce, plaintext, aad), nil
+	return sealAEAD(key, plaintext, aad)
 }
 
 // Open implements Sealer. It never creates the key file.
@@ -48,27 +38,7 @@ func (k *KeyFile) Open(sealed, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	if len(sealed) < gcm.NonceSize()+gcm.Overhead() {
-		return nil, ErrCorrupt
-	}
-	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
-	plain, err := gcm.Open(nil, nonce, ct, aad)
-	if err != nil {
-		return nil, ErrCorrupt
-	}
-	return plain, nil
-}
-
-func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
+	return openAEAD(key, sealed, aad)
 }
 
 // Check reads the key as Seal and Open do, without creating it: nil when

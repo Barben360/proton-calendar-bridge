@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -47,14 +49,52 @@ func TestStatusTextIsOneKeyValuePerLine(t *testing.T) {
 	}
 }
 
+// loginStatus is the login of the only account pcb status --json shows.
+func loginStatus(t *testing.T, r *rig) service.Status {
+	t.Helper()
+	r.want(exitcode.OK, "status", "--json")
+	var st ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &st)
+	if len(st.Accounts) != 1 {
+		t.Fatalf("status accounts = %+v, want one", st.Accounts)
+	}
+	return st.Accounts[0].Login
+}
+
+// Signed out, the account's status is logged-out, exit 0; with no account
+// at all, status lists none, exit 0.
 func TestStatusWhenLoggedOutExits0(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "status", "--json")
-	var st service.Status
-	mustUnmarshal(t, r.envelope().Data, &st)
-	if st.Phase != "logged-out" {
+	var none ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &none)
+	if none.Accounts == nil || len(none.Accounts) != 0 || none.Daemon != nil {
+		t.Errorf("status with no account = %+v, want an empty accounts array", none)
+	}
+	// Ruling R44: with no account, the process needs a login.
+	needsLogin := []ctl.Alert{{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: "run pcb login"}}
+	if !slices.Equal(none.Alerts, needsLogin) {
+		t.Errorf("process alerts with no account = %+v, want %+v", none.Alerts, needsLogin)
+	}
+	r.want(exitcode.OK, "status")
+	for _, want := range []string{"accounts: none (add one with pcb login)", "alert: error needs-login: not logged in to Proton (fix: run pcb login)"} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("status with no account lacks %q:\n%s", want, r.out.String())
+		}
+	}
+	r.want(exitcode.OK, "login", "--non-interactive")
+	r.want(exitcode.OK, "logout")
+	if st := loginStatus(t, r); st.Phase != "logged-out" || st.Address != r.f.Username {
 		t.Errorf("status = %+v", st)
+	}
+	// Signed out, the account's own needs-login says it: the process does
+	// not repeat it.
+	r.want(exitcode.OK, "status", "--json")
+	var out ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &out)
+	if out.Alerts == nil || len(out.Alerts) != 0 || len(out.Accounts) != 1 || len(out.Accounts[0].Alerts) != 1 || out.Accounts[0].Alerts[0].Code != "needs-login" {
+		t.Errorf("status signed out: process alerts %+v, accounts %+v; want only the account's needs-login", out.Alerts, out.Accounts)
 	}
 }
 
@@ -107,9 +147,9 @@ func (d *daemonAPI) Health(context.Context) (service.Health, error) { return d.h
 // daemonNow is the clock of the test daemons.
 var daemonNow = time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 
-// startDaemon serves a control socket on api at the rig's socket path, as
+// startDaemon serves a control socket on hub at the rig's socket path, as
 // pcb serve does, until the test ends.
-func startDaemon(t *testing.T, r *rig, api service.API, ln *ctl.Listener) {
+func startDaemon(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("no control socket off Unix")
@@ -121,7 +161,7 @@ func startDaemon(t *testing.T, r *rig, api service.API, ln *ctl.Listener) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &ctl.Server{API: api, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
+	srv := &ctl.Server{Hub: hub, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
 		Daemon: ctl.Daemon{PID: 4242, Version: "v1.2.3", StartedAt: daemonNow.Add(-2 * time.Hour), LogLevel: "info", Socket: r.dirs.Socket()}}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(sl) }()
@@ -138,7 +178,7 @@ func TestStatusShowsWhenTheHeldLoginExpires(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})
 	exp := daemonNow.Add(5 * time.Minute)
-	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "needs-totp", LoginExpires: &exp}}, nil)
+	startDaemon(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "needs-totp", LoginExpires: &exp}}), nil)
 	r.want(exitcode.OK, "status")
 	if !strings.Contains(r.out.String(), "login_expires: 2026-11-12T12:05:00Z\n") {
 		t.Errorf("status lacks the expiry:\n%s", r.out.String())
@@ -154,17 +194,29 @@ func TestStatusFallsBackOffline(t *testing.T) {
 	if d, ok := data["daemon"]; !ok || string(d) != "null" {
 		t.Errorf("daemon = %s (present %v), want null", d, ok)
 	}
-	if string(data["phase"]) != `"logged-out"` {
-		t.Errorf("phase = %s, want the flat login field", data["phase"])
+	var st ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &st)
+	if len(st.Accounts) != 1 || st.Accounts[0].ID != stubAccountID || st.Accounts[0].Login.Phase != "logged-out" {
+		t.Fatalf("accounts = %+v, want the stub's, logged out", st.Accounts)
 	}
-	var alerts []ctl.Alert
-	mustUnmarshal(t, data["alerts"], &alerts)
-	if len(alerts) != 1 || alerts[0].Code != "needs-login" {
-		t.Errorf("alerts = %+v, want the login's", alerts)
+	if a := st.Accounts[0].Alerts; len(a) != 1 || a[0].Code != "needs-login" || a[0].Account != stubAccountID {
+		t.Errorf("alerts = %+v, want the login's", a)
 	}
-	for _, absent := range []string{"health", "listener"} {
+	if st.Alerts == nil || len(st.Alerts) != 0 {
+		t.Errorf("process alerts = %+v, want an empty array", st.Alerts)
+	}
+	for _, absent := range []string{"listener"} {
 		if _, has := data[absent]; has {
 			t.Errorf("the offline view has %s: %s", absent, data[absent])
+		}
+	}
+	var raw struct {
+		Accounts []map[string]json.RawMessage `json:"accounts"`
+	}
+	mustUnmarshal(t, r.envelope().Data, &raw)
+	for _, absent := range []string{"health", "url"} {
+		if _, has := raw.Accounts[0][absent]; has {
+			t.Errorf("the offline view's account has %s: %s", absent, raw.Accounts[0][absent])
 		}
 	}
 
@@ -172,6 +224,7 @@ func TestStatusFallsBackOffline(t *testing.T) {
 	for _, want := range []string{
 		"phase: logged-out\n",
 		"daemon: not running (offline view)\n",
+		"account: " + stubAccountID + "\n",
 		"alert: error needs-login: not logged in to Proton (fix: run pcb login)",
 	} {
 		if !strings.Contains(r.out.String(), want) {
@@ -196,13 +249,15 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 			},
 			Render: service.RenderCounts{Undecryptable: 1, Unverified: 2, DuplicateMasters: 3, DroppedAlarms: 4}},
 	}
-	startDaemon(t, r, api, &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
+	startDaemon(t, r, newStubHub(api), &ctl.Listener{Addr: "0.0.0.0:8443", URL: "https://pcb.lan:8443/", TLS: true, Fingerprint: "AB:CD", CertNotAfter: &notAfter})
 
 	r.want(exitcode.OK, "status")
 	got := r.out.String()
 	for _, want := range []string{
 		"phase: ready\n",
-		"daemon: serving since 2026-11-12T11:00:00Z (pid 4242, version v1.2.3)\n",
+		"daemon: running since 2026-11-12T10:00:00Z (pid 4242, version v1.2.3)\n",
+		"account: " + stubAccountID + "\nurl: https://pcb.lan:8443/dav/" + stubAccountID + "/\n",
+		"serve: serving since 2026-11-12T11:00:00Z\n",
 		"listener: https://pcb.lan:8443/ (TLS, certificate until 2027-01-01, fingerprint AB:CD)\n",
 		"calendar: Work (cal-1): synced 2026-11-12T11:59:00Z, lag 1m0s, write gate closed (our member lacks the Write permission)\n",
 		"calendar: Home (cal-2): synced never, write gate undecided (the keys were not loaded yet), last error network: dial tcp: refused\n",
@@ -222,10 +277,13 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 	}
 
 	r.want(exitcode.OK, "status", "--json", "--daemon")
-	var st ctl.Status
+	var st ctl.Status // the daemon's, as the control socket answers it
 	mustUnmarshal(t, r.envelope().Data, &st)
-	if st.Daemon == nil || st.Daemon.PID != 4242 || st.Username != "alice" || st.Health == nil || len(st.Alerts) != 2 {
-		t.Errorf("status = %+v", st)
+	if st.Daemon == nil || st.Daemon.PID != 4242 || len(st.Accounts) != 1 {
+		t.Fatalf("status = %+v", st)
+	}
+	if a := st.Accounts[0]; a.Login.Username != "alice" || a.Health == nil || len(a.Alerts) != 2 || a.URL != "https://pcb.lan:8443/dav/"+stubAccountID+"/" {
+		t.Errorf("account = %+v", a)
 	}
 }
 
@@ -235,11 +293,11 @@ func TestStatusShowsADaemonWaitingForALogin(t *testing.T) {
 	t.Parallel()
 	r := stubRig(t, &stubAPI{statusPhase: "ready"})
 	since := daemonNow.Add(-time.Minute)
-	startDaemon(t, r, &daemonAPI{status: service.Status{Phase: "logged-out"},
-		health: service.Health{Serve: service.ServeWaitingForLogin, Since: &since, Calendars: []service.CalendarHealth{}}}, nil)
+	startDaemon(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "logged-out"},
+		health: service.Health{Serve: service.ServeWaitingForLogin, Since: &since, Calendars: []service.CalendarHealth{}}}), nil)
 	r.want(exitcode.OK, "status")
 	for _, want := range []string{
-		"daemon: waiting for a login since 2026-11-12T11:59:00Z\n",
+		"serve: waiting for a login since 2026-11-12T11:59:00Z\n",
 		"alert: error needs-login: not logged in to Proton (fix: run pcb login)",
 	} {
 		if !strings.Contains(r.out.String(), want) {
@@ -351,10 +409,53 @@ func TestStatusRefusesAForeignSocketPath(t *testing.T) {
 	}
 }
 
-// pcb status says when the configured key file is not there (before the
-// first login, or after pcb uninstall --delete-data deleted it): the path
-// stays as configured, "(absent)" follows it, and --json carries
-// key_file_absent.
+// usageStatus is an account whose Status refuses with a Usage error that
+// is not the Hub's "no account".
+type usageStatus struct{ stubAPI }
+
+func (*usageStatus) Status(context.Context) (service.Status, error) {
+	return service.Status{}, &exitcode.Error{Code: exitcode.Usage, Err: errors.New("the account's settings are invalid"), Hint: "fix them"}
+}
+
+// ghostHub lists, besides its accounts, one the Hub then says is gone (as
+// one removed between Accounts and Account).
+type ghostHub struct{ *stubHub }
+
+func (h ghostHub) Accounts() []service.AccountInfo {
+	return append(h.stubHub.Accounts(), service.AccountInfo{ID: "99999999", Address: "ghost@x.test"})
+}
+
+// Ruling R34: the offline status drops an account only when the Hub says
+// it is gone ("no account"); one whose Status fails, even with exit 2,
+// keeps its entry with an account-unreadable alert.
+func TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	hub := newStubHub(&usageStatus{}, &daemonAPI{status: service.Status{Phase: "ready"}})
+	hub.accounts[0].address, hub.accounts[1].address = userA, userB
+	r.open = func() (cli.Hub, error) { return ghostHub{hub}, nil }
+	r.want(exitcode.Usage, "status", "--json")
+	var data ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &data)
+	got := map[string][]ctl.Alert{}
+	for _, as := range data.Accounts {
+		got[as.ID] = as.Alerts
+	}
+	if _, ok := got["99999999"]; ok || len(data.Accounts) != 2 {
+		t.Fatalf("accounts = %+v; want both real ones, not the gone one", data.Accounts)
+	}
+	if a := got["00000000"]; len(a) != 1 || a[0].Code != ctl.CodeAccountUnreadable || a[0].Message != "the account's settings are invalid" || a[0].Fix != "fix them" {
+		t.Errorf("alerts of the failing account = %+v", a)
+	}
+	if _, ok := got["00000001"]; !ok {
+		t.Errorf("the ready account is missing: %+v", data.Accounts)
+	}
+}
+
+// pcb status says when the configured key file is not there (after pcb
+// uninstall --delete-data deleted it; before the first login there is no
+// account to show): the path stays as configured, "(absent)" follows it,
+// and --json carries the account's login.key_file_absent.
 func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
@@ -370,11 +471,19 @@ func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
 			t.Errorf("%s: status lacks %q:\n%s", when, want, got)
 		}
 		r.want(exitcode.OK, "status", "--json")
-		var st struct {
-			KeyFile       string `json:"key_file"`
-			KeyFileAbsent *bool  `json:"key_file_absent"`
+		var data struct {
+			Accounts []struct {
+				Login struct {
+					KeyFile       string `json:"key_file"`
+					KeyFileAbsent *bool  `json:"key_file_absent"`
+				} `json:"login"`
+			} `json:"accounts"`
 		}
-		mustUnmarshal(t, r.envelope().Data, &st)
+		mustUnmarshal(t, r.envelope().Data, &data)
+		if len(data.Accounts) != 1 {
+			t.Fatalf("%s: %d accounts, want 1", when, len(data.Accounts))
+		}
+		st := data.Accounts[0].Login
 		switch {
 		case st.KeyFile != key:
 			t.Errorf("%s: --json key_file %q, want %q", when, st.KeyFile, key)
@@ -384,7 +493,6 @@ func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
 			t.Errorf("%s: --json key_file_absent %v, want %v", when, *st.KeyFileAbsent, absent)
 		}
 	}
-	check("before the first login", true)
 	r.want(exitcode.OK, "login", "--non-interactive")
 	check("logged in", false)
 	if err := os.Remove(key); err != nil {

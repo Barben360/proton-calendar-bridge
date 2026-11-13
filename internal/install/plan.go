@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
 )
 
 // Step actions.
@@ -37,6 +38,9 @@ const (
 	KindCommand = "command"
 	KindUser    = "user"
 	KindLogout  = "logout"
+	// KindKeyring is the state's "pcb sealing key" item in the desktop
+	// keyring (ruling R13); its Path is the state directory it belongs to.
+	KindKeyring = "keyring"
 )
 
 // Step is one thing an install or uninstall does, or would do. Paths are
@@ -399,6 +403,7 @@ func planDeleteData(h Host, s Scope, dirs paths.Dirs) ([]Step, error) {
 	}
 	steps := []Step{logout}
 	keyFile, keyErr := configuredKeyFile(h, dirs)
+	stateRemoved := false
 	for _, d := range []string{dirs.Config, dirs.State} {
 		st := Step{Action: ActionRemove, Kind: KindDir, Path: d}
 		switch {
@@ -413,7 +418,15 @@ func planDeleteData(h Host, s Scope, dirs paths.Dirs) ([]Step, error) {
 		case d == dirs.Config && keyErr != nil:
 			st.Note = "config.toml is unreadable: a key_file it names elsewhere is not removed"
 		}
+		if d == dirs.State && st.Action == ActionRemove {
+			stateRemoved = true
+		}
 		steps = append(steps, st)
+	}
+	if stateRemoved {
+		if st, ok := keyringStep(h, dirs.State); ok {
+			steps = append(steps, st)
+		}
 	}
 	if keyFile != "" && !within(keyFile, dirs.Config) && !within(keyFile, dirs.State) && exists(h, keyFile) {
 		steps = append(steps, Step{Action: ActionKeep, Kind: KindFile, Path: keyFile,
@@ -431,6 +444,34 @@ func planDeleteData(h Host, s Scope, dirs paths.Dirs) ([]Step, error) {
 		steps = append(steps, del)
 	}
 	return steps, nil
+}
+
+// keyringStep is the removal of the state's keyring item when layout.json
+// records the secret-service sealer (ruling R13), after the directory: the
+// data goes first, so a failed removal of the directory keeps the key that
+// opens it. A layout that cannot be read is a keep step saying so. A state
+// directory that is kept keeps its key too (the caller plans none then).
+func keyringStep(h Host, state string) (Step, bool) {
+	info, err := store.ReadLayout(h.Path(state))
+	switch {
+	case err != nil:
+		return Step{Action: ActionKeep, Kind: KindKeyring, Path: state,
+			Note: "layout.json cannot be read (" + err.Error() + "): a desktop keyring item of this state, if any, is not removed; " + keyringByHand(h.Path(state))}, true
+	case info.Sealer != sealerSecretService:
+		return Step{}, false
+	}
+	return Step{Action: ActionRemove, Kind: KindKeyring, Path: state, Note: "the \"" + keyringItemLabel + "\" item of this state in the desktop keyring"}, true
+}
+
+// The keyring item pcb seals a state with (seal.SecretService).
+const (
+	keyringItemLabel    = "pcb sealing key"
+	sealerSecretService = "secret-service"
+)
+
+// keyringByHand says how to delete the state's item without pcb.
+func keyringByHand(state string) string {
+	return "delete the item \"" + keyringItemLabel + "\" (application pcb, state " + state + ") by hand in Seahorse (Passwords and Keys)"
 }
 
 // configuredKeyFile is the key_file of the scope's config.toml (a host

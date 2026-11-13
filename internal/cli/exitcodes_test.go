@@ -61,6 +61,7 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 	r := newRig(t, &protontest.Options{})
 	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	acct := accountDir(t, r)
 	key := config.Defaults(r.dirs).Secrets.KeyFile
 	snap := t.TempDir()
 	copyTree(t, filepath.Dir(r.dirs.Config), filepath.Join(snap, "cfg"))
@@ -102,7 +103,7 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 		}
 	}, ""}
 	badState := fault{"state.json unreadable", func(t *testing.T) {
-		if err := os.WriteFile(filepath.Join(r.dirs.State, "state.json"), []byte("{not json"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(acct, "state.json"), []byte("{not json"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}, "run pcb logout to reset it"}
@@ -130,7 +131,6 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 		{short, []string{"serve", "--listen", "127.0.0.1:0"}, exitcode.MustAct},
 		{unreadable, []string{"serve", "--listen", "127.0.0.1:0"}, exitcode.MustAct},
 		{badState, []string{"serve", "--listen", "127.0.0.1:0"}, exitcode.MustAct},
-		{badState, []string{"serve", "--wait-for-login", "--listen", "127.0.0.1:0"}, exitcode.MustAct},
 		{unreadable, []string{"logout"}, exitcode.MustAct},
 		{missing, []string{"logout"}, exitcode.OK},
 		{short, []string{"logout"}, exitcode.OK},

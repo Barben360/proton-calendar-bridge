@@ -42,8 +42,13 @@ func errClosed() error { return blocked("service closed", "start a new session")
 // passed, unless stop (true: it will not run) came first; it ends a login
 // left waiting for its 2FA code (pendingTTL). Logger gets what the service
 // says outside Serve (Serve's own logger wins while it runs); nil discards
-// it.
+// it. Dirs.State is the account's own directory. GuardDir holds the login
+// guard (login.lock, last-login) and is shared by every account of a
+// process; empty, it is Dirs.State. Limiter counts failed CalDAV password
+// checks per remote IP and is shared likewise; nil, the service gets its own.
 type Options struct {
+	GuardDir  string
+	Limiter   *access.Limiter
 	Dirs      paths.Dirs
 	Config    config.Config
 	Sealer    seal.Sealer
@@ -80,6 +85,7 @@ type Local struct {
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
 	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
+	who     atomic.Pointer[loginWho]  // pending's username and user ID while pending != nil, readable without mu
 	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
 	closed  atomic.Bool
 
@@ -124,6 +130,9 @@ type Local struct {
 	wipeHook     func()                                 // runs in Logout just before the wipe
 	serveHook    func()                                 // runs between a ready login check and serveOn
 	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer
+
+	// skipRelogin replaces an unattended relogin's SRP step when set.
+	skipRelogin func(username string) (*auth.Pending, error)
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and
@@ -164,12 +173,18 @@ func NewLocal(o Options) (*Local, error) {
 	if o.AfterFunc == nil {
 		o.AfterFunc = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 	}
+	if o.GuardDir == "" {
+		o.GuardDir = o.Dirs.State
+	}
+	if o.Limiter == nil {
+		o.Limiter = access.NewLimiter(o.Now)
+	}
 	l := &Local{
 		o:       o,
 		secrets: store.NewSecrets(o.Dirs.State, o.Sealer),
 		mgr:     auth.NewManager(o.Config.Proton.BaseURL, o.Config.Proton.AppVersion),
 		clients: access.NewStore(o.Dirs.State, o.Now),
-		limiter: access.NewLimiter(o.Now),
+		limiter: o.Limiter,
 
 		touching:     map[string]bool{},
 		touchTimeout: defaultTouchTimeout,
@@ -214,7 +229,41 @@ func (l *Local) log() *slog.Logger {
 }
 
 // keyFile is the path named in store errors.
-func (l *Local) keyFile() string { return l.o.Config.Secrets.KeyFile }
+// The sealers' names (seal.Sealer.Name, layout.json's "sealer").
+const (
+	SealerKeyFile       = "keyfile"
+	SealerSecretService = "secret-service"
+)
+
+// keyringRef stands for the desktop keyring where the error mappers take a
+// key file's path: the key of a secret-service state is no file.
+const keyringRef = "<the desktop keyring>"
+
+// keyFile is the key file's path, or keyringRef for a secret-service state;
+// it is only a name for the messages (Status.KeyFile reads the config).
+func (l *Local) keyFile() string {
+	if l.o.Sealer.Name() == SealerSecretService {
+		return keyringRef
+	}
+	return l.o.Config.Secrets.KeyFile
+}
+
+// keyFix is the hint for a key that cannot be used, by where it lives.
+func (l *Local) keyFix() string {
+	if l.keyFile() == keyringRef {
+		return keyringFailFix
+	}
+	return keyFix
+}
+
+// keyWhat names where the sealing key lives, for a message: "the key file
+// <path>" or "the desktop keyring".
+func (l *Local) keyWhat() string {
+	if f := l.keyFile(); f != keyringRef {
+		return "the key file " + f
+	}
+	return "the desktop keyring"
+}
 
 func (l *Local) fail(err error) error { return mapError(err, l.keyFile()) }
 
@@ -353,7 +402,11 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	// Seeded with the wiped generation + 1: over an unreadable state.json
 	// (the reset logout is) the mirror write failed and SaveState cannot
 	// read the old one, so the mirror must not restart at 0.
-	if err := store.SaveStateContext(wipe, l.o.Dirs.State, store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next}); err != nil {
+	// The address, the CalDAV switch and the creation time are not login
+	// fields: they stay. A state.json too damaged to read loses them.
+	kept, _ := store.LoadState(l.o.Dirs.State)
+	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, Created: kept.Created}
+	if err := store.SaveStateContext(wipe, l.o.Dirs.State, reset); err != nil {
 		return LogoutResult{}, l.stateWriteError(err)
 	}
 	return res, nil
@@ -391,11 +444,16 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Reason:     st.Reason,
 		AccountID:  st.AccountID,
 		Secrets:    "none",
-		KeyFile:    l.keyFile(),
+		Sealer:     l.o.Sealer.Name(),
 		Unattended: st.Unattended,
+		Address:    st.Address,
 	}
-	if _, err := os.Stat(l.keyFile()); errors.Is(err, os.ErrNotExist) {
-		s.KeyFileAbsent = true
+	if s.Sealer == SealerKeyFile {
+		s.KeyFile = l.o.Config.Secrets.KeyFile
+		// The keyring's sealer has no file to be absent.
+		if _, err := os.Stat(s.KeyFile); errors.Is(err, os.ErrNotExist) {
+			s.KeyFileAbsent = true
+		}
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL
@@ -412,13 +470,21 @@ func (l *Local) Status(context.Context) (Status, error) {
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
 		)
+		unreadable := "the stored secrets cannot be opened; see the key file"
+		if l.keyFile() == keyringRef {
+			unreadable = "the stored secrets cannot be opened with the key in the desktop keyring"
+		}
 		switch {
 		case errors.As(err, &rb):
 			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
 		case errors.As(err, &ue):
 			s.Secrets, s.Phase, s.Reason = SecretsUnsupported, string(store.PhaseNeedsLogin), ue.Explain()
+		case errors.Is(err, seal.ErrLocked):
+			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
+		case errors.Is(err, seal.ErrNoService):
+			s.Secrets = SecretsKeyringUnavailable // no keyring answers here: nothing is lost either (R15)
 		case err != nil:
-			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
+			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:
 			s.Secrets = "sealed"
 			s.Username = accounts[st.AccountID].Username

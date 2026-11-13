@@ -20,10 +20,10 @@ type installData struct {
 	Plan  bool           `json:"plan"`
 	Steps []install.Step `json:"steps"`
 	Next  []string       `json:"next"`
-	// Logout is what the uninstall's logout step got from Proton, as pcb
-	// logout prints it; absent when no logout ran or it failed before an
-	// answer (its step's note says why).
-	Logout *service.LogoutResult `json:"logout,omitempty"`
+	// Logout is what the uninstall's logout step got from Proton, one
+	// entry per account that answered, as pcb logout prints it; absent when
+	// no logout ran or none got an answer (its step's note says why).
+	Logout []uninstallLogout `json:"logout,omitempty"`
 }
 
 // scopeFlags are --user and --system.
@@ -237,26 +237,44 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h, &data.Logout)}); err != nil {
-		if data.Logout != nil {
+	hooks := install.Hooks{Logout: a.logoutHook(h, &data.Logout), Keyring: func(ctx context.Context, stateDir string) error {
+		return service.DeleteSealingKey(ctx, stateDir, a.Keyring)
+	}}
+	if err := install.Apply(ctx, h, steps, hooks); err != nil {
+		if len(data.Logout) > 0 {
 			// A later step failed: what Proton answered still matters.
-			return Finish(cmd, data, uninstallLogoutText(*data.Logout), applyFailed(err))
+			return Finish(cmd, data, uninstallLogoutText(data.Logout), applyFailed(err))
 		}
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
 	text := appliedText(steps, nil)
-	if data.Logout != nil {
-		text += "\n" + uninstallLogoutText(*data.Logout)
+	if len(data.Logout) > 0 {
+		text += "\n" + uninstallLogoutText(data.Logout)
 	}
 	return Finish(cmd, data, text, nil)
 }
 
-// uninstallLogoutText is pcb logout's first line for res: its advice to
-// run pcb logout again after a sync makes no sense once the directories
-// are deleted.
-func uninstallLogoutText(res service.LogoutResult) string {
-	first, _, _ := strings.Cut(logoutText(res), "\n")
-	return first
+// uninstallLogout is what the uninstall's logout step got from Proton for
+// one account, as pcb logout prints it.
+type uninstallLogout struct {
+	Account string `json:"account"`
+	Address string `json:"address"`
+	service.LogoutResult
+}
+
+// uninstallLogoutText is pcb logout's first line for each answer, after
+// the account's name when there are several: its advice to run pcb logout
+// again after a sync makes no sense once the directories are deleted.
+func uninstallLogoutText(answers []uninstallLogout) string {
+	lines := make([]string, 0, len(answers))
+	for _, l := range answers {
+		first, _, _ := strings.Cut(logoutText(l.LogoutResult), "\n")
+		if len(answers) > 1 {
+			first = accountName(service.AccountInfo{ID: l.Account, Address: l.Address}) + ": " + first
+		}
+		lines = append(lines, first)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runsSystemctl reports whether steps run systemctl.
@@ -348,10 +366,12 @@ func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 	return nil
 }
 
-// logoutHook revokes the session of the directories the plan resolved,
-// with the in-process service, never the caller's own (M5-P19), and sets
-// *out to the service's answer; only a failure to get one is an error.
-func (a *app) logoutHook(h install.Host, out **service.LogoutResult) func(context.Context, paths.Dirs) error {
+// logoutHook signs out every account of the directories the plan
+// resolved (design §4.6), with the in-process accounts, never the caller's
+// own (M5-P19), and appends each account's answer to *out. Each account is
+// tried; only a failure to get an answer is an error (the first one, named
+// after its account when there are several).
+func (a *app) logoutHook(h install.Host, out *[]uninstallLogout) func(context.Context, paths.Dirs) error {
 	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
 			switch k {
@@ -362,18 +382,28 @@ func (a *app) logoutHook(h install.Host, out **service.LogoutResult) func(contex
 			}
 			return a.Env(k)
 		}
-		svc, err := a.NewService(withLogger(ctx, newNoteLogger(a.Stderr)), env)
+		hub, err := a.OpenHub(withLogger(ctx, newNoteLogger(a.Stderr)), env)
 		if err != nil {
 			return err
 		}
-		defer a.closeService(svc)
-		res, err := svc.Logout(ctx, service.LogoutRequest{})
-		if err != nil {
-			return err
+		defer a.closeHub(hub)
+		var failure error
+		accounts := hub.Accounts()
+		for _, info := range accounts {
+			res, err := hub.SignOut(ctx, info.ID, service.LogoutRequest{})
+			if err != nil {
+				if failure == nil {
+					failure = err
+					if len(accounts) > 1 {
+						failure = fmt.Errorf("%s: %w", accountName(info), err)
+					}
+				}
+				continue
+			}
+			*out = append(*out, uninstallLogout{Account: info.ID, Address: info.Address, LogoutResult: res})
 		}
 		// Not revoked is an answer: the outcome line says so, in pcb
 		// logout's words, not a note of the step.
-		*out = &res
-		return nil
+		return failure
 	}
 }

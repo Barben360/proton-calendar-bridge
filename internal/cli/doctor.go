@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
-	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -33,7 +31,7 @@ func (a *app) newDoctor() *cobra.Command {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
 			daemon := a.askDaemon(cmd.Context())
-			results := doctor.Run(cmd.Context(), doctorChecks(a.Env, daemon.live()), stream)
+			results := doctor.Run(cmd.Context(), doctor.Checks(a.Env, a.Host, a.Keyring, daemon.live()), stream)
 			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, daemon.results()...) {
 				if stream != nil {
 					stream(r)
@@ -100,12 +98,13 @@ func (d doctorDaemon) live() *doctor.Live {
 }
 
 // results are what a running pcb serve reports: "daemon", then one
-// result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
-// a warning warns). needs-login while the daemon waits for a login is the
-// normal state of a fresh install: a warning (ux-I2). A daemon that does
-// not answer cleanly is a transient error, a control socket pcb refuses
-// is not. With no daemon, "daemon" is
-// skipped: offline checks only.
+// result per alert of the process, named "alert CODE[ CALENDAR]", and of
+// each account, named "ACCOUNT: alert CODE[ CALENDAR]" (an error alert
+// fails, a warning warns). needs-login while the account's loop waits for
+// a login is the normal state of a fresh install: a warning (ux-I2). A
+// daemon that does not answer cleanly is a transient error, a control
+// socket pcb refuses is not. With no daemon, "daemon" is skipped: offline
+// checks only.
 func (d doctorDaemon) results() []doctor.Result {
 	const name = "daemon"
 	st := d.st
@@ -120,53 +119,41 @@ func (d doctorDaemon) results() []doctor.Result {
 	case !d.ok:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}
-	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonState(st)}}
-	for _, al := range st.Alerts {
-		r := doctor.Result{Name: "alert " + al.Code, Status: doctor.StatusWarn, Message: al.Message, Fix: al.Fix}
-		if al.Calendar != "" {
-			r.Name += " " + al.Calendar
-		}
-		waiting := st.Health != nil && st.Health.Serve == service.ServeWaitingForLogin
-		if al.Severity == ctl.SeverityError && (al.Code != ctl.CodeNeedsLogin || !waiting) {
-			r.Status = doctor.StatusError
-		}
-		results = append(results, r)
+	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonText(st.Daemon)}}
+	// The process's needs-login means no account: a daemon that answers
+	// with none waits for a login (pcb serve exits 10 without
+	// --wait-for-login), a warning as for an account (ruling R44).
+	results = append(results, alertResults("", st.Alerts, true)...)
+	for _, as := range st.Accounts {
+		waiting := as.Health != nil && as.Health.Serve == service.ServeWaitingForLogin
+		results = append(results, alertResults(accountLabel(as.AccountInfo)+": ", as.Alerts, waiting)...)
 	}
 	return results
 }
 
-// doctorChecks lists the checks, with one failing check per directory when
-// the user directories cannot be located. env looks up an environment
-// variable; live is the running daemon's listener (nil: none).
-func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
-	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
-	dirs, err := paths.Resolve(env)
-	if err != nil {
-		fix := func(override, xdg string) string {
-			return "set HOME, " + override + " or " + xdg + " to an absolute path"
+// daemonText is "running since T (pid N, version V)".
+func daemonText(d *ctl.Daemon) string {
+	if d == nil {
+		return "running"
+	}
+	return fmt.Sprintf("running since %s (pid %d, version %s)", d.StartedAt.Format(time.RFC3339), d.PID, d.Version)
+}
+
+// alertResults is one result per alert, its name prefixed: an error alert
+// fails, but needs-login while waiting for a login only warns.
+func alertResults(prefix string, alerts []ctl.Alert, waiting bool) []doctor.Result {
+	var out []doctor.Result
+	for _, al := range alerts {
+		r := doctor.Result{Name: prefix + "alert " + al.Code, Status: doctor.StatusWarn, Message: al.Message, Fix: al.Fix}
+		if al.Calendar != "" {
+			r.Name += " " + al.Calendar
 		}
-		return append(checks,
-			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix(paths.EnvConfigDir, "XDG_CONFIG_HOME")},
-			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix(paths.EnvStateDir, "XDG_STATE_HOME")})
+		if al.Severity == ctl.SeverityError && (al.Code != ctl.CodeNeedsLogin || !waiting) {
+			r.Status = doctor.StatusError
+		}
+		out = append(out, r)
 	}
-	checks = append(checks,
-		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
-		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700},
-		doctor.ConfigCheck{Path: config.Path(dirs), Dirs: dirs})
-	cfg, err := config.Load(config.Path(dirs), dirs)
-	if err != nil { // ConfigCheck already reports it
-		return checks
-	}
-	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
-	return append(checks,
-		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
-		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
-		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile},
-		doctor.CacheCheck{StateDir: dirs.State},
-		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
-		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
-		doctor.ClientsCheck{StateDir: dirs.State},
-		doctor.SealedClientsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile})
+	return out
 }
 
 var marks = map[doctor.Status]string{

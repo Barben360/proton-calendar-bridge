@@ -1,4 +1,4 @@
-package cli
+package daemon
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -239,12 +241,40 @@ func TestListenNetworkIsTCP4OnlyForIPv4Literals(t *testing.T) {
 	}
 }
 
+// The base has no trailing slash: AccountURL adds /dav/<id>/ to it.
+func TestThunderbirdBaseHasNoTrailingSlash(t *testing.T) {
+	t.Parallel()
+	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1080}
+	if got, err := thunderbirdBase(config.CalDAV{}, addr.IP, addr, false); got != "http://localhost:1080" || err != nil {
+		t.Errorf("plain base = %q, %v", got, err)
+	}
+	addr = &net.TCPAddr{IP: net.ParseIP("192.168.1.5"), Port: 8443}
+	if got, _ := thunderbirdBase(config.CalDAV{}, addr.IP, addr, true); got != "https://192.168.1.5:8443" {
+		t.Errorf("TLS base = %q", got)
+	}
+}
+
+func TestOfflineInfoNamesTheBaseAndNothingWhenListenIsMalformed(t *testing.T) {
+	t.Parallel()
+	dirs := paths.Dirs{State: t.TempDir()}
+	got := OfflineInfo(t.Context(), dirs, config.CalDAV{Listen: "127.0.0.1:1080"})
+	if got.Base != "http://localhost:1080" || got.TLS || got.Fingerprint != "" {
+		t.Errorf("OfflineInfo = %+v, want the plain loopback base", got)
+	}
+	if got := OfflineInfo(t.Context(), dirs, config.CalDAV{Listen: "not a listen address"}); got.Base != "" {
+		t.Errorf("OfflineInfo of a malformed listen = %+v, want no base", got)
+	}
+	if _, err := os.Stat(filepath.Join(dirs.State, "tls")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("OfflineInfo created the tls directory: %v", err)
+	}
+}
+
 // A session that ended with no Proton answer to read (no refresh available)
 // logs without a status or code: none is invented.
 func TestLogPassInventsNoProtonAnswer(t *testing.T) {
 	var b bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&b, nil))
-	logPass(log, service.WatchPass{Err: &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the Proton session has ended"), Hint: "run pcb login"}})
+	LogPass(log, service.WatchPass{Err: &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the Proton session has ended"), Hint: "run pcb login"}})
 	got := b.String()
 	if !strings.Contains(got, `msg="sync pass failed"`) || !strings.Contains(got, "run pcb login") {
 		t.Fatalf("the failed pass is not logged:\n%s", got)

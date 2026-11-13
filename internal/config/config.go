@@ -78,6 +78,7 @@ type Proton struct {
 // Secrets locates the key that seals the stored secrets.
 type Secrets struct {
 	KeyFile string `toml:"key_file"` // absolute path
+	Backend string `toml:"backend"`  // auto (default), keyfile or secret-service: what seals the secrets of a new state
 }
 
 // Path returns where config.toml lives.
@@ -88,7 +89,7 @@ func Path(d paths.Dirs) string { return filepath.Join(d.Config, "config.toml") }
 func Defaults(d paths.Dirs) Config {
 	return Config{
 		Proton:  Proton{BaseURL: DefaultBaseURL, AppVersion: DefaultAppVersion},
-		Secrets: Secrets{KeyFile: filepath.Join(d.Config, "secrets.key")},
+		Secrets: Secrets{KeyFile: filepath.Join(d.Config, "secrets.key"), Backend: "auto"},
 		CalDAV:  CalDAV{Listen: DefaultListen},
 		Log:     Log{Level: "info"},
 	}
@@ -165,6 +166,11 @@ func (c Config) validate() error {
 	}
 	if !filepath.IsAbs(c.Secrets.KeyFile) {
 		return errors.New("secrets.key_file must be an absolute path")
+	}
+	switch c.Secrets.Backend {
+	case "auto", "keyfile", "secret-service":
+	default:
+		return errors.New("[secrets] backend must be auto, keyfile or secret-service")
 	}
 	if _, err := ParseLevel(c.Log.Level); err != nil {
 		return fmt.Errorf("log.level %w", err)

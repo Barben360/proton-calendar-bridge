@@ -28,6 +28,13 @@ var (
 	// ErrCorrupt means the data is not authentic: tampered, truncated,
 	// sealed with another key or for another context.
 	ErrCorrupt = errors.New("sealed data is corrupt or not for this key")
+	// ErrLocked means the desktop keyring holding the key is locked. It
+	// clears when the user unlocks it (logs in to the desktop session); pcb
+	// never prompts for it.
+	ErrLocked = errors.New("the desktop keyring is locked")
+	// ErrNoService means no Secret Service answers on the session bus (or
+	// there is no session bus): the desktop keyring cannot be used.
+	ErrNoService = errors.New("no Secret Service answers on the session bus")
 	// ErrKeyMode means the key file's mode lets other users in: it is
 	// refused, readable or not (fails closed). The error is a *KeyModeError.
 	ErrKeyMode = errors.New("the key file is accessible by others")

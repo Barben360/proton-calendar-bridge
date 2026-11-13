@@ -125,7 +125,7 @@ func TestWaitingForLoginIs503WithoutAWarning(t *testing.T) {
 	s := newStub()
 	waiting := &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrWaitingForLogin, Hint: "run pcb login"}
 	s.readErr, s.writeErr = waiting, waiting
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	for _, tc := range []struct{ method, path, body, depth string }{
 		{"PROPFIND", home, tbHomeSet, "1"},
 		{"PROPFIND", calPath(workID), tbServerInfo, "0"},

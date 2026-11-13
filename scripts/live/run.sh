@@ -20,7 +20,7 @@
 #                  this login beyond the main or global budget; printed loudly and
 #                  recorded with the reason R in both ledgers; the 60 s spacing
 #                  still holds; refused (exit 2) without a non-empty reason
-#   --vm           step 7 only, on its throwaway VM: pcb runs with the host's
+#   --vm           steps 7 to 9, on their throwaway VMs: pcb runs with the host's
 #                  default dirs there (that is what `pcb install` tests), so the dir
 #                  guard cannot apply and PCB_*_DIR are removed from the command's
 #                  environment (the banner says so, not the guard's dir list);
@@ -104,7 +104,7 @@ fi
 for w in "$@"; do
   w=${w//@RUN@/$PCB_LIVE_RUN}
   case ${w##*/} in
-    pcb | pcb-lab | proton-cal)
+    pcb | pcb-ui | pcb-lab | proton-cal)
       if [[ $w == */* && $w != "$PCB_LIVE_RUN/bin/${w##*/}" ]]; then
         echo "run.sh: $w is not the run root's build ($PCB_LIVE_RUN/bin/${w##*/}): refused" >&2; exit 1
       fi

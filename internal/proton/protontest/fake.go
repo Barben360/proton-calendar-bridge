@@ -101,24 +101,36 @@ type Fake struct {
 
 	mu        sync.Mutex
 	calls     []call
-	failures  map[string][]failure       // "METHOD /path" → queued answers
-	stalls    map[string][]time.Duration // "METHOD /path" → queued stalls, by their bound
-	issued    map[string]bool            // access tokens handed out, not yet expired
-	minted    []string                   // every access token handed out, in order
-	expired   map[string]bool            // access tokens that answer 401
-	unlocked  map[string]bool            // UIDs holding the locked scope
-	users     map[string]string          // username → user ID
-	passwords map[string]string          // username → password
-	captcha   string                     // Options.Captcha, changed by SetCaptcha
-	codes     []string                   // 2FA codes received, in order
-	sessions  map[string]sessionRec      // access token minted by Session → session
-	logins    map[string]loginRec        // UID → session handed out by Login, not spent
-	rotated   map[string]string          // refresh token issued by a refresh → its pair's access token
+	failures  map[userRoute][]failure       // user ("" = every user), "METHOD /path" → queued answers
+	stalls    map[userRoute][]time.Duration // user ("" = every user), "METHOD /path" → queued stalls, by their bound
+	perUser   bool                          // a per-user failure, stall, CAPTCHA or 2FA was set: serve resolves the user
+	issued    map[string]bool               // access tokens handed out, not yet expired
+	minted    []string                      // every access token handed out, in order
+	expired   map[string]bool               // access tokens that answer 401
+	unlocked  map[string]bool               // UIDs holding the locked scope
+	users     map[string]string             // username → user ID
+	passwords map[string]string             // username → password
+	captchas  map[string]string             // user ("" = every user) → CAPTCHA token; Options.Captcha, SetCaptcha*
+	twoFAs    map[string]userTwoFA          // user → 2FA set by SetTwoFA, overriding Options.TwoFA
+	codes     []string                      // 2FA codes received, in order
+	sessions  map[string]sessionRec         // access token minted by Session → session
+	logins    map[string]loginRec           // UID → session handed out by Login, not spent
+	rotated   map[string]string             // refresh token issued by a refresh → its pair's access token
 
 	cal calendars
 }
 
 type call struct{ method, path string }
+
+// userRoute keys the queues of injected failures and stalls: user "" applies
+// to every user.
+type userRoute struct{ user, route string }
+
+type userTwoFA struct {
+	on   bool
+	totp *otp.TOTP
+	uri  string
+}
 
 type failure struct {
 	status, code int
@@ -159,8 +171,10 @@ func New(t TB, o Options) *Fake {
 		pool:      p,
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 		http:      &http.Client{Timeout: 10 * time.Second},
-		failures:  map[string][]failure{},
-		stalls:    map[string][]time.Duration{},
+		failures:  map[userRoute][]failure{},
+		stalls:    map[userRoute][]time.Duration{},
+		captchas:  map[string]string{},
+		twoFAs:    map[string]userTwoFA{},
 		issued:    map[string]bool{},
 		expired:   map[string]bool{},
 		unlocked:  map[string]bool{},
@@ -174,7 +188,7 @@ func New(t TB, o Options) *Fake {
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)
 	}
-	f.captcha = o.Captcha
+	f.captchas[""] = o.Captcha
 	t.Cleanup(f.giveBackLogins) // before borrow's: the backend comes back with them
 	f.proxy.ModifyResponse = f.fixResponse
 	f.AddUser(f.Username, f.Password)
@@ -242,22 +256,30 @@ func (f *Fake) Calls(method, pathPrefix string) int {
 // with Proton code code, and a Retry-After header when retryAfter > 0. Calls
 // queue up: each answers one request.
 func (f *Fake) FailNext(method, path string, status, code, retryAfter int) {
+	f.FailNextFor("", method, path, status, code, retryAfter)
+}
+
+// FailNextFor is FailNext for the requests of username only ("" for every
+// user). The user of a request is its session's, or on POST /auth/v4 and
+// /auth/v4/info the Username it names.
+func (f *Fake) FailNextFor(username, method, path string, status, code, retryAfter int) {
 	ra := ""
 	if retryAfter > 0 {
 		ra = strconv.Itoa(retryAfter)
 	}
-	f.failNext(method, path, failure{status, code, ra})
+	f.failNext(username, method, path, failure{status, code, ra})
 }
 
 // FailNextRetryAt is FailNext with Retry-After in its HTTP-date form, at.
 func (f *Fake) FailNextRetryAt(method, path string, status, code int, at time.Time) {
-	f.failNext(method, path, failure{status, code, at.UTC().Format(http.TimeFormat)})
+	f.failNext("", method, path, failure{status, code, at.UTC().Format(http.TimeFormat)})
 }
 
-func (f *Fake) failNext(method, path string, fl failure) {
+func (f *Fake) failNext(user, method, path string, fl failure) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	key := method + " " + path
+	f.perUser = f.perUser || user != ""
+	key := userRoute{user, method + " " + path}
 	f.failures[key] = append(f.failures[key], fl)
 }
 
@@ -265,18 +287,51 @@ func (f *Fake) failNext(method, path string, fl failure) {
 // an answer until the client gives up, or at most bound, after which it is
 // answered as usual. Calls queue up: each stalls one request.
 func (f *Fake) StallNext(method, path string, bound time.Duration) {
+	f.StallNextFor("", method, path, bound)
+}
+
+// StallNextFor is StallNext for the requests of username only ("" for every
+// user), as FailNextFor names them.
+func (f *Fake) StallNextFor(username, method, path string, bound time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	key := method + " " + path
+	f.perUser = f.perUser || username != ""
+	key := userRoute{username, method + " " + path}
 	f.stalls[key] = append(f.stalls[key], bound)
 }
 
 // SetCaptcha makes later logins answer the CAPTCHA challenge token, like
 // Options.Captcha; "" stops challenging.
 func (f *Fake) SetCaptcha(token string) {
+	f.SetCaptchaFor("", token)
+}
+
+// SetCaptchaFor is SetCaptcha for the logins of username only ("" for every
+// user). A token set for a user, "" included, wins over the fake-wide one.
+func (f *Fake) SetCaptchaFor(username, token string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.captcha = token
+	f.perUser = f.perUser || username != ""
+	f.captchas[username] = token
+}
+
+// SetTwoFA turns 2FA on or off for username, overriding Options.TwoFA, and
+// returns the otpauth URI whose codes /auth/v4/2fa then accepts for that user.
+func (f *Fake) SetTwoFA(username string, on bool) (totpURI string) {
+	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec, ok := f.twoFAs[username]
+	if !ok {
+		rec.uri = "otpauth://totp/pcbfake?secret=" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(f.t, 20))
+		var err error
+		if rec.totp, err = otp.Parse(rec.uri); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	rec.on = on
+	f.twoFAs[username] = rec
+	return rec.uri
 }
 
 // TOTPCodes returns the 2FA codes received so far, in order.
@@ -436,7 +491,14 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, call{r.Method, r.URL.Path})
-	stall := f.popStall(route)
+	perUser := f.perUser
+	f.mu.Unlock()
+	user := ""
+	if perUser {
+		user = f.requestUser(r)
+	}
+	f.mu.Lock()
+	stall := f.popStall(user, route)
 	f.mu.Unlock()
 	if stall > 0 {
 		// The server notices a client that gave up only once the body is
@@ -455,7 +517,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.mu.Lock()
-	fail, injected := f.popFailure(route)
+	fail, injected := f.popFailure(user, route)
 	expired := f.expired[bearer(r)] && r.URL.Path != "/auth/v4/refresh"
 	f.mu.Unlock()
 	switch {
@@ -468,8 +530,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
 	case route == "POST /auth/v4/refresh" && f.refusesRefresh(r):
 		reply(w, http.StatusBadRequest, api.CodeRefreshInvalid, "Invalid refresh token")
-	case route == "POST /auth/v4" && f.challenged(r):
-		WriteChallenge(w, f.captchaToken(), f.o.CaptchaMethods)
+	case route == "POST /auth/v4" && f.challenged(r, user):
+		WriteChallenge(w, f.captchaToken(user), f.o.CaptchaMethods)
 	case strings.HasPrefix(r.URL.Path, "/calendar/") || route == "GET /settings/calendar":
 		f.serveCalendar(w, r)
 	case route == "POST /auth/v4/2fa":
@@ -510,32 +572,61 @@ func (f *Fake) refusesRefresh(r *http.Request) bool {
 	return rotated && req.AccessToken != acc
 }
 
-func (f *Fake) popFailure(route string) (failure, bool) {
-	q := f.failures[route]
-	if len(q) == 0 {
-		return failure{}, false
+// requestUser returns the user of r: the session's, or on POST /auth/v4 and
+// /auth/v4/info the Username of its body; "" when unknown.
+func (f *Fake) requestUser(r *http.Request) string {
+	if r.Method == http.MethodPost && (r.URL.Path == "/auth/v4" || r.URL.Path == "/auth/v4/info") {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return ""
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var named struct{ Username string }
+		_ = json.Unmarshal(body, &named)
+		return named.Username
 	}
-	f.failures[route] = q[1:]
-	return q[0], true
+	if name, ok := f.sessionUser(r); ok {
+		return name
+	}
+	name, _ := f.whoami(r)
+	return name
 }
 
-func (f *Fake) popStall(route string) time.Duration {
-	q := f.stalls[route]
-	if len(q) == 0 {
-		return 0
+// popFailure takes the next failure queued for user, else the next one queued
+// for every user.
+func (f *Fake) popFailure(user, route string) (failure, bool) {
+	for _, u := range []string{user, ""} {
+		key := userRoute{u, route}
+		if q := f.failures[key]; len(q) > 0 {
+			f.failures[key] = q[1:]
+			return q[0], true
+		}
 	}
-	f.stalls[route] = q[1:]
-	return q[0]
+	return failure{}, false
 }
 
-func (f *Fake) captchaToken() string {
+func (f *Fake) popStall(user, route string) time.Duration {
+	for _, u := range []string{user, ""} {
+		key := userRoute{u, route}
+		if q := f.stalls[key]; len(q) > 0 {
+			f.stalls[key] = q[1:]
+			return q[0]
+		}
+	}
+	return 0
+}
+
+func (f *Fake) captchaToken(user string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.captcha
+	if token, ok := f.captchas[user]; ok {
+		return token
+	}
+	return f.captchas[""]
 }
 
-func (f *Fake) challenged(r *http.Request) bool {
-	token := f.captchaToken()
+func (f *Fake) challenged(r *http.Request, user string) bool {
+	token := f.captchaToken(user)
 	return token != "" &&
 		(r.Header.Get("x-pm-human-verification-token") != token ||
 			r.Header.Get("x-pm-human-verification-token-type") != "captcha")
@@ -549,7 +640,8 @@ func (f *Fake) isUnlocked(r *http.Request) bool {
 
 // twoFA accepts the codes of the current and the previous TOTP period.
 func (f *Fake) twoFA(w http.ResponseWriter, r *http.Request) {
-	if _, ok := f.whoami(r); !ok {
+	name, ok := f.whoami(r)
+	if !ok {
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
 		return
 	}
@@ -557,9 +649,13 @@ func (f *Fake) twoFA(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	f.mu.Lock()
 	f.codes = append(f.codes, req.TwoFactorCode)
+	on, totp := f.o.TwoFA, f.totp
+	if rec, ok := f.twoFAs[name]; ok {
+		on, totp = rec.on, rec.totp
+	}
 	f.mu.Unlock()
 	now := f.o.Now()
-	if !f.o.TwoFA || (req.TwoFactorCode != f.totp.Code(now) && req.TwoFactorCode != f.totp.Code(now.Add(-30*time.Second))) {
+	if !on || (req.TwoFactorCode != totp.Code(now) && req.TwoFactorCode != totp.Code(now.Add(-30*time.Second))) {
 		reply(w, http.StatusUnprocessableEntity, CodeTOTPWrong, "Incorrect code")
 		return
 	}
@@ -702,7 +798,7 @@ func (f *Fake) shapeAuth(body map[string]any) {
 	switch {
 	case f.o.FIDO2Only:
 		body["2FA"] = map[string]any{"Enabled": 2}
-	case f.o.TwoFA:
+	case f.twoFAOn(body["UserID"]):
 		body["2FA"] = map[string]any{"Enabled": 1}
 	}
 	if f.o.TwoPassword {
@@ -711,6 +807,20 @@ func (f *Fake) shapeAuth(body map[string]any) {
 	if proof, ok := body["ServerProof"].(string); ok && f.o.BadLoginProof {
 		body["ServerProof"] = corrupt(proof)
 	}
+}
+
+// twoFAOn tells whether 2FA is on for the user whose ID is userID.
+func (f *Fake) twoFAOn(userID any) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for name, id := range f.users {
+		if id == userID {
+			if rec, ok := f.twoFAs[name]; ok {
+				return rec.on
+			}
+		}
+	}
+	return f.o.TwoFA
 }
 
 // corrupt flips the first byte of a base64 proof.

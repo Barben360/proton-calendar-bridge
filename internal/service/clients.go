@@ -64,11 +64,11 @@ func (l *Local) clientsError(err error) error {
 	case errors.Is(err, access.ErrNotFound):
 		return usage(err.Error(), "run pcb client list to see the clients")
 	case errors.Is(err, access.ErrSeal):
-		msg := "the client's password could not be sealed with the key file " + l.keyFile()
+		msg := "the client's password could not be sealed with " + l.keyWhat()
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
-		return keyFailure(err, msg+", so nothing was stored", keyFix)
+		return keyFailure(err, msg+", so nothing was stored", l.keyFix())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
@@ -129,21 +129,45 @@ func (l *Local) CheckClient(ctx context.Context, password, remote string) (ok bo
 	if allowed, wait := l.limiter.Allow(remote); !allowed {
 		return false, wait
 	}
-	c, found, err := l.clients.Verify(password)
+	found, err := l.VerifyClient(ctx, password)
 	if err != nil {
 		// Not the client's fault: a state that can pass, so a 503 and no
 		// limiter charge (audit surface-I2).
-		l.noteClientsLoad(err)
 		return false, clientsRetry
 	}
-	l.noteClientsLoad(nil)
 	if !found {
 		l.limiter.Fail(remote)
 		return false, 0
 	}
-	l.touch(c.ID)
-	l.noteActivity()
 	return true, 0
+}
+
+// VerifyClient reports whether password is a CalDAV app password of this
+// account, without the limiter (the caller owns it: a Hub tries each account
+// and charges one failure). A match touches the client and notes activity.
+// err is set when clients.json cannot be loaded (logged once per failure).
+func (l *Local) VerifyClient(_ context.Context, password string) (found bool, err error) {
+	return l.verifyClient(password, true)
+}
+
+// verifyClient is VerifyClient; a match touches the client and notes
+// activity only when use is set (a Hub checks the clients of an account
+// with CalDAV off without using them, ruling R28).
+func (l *Local) verifyClient(password string, use bool) (found bool, err error) {
+	if l.closed.Load() {
+		return false, nil
+	}
+	c, found, err := l.clients.Verify(password)
+	if err != nil {
+		l.noteClientsLoad(err)
+		return false, err
+	}
+	l.noteClientsLoad(nil)
+	if found && use {
+		l.touch(c.ID)
+		l.noteActivity()
+	}
+	return found, nil
 }
 
 // clientsRetry is the wait a request is given while clients.json cannot be
@@ -308,20 +332,27 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 // is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), l.keyFix())
 	}
-	why := "its sealed copy does not open with the key file " + l.keyFile()
+	why := "its sealed copy does not open with " + l.keyWhat()
 	switch {
 	case errors.Is(err, access.ErrStale):
 		why = "its sealed copy does not match its password (clients.json was edited)"
 	case errors.Is(err, seal.ErrNoKey):
-		why = "the key file " + l.keyFile() + " is missing"
+		why = l.keyWhat() + " is missing"
+		if l.keyFile() == keyringRef {
+			why = "the desktop keyring has no key for it"
+		}
 	}
-	hint := "restore the key file from a backup, or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
+	restore := "restore the key file from a backup"
+	if l.keyFile() == keyringRef {
+		restore = "make sure the desktop keyring holds pcb's key (unlock it, or restore it from a backup of the keyring)"
+	}
+	hint := restore + ", or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
 	if errors.Is(err, seal.ErrNoKey) && l.sessionSealed() {
 		// rotate is refused meanwhile (sessionKeyLost); after the new
 		// login, show offers it for a copy the new key does not open.
-		hint = "restore the key file from a backup, or run pcb logout, then pcb login"
+		hint = restore + ", or run pcb logout, then pcb login"
 	}
 	return mustAct(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s", name, why), hint)
 }
@@ -340,6 +371,9 @@ func (l *Local) sessionSealed() bool {
 // (rotate). Only an absent key file counts: any other key error is the
 // sealer's to report. A login's own sealing still creates the key.
 func (l *Local) sessionKeyLost() error {
+	if l.o.Sealer.Name() == SealerSecretService { // its key is not a file
+		return nil
+	}
 	if _, err := os.Stat(l.keyFile()); !errors.Is(err, fs.ErrNotExist) || !l.sessionSealed() {
 		return nil
 	}

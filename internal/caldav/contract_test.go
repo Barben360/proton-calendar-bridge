@@ -113,11 +113,73 @@ func tbEncode(seg string) string {
 	return b.String()
 }
 
-// calPath is a calendar's collection URL: the first 16 hex digits of
+// stubID is the local ID of the tests' one account (oneAccount).
+const stubID = "0a1b2c3d"
+
+// accountPrincipal is the account's own principal: what / and the
+// well-known URL point to, whatever the namespace (design §4.4).
+const accountPrincipal = "/dav/" + stubID + "/principals/me/"
+
+// urlBase is a URL namespace the contract tests run on: the compatibility
+// URLs (M5's, realm pcb) or the account's own under /dav/<local-id>/
+// (realm "pcb <local-id>"). Each answers its hrefs in its own namespace.
+type urlBase struct {
+	name      string
+	root      string // what / is in the namespace
+	dav       string // the namespace's base: /dav/ or /dav/<local-id>/
+	principal string
+	home      string
+	challenge string
+}
+
+var (
+	compat  = urlBase{name: "compatibility", root: "/", dav: "/dav/", principal: principal, home: home, challenge: challenge}
+	account = urlBase{name: "account", root: "/dav/" + stubID + "/", dav: "/dav/" + stubID + "/", principal: accountPrincipal,
+		home: "/dav/" + stubID + "/calendars/me/", challenge: `Basic realm="pcb ` + stubID + `", charset="UTF-8"`}
+)
+
+// forBases runs test on each namespace, as parallel subtests named after it.
+func forBases(t *testing.T, test func(t *testing.T, b urlBase)) {
+	t.Helper()
+	t.Parallel()
+	for _, b := range []urlBase{compat, account} {
+		t.Run(b.name, func(t *testing.T) { test(t, b) })
+	}
+}
+
+// oneAccount is a service.Router of one account, stubID, whose API is api:
+// a request on the compatibility URLs or on stubID's is checked by
+// api.CheckClient, one on another account's is refused (401).
+type oneAccount struct{ api service.API }
+
+func (o oneAccount) Route(ctx context.Context, accountID, password, remote string) (service.API, string, time.Duration, error) {
+	if accountID != "" && accountID != stubID {
+		return nil, "", 0, nil
+	}
+	if ok, wait := o.api.CheckClient(ctx, password, remote); !ok {
+		return nil, "", wait, nil
+	}
+	return o.api, stubID, 0, nil
+}
+
+// handler is caldav.Handler on api as the one account.
+func handler(api service.API, o caldav.Options) http.Handler {
+	return caldav.Handler(oneAccount{api}, o)
+}
+
+// handlerWithDataCap is caldav.HandlerWithDataCap on api as the one account.
+func handlerWithDataCap(api service.API, o caldav.Options, n int) http.Handler {
+	return caldav.HandlerWithDataCap(oneAccount{api}, o, n)
+}
+
+// calPath is a calendar's collection URL on the compatibility URLs.
+func calPath(id string) string { return compat.calPath(id) }
+
+// calPath (of b) is a calendar's collection URL: the first 16 hex digits of
 // sha256 of its ID under the home set.
-func calPath(id string) string {
+func (b urlBase) calPath(id string) string {
 	sum := sha256.Sum256([]byte(id))
-	return home + hex.EncodeToString(sum[:])[:16] + "/"
+	return b.home + hex.EncodeToString(sum[:])[:16] + "/"
 }
 
 var plainName = regexp.MustCompile(`^[A-Za-z0-9._@-]{1,200}$`)
@@ -131,11 +193,15 @@ func objName(uid string) string {
 	return "~" + base64.RawURLEncoding.EncodeToString([]byte(uid)) + ".ics"
 }
 
-func objPath(calID, uid string) string { return calPath(calID) + objName(uid) }
+func objPath(calID, uid string) string { return compat.objPath(calID, uid) }
+
+func (b urlBase) objPath(calID, uid string) string { return b.calPath(calID) + objName(uid) }
 
 // tbHref is objPath as Thunderbird sends it: each segment encodeURIComponent'ed.
-func tbHref(calID, uid string) string {
-	segs := strings.Split(objPath(calID, uid), "/")
+func tbHref(calID, uid string) string { return compat.tbHref(calID, uid) }
+
+func (b urlBase) tbHref(calID, uid string) string {
+	segs := strings.Split(b.objPath(calID, uid), "/")
 	for i, s := range segs {
 		segs[i] = tbEncode(s)
 	}
@@ -618,27 +684,33 @@ func privileges(t *testing.T, set el) []xml.Name {
 // Every method on every path needs credentials and asks for them with a
 // Basic challenge, never a 403, before any other work.
 func TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge(t *testing.T) {
+	forBases(t, testMust01UnauthenticatedRequestsGet401WithTheBasicChallenge)
+}
+
+func testMust01UnauthenticatedRequestsGet401WithTheBasicChallenge(t *testing.T, b urlBase) {
 	t.Parallel()
+	// The well-known URL and paths outside every namespace are the
+	// compatibility URLs': their challenge is realm pcb on either base.
 	targets := []struct{ method, path, body string }{
-		{"PROPFIND", "/", tbDetect},
+		{"PROPFIND", b.root, tbDetect},
 		{"PROPFIND", "/.well-known/caldav", tbDetect},
 		{"GET", "/.well-known/caldav", ""},
-		{"PROPFIND", principal, tbDetect},
-		{"PROPFIND", home, tbHomeSet},
-		{"PROPFIND", calPath(workID), tbServerInfo},
-		{"REPORT", calPath(workID), tbSync("")},
-		{"GET", objPath(workID, plainUID), ""},
-		{"HEAD", objPath(workID, plainUID), ""},
-		{"PUT", objPath(workID, plainUID), "BEGIN:VCALENDAR"},
-		{"DELETE", objPath(workID, plainUID), ""},
-		{"PROPPATCH", calPath(workID), ""},
-		{"MKCALENDAR", home + "new/", ""},
+		{"PROPFIND", b.principal, tbDetect},
+		{"PROPFIND", b.home, tbHomeSet},
+		{"PROPFIND", b.calPath(workID), tbServerInfo},
+		{"REPORT", b.calPath(workID), tbSync("")},
+		{"GET", b.objPath(workID, plainUID), ""},
+		{"HEAD", b.objPath(workID, plainUID), ""},
+		{"PUT", b.objPath(workID, plainUID), "BEGIN:VCALENDAR"},
+		{"DELETE", b.objPath(workID, plainUID), ""},
+		{"PROPPATCH", b.calPath(workID), ""},
+		{"MKCALENDAR", b.home + "new/", ""},
 		{"PROPFIND", "/nowhere", ""},
 	}
 	for _, tc := range targets {
 		for _, mode := range []string{"anonymous", "wrong password", "empty password"} {
 			s := newStub()
-			h := caldav.Handler(s, caldav.Options{})
+			h := handler(s, caldav.Options{})
 			r := call(tc.method, tc.path, tc.body, "Depth", "0")
 			switch mode {
 			case "wrong password":
@@ -651,8 +723,12 @@ func TestMust01UnauthenticatedRequestsGet401WithTheBasicChallenge(t *testing.T) 
 				t.Errorf("%s %s (%s): status %d, want 401", tc.method, tc.path, mode, rec.Code)
 				continue
 			}
-			if got := rec.Header().Get("WWW-Authenticate"); got != challenge {
-				t.Errorf("%s %s (%s): WWW-Authenticate %q, want %q", tc.method, tc.path, mode, got, challenge)
+			want := b.challenge
+			if strings.HasPrefix(tc.path, "/.well-known/") || tc.path == "/nowhere" {
+				want = challenge
+			}
+			if got := rec.Header().Get("WWW-Authenticate"); got != want {
+				t.Errorf("%s %s (%s): WWW-Authenticate %q, want %q", tc.method, tc.path, mode, got, want)
 			}
 			if rec.Body.Len() != 0 {
 				t.Errorf("%s %s (%s): body %q, want none", tc.method, tc.path, mode, rec.Body)
@@ -684,7 +760,7 @@ func TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter(t *testing.T) {
 		s.wait = tc.wait
 		r := call("PROPFIND", "/", tbDetect, "Depth", "0")
 		r.SetBasicAuth("x", "wrong")
-		rec := serve(caldav.Handler(s, caldav.Options{}), r)
+		rec := serve(handler(s, caldav.Options{}), r)
 		wantStatus(t, rec, http.StatusServiceUnavailable)
 		if got := rec.Header().Get("Retry-After"); got != tc.want {
 			t.Errorf("retryAfter %v: Retry-After %q, want %q", tc.wait, got, tc.want)
@@ -697,24 +773,27 @@ func TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter(t *testing.T) {
 
 // --- MUST 2 ---------------------------------------------------------------
 
+// The well-known URL is a compatibility URL, yet it points to the
+// account's own principal (the one the password chose), so a new setup
+// ends on the account's URLs (design §4.4).
 func TestMust02WellKnownRedirectsToThePrincipal(t *testing.T) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, tc := range []struct{ method, path string }{
 		{"PROPFIND", "/.well-known/caldav"}, {"PROPFIND", "/.well-known/caldav/"}, {"GET", "/.well-known/caldav"},
 	} {
 		rec := do(h, tc.method, tc.path, tbDetect, "Depth", "0")
 		wantStatus(t, rec, http.StatusPermanentRedirect)
 		loc, err := url.Parse(rec.Header().Get("Location"))
-		if err != nil || loc.Host != "" && loc.Host != "example.com" || loc.Path != principal {
-			t.Fatalf("%s %s: Location %q, want the principal on the same origin", tc.method, tc.path, rec.Header().Get("Location"))
+		if err != nil || loc.Host != "" && loc.Host != "example.com" || loc.Path != accountPrincipal {
+			t.Fatalf("%s %s: Location %q, want the account's principal on the same origin", tc.method, tc.path, rec.Header().Get("Location"))
 		}
 	}
 	// Following it (Thunderbird re-sends the PROPFIND) finds the home set.
-	ms := parseMS(t, do(h, "PROPFIND", principal, tbDetect, "Depth", "0"))
-	p := ms.get(t, principal)
-	if got := p.prop(t, nsC, "calendar-home-set").hrefOf(t); got != home {
-		t.Errorf("calendar-home-set %q, want %q", got, home)
+	ms := parseMS(t, do(h, "PROPFIND", accountPrincipal, tbDetect, "Depth", "0"))
+	p := ms.get(t, accountPrincipal)
+	if got := p.prop(t, nsC, "calendar-home-set").hrefOf(t); got != account.home {
+		t.Errorf("calendar-home-set %q, want %q", got, account.home)
 	}
 }
 
@@ -724,27 +803,33 @@ func TestMust02WellKnownRedirectsToThePrincipal(t *testing.T) {
 // principal names the home set; resourcetype is always there; property
 // names match by namespace, whatever the prefix.
 func TestMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet(t *testing.T) {
+	forBases(t, testMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet)
+}
+
+func testMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	otherPrefixes := `<propfind xmlns="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"><prop><resourcetype/><current-user-principal/><cal:calendar-home-set/></prop></propfind>`
 	for _, body := range []string{tbDetect, otherPrefixes} {
-		root := parseMS(t, do(h, "PROPFIND", "/", body, "Depth", "0", "Content-Type", "text/xml; charset=utf-8"))
+		root := parseMS(t, do(h, "PROPFIND", b.root, body, "Depth", "0", "Content-Type", "text/xml; charset=utf-8"))
 		if len(root.responses) != 1 {
-			t.Fatalf("depth 0 on / gave %d responses", len(root.responses))
+			t.Fatalf("depth 0 on %s gave %d responses", b.root, len(root.responses))
 		}
-		r := root.responses[0]
-		wantNames(t, "resourcetype of /", r.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"))
-		if got := r.prop(t, nsD, "current-user-principal").hrefOf(t); got != principal {
-			t.Fatalf("current-user-principal %q, want %q", got, principal)
+		r := root.get(t, b.root)
+		wantNames(t, "resourcetype of the root", r.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"))
+		// The account's own principal on either base: a new setup ends on
+		// the account's URLs (design §4.4).
+		if got := r.prop(t, nsD, "current-user-principal").hrefOf(t); got != accountPrincipal {
+			t.Fatalf("current-user-principal %q, want %q", got, accountPrincipal)
 		}
-		pr := parseMS(t, do(h, "PROPFIND", principal, body, "Depth", "0")).get(t, principal)
+		pr := parseMS(t, do(h, "PROPFIND", b.principal, body, "Depth", "0")).get(t, b.principal)
 		wantNames(t, "resourcetype of the principal", pr.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"), n(nsD, "principal"))
-		if got := pr.prop(t, nsC, "calendar-home-set").hrefOf(t); got != home {
-			t.Fatalf("calendar-home-set %q, want %q", got, home)
+		if got := pr.prop(t, nsC, "calendar-home-set").hrefOf(t); got != b.home {
+			t.Fatalf("calendar-home-set %q, want %q", got, b.home)
 		}
 	}
 	// What a resource lacks comes back in a 404 propstat, not dropped.
-	r := parseMS(t, do(h, "PROPFIND", "/", tbDetect, "Depth", "0")).responses[0]
+	r := parseMS(t, do(h, "PROPFIND", b.root, tbDetect, "Depth", "0")).responses[0]
 	for _, p := range []xml.Name{n(nsA, "calendar-color"), n(nsC, "calendar-home-set")} {
 		if !r.missing[p] {
 			t.Errorf("/ does not report %v as 404 (missing %v)", p, r.missing)
@@ -752,8 +837,8 @@ func TestMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet(t *testing.T) {
 	}
 	// The calendar URL entered directly is recognised as a calendar
 	// (Thunderbird's attemptLocation), with or without its trailing slash.
-	for _, p := range []string{calPath(workID), strings.TrimSuffix(calPath(workID), "/")} {
-		c := parseMS(t, do(h, "PROPFIND", p, tbDetect, "Depth", "0")).get(t, calPath(workID))
+	for _, p := range []string{b.calPath(workID), strings.TrimSuffix(b.calPath(workID), "/")} {
+		c := parseMS(t, do(h, "PROPFIND", p, tbDetect, "Depth", "0")).get(t, b.calPath(workID))
 		wantNames(t, "resourcetype of the calendar", c.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"), n(nsC, "calendar"))
 	}
 }
@@ -761,9 +846,13 @@ func TestMust03DiscoveryFromTheRootFindsPrincipalAndHomeSet(t *testing.T) {
 // --- MUST 4 ---------------------------------------------------------------
 
 func TestMust04HomeSetDepth1ListsEveryCalendar(t *testing.T) {
+	forBases(t, testMust04HomeSetDepth1ListsEveryCalendar)
+}
+
+func testMust04HomeSetDepth1ListsEveryCalendar(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
+	h := handler(newStub(), caldav.Options{})
+	ms := parseMS(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"))
 	if len(ms.responses) != 3 {
 		t.Fatalf("%d responses, want the home set and its 2 calendars:\n%s", len(ms.responses), ms.raw)
 	}
@@ -772,9 +861,9 @@ func TestMust04HomeSetDepth1ListsEveryCalendar(t *testing.T) {
 			t.Errorf("%s has no resourcetype (Thunderbird throws)", r.href)
 		}
 	}
-	wantNames(t, "resourcetype of the home set", ms.get(t, home).prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"))
+	wantNames(t, "resourcetype of the home set", ms.get(t, b.home).prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"))
 	for id, want := range map[string]struct{ name, color string }{workID: {"Work", "#3CBB3A"}, holID: {"Holidays", ""}} {
-		c := ms.get(t, calPath(id))
+		c := ms.get(t, b.calPath(id))
 		wantNames(t, "resourcetype of "+want.name, c.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"), n(nsC, "calendar"))
 		if got := c.prop(t, nsD, "displayname").Text; got != want.name {
 			t.Errorf("displayname %q, want %q", got, want.name)
@@ -793,9 +882,13 @@ func TestMust04HomeSetDepth1ListsEveryCalendar(t *testing.T) {
 // --- MUST 5 ---------------------------------------------------------------
 
 func TestMust05CalendarDepth0CarriesTheServerInfo(t *testing.T) {
+	forBases(t, testMust05CalendarDepth0CarriesTheServerInfo)
+}
+
+func testMust05CalendarDepth0CarriesTheServerInfo(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	c := parseMS(t, do(h, "PROPFIND", calPath(workID), tbServerInfo, "Depth", "0")).get(t, calPath(workID))
+	h := handler(newStub(), caldav.Options{})
+	c := parseMS(t, do(h, "PROPFIND", b.calPath(workID), tbServerInfo, "Depth", "0")).get(t, b.calPath(workID))
 	wantNames(t, "resourcetype", c.prop(t, nsD, "resourcetype").kidNames(), n(nsD, "collection"), n(nsC, "calendar"))
 	var reports []xml.Name
 	for _, sr := range c.prop(t, nsD, "supported-report-set").Kids {
@@ -816,13 +909,13 @@ func TestMust05CalendarDepth0CarriesTheServerInfo(t *testing.T) {
 		t.Errorf("getctag %q", got)
 	}
 	for _, p := range []string{"owner", "current-user-principal"} {
-		if got := c.prop(t, nsD, p).hrefOf(t); got != principal {
-			t.Errorf("%s %q, want %q", p, got, principal)
+		if got := c.prop(t, nsD, p).hrefOf(t); got != b.principal {
+			t.Errorf("%s %q, want %q", p, got, b.principal)
 		}
 	}
 	// The other properties of the calendar, asked for by name.
 	more := `<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:sync-token/><D:displayname/><C:calendar-description/></D:prop></D:propfind>`
-	c = parseMS(t, do(h, "PROPFIND", calPath(workID), more, "Depth", "0")).get(t, calPath(workID))
+	c = parseMS(t, do(h, "PROPFIND", b.calPath(workID), more, "Depth", "0")).get(t, b.calPath(workID))
 	if c.prop(t, nsD, "sync-token").Text != "urn:pcb:sync:1:e1:7:gen1" || c.prop(t, nsD, "displayname").Text != "Work" ||
 		c.prop(t, nsC, "calendar-description").Text != "Team" {
 		t.Errorf("calendar properties = %+v", c.props)
@@ -832,12 +925,16 @@ func TestMust05CalendarDepth0CarriesTheServerInfo(t *testing.T) {
 // --- SHOULD: privileges (rulings M3-R1, M3-R15) ---------------------------
 
 func TestShouldPrivilegesFollowReadOnly(t *testing.T) {
+	forBases(t, testShouldPrivilegesFollowReadOnly)
+}
+
+func testShouldPrivilegesFollowReadOnly(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
-	wantNames(t, "privileges of a writable calendar", privileges(t, ms.get(t, calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
+	h := handler(newStub(), caldav.Options{})
+	ms := parseMS(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"))
+	wantNames(t, "privileges of a writable calendar", privileges(t, ms.get(t, b.calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
 		n(nsD, "read"), n(nsD, "write"), n(nsD, "write-content"), n(nsD, "bind"), n(nsD, "unbind"))
-	wantNames(t, "privileges of a read-only calendar", privileges(t, ms.get(t, calPath(holID)).prop(t, nsD, "current-user-privilege-set")),
+	wantNames(t, "privileges of a read-only calendar", privileges(t, ms.get(t, b.calPath(holID)).prop(t, nsD, "current-user-privilege-set")),
 		n(nsD, "read"))
 }
 
@@ -847,10 +944,14 @@ func TestShouldPrivilegesFollowReadOnly(t *testing.T) {
 // credentials and without asking the service (ruling M3-R23); never a
 // scheduling class (AVOID 1).
 func TestMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth(t *testing.T) {
+	forBases(t, testMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth)
+}
+
+func testMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	for _, p := range []string{"/", "/.well-known/caldav", principal, home, calPath(workID), objPath(workID, plainUID), "/nowhere/at/all"} {
+	h := handler(s, caldav.Options{})
+	for _, p := range []string{b.root, "/.well-known/caldav", b.principal, b.home, b.calPath(workID), b.objPath(workID, plainUID), "/nowhere/at/all"} {
 		rec := serve(h, call("OPTIONS", p, ""))
 		wantStatus(t, rec, http.StatusOK)
 		if got := rec.Header().Get("DAV"); got != davHeader {
@@ -868,15 +969,19 @@ func TestMust06OptionsAnswers200WithTheDAVHeaderWithoutAuth(t *testing.T) {
 // --- MUST 7 ---------------------------------------------------------------
 
 func TestMust07SyncCollectionWithAnEmptyTokenListsEverything(t *testing.T) {
+	forBases(t, testMust07SyncCollectionWithAnEmptyTokenListsEverything)
+}
+
+func testMust07SyncCollectionWithAnEmptyTokenListsEverything(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbSync(""), "Depth", "1", "Content-Type", "text/xml; charset=utf-8"))
+	h := handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbSync(""), "Depth", "1", "Content-Type", "text/xml; charset=utf-8"))
 	if len(ms.responses) != len(s.objs[workID]) {
 		t.Fatalf("%d responses, want every object (%d):\n%s", len(ms.responses), len(s.objs[workID]), ms.raw)
 	}
 	for _, o := range s.objs[workID] {
-		r := ms.get(t, objPath(workID, o.UID))
+		r := ms.get(t, b.objPath(workID, o.UID))
 		if got := r.prop(t, nsD, "getetag").Text; got != o.ETag {
 			t.Errorf("%s: getetag %q, want %q", o.UID, got, o.ETag)
 		}
@@ -900,6 +1005,10 @@ func TestMust07SyncCollectionWithAnEmptyTokenListsEverything(t *testing.T) {
 // objects with their ETags, deletions as a response-level 404 with no
 // propstat, and a new token even when nothing changed.
 func TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T) {
+	forBases(t, testMust07SyncCollectionServesTheDeltaAndDeletionsAs404)
+}
+
+func testMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{
@@ -908,16 +1017,16 @@ func TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T) {
 		Token:   "tok-2",
 	}
 	s.deltas["tok-2"] = service.ChangeSet{Changed: []service.ObjectInfo{}, Deleted: dels(), Token: "tok-2"}
-	h := caldav.Handler(s, caldav.Options{})
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbSync("tok-1"), "Depth", "1"))
+	h := handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbSync("tok-1"), "Depth", "1"))
 	if len(ms.responses) != 3 {
 		t.Fatalf("%d responses:\n%s", len(ms.responses), ms.raw)
 	}
-	if got := ms.get(t, objPath(workID, plainUID)).prop(t, nsD, "getetag").Text; got != `"v1-plain"` {
+	if got := ms.get(t, b.objPath(workID, plainUID)).prop(t, nsD, "getetag").Text; got != `"v1-plain"` {
 		t.Errorf("changed getetag %q", got)
 	}
 	for _, uid := range []string{"gone@x", "gone too/ü"} {
-		r := ms.get(t, objPath(workID, uid))
+		r := ms.get(t, b.objPath(workID, uid))
 		if r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
 			t.Errorf("deleted %s: status %q, %d propstats; want a response-level 404 alone", uid, r.status, r.propstats)
 		}
@@ -925,7 +1034,7 @@ func TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T) {
 	if ms.token == nil || *ms.token != "tok-2" {
 		t.Errorf("sync-token %v, want tok-2", ms.token)
 	}
-	quiet := parseMS(t, do(h, "REPORT", calPath(workID), tbSync("tok-2"), "Depth", "1"))
+	quiet := parseMS(t, do(h, "REPORT", b.calPath(workID), tbSync("tok-2"), "Depth", "1"))
 	if len(quiet.responses) != 0 || quiet.token == nil || *quiet.token != "tok-2" {
 		t.Errorf("nothing changed: %d responses, token %v; want none and a token", len(quiet.responses), quiet.token)
 	}
@@ -934,10 +1043,14 @@ func TestMust07SyncCollectionServesTheDeltaAndDeletionsAs404(t *testing.T) {
 // A token the service cannot answer from is a 403 with the valid-sync-token
 // precondition, a non-empty body that is not the rate-limit one (E08 §3.3).
 func TestMust07InvalidSyncTokenIs403ValidSyncToken(t *testing.T) {
+	forBases(t, testMust07InvalidSyncTokenIs403ValidSyncToken)
+}
+
+func testMust07InvalidSyncTokenIs403ValidSyncToken(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, tok := range []string{"urn:pcb:sync:1:other-epoch:7:gen1", "garbage"} {
-		rec := do(h, "REPORT", calPath(workID), tbSync(tok), "Depth", "1")
+		rec := do(h, "REPORT", b.calPath(workID), tbSync(tok), "Depth", "1")
 		wantStatus(t, rec, http.StatusForbidden)
 		wantBody(t, rec, validSyncTokenBody)
 		if rec.Body.String() == rateLimitBody {
@@ -952,24 +1065,28 @@ func TestMust07InvalidSyncTokenIs403ValidSyncToken(t *testing.T) {
 // --- MUST 8 ---------------------------------------------------------------
 
 func TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T) {
+	forBases(t, testMust08MultigetAnswersEveryHrefAndMissingOnesWith404)
+}
+
+func testMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	hrefs := []string{
-		tbHref(workID, plainUID),                        // %40 for @
-		tbHref(workID, oddUID),                          // ~base64url name
-		"http://example.com" + objPath(workID, lastUID), // absolute form
-		tbHref(workID, "nobody@x"),                      // no such object
-		objPath(holID, "newyear@x"),                     // another calendar's
-		calPath(workID) + "~!!!.ics",                    // a name that does not decode
-		calPath(workID) + "~" + base64.RawURLEncoding.EncodeToString([]byte(plainUID)) + ".ics", // not the canonical name
+		b.tbHref(workID, plainUID),                        // %40 for @
+		b.tbHref(workID, oddUID),                          // ~base64url name
+		"http://example.com" + b.objPath(workID, lastUID), // absolute form
+		b.tbHref(workID, "nobody@x"),                      // no such object
+		b.objPath(holID, "newyear@x"),                     // another calendar's
+		b.calPath(workID) + "~!!!.ics",                    // a name that does not decode
+		b.calPath(workID) + "~" + base64.RawURLEncoding.EncodeToString([]byte(plainUID)) + ".ics", // not the canonical name
 	}
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(hrefs...), "Depth", "1"))
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbMultiget(hrefs...), "Depth", "1"))
 	if len(ms.responses) != len(hrefs) {
 		t.Fatalf("%d responses for %d hrefs:\n%s", len(ms.responses), len(hrefs), ms.raw)
 	}
 	for _, o := range s.objs[workID] {
-		r := ms.get(t, objPath(workID, o.UID))
+		r := ms.get(t, b.objPath(workID, o.UID))
 		if r.status != "" {
 			t.Errorf("%s: response-level status %q", o.UID, r.status)
 		}
@@ -980,7 +1097,7 @@ func TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T) {
 			t.Errorf("%s: calendar-data\n%q\nwant\n%q", o.UID, got, o.Data)
 		}
 	}
-	for _, p := range []string{objPath(workID, "nobody@x"), objPath(holID, "newyear@x"), calPath(workID) + "~!!!.ics", hrefs[6]} {
+	for _, p := range []string{b.objPath(workID, "nobody@x"), b.objPath(holID, "newyear@x"), b.calPath(workID) + "~!!!.ics", hrefs[6]} {
 		r := ms.get(t, p)
 		if r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
 			t.Errorf("%s: status %q with %d propstats; want a response-level 404 alone", p, r.status, r.propstats)
@@ -997,17 +1114,21 @@ func TestMust08MultigetAnswersEveryHrefAndMissingOnesWith404(t *testing.T) {
 // An aliased object deleted between the change list and the render of its
 // calendar-data is a deletion at its alias, the only href a client knows.
 func TestSyncWithCalendarDataReportsAVanishedAliasAtItsAlias(t *testing.T) {
+	forBases(t, testSyncWithCalendarDataReportsAVanishedAliasAtItsAlias)
+}
+
+func testSyncWithCalendarDataReportsAVanishedAliasAtItsAlias(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.aliases[workID] = map[string]string{"vanished@x": "my event.ics"}
 	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: "vanished@x", ETag: `"v1-vanished"`}}, Deleted: dels(), Token: "tok-2"}
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><sync-level>1</sync-level><prop><getetag/><C:calendar-data/></prop></sync-collection>`
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), body, "Depth", "1"))
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), body, "Depth", "1"))
 	if len(ms.responses) != 1 {
 		t.Fatalf("%d responses:\n%s", len(ms.responses), ms.raw)
 	}
-	if r := ms.get(t, calPath(workID)+"my event.ics"); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+	if r := ms.get(t, b.calPath(workID)+"my event.ics"); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
 		t.Errorf("the vanished alias: %+v", r)
 	}
 }
@@ -1015,30 +1136,38 @@ func TestSyncWithCalendarDataReportsAVanishedAliasAtItsAlias(t *testing.T) {
 // An object the service answers under another name than the href asked is
 // never served at that href: the href is a 404.
 func TestMultigetServesAnObjectOnlyAtItsOwnName(t *testing.T) {
+	forBases(t, testMultigetServesAnObjectOnlyAtItsOwnName)
+}
+
+func testMultigetServesAnObjectOnlyAtItsOwnName(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.misnamed = true
-	h := caldav.Handler(s, caldav.Options{})
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "Depth", "1"))
-	if r := ms.get(t, objPath(workID, plainUID)); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+	h := handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbMultiget(b.tbHref(workID, plainUID)), "Depth", "1"))
+	if r := ms.get(t, b.objPath(workID, plainUID)); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
 		t.Errorf("a misnamed object: status %q, %d propstats; want a response-level 404", r.status, r.propstats)
 	}
 }
 
 // At most 1000 hrefs per multiget; more is 413 (Thunderbird batches 100).
 func TestMust08MultigetRefusesMoreThan1000Hrefs(t *testing.T) {
+	forBases(t, testMust08MultigetRefusesMoreThan1000Hrefs)
+}
+
+func testMust08MultigetRefusesMoreThan1000Hrefs(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	hrefs := make([]string, 1001)
 	for i := range hrefs {
-		hrefs[i] = objPath(workID, fmt.Sprintf("u%d@x", i))
+		hrefs[i] = b.objPath(workID, fmt.Sprintf("u%d@x", i))
 	}
-	wantStatus(t, do(h, "REPORT", calPath(workID), tbMultiget(hrefs...), "Depth", "1"), http.StatusRequestEntityTooLarge)
+	wantStatus(t, do(h, "REPORT", b.calPath(workID), tbMultiget(hrefs...), "Depth", "1"), http.StatusRequestEntityTooLarge)
 	if _, reads := s.counts(); reads != 0 {
 		t.Errorf("a refused multiget made %d reads", reads)
 	}
-	if ms := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(hrefs[:1000]...), "Depth", "1")); len(ms.responses) != 1000 {
+	if ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbMultiget(hrefs[:1000]...), "Depth", "1")); len(ms.responses) != 1000 {
 		t.Errorf("1000 hrefs: %d responses", len(ms.responses))
 	}
 }
@@ -1046,17 +1175,21 @@ func TestMust08MultigetRefusesMoreThan1000Hrefs(t *testing.T) {
 // --- MUST 9 / AVOID nested collections ------------------------------------
 
 func TestMust09ObjectsAreICSResourcesDirectlyUnderTheirCalendar(t *testing.T) {
+	forBases(t, testMust09ObjectsAreICSResourcesDirectlyUnderTheirCalendar)
+}
+
+func testMust09ObjectsAreICSResourcesDirectlyUnderTheirCalendar(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	ms := parseMS(t, do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "1"))
+	h := handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "PROPFIND", b.calPath(workID), tbEtags, "Depth", "1"))
 	if len(ms.responses) != 1+len(s.objs[workID]) {
 		t.Fatalf("%d responses:\n%s", len(ms.responses), ms.raw)
 	}
 	for _, o := range s.objs[workID] {
-		p := objPath(workID, o.UID)
+		p := b.objPath(workID, o.UID)
 		r := ms.get(t, p)
-		if rest := strings.TrimPrefix(p, calPath(workID)); strings.Contains(rest, "/") || !strings.HasSuffix(rest, ".ics") {
+		if rest := strings.TrimPrefix(p, b.calPath(workID)); strings.Contains(rest, "/") || !strings.HasSuffix(rest, ".ics") {
 			t.Errorf("%s is not an .ics directly under the calendar", p)
 		}
 		if kids := r.prop(t, nsD, "resourcetype").Kids; len(kids) != 0 {
@@ -1076,22 +1209,24 @@ func TestMust09ObjectsAreICSResourcesDirectlyUnderTheirCalendar(t *testing.T) {
 
 // Names parse back exactly (ruling M3-R13): only the canonical name of a
 // UID reaches it, anything else is 404.
-func TestHrefNamesDecodeExactly(t *testing.T) {
+func TestHrefNamesDecodeExactly(t *testing.T) { forBases(t, testHrefNamesDecodeExactly) }
+
+func testHrefNamesDecodeExactly(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.objs[workID] = append(s.objs[workID], service.Object{UID: "ABC", ETag: `"v1-abc"`, Data: ics("ABC", "abc")},
 		service.Object{UID: strings.Repeat("a", 200), ETag: `"v1-200"`, Data: ics("a200", "long")},
 		service.Object{UID: strings.Repeat("b", 201), ETag: `"v1-201"`, Data: ics("b201", "longer")})
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, uid := range []string{plainUID, oddUID, "ABC", strings.Repeat("a", 200), strings.Repeat("b", 201)} {
-		if rec := do(h, "GET", objPath(workID, uid), ""); rec.Code != http.StatusOK {
+		if rec := do(h, "GET", b.objPath(workID, uid), ""); rec.Code != http.StatusOK {
 			t.Errorf("GET of %q's canonical name: %d", uid, rec.Code)
 		}
 	}
 	if !strings.HasPrefix(objName(strings.Repeat("b", 201)), "~") {
 		t.Fatal("test bug: a 201-byte UID must be encoded")
 	}
-	cal := calPath(workID)
+	cal := b.calPath(workID)
 	for _, p := range []string{
 		cal + "~QUJD.ics",                       // "ABC" encoded: not its canonical name
 		cal + "~QUJD" + "=.ics",                 // padded
@@ -1103,9 +1238,9 @@ func TestHrefNamesDecodeExactly(t *testing.T) {
 		cal + "odd%20uid.ics",                   // not plain, not encoded
 		cal + "~" + base64.URLEncoding.EncodeToString([]byte(oddUID)) + ".ics",     // padded form
 		cal + "~" + base64.StdEncoding.EncodeToString([]byte(oddUID+"?")) + ".ics", // standard alphabet
-		cal + "ABC.ics/",                  // a collection below an object
-		cal + "x/ABC.ics",                 // nested
-		home + "0123456789abcdef/ABC.ics", // no such calendar
+		cal + "ABC.ics/",                    // a collection below an object
+		cal + "x/ABC.ics",                   // nested
+		b.home + "0123456789abcdef/ABC.ics", // no such calendar
 	} {
 		if rec := do(h, "GET", p, ""); rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s: %d, want 404", p, rec.Code)
@@ -1124,6 +1259,10 @@ func svcErr(code exitcode.Code, err error) error {
 // object's name, the body byte for byte and the precondition as sent; a
 // create is 201, a replace 204, neither with an ETag or a body (E08 §4.1).
 func TestMust10PutIs201Or204WithoutAnETag(t *testing.T) {
+	forBases(t, testMust10PutIs201Or204WithoutAnETag)
+}
+
+func testMust10PutIs201Or204WithoutAnETag(t *testing.T, b urlBase) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
@@ -1139,9 +1278,9 @@ func TestMust10PutIs201Or204WithoutAnETag(t *testing.T) {
 	} {
 		s := newStub()
 		s.putRes = service.PutResult{Created: tc.created}
-		h := caldav.Handler(s, caldav.Options{})
+		h := handler(s, caldav.Options{})
 		body := string(richData)
-		rec := do(h, http.MethodPut, calPath(workID)+"3f2a1c9e-new%20one.ics", body,
+		rec := do(h, http.MethodPut, b.calPath(workID)+"3f2a1c9e-new%20one.ics", body,
 			append([]string{"Content-Type", "text/calendar; charset=utf-8", "Accept", "text/xml"}, tc.hdr...)...)
 		wantStatus(t, rec, tc.code)
 		if rec.Header().Get("ETag") != "" || rec.Body.Len() != 0 {
@@ -1159,14 +1298,18 @@ func TestMust10PutIs201Or204WithoutAnETag(t *testing.T) {
 // (RFC 9110 §13.1.2: the service compares them with the object's, and a
 // missing object passes), from one header or several.
 func TestIfNoneMatchETagsReachTheService(t *testing.T) {
+	forBases(t, testIfNoneMatchETagsReachTheService)
+}
+
+func testIfNoneMatchETagsReachTheService(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	req := authed(call(http.MethodPut, objPath(workID, "new@x"), "x", "Content-Type", "text/calendar"))
+	h := handler(s, caldav.Options{})
+	req := authed(call(http.MethodPut, b.objPath(workID, "new@x"), "x", "Content-Type", "text/calendar"))
 	req.Header.Add("If-None-Match", `"v1-a", W/"v1-b"`)
 	req.Header.Add("If-None-Match", `"v1-c"`)
 	wantStatus(t, serve(h, req), http.StatusNoContent)
-	wantStatus(t, do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-None-Match", ` "v1-d" `), http.StatusNoContent)
+	wantStatus(t, do(h, http.MethodDelete, b.objPath(workID, plainUID), "", "If-None-Match", ` "v1-d" `), http.StatusNoContent)
 	w := s.writeCalls()
 	if len(w) != 2 || !slices.Equal(w[0].cond.IfNoneMatch, []string{`"v1-a"`, `W/"v1-b"`, `"v1-c"`}) || w[0].cond.IfNoneMatchAny ||
 		!slices.Equal(w[1].cond.IfNoneMatch, []string{`"v1-d"`}) {
@@ -1178,11 +1321,15 @@ func TestIfNoneMatchETagsReachTheService(t *testing.T) {
 // elsewhere is a 409 whose no-uid-conflict names that object's href (E08
 // §4.2, RFC 4791 §5.3.2.1), percent-encoded.
 func TestMust10PreconditionsAre412AndUIDConflictsAre409(t *testing.T) {
+	forBases(t, testMust10PreconditionsAre412AndUIDConflictsAre409)
+}
+
+func testMust10PreconditionsAre412AndUIDConflictsAre409(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	put := func() *httptest.ResponseRecorder {
-		return do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar", "If-Match", `"v1-old"`)
+		return do(h, http.MethodPut, b.objPath(workID, plainUID), "x", "Content-Type", "text/calendar", "If-Match", `"v1-old"`)
 	}
 	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
 	rec := put()
@@ -1193,7 +1340,7 @@ func TestMust10PreconditionsAre412AndUIDConflictsAre409(t *testing.T) {
 	rec = put()
 	wantStatus(t, rec, http.StatusConflict)
 	wantBody(t, rec, `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:no-uid-conflict><D:href>`+
-		calPath(workID)+`other%20one.ics</D:href></C:no-uid-conflict></D:error>`)
+		b.calPath(workID)+`other%20one.ics</D:href></C:no-uid-conflict></D:error>`)
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "xml") {
 		t.Errorf("409 Content-Type %q", ct)
 	}
@@ -1204,10 +1351,14 @@ func TestMust10PreconditionsAre412AndUIDConflictsAre409(t *testing.T) {
 // HEAD answers 200 with the ETag or 404, which ends Thunderbird's delete
 // flow after a 412 (E08 §4.3).
 func TestMust11DeleteIs204Or404Or412AndHeadAnswers(t *testing.T) {
+	forBases(t, testMust11DeleteIs204Or404Or412AndHeadAnswers)
+}
+
+func testMust11DeleteIs204Or404Or412AndHeadAnswers(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	rec := do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
+	h := handler(s, caldav.Options{})
+	rec := do(h, http.MethodDelete, b.objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
 	wantStatus(t, rec, http.StatusNoContent)
 	wantBody(t, rec, "")
 	if w := s.writeCalls(); len(w) != 1 || w[0].method != http.MethodDelete || w[0].name != objName(plainUID) ||
@@ -1222,47 +1373,51 @@ func TestMust11DeleteIs204Or404Or412AndHeadAnswers(t *testing.T) {
 		{svcErr(exitcode.Usage, service.ErrPreconditionFailed), http.StatusPreconditionFailed},
 	} {
 		s.writeErr = tc.err
-		rec := do(h, http.MethodDelete, objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
+		rec := do(h, http.MethodDelete, b.objPath(workID, plainUID), "", "If-Match", `"v1-plain"`)
 		wantStatus(t, rec, tc.code)
 		wantBody(t, rec, "")
 	}
 
 	o := s.objs[workID][0]
-	rec = do(h, "HEAD", objPath(workID, o.UID), "")
+	rec = do(h, "HEAD", b.objPath(workID, o.UID), "")
 	wantStatus(t, rec, http.StatusOK)
 	if rec.Header().Get("ETag") != o.ETag || rec.Header().Get("Content-Length") != fmt.Sprint(len(o.Data)) || rec.Body.Len() != 0 {
 		t.Errorf("HEAD: ETag %q, Content-Length %q, %d body bytes", rec.Header().Get("ETag"), rec.Header().Get("Content-Length"), rec.Body.Len())
 	}
-	wantStatus(t, do(h, "HEAD", objPath(workID, "nobody@x"), ""), http.StatusNotFound)
-	wantStatus(t, do(h, "GET", objPath(workID, "nobody@x"), ""), http.StatusNotFound)
+	wantStatus(t, do(h, "HEAD", b.objPath(workID, "nobody@x"), ""), http.StatusNotFound)
+	wantStatus(t, do(h, "GET", b.objPath(workID, "nobody@x"), ""), http.StatusNotFound)
 }
 
 // A write to a read-only calendar is 403 need-privileges naming the
 // privilege it lacks, without asking the service to write; so is the
 // service's own ErrNotWritable (the gate changed since the listing).
 func TestWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T) {
+	forBases(t, testWritesToReadOnlyCalendarsAre403NeedPrivileges)
+}
+
+func testWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	const putBody = `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource><D:href>%s</D:href><D:privilege><D:write-content/></D:privilege></D:resource></D:need-privileges></D:error>`
 	const delBody = `<D:error xmlns:D="DAV:"><D:need-privileges><D:resource><D:href>%s</D:href><D:privilege><D:unbind/></D:privilege></D:resource></D:need-privileges></D:error>`
-	rec := do(h, http.MethodPut, objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar")
+	rec := do(h, http.MethodPut, b.objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar")
 	wantStatus(t, rec, http.StatusForbidden)
-	wantBody(t, rec, fmt.Sprintf(putBody, objPath(holID, "newyear@x")))
-	rec = do(h, http.MethodDelete, objPath(holID, "newyear@x"), "")
+	wantBody(t, rec, fmt.Sprintf(putBody, b.objPath(holID, "newyear@x")))
+	rec = do(h, http.MethodDelete, b.objPath(holID, "newyear@x"), "")
 	wantStatus(t, rec, http.StatusForbidden)
-	wantBody(t, rec, fmt.Sprintf(delBody, calPath(holID)))
+	wantBody(t, rec, fmt.Sprintf(delBody, b.calPath(holID)))
 	if w := s.writeCalls(); len(w) != 0 {
 		t.Errorf("writes to a read-only calendar reached the service: %+v", w)
 	}
 
 	s.writeErr = svcErr(exitcode.Usage, service.ErrNotWritable)
-	rec = do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
+	rec = do(h, http.MethodPut, b.objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
 	wantStatus(t, rec, http.StatusForbidden)
-	wantBody(t, rec, fmt.Sprintf(putBody, objPath(workID, plainUID)))
-	rec = do(h, http.MethodDelete, objPath(workID, plainUID), "")
+	wantBody(t, rec, fmt.Sprintf(putBody, b.objPath(workID, plainUID)))
+	rec = do(h, http.MethodDelete, b.objPath(workID, plainUID), "")
 	wantStatus(t, rec, http.StatusForbidden)
-	wantBody(t, rec, fmt.Sprintf(delBody, calPath(workID)))
+	wantBody(t, rec, fmt.Sprintf(delBody, b.calPath(workID)))
 }
 
 // Ruling M4-R40: a calendar whose gate was never decided advertises no
@@ -1270,20 +1425,24 @@ func TestWritesToReadOnlyCalendarsAre403NeedPrivileges(t *testing.T) {
 // decision; Thunderbird keeps a read-only flag for good), in a Depth 0 and
 // a Depth 1 PROPFIND, and allprop leaves it out.
 func TestUndecidedPrivilegesAreA404Propstat(t *testing.T) {
+	forBases(t, testUndecidedPrivilegesAreA404Propstat)
+}
+
+func testUndecidedPrivilegesAreA404Propstat(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.colls[1].ReadOnly, s.colls[1].PrivilegesUnknown, s.colls[1].WriteGateUndecided = true, true, true
-	h := caldav.Handler(s, caldav.Options{})
-	hs := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
-	one := parseMS(t, do(h, "PROPFIND", calPath(holID), tbServerInfo, "Depth", "0"))
-	for _, r := range []response{hs.get(t, calPath(holID)), one.get(t, calPath(holID))} {
+	h := handler(s, caldav.Options{})
+	hs := parseMS(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"))
+	one := parseMS(t, do(h, "PROPFIND", b.calPath(holID), tbServerInfo, "Depth", "0"))
+	for _, r := range []response{hs.get(t, b.calPath(holID)), one.get(t, b.calPath(holID))} {
 		if _, ok := r.props[n(nsD, "current-user-privilege-set")]; ok || !r.missing[n(nsD, "current-user-privilege-set")] {
 			t.Errorf("an undecided calendar: privileges %v, missing %v; want a 404 propstat", r.props[n(nsD, "current-user-privilege-set")], r.missing)
 		}
 	}
-	wantNames(t, "a decided calendar", privileges(t, hs.get(t, calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
+	wantNames(t, "a decided calendar", privileges(t, hs.get(t, b.calPath(workID)).prop(t, nsD, "current-user-privilege-set")),
 		n(nsD, "read"), n(nsD, "write"), n(nsD, "write-content"), n(nsD, "bind"), n(nsD, "unbind"))
-	all := parseMS(t, do(h, "PROPFIND", calPath(holID), "", "Depth", "0")).get(t, calPath(holID))
+	all := parseMS(t, do(h, "PROPFIND", b.calPath(holID), "", "Depth", "0")).get(t, b.calPath(holID))
 	if _, ok := all.props[n(nsD, "current-user-privilege-set")]; ok || len(all.missing) != 0 {
 		t.Errorf("allprop of an undecided calendar: %+v", all)
 	}
@@ -1293,14 +1452,18 @@ func TestUndecidedPrivilegesAreA404Propstat(t *testing.T) {
 // is not refused by the adapter: the write goes to the service, whose
 // ErrGateUndecided is a 503 with Retry-After.
 func TestUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter(t *testing.T) {
+	forBases(t, testUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter)
+}
+
+func testUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.colls[1].WriteGateUndecided = true // Holidays: read only, undecided
 	s.writeErr = svcErr(exitcode.Blocked, service.ErrGateUndecided)
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, rec := range []*httptest.ResponseRecorder{
-		do(h, http.MethodPut, objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
-		do(h, http.MethodDelete, objPath(holID, "newyear@x"), ""),
+		do(h, http.MethodPut, b.objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
+		do(h, http.MethodDelete, b.objPath(holID, "newyear@x"), ""),
 	} {
 		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
 			t.Errorf("%d, Retry-After %q; want 503, 30", rec.Code, rec.Header().Get("Retry-After"))
@@ -1316,9 +1479,13 @@ func TestUndecidedReadOnlyCalendarsAreNotRefusedByTheAdapter(t *testing.T) {
 // keeps Proton's text out of it), XML-escaped; a code that is not one of
 // ours is pcb:refused.
 func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
+	forBases(t, testWriteRefusalsAre403WithTheirPCBPrecondition)
+}
+
+func testWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, tc := range []struct {
 		refusal *service.WriteRefusal
 		body    string
@@ -1334,7 +1501,7 @@ func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
 	} {
 		s.writeErr = svcErr(exitcode.Usage, tc.refusal)
 		for _, method := range []string{http.MethodPut, http.MethodDelete} {
-			rec := do(h, method, objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
+			rec := do(h, method, b.objPath(workID, plainUID), "x", "Content-Type", "text/calendar")
 			wantStatus(t, rec, http.StatusForbidden)
 			wantBody(t, rec, tc.body)
 			if rec.Body.String() == rateLimitBody {
@@ -1348,11 +1515,13 @@ func TestWriteRefusalsAre403WithTheirPCBPrecondition(t *testing.T) {
 // text/calendar is 415, over 8 MiB 413, an If-None-Match or an If-Match
 // that names no ETag 412; PUT or DELETE on a
 // collection 405, on no resource 404. None reaches the service.
-func TestPutRequestChecksComeFirst(t *testing.T) {
+func TestPutRequestChecksComeFirst(t *testing.T) { forBases(t, testPutRequestChecksComeFirst) }
+
+func testPutRequestChecksComeFirst(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	obj := objPath(workID, plainUID)
+	h := handler(s, caldav.Options{})
+	obj := b.objPath(workID, plainUID)
 	for _, tc := range []struct {
 		name, method, target, body string
 		hdr                        []string
@@ -1369,11 +1538,11 @@ func TestPutRequestChecksComeFirst(t *testing.T) {
 		{"empty If-Match", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-Match", ""}, http.StatusPreconditionFailed},
 		{"blank If-Match", http.MethodPut, obj, "x", []string{"Content-Type", "text/calendar", "If-Match", " \t "}, http.StatusPreconditionFailed},
 		{"DELETE If-Match of commas", http.MethodDelete, obj, "", []string{"If-Match", " , ,"}, http.StatusPreconditionFailed},
-		{"PUT a calendar", http.MethodPut, calPath(workID), "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
-		{"DELETE a calendar", http.MethodDelete, calPath(workID), "", nil, http.StatusMethodNotAllowed},
-		{"PUT the home set", http.MethodPut, home, "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
-		{"DELETE the principal", http.MethodDelete, principal, "", nil, http.StatusMethodNotAllowed},
-		{"PUT nested", http.MethodPut, calPath(workID) + "x/y.ics", "x", []string{"Content-Type", "text/calendar"}, http.StatusNotFound},
+		{"PUT a calendar", http.MethodPut, b.calPath(workID), "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
+		{"DELETE a calendar", http.MethodDelete, b.calPath(workID), "", nil, http.StatusMethodNotAllowed},
+		{"PUT the home set", http.MethodPut, b.home, "x", []string{"Content-Type", "text/calendar"}, http.StatusMethodNotAllowed},
+		{"DELETE the principal", http.MethodDelete, b.principal, "", nil, http.StatusMethodNotAllowed},
+		{"PUT nested", http.MethodPut, b.calPath(workID) + "x/y.ics", "x", []string{"Content-Type", "text/calendar"}, http.StatusNotFound},
 		{"DELETE elsewhere", http.MethodDelete, "/nowhere.ics", "", nil, http.StatusNotFound},
 	} {
 		rec := do(h, tc.method, tc.target, tc.body, tc.hdr...)
@@ -1400,6 +1569,10 @@ func TestPutRequestChecksComeFirst(t *testing.T) {
 // contract, an unknown error; logged without the body, except a pending
 // calendar or a client gone.
 func TestWritesAre503WhenTheServiceCannotAnswer(t *testing.T) {
+	forBases(t, testWritesAre503WhenTheServiceCannotAnswer)
+}
+
+func testWritesAre503WhenTheServiceCannotAnswer(t *testing.T, b urlBase) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
@@ -1418,10 +1591,10 @@ func TestWritesAre503WhenTheServiceCannotAnswer(t *testing.T) {
 		var logs bytes.Buffer
 		s := newStub()
 		s.writeErr = tc.err
-		h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+		h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 		for _, rec := range []*httptest.ResponseRecorder{
-			do(h, http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar"),
-			do(h, http.MethodDelete, objPath(workID, plainUID), ""),
+			do(h, http.MethodPut, b.objPath(workID, plainUID), "x", "Content-Type", "text/calendar"),
+			do(h, http.MethodDelete, b.objPath(workID, plainUID), ""),
 		} {
 			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
 				t.Errorf("%s: %d, Retry-After %q, body %q; want 503, 30, none", tc.name, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
@@ -1436,18 +1609,22 @@ func TestWritesAre503WhenTheServiceCannotAnswer(t *testing.T) {
 // --- MUST 12 --------------------------------------------------------------
 
 func TestMust12ETagsAgreeAcrossListingsAndReads(t *testing.T) {
+	forBases(t, testMust12ETagsAgreeAcrossListingsAndReads)
+}
+
+func testMust12ETagsAgreeAcrossListingsAndReads(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	synced := parseMS(t, do(h, "REPORT", calPath(workID), tbSync(""), "Depth", "1"))
-	listed := parseMS(t, do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "1"))
+	h := handler(s, caldav.Options{})
+	synced := parseMS(t, do(h, "REPORT", b.calPath(workID), tbSync(""), "Depth", "1"))
+	listed := parseMS(t, do(h, "PROPFIND", b.calPath(workID), tbEtags, "Depth", "1"))
 	var hrefs []string
 	for _, o := range s.objs[workID] {
-		hrefs = append(hrefs, tbHref(workID, o.UID))
+		hrefs = append(hrefs, b.tbHref(workID, o.UID))
 	}
-	got := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(hrefs...), "Depth", "1"))
+	got := parseMS(t, do(h, "REPORT", b.calPath(workID), tbMultiget(hrefs...), "Depth", "1"))
 	for _, o := range s.objs[workID] {
-		p := objPath(workID, o.UID)
+		p := b.objPath(workID, o.UID)
 		one := parseMS(t, do(h, "PROPFIND", p, tbEtags, "Depth", "0"))
 		head := do(h, "HEAD", p, "")
 		etags := []string{
@@ -1466,13 +1643,17 @@ func TestMust12ETagsAgreeAcrossListingsAndReads(t *testing.T) {
 // --- MUST 13 / AVOID normalising ------------------------------------------
 
 func TestMust13CalendarDataIsServedByteForByte(t *testing.T) {
+	forBases(t, testMust13CalendarDataIsServedByteForByte)
+}
+
+func testMust13CalendarDataIsServedByteForByte(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), tbMultiget(tbHref(workID, oddUID)), "Depth", "1"))
-	if got := ms.get(t, objPath(workID, oddUID)).prop(t, nsC, "calendar-data").Text; got != string(richData) {
+	h := handler(newStub(), caldav.Options{})
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), tbMultiget(b.tbHref(workID, oddUID)), "Depth", "1"))
+	if got := ms.get(t, b.objPath(workID, oddUID)).prop(t, nsC, "calendar-data").Text; got != string(richData) {
 		t.Errorf("calendar-data after XML decoding:\n%q\nwant\n%q", got, richData)
 	}
-	if rec := do(h, "GET", objPath(workID, oddUID), ""); !bytes.Equal(rec.Body.Bytes(), richData) {
+	if rec := do(h, "GET", b.objPath(workID, oddUID), ""); !bytes.Equal(rec.Body.Bytes(), richData) {
 		t.Errorf("GET:\n%q\nwant\n%q", rec.Body, richData)
 	}
 }
@@ -1480,10 +1661,14 @@ func TestMust13CalendarDataIsServedByteForByte(t *testing.T) {
 // --- MUST 14 --------------------------------------------------------------
 
 func TestMust14AcceptsTextXMLBodiesAndThunderbirdHeaders(t *testing.T) {
+	forBases(t, testMust14AcceptsTextXMLBodiesAndThunderbirdHeaders)
+}
+
+func testMust14AcceptsTextXMLBodiesAndThunderbirdHeaders(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, ct := range []string{"text/xml; charset=utf-8", "application/xml", ""} {
-		rec := do(h, "PROPFIND", calPath(workID), tbServerInfo, "Depth", "0", "Content-Type", ct,
+		rec := do(h, "PROPFIND", b.calPath(workID), tbServerInfo, "Depth", "0", "Content-Type", ct,
 			"Accept", "text/xml", "Accept-Charset", "utf-8,*;q=0.1", "Cache-Control", "no-cache")
 		parseMS(t, rec)
 	}
@@ -1494,13 +1679,17 @@ func TestMust14AcceptsTextXMLBodiesAndThunderbirdHeaders(t *testing.T) {
 // The PROPFIND Depth 1 fallback lists every object with getcontenttype and
 // getetag; the calendar carries its CTag.
 func TestShouldDepth1ListingCarriesContentTypeAndETagOnEveryObject(t *testing.T) {
+	forBases(t, testShouldDepth1ListingCarriesContentTypeAndETagOnEveryObject)
+}
+
+func testShouldDepth1ListingCarriesContentTypeAndETagOnEveryObject(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	ms := parseMS(t, do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "1"))
+	h := handler(s, caldav.Options{})
+	ms := parseMS(t, do(h, "PROPFIND", b.calPath(workID), tbEtags, "Depth", "1"))
 	objects := 0
 	for _, r := range ms.responses {
-		if r.href == calPath(workID) {
+		if r.href == b.calPath(workID) {
 			continue
 		}
 		objects++
@@ -1521,26 +1710,30 @@ func TestShouldDepth1ListingCarriesContentTypeAndETagOnEveryObject(t *testing.T)
 
 // A Depth 1 PROPFIND that asks for calendar-data gets it for every object.
 func TestDepth1ListingServesCalendarDataWhenAsked(t *testing.T) {
+	forBases(t, testDepth1ListingServesCalendarDataWhenAsked)
+}
+
+func testDepth1ListingServesCalendarDataWhenAsked(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	body := `<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop></D:propfind>`
-	ms := parseMS(t, do(h, "PROPFIND", calPath(workID), body, "Depth", "1"))
+	ms := parseMS(t, do(h, "PROPFIND", b.calPath(workID), body, "Depth", "1"))
 	for _, o := range s.objs[workID] {
-		if got := ms.get(t, objPath(workID, o.UID)).prop(t, nsC, "calendar-data").Text; got != string(o.Data) {
+		if got := ms.get(t, b.objPath(workID, o.UID)).prop(t, nsC, "calendar-data").Text; got != string(o.Data) {
 			t.Errorf("%s: calendar-data %q", o.UID, got)
 		}
 	}
 	// allprop leaves calendar-data out (RFC 4791 §9.6).
-	all := parseMS(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, "Depth", "1"))
-	r := all.get(t, objPath(workID, plainUID))
+	all := parseMS(t, do(h, "PROPFIND", b.calPath(workID), `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, "Depth", "1"))
+	r := all.get(t, b.objPath(workID, plainUID))
 	if _, ok := r.props[n(nsC, "calendar-data")]; ok {
 		t.Error("allprop returned calendar-data")
 	}
 	r.prop(t, nsD, "getetag")
-	all.get(t, calPath(workID)).prop(t, nsD, "resourcetype")
+	all.get(t, b.calPath(workID)).prop(t, nsD, "resourcetype")
 	// An empty body is allprop.
-	parseMS(t, do(h, "PROPFIND", calPath(workID), "", "Depth", "0")).get(t, calPath(workID)).prop(t, nsCS, "getctag")
+	parseMS(t, do(h, "PROPFIND", b.calPath(workID), "", "Depth", "0")).get(t, b.calPath(workID)).prop(t, nsCS, "getctag")
 }
 
 // Ruling M3-R35 (final review, minor 2): a PROPFIND Depth 1 or a
@@ -1549,15 +1742,19 @@ func TestDepth1ListingServesCalendarDataWhenAsked(t *testing.T) {
 // getetag and gets calendar-data in a 404 propstat, so the client fetches it
 // with a multiget.
 func TestCalendarDataInListingsIsCapped(t *testing.T) {
+	forBases(t, testCalendarDataInListingsIsCapped)
+}
+
+func testCalendarDataInListingsIsCapped(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.HandlerWithDataCap(s, caldav.Options{}, 2)
+	h := handlerWithDataCap(s, caldav.Options{}, 2)
 	objs := s.objs[workID]
 	check := func(what string, rec *httptest.ResponseRecorder) {
 		t.Helper()
 		ms := parseMS(t, rec)
 		for i, o := range objs {
-			r := ms.get(t, objPath(workID, o.UID))
+			r := ms.get(t, b.objPath(workID, o.UID))
 			if e := r.prop(t, nsD, "getetag").Text; e != o.ETag {
 				t.Errorf("%s, %s: getetag %q, want %q", what, o.UID, e, o.ETag)
 			}
@@ -1577,10 +1774,10 @@ func TestCalendarDataInListingsIsCapped(t *testing.T) {
 		}
 	}
 	body := `<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop></D:propfind>`
-	check("PROPFIND Depth 1", do(h, "PROPFIND", calPath(workID), body, "Depth", "1"))
+	check("PROPFIND Depth 1", do(h, "PROPFIND", b.calPath(workID), body, "Depth", "1"))
 	sync := `<D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:sync-token/><D:sync-level>1</D:sync-level>` +
 		`<D:prop><D:getetag/><C:calendar-data/></D:prop></D:sync-collection>`
-	check("sync-collection", do(h, "REPORT", calPath(workID), sync, "Depth", "1"))
+	check("sync-collection", do(h, "REPORT", b.calPath(workID), sync, "Depth", "1"))
 }
 
 // --- AVOID ----------------------------------------------------------------
@@ -1588,8 +1785,12 @@ func TestCalendarDataInListingsIsCapped(t *testing.T) {
 // 403 only for a genuine refusal: anonymous or wrong credentials and the
 // well-known URL never get one, and the rate-limit body is never sent.
 func TestAvoid403OutsideGenuineRefusals(t *testing.T) {
+	forBases(t, testAvoid403OutsideGenuineRefusals)
+}
+
+func testAvoid403OutsideGenuineRefusals(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	anon := serve(h, call("PROPFIND", "/.well-known/caldav", tbDetect, "Depth", "0"))
 	wrong := call("PROPFIND", "/.well-known/caldav", tbDetect, "Depth", "0")
 	wrong.SetBasicAuth("x", "nope")
@@ -1599,11 +1800,11 @@ func TestAvoid403OutsideGenuineRefusals(t *testing.T) {
 		}
 	}
 	for _, rec := range []*httptest.ResponseRecorder{
-		do(h, "REPORT", calPath(workID), tbSync("bad"), "Depth", "1"),
-		do(h, "PUT", objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
-		do(h, "DELETE", objPath(holID, "newyear@x"), ""),
-		do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "infinity"),
-		do(h, "REPORT", calPath(workID), `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"/>`, "Depth", "1"),
+		do(h, "REPORT", b.calPath(workID), tbSync("bad"), "Depth", "1"),
+		do(h, "PUT", b.objPath(holID, "newyear@x"), "x", "Content-Type", "text/calendar"),
+		do(h, "DELETE", b.objPath(holID, "newyear@x"), ""),
+		do(h, "PROPFIND", b.calPath(workID), tbEtags, "Depth", "infinity"),
+		do(h, "REPORT", b.calPath(workID), `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"/>`, "Depth", "1"),
 	} {
 		if rec.Code != http.StatusForbidden || rec.Body.Len() == 0 || rec.Body.String() == rateLimitBody {
 			t.Errorf("refusal %d with body %q: want a 403 with a precondition", rec.Code, rec.Body)
@@ -1616,22 +1817,26 @@ func TestAvoid403OutsideGenuineRefusals(t *testing.T) {
 // would disable the calendar in Thunderbird (ruling M3-R22, E08 AVOID 3).
 // Discovery that needs no service still answers.
 func TestAvoid4xxWhenTheServiceIsUnavailable(t *testing.T) {
+	forBases(t, testAvoid4xxWhenTheServiceIsUnavailable)
+}
+
+func testAvoid4xxWhenTheServiceIsUnavailable(t *testing.T, b urlBase) {
 	t.Parallel()
 	var logs bytes.Buffer
 	s := newStub()
 	s.readErr = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New(secretText), Hint: "run pcb login"}
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	for _, tc := range []struct{ method, path, body, depth string }{
-		{"PROPFIND", calPath(workID), tbServerInfo, "0"},
-		{"PROPFIND", home, tbHomeSet, "1"},
-		{"PROPFIND", objPath(workID, plainUID), tbEtags, "0"},
-		{"REPORT", calPath(workID), tbSync(""), "1"},
-		{"REPORT", calPath(workID), tbSync("urn:pcb:sync:1:e1:7:gen1"), "1"},
-		{"REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "1"},
-		{"GET", objPath(workID, plainUID), "", ""},
-		{"PUT", objPath(workID, plainUID), "x", ""},
-		{"PUT", objPath(holID, "newyear@x"), "x", ""},
-		{"DELETE", objPath(workID, plainUID), "", ""},
+		{"PROPFIND", b.calPath(workID), tbServerInfo, "0"},
+		{"PROPFIND", b.home, tbHomeSet, "1"},
+		{"PROPFIND", b.objPath(workID, plainUID), tbEtags, "0"},
+		{"REPORT", b.calPath(workID), tbSync(""), "1"},
+		{"REPORT", b.calPath(workID), tbSync("urn:pcb:sync:1:e1:7:gen1"), "1"},
+		{"REPORT", b.calPath(workID), tbMultiget(b.tbHref(workID, plainUID)), "1"},
+		{"GET", b.objPath(workID, plainUID), "", ""},
+		{"PUT", b.objPath(workID, plainUID), "x", ""},
+		{"PUT", b.objPath(holID, "newyear@x"), "x", ""},
+		{"DELETE", b.objPath(workID, plainUID), "", ""},
 	} {
 		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth, "Content-Type", "text/calendar")
 		wantStatus(t, rec, http.StatusServiceUnavailable)
@@ -1648,25 +1853,27 @@ func TestAvoid4xxWhenTheServiceIsUnavailable(t *testing.T) {
 	if w := s.writeCalls(); len(w) != 0 {
 		t.Errorf("writes reached a service that cannot answer: %+v", w)
 	}
-	wantStatus(t, serve(h, call("OPTIONS", calPath(workID), "")), http.StatusOK)
-	parseMS(t, do(h, "PROPFIND", "/", tbDetect, "Depth", "0"))
-	parseMS(t, do(h, "PROPFIND", principal, tbDetect, "Depth", "0"))
+	wantStatus(t, serve(h, call("OPTIONS", b.calPath(workID), "")), http.StatusOK)
+	parseMS(t, do(h, "PROPFIND", b.root, tbDetect, "Depth", "0"))
+	parseMS(t, do(h, "PROPFIND", b.principal, tbDetect, "Depth", "0"))
 }
 
 // A calendar the service does not hold (gone since the listing) is a 404;
 // so is one no listing names.
-func TestUnknownCalendarsAre404(t *testing.T) {
+func TestUnknownCalendarsAre404(t *testing.T) { forBases(t, testUnknownCalendarsAre404) }
+
+func testUnknownCalendarsAre404(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.gone[workID] = true
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, tc := range []struct{ method, path, body, depth string }{
-		{"REPORT", calPath(workID), tbSync(""), "1"},
-		{"REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID)), "1"},
-		{"PROPFIND", calPath(workID), tbEtags, "1"},
-		{"GET", objPath(workID, plainUID), "", ""},
-		{"PROPFIND", calPath("never-listed"), tbServerInfo, "0"},
-		{"REPORT", calPath("never-listed"), tbSync(""), "1"},
+		{"REPORT", b.calPath(workID), tbSync(""), "1"},
+		{"REPORT", b.calPath(workID), tbMultiget(b.tbHref(workID, plainUID)), "1"},
+		{"PROPFIND", b.calPath(workID), tbEtags, "1"},
+		{"GET", b.objPath(workID, plainUID), "", ""},
+		{"PROPFIND", b.calPath("never-listed"), tbServerInfo, "0"},
+		{"REPORT", b.calPath("never-listed"), tbSync(""), "1"},
 	} {
 		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
 		wantStatus(t, rec, http.StatusNotFound)
@@ -1682,15 +1889,19 @@ func TestUnknownCalendarsAre404(t *testing.T) {
 // never the 404 that disables the calendar for good (E08 §2.2). Once every
 // calendar is synced, it is 404.
 func TestUnknownCalendarIs503WhileACalendarIsPending(t *testing.T) {
+	forBases(t, testUnknownCalendarIs503WhileACalendarIsPending)
+}
+
+func testUnknownCalendarIs503WhileACalendarIsPending(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.colls[1].Pending = true
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, tc := range []struct{ method, path, body, depth string }{
-		{"PROPFIND", calPath("not-recorded-yet"), tbServerInfo, "0"},
-		{"REPORT", calPath("not-recorded-yet"), tbSync(""), "1"},
-		{"REPORT", calPath("not-recorded-yet"), tbMultiget(tbHref("not-recorded-yet", plainUID)), "1"},
-		{"GET", objPath("not-recorded-yet", plainUID), "", ""},
+		{"PROPFIND", b.calPath("not-recorded-yet"), tbServerInfo, "0"},
+		{"REPORT", b.calPath("not-recorded-yet"), tbSync(""), "1"},
+		{"REPORT", b.calPath("not-recorded-yet"), tbMultiget(b.tbHref("not-recorded-yet", plainUID)), "1"},
+		{"GET", b.objPath("not-recorded-yet", plainUID), "", ""},
 	} {
 		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
 		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
@@ -1698,12 +1909,16 @@ func TestUnknownCalendarIs503WhileACalendarIsPending(t *testing.T) {
 		}
 	}
 	s.colls[1].Pending = false
-	wantStatus(t, do(h, "PROPFIND", calPath("not-recorded-yet"), tbServerInfo, "Depth", "0"), http.StatusNotFound)
+	wantStatus(t, do(h, "PROPFIND", b.calPath("not-recorded-yet"), tbServerInfo, "Depth", "0"), http.StatusNotFound)
 }
 
 // A request whose context ended still gets its 503 (a live client must
 // never see an empty 200), but it is not logged as a service failure.
 func TestCancelledRequestsAreNotReportedAsFailures(t *testing.T) {
+	forBases(t, testCancelledRequestsAreNotReportedAsFailures)
+}
+
+func testCancelledRequestsAreNotReportedAsFailures(t *testing.T, b urlBase) {
 	t.Parallel()
 	var logs bytes.Buffer
 	s := newStub()
@@ -1711,10 +1926,10 @@ func TestCancelledRequestsAreNotReportedAsFailures(t *testing.T) {
 		<-ctx.Done()
 		return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the operation was cancelled"), Hint: "x"}
 	}
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	rec := serve(h, authed(call("REPORT", calPath(workID), tbSync(""), "Depth", "1")).WithContext(ctx))
+	rec := serve(h, authed(call("REPORT", b.calPath(workID), tbSync(""), "Depth", "1")).WithContext(ctx))
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" {
 		t.Errorf("a cancelled request got %d, Retry-After %q; want 503, 30", rec.Code, rec.Header().Get("Retry-After"))
 	}
@@ -1727,20 +1942,22 @@ var spaceBetweenTags = regexp.MustCompile(`>\s+<`)
 
 // No whitespace around leaf values (href, getetag, sync-token, status...):
 // Thunderbird does not trim them.
-func TestAvoidWhitespaceInLeafElements(t *testing.T) {
+func TestAvoidWhitespaceInLeafElements(t *testing.T) { forBases(t, testAvoidWhitespaceInLeafElements) }
+
+func testAvoidWhitespaceInLeafElements(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	recs := []*httptest.ResponseRecorder{
-		do(h, "PROPFIND", "/", tbDetect, "Depth", "0"),
-		do(h, "PROPFIND", principal, tbDetect, "Depth", "0"),
-		do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"),
-		do(h, "PROPFIND", calPath(workID), tbServerInfo, "Depth", "0"),
-		do(h, "PROPFIND", calPath(workID), tbEtags, "Depth", "1"),
-		do(h, "REPORT", calPath(workID), tbSync(""), "Depth", "1"),
-		do(h, "REPORT", calPath(workID), tbSync("tok-1"), "Depth", "1"),
-		do(h, "REPORT", calPath(workID), tbMultiget(tbHref(workID, plainUID), tbHref(workID, "nobody@x")), "Depth", "1"),
+		do(h, "PROPFIND", b.root, tbDetect, "Depth", "0"),
+		do(h, "PROPFIND", b.principal, tbDetect, "Depth", "0"),
+		do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"),
+		do(h, "PROPFIND", b.calPath(workID), tbServerInfo, "Depth", "0"),
+		do(h, "PROPFIND", b.calPath(workID), tbEtags, "Depth", "1"),
+		do(h, "REPORT", b.calPath(workID), tbSync(""), "Depth", "1"),
+		do(h, "REPORT", b.calPath(workID), tbSync("tok-1"), "Depth", "1"),
+		do(h, "REPORT", b.calPath(workID), tbMultiget(b.tbHref(workID, plainUID), b.tbHref(workID, "nobody@x")), "Depth", "1"),
 	}
 	var walk func(e el)
 	walk = func(e el) {
@@ -1766,12 +1983,16 @@ func TestAvoidWhitespaceInLeafElements(t *testing.T) {
 // object (200 propstat with a non-empty getetag and a text/calendar type)
 // or a deletion (response-level 404, nothing else).
 func TestAvoidUnclassifiableSyncResponses(t *testing.T) {
+	forBases(t, testAvoidUnclassifiableSyncResponses)
+}
+
+func testAvoidUnclassifiableSyncResponses(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{Changed: []service.ObjectInfo{{UID: oddUID, ETag: `"v1-odd"`}}, Deleted: dels("gone@x"), Token: "tok-2"}
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, tok := range []string{"", "tok-1"} {
-		for _, r := range parseMS(t, do(h, "REPORT", calPath(workID), tbSync(tok), "Depth", "1")).responses {
+		for _, r := range parseMS(t, do(h, "REPORT", b.calPath(workID), tbSync(tok), "Depth", "1")).responses {
 			deleted := r.status == "HTTP/1.1 404 Not Found" && r.propstats == 0
 			listed := r.status == "" && r.props[n(nsD, "getetag")].Text != "" && strings.HasPrefix(r.props[n(nsD, "getcontenttype")].Text, "text/calendar")
 			if !deleted && !listed {
@@ -1782,20 +2003,22 @@ func TestAvoidUnclassifiableSyncResponses(t *testing.T) {
 }
 
 // Error bodies carry no text: neither the service's nor Go's.
-func TestAvoidErrorTextInBodies(t *testing.T) {
+func TestAvoidErrorTextInBodies(t *testing.T) { forBases(t, testAvoidErrorTextInBodies) }
+
+func testAvoidErrorTextInBodies(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, tc := range []struct {
 		method, path, body string
 		code               int
 	}{
-		{"PROPFIND", calPath(workID), "<D:propfind xmlns:D='DAV:'><D:prop>", http.StatusBadRequest},
-		{"PROPFIND", calPath(workID), "<notdav/>", http.StatusBadRequest},
-		{"REPORT", calPath(workID), "", http.StatusBadRequest},
-		{"REPORT", calPath(workID), "<sync-collection xmlns='DAV:'><prop/></sync-collection>", http.StatusBadRequest},
-		{"REPORT", calPath(workID), `<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop/></C:calendar-multiget>`, http.StatusBadRequest},
+		{"PROPFIND", b.calPath(workID), "<D:propfind xmlns:D='DAV:'><D:prop>", http.StatusBadRequest},
+		{"PROPFIND", b.calPath(workID), "<notdav/>", http.StatusBadRequest},
+		{"REPORT", b.calPath(workID), "", http.StatusBadRequest},
+		{"REPORT", b.calPath(workID), "<sync-collection xmlns='DAV:'><prop/></sync-collection>", http.StatusBadRequest},
+		{"REPORT", b.calPath(workID), `<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop/></C:calendar-multiget>`, http.StatusBadRequest},
 		{"PROPFIND", "/dav/", tbDetect, http.StatusNotFound},
-		{"GET", calPath(workID), "", http.StatusMethodNotAllowed},
+		{"GET", b.calPath(workID), "", http.StatusMethodNotAllowed},
 	} {
 		rec := do(h, tc.method, tc.path, tc.body, "Depth", "1")
 		wantStatus(t, rec, tc.code)
@@ -1809,17 +2032,21 @@ func TestAvoidErrorTextInBodies(t *testing.T) {
 // ours is 403 supported-report (ruling M3-R23), as are ours where they do
 // not apply.
 func TestAvoidUnsupportedReportsAre403SupportedReport(t *testing.T) {
+	forBases(t, testAvoidUnsupportedReportsAre403SupportedReport)
+}
+
+func testAvoidUnsupportedReportsAre403SupportedReport(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, tc := range []struct{ path, body string }{
-		{calPath(workID), `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:prop><D:getetag/></D:prop><C:filter><C:comp-filter name="VCALENDAR"/></C:filter></C:calendar-query>`},
-		{calPath(workID), `<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"/>`},
-		{calPath(workID), `<D:expand-property xmlns:D="DAV:"/>`},
-		{calPath(workID), `<sync-collection xmlns="urn:other"/>`},
-		{home, tbSync("")},
-		{principal, tbMultiget(tbHref(workID, plainUID))},
-		{objPath(workID, plainUID), tbSync("")},
+		{b.calPath(workID), `<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:prop><D:getetag/></D:prop><C:filter><C:comp-filter name="VCALENDAR"/></C:filter></C:calendar-query>`},
+		{b.calPath(workID), `<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"/>`},
+		{b.calPath(workID), `<D:expand-property xmlns:D="DAV:"/>`},
+		{b.calPath(workID), `<sync-collection xmlns="urn:other"/>`},
+		{b.home, tbSync("")},
+		{b.principal, tbMultiget(b.tbHref(workID, plainUID))},
+		{b.objPath(workID, plainUID), tbSync("")},
 	} {
 		rec := do(h, "REPORT", tc.path, tc.body, "Depth", "1")
 		wantStatus(t, rec, http.StatusForbidden)
@@ -1831,11 +2058,15 @@ func TestAvoidUnsupportedReportsAre403SupportedReport(t *testing.T) {
 }
 
 func TestAvoidProppatchAndMkcalendarAre405(t *testing.T) {
+	forBases(t, testAvoidProppatchAndMkcalendarAre405)
+}
+
+func testAvoidProppatchAndMkcalendarAre405(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, tc := range []struct{ method, path string }{
-		{"PROPPATCH", calPath(workID)}, {"MKCALENDAR", home + "new/"}, {"MKCOL", home + "new/"}, {"MOVE", objPath(workID, plainUID)},
-		{"POST", calPath(workID)}, {"GET", home}, {"HEAD", calPath(workID)},
+		{"PROPPATCH", b.calPath(workID)}, {"MKCALENDAR", b.home + "new/"}, {"MKCOL", b.home + "new/"}, {"MOVE", b.objPath(workID, plainUID)},
+		{"POST", b.calPath(workID)}, {"GET", b.home}, {"HEAD", b.calPath(workID)},
 	} {
 		rec := do(h, tc.method, tc.path, `<D:propertyupdate xmlns:D="DAV:"/>`)
 		wantStatus(t, rec, http.StatusMethodNotAllowed)
@@ -1848,60 +2079,73 @@ func TestAvoidProppatchAndMkcalendarAre405(t *testing.T) {
 // --- Robustness -----------------------------------------------------------
 
 func TestPropfindDepthInfinityIs403FiniteDepth(t *testing.T) {
+	forBases(t, testPropfindDepthInfinityIs403FiniteDepth)
+}
+
+func testPropfindDepthInfinityIs403FiniteDepth(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	for _, depth := range []string{"infinity", ""} {
-		rec := do(h, "PROPFIND", home, tbHomeSet, "Depth", depth)
+		rec := do(h, "PROPFIND", b.home, tbHomeSet, "Depth", depth)
 		wantStatus(t, rec, http.StatusForbidden)
 		wantBody(t, rec, finiteDepthBody)
 	}
-	wantStatus(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "2"), http.StatusBadRequest)
+	wantStatus(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "2"), http.StatusBadRequest)
 }
 
 func TestPropfindAndReportBodiesOver1MiBAre413(t *testing.T) {
+	forBases(t, testPropfindAndReportBodiesOver1MiBAre413)
+}
+
+func testPropfindAndReportBodiesOver1MiBAre413(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	const limit = 1 << 20
 	valid := `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>`
 	pad := func(size int) string { return valid + "<!--" + strings.Repeat("x", size-len(valid)-7) + "-->" }
 	if len(pad(limit)) != limit {
 		t.Fatal("test bug: padding")
 	}
-	parseMS(t, do(h, "PROPFIND", calPath(workID), pad(limit), "Depth", "0"))
-	wantStatus(t, do(h, "PROPFIND", calPath(workID), pad(limit+1), "Depth", "0"), http.StatusRequestEntityTooLarge)
+	parseMS(t, do(h, "PROPFIND", b.calPath(workID), pad(limit), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", b.calPath(workID), pad(limit+1), "Depth", "0"), http.StatusRequestEntityTooLarge)
 	// Without a Content-Length (chunked) too.
-	r := authed(call("REPORT", calPath(workID), "", "Depth", "1"))
+	r := authed(call("REPORT", b.calPath(workID), "", "Depth", "1"))
 	r.Body = io.NopCloser(io.MultiReader(strings.NewReader(pad(limit + 1))))
 	r.ContentLength = -1
 	wantStatus(t, serve(h, r), http.StatusRequestEntityTooLarge)
 }
 
 // A DOCTYPE is refused outright: no entity of any kind is expanded.
-func TestXMLWithADoctypeIsRefused(t *testing.T) {
+func TestXMLWithADoctypeIsRefused(t *testing.T) { forBases(t, testXMLWithADoctypeIsRefused) }
+
+func testXMLWithADoctypeIsRefused(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	for _, body := range []string{
 		`<!DOCTYPE p [<!ENTITY e "boom">]><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>`,
 		`<?xml version="1.0"?><!DOCTYPE p SYSTEM "file:///etc/passwd"><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`,
 		`<!DOCTYPE p><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`,
 	} {
 		for _, m := range []string{"PROPFIND", "REPORT"} {
-			rec := do(h, m, calPath(workID), body, "Depth", "0")
+			rec := do(h, m, b.calPath(workID), body, "Depth", "0")
 			wantStatus(t, rec, http.StatusBadRequest)
 		}
 	}
-	rec := do(h, "REPORT", calPath(workID), `<!DOCTYPE s [<!ENTITY t "urn:pcb:sync:1:e1:7:gen1">]><sync-collection xmlns="DAV:"><sync-token>&t;</sync-token><prop/></sync-collection>`, "Depth", "1")
+	rec := do(h, "REPORT", b.calPath(workID), `<!DOCTYPE s [<!ENTITY t "urn:pcb:sync:1:e1:7:gen1">]><sync-collection xmlns="DAV:"><sync-token>&t;</sync-token><prop/></sync-collection>`, "Depth", "1")
 	wantStatus(t, rec, http.StatusBadRequest)
 	if _, reads := s.counts(); reads != 0 {
 		t.Errorf("refused bodies made %d reads", reads)
 	}
 }
 
-func TestUnknownPathsAre404(t *testing.T) {
+func TestUnknownPathsAre404(t *testing.T) { forBases(t, testUnknownPathsAre404) }
+
+func testUnknownPathsAre404(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	for _, p := range []string{"/dav/", "/dav/principals/", "/dav/principals/someone-else/", "/dav/calendars/", "/dav/calendars/other/", home + "nothex/", "/favicon.ico"} {
+	h := handler(newStub(), caldav.Options{})
+	for _, p := range []string{"/dav/", b.dav + "nothing/", b.dav + "principals/", b.dav + "principals/someone-else/", b.dav + "calendars/", b.dav + "calendars/other/",
+		b.home + "nothex/", "/favicon.ico"} {
 		wantStatus(t, do(h, "PROPFIND", p, tbDetect, "Depth", "0"), http.StatusNotFound)
 	}
 }
@@ -1922,6 +2166,10 @@ func propNames(count int) string {
 // M3-R27): each name is echoed on every resource, so the list bounds the
 // response; the service is not asked.
 func TestPropertyListsOver64NamesAre400(t *testing.T) {
+	forBases(t, testPropertyListsOver64NamesAre400)
+}
+
+func testPropertyListsOver64NamesAre400(t *testing.T, b urlBase) {
 	t.Parallel()
 	const ns = `xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:x="urn:x"`
 	bodies := map[string]func(names string) (method, body string){
@@ -1935,20 +2183,20 @@ func TestPropertyListsOver64NamesAre400(t *testing.T) {
 			return "REPORT", `<D:sync-collection ` + ns + `><D:sync-token/><D:prop>` + names + `</D:prop></D:sync-collection>`
 		},
 		"multiget prop": func(names string) (string, string) {
-			return "REPORT", `<C:calendar-multiget ` + ns + `><D:prop>` + names + `</D:prop><D:href>` + objPath(workID, plainUID) + `</D:href></C:calendar-multiget>`
+			return "REPORT", `<C:calendar-multiget ` + ns + `><D:prop>` + names + `</D:prop><D:href>` + b.objPath(workID, plainUID) + `</D:href></C:calendar-multiget>`
 		},
 	}
 	for what, body := range bodies {
 		s := newStub()
-		h := caldav.Handler(s, caldav.Options{})
-		m, b := body(propNames(65))
-		rec := do(h, m, calPath(workID), b, "Depth", "1")
+		h := handler(s, caldav.Options{})
+		m, req := body(propNames(65))
+		rec := do(h, m, b.calPath(workID), req, "Depth", "1")
 		wantStatus(t, rec, http.StatusBadRequest)
 		if _, reads := s.counts(); reads != 0 || rec.Body.Len() != 0 {
 			t.Errorf("%s: %d reads, body %q", what, reads, rec.Body)
 		}
-		m, b = body(propNames(64))
-		ms := parseMS(t, do(h, m, calPath(workID), b, "Depth", "1"))
+		m, req = body(propNames(64))
+		ms := parseMS(t, do(h, m, b.calPath(workID), req, "Depth", "1"))
 		if r := ms.responses[len(ms.responses)-1]; len(r.missing) != 64 {
 			t.Errorf("%s with 64 names: %d missing properties, want 64", what, len(r.missing))
 		}
@@ -1958,9 +2206,13 @@ func TestPropertyListsOver64NamesAre400(t *testing.T) {
 // More than 64 attributes on one element (namespace declarations included)
 // is 400 (ruling M3-R27).
 func TestElementsWithOver64AttributesAre400(t *testing.T) {
+	forBases(t, testElementsWithOver64AttributesAre400)
+}
+
+func testElementsWithOver64AttributesAre400(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	attrs := func(count int) string {
 		var b strings.Builder
 		for i := range count {
@@ -1972,72 +2224,80 @@ func TestElementsWithOver64AttributesAre400(t *testing.T) {
 	body := func(count int) string {
 		return `<D:propfind xmlns:D="DAV:"` + attrs(count-1) + `><D:prop><D:getetag/></D:prop></D:propfind>`
 	}
-	parseMS(t, do(h, "PROPFIND", calPath(workID), body(64), "Depth", "0"))
-	wantStatus(t, do(h, "PROPFIND", calPath(workID), body(65), "Depth", "0"), http.StatusBadRequest)
-	wantStatus(t, do(h, "REPORT", calPath(workID), `<sync-collection xmlns="DAV:"`+attrs(64)+`><sync-token/><prop/></sync-collection>`, "Depth", "1"),
+	parseMS(t, do(h, "PROPFIND", b.calPath(workID), body(64), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", b.calPath(workID), body(65), "Depth", "0"), http.StatusBadRequest)
+	wantStatus(t, do(h, "REPORT", b.calPath(workID), `<sync-collection xmlns="DAV:"`+attrs(64)+`><sync-token/><prop/></sync-collection>`, "Depth", "1"),
 		http.StatusBadRequest)
 	// Plain attributes count the same way, on any element.
 	var plain strings.Builder
 	for i := range 65 {
 		fmt.Fprintf(&plain, ` a%d="v"`, i)
 	}
-	wantStatus(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag`+plain.String()+`/></D:prop></D:propfind>`, "Depth", "0"),
+	wantStatus(t, do(h, "PROPFIND", b.calPath(workID), `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag`+plain.String()+`/></D:prop></D:propfind>`, "Depth", "0"),
 		http.StatusBadRequest)
 }
 
 // The parser's limits: at most 10 000 elements (else 413) and 32 levels of
 // nesting (else 400).
-func TestXMLElementAndDepthLimits(t *testing.T) {
+func TestXMLElementAndDepthLimits(t *testing.T) { forBases(t, testXMLElementAndDepthLimits) }
+
+func testXMLElementAndDepthLimits(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	// propfind, prop, getetag and x are 4 elements; the rest are y.
 	elements := func(count int) string {
 		return `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop><x>` + strings.Repeat("<y/>", count-4) + `</x></D:propfind>`
 	}
-	parseMS(t, do(h, "PROPFIND", calPath(workID), elements(10_000), "Depth", "0"))
-	wantStatus(t, do(h, "PROPFIND", calPath(workID), elements(10_001), "Depth", "0"), http.StatusRequestEntityTooLarge)
+	parseMS(t, do(h, "PROPFIND", b.calPath(workID), elements(10_000), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", b.calPath(workID), elements(10_001), "Depth", "0"), http.StatusRequestEntityTooLarge)
 	// propfind is level 1; depth-1 nested z reach level depth.
 	nested := func(depth int) string {
 		return `<D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop>` + strings.Repeat("<z>", depth-1) + strings.Repeat("</z>", depth-1) + `</D:propfind>`
 	}
-	parseMS(t, do(h, "PROPFIND", calPath(workID), nested(32), "Depth", "0"))
-	wantStatus(t, do(h, "PROPFIND", calPath(workID), nested(33), "Depth", "0"), http.StatusBadRequest)
+	parseMS(t, do(h, "PROPFIND", b.calPath(workID), nested(32), "Depth", "0"))
+	wantStatus(t, do(h, "PROPFIND", b.calPath(workID), nested(33), "Depth", "0"), http.StatusBadRequest)
 }
 
 // sync-level, when sent, is 1 or infinite (a calendar holds no collection,
 // both list the same); anything else is 400.
-func TestSyncLevelMustBe1OrInfinite(t *testing.T) {
+func TestSyncLevelMustBe1OrInfinite(t *testing.T) { forBases(t, testSyncLevelMustBe1OrInfinite) }
+
+func testSyncLevelMustBe1OrInfinite(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
+	h := handler(newStub(), caldav.Options{})
 	body := func(level string) string {
 		return `<sync-collection xmlns="DAV:"><sync-token/>` + level + `<prop><getetag/></prop></sync-collection>`
 	}
 	for _, level := range []string{"<sync-level>1</sync-level>", "<sync-level>infinite</sync-level>", "<sync-level> 1 </sync-level>", ""} {
-		if ms := parseMS(t, do(h, "REPORT", calPath(workID), body(level), "Depth", "1")); len(ms.responses) != 3 {
+		if ms := parseMS(t, do(h, "REPORT", b.calPath(workID), body(level), "Depth", "1")); len(ms.responses) != 3 {
 			t.Errorf("%q: %d responses", level, len(ms.responses))
 		}
 	}
 	for _, level := range []string{"<sync-level>2</sync-level>", "<sync-level>0</sync-level>", "<sync-level/>"} {
-		wantStatus(t, do(h, "REPORT", calPath(workID), body(level), "Depth", "1"), http.StatusBadRequest)
+		wantStatus(t, do(h, "REPORT", b.calPath(workID), body(level), "Depth", "1"), http.StatusBadRequest)
 	}
 }
 
 // A sync-collection asking for calendar-data fetches the changed objects;
 // one gone since the changes were read is a deletion (response-level 404).
 func TestSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions(t *testing.T) {
+	forBases(t, testSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions)
+}
+
+func testSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.deltas["tok-1"] = service.ChangeSet{
 		Changed: []service.ObjectInfo{{UID: plainUID, ETag: `"v1-plain"`}, {UID: "vanished@x", ETag: `"v1-vanished"`}},
 		Deleted: dels(), Token: "tok-2",
 	}
-	h := caldav.Handler(s, caldav.Options{})
+	h := handler(s, caldav.Options{})
 	body := `<sync-collection xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><sync-token>tok-1</sync-token><prop><getetag/><C:calendar-data/></prop></sync-collection>`
-	ms := parseMS(t, do(h, "REPORT", calPath(workID), body, "Depth", "1"))
-	if got := ms.get(t, objPath(workID, plainUID)).prop(t, nsC, "calendar-data").Text; got != string(s.objs[workID][0].Data) {
+	ms := parseMS(t, do(h, "REPORT", b.calPath(workID), body, "Depth", "1"))
+	if got := ms.get(t, b.objPath(workID, plainUID)).prop(t, nsC, "calendar-data").Text; got != string(s.objs[workID][0].Data) {
 		t.Errorf("calendar-data %q", got)
 	}
-	if r := ms.get(t, objPath(workID, "vanished@x")); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
+	if r := ms.get(t, b.objPath(workID, "vanished@x")); r.status != "HTTP/1.1 404 Not Found" || r.propstats != 0 {
 		t.Errorf("vanished object: status %q, %d propstats; want a response-level 404", r.status, r.propstats)
 	}
 	if len(ms.responses) != 2 || ms.token == nil || *ms.token != "tok-2" {
@@ -2048,23 +2308,25 @@ func TestSyncCollectionWithCalendarDataTurnsMissingObjectsIntoDeletions(t *testi
 // allprop leaves sync-token out (RFC 6578 §4) unless include names it; an
 // included name the resource lacks is a 404 property; propname lists the
 // names with empty values.
-func TestAllpropIncludeAndPropname(t *testing.T) {
+func TestAllpropIncludeAndPropname(t *testing.T) { forBases(t, testAllpropIncludeAndPropname) }
+
+func testAllpropIncludeAndPropname(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	c := parseMS(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, "Depth", "0")).get(t, calPath(workID))
+	h := handler(newStub(), caldav.Options{})
+	c := parseMS(t, do(h, "PROPFIND", b.calPath(workID), `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`, "Depth", "0")).get(t, b.calPath(workID))
 	if _, ok := c.props[n(nsD, "sync-token")]; ok {
 		t.Error("allprop returned sync-token")
 	}
 	c.prop(t, nsCS, "getctag")
 	inc := `<D:propfind xmlns:D="DAV:"><D:allprop/><D:include><D:sync-token/><D:getctag-not/><D:displayname/></D:include></D:propfind>`
-	c = parseMS(t, do(h, "PROPFIND", calPath(workID), inc, "Depth", "0")).get(t, calPath(workID))
+	c = parseMS(t, do(h, "PROPFIND", b.calPath(workID), inc, "Depth", "0")).get(t, b.calPath(workID))
 	if c.prop(t, nsD, "sync-token").Text != "urn:pcb:sync:1:e1:7:gen1" || !c.missing[n(nsD, "getctag-not")] || c.prop(t, nsD, "displayname").Text != "Work" {
 		t.Errorf("allprop with include: %+v, missing %v", c.props, c.missing)
 	}
-	if strings.Count(parseMS(t, do(h, "PROPFIND", calPath(workID), inc, "Depth", "0")).raw, "<D:displayname>") != 1 {
+	if strings.Count(parseMS(t, do(h, "PROPFIND", b.calPath(workID), inc, "Depth", "0")).raw, "<D:displayname>") != 1 {
 		t.Error("an included property already in allprop is written twice")
 	}
-	names := parseMS(t, do(h, "PROPFIND", calPath(workID), `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`, "Depth", "0")).get(t, calPath(workID))
+	names := parseMS(t, do(h, "PROPFIND", b.calPath(workID), `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`, "Depth", "0")).get(t, b.calPath(workID))
 	for _, p := range []xml.Name{n(nsD, "resourcetype"), n(nsCS, "getctag"), n(nsD, "sync-token"), n(nsD, "current-user-privilege-set")} {
 		v, ok := names.props[p]
 		if !ok || len(v.Kids) != 0 || v.Text != "" {
@@ -2080,12 +2342,14 @@ func TestAllpropIncludeAndPropname(t *testing.T) {
 // slashes and dots, double encoding, an uppercase calseg, empty segments and
 // a trailing slash on an object name nothing; %40 and a query string are
 // the object.
-func TestPathVariantsResolveExactly(t *testing.T) {
+func TestPathVariantsResolveExactly(t *testing.T) { forBases(t, testPathVariantsResolveExactly) }
+
+func testPathVariantsResolveExactly(t *testing.T, b urlBase) {
 	t.Parallel()
-	h := caldav.Handler(newStub(), caldav.Options{})
-	cal, holCal := calPath(workID), calPath(holID)
+	h := handler(newStub(), caldav.Options{})
+	cal, holCal := b.calPath(workID), b.calPath(holID)
 	name := objName(plainUID)
-	seg := strings.TrimSuffix(strings.TrimPrefix(cal, home), "/")
+	seg := strings.TrimSuffix(strings.TrimPrefix(cal, b.home), "/")
 	for _, tc := range []struct {
 		target string
 		code   int
@@ -2095,15 +2359,15 @@ func TestPathVariantsResolveExactly(t *testing.T) {
 		{cal + name + "?x=1", http.StatusOK},
 		{cal + name + "/", http.StatusNotFound},
 		{cal + strings.ReplaceAll(name, "@", "%2540"), http.StatusNotFound},
-		{cal + "../" + strings.TrimPrefix(holCal, home) + objName("newyear@x"), http.StatusNotFound},
-		{cal + "%2E%2E/" + strings.TrimPrefix(holCal, home) + objName("newyear@x"), http.StatusNotFound},
+		{cal + "../" + strings.TrimPrefix(holCal, b.home) + objName("newyear@x"), http.StatusNotFound},
+		{cal + "%2E%2E/" + strings.TrimPrefix(holCal, b.home) + objName("newyear@x"), http.StatusNotFound},
 		{cal + "x%2F..%2F" + name, http.StatusNotFound},
 		{cal + "./" + name, http.StatusNotFound},
-		{home + strings.ToUpper(seg) + "/" + name, http.StatusNotFound},
-		{home + "/" + seg + "/" + name, http.StatusNotFound},
+		{b.home + strings.ToUpper(seg) + "/" + name, http.StatusNotFound},
+		{b.home + "/" + seg + "/" + name, http.StatusNotFound},
 		{cal + "/" + name, http.StatusNotFound},
 		{strings.Replace(cal, "/dav/", "//dav/", 1) + name, http.StatusNotFound},
-		{"/dav/calendars/me/../me/" + seg + "/" + name, http.StatusNotFound},
+		{b.home + "../me/" + seg + "/" + name, http.StatusNotFound},
 	} {
 		if rec := do(h, "GET", tc.target, ""); rec.Code != tc.code {
 			t.Errorf("GET %s: %d, want %d", tc.target, rec.Code, tc.code)
@@ -2116,26 +2380,30 @@ func TestPathVariantsResolveExactly(t *testing.T) {
 // (which would disable it in Thunderbird), without a warning; so does one
 // whose read says it is pending.
 func TestPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T) {
+	forBases(t, testPendingCalendarsAre503AndLeftOutOfTheHomeSet)
+}
+
+func testPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T, b urlBase) {
 	t.Parallel()
 	var logs bytes.Buffer
 	s := newStub()
 	s.colls = append(s.colls, service.Collection{ID: "pending-ID", Name: "Pending", Pending: true})
 	s.pending[holID] = true // listed as synced, then a new cache life began
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
-	ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", "1"))
-	if _, ok := ms.byPath[calPath("pending-ID")]; ok || len(ms.responses) != 3 {
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	ms := parseMS(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", "1"))
+	if _, ok := ms.byPath[b.calPath("pending-ID")]; ok || len(ms.responses) != 3 {
 		t.Errorf("home set lists %d responses, the pending calendar included: %v", len(ms.responses), ok)
 	}
 	for _, id := range []string{"pending-ID", holID} {
 		for _, tc := range []struct{ method, path, body, depth string }{
-			{"PROPFIND", calPath(id), tbServerInfo, "0"},
-			{"PROPFIND", calPath(id), tbEtags, "1"},
-			{"REPORT", calPath(id), tbSync(""), "1"},
-			{"REPORT", calPath(id), tbSync("urn:pcb:sync:1:e1:3:gen2"), "1"},
-			{"REPORT", calPath(id), tbMultiget(tbHref(id, "newyear@x")), "1"},
-			{"GET", objPath(id, "newyear@x"), "", ""},
-			{"PUT", objPath(id, "newyear@x"), "x", ""},
-			{"DELETE", objPath(id, "newyear@x"), "", ""},
+			{"PROPFIND", b.calPath(id), tbServerInfo, "0"},
+			{"PROPFIND", b.calPath(id), tbEtags, "1"},
+			{"REPORT", b.calPath(id), tbSync(""), "1"},
+			{"REPORT", b.calPath(id), tbSync("urn:pcb:sync:1:e1:3:gen2"), "1"},
+			{"REPORT", b.calPath(id), tbMultiget(b.tbHref(id, "newyear@x")), "1"},
+			{"GET", b.objPath(id, "newyear@x"), "", ""},
+			{"PUT", b.objPath(id, "newyear@x"), "x", ""},
+			{"DELETE", b.objPath(id, "newyear@x"), "", ""},
 		} {
 			if id == holID && (tc.method == "PROPFIND" && tc.depth == "0" || tc.method == "PUT" || tc.method == "DELETE") {
 				// Reads nothing but the listing, which says synced (and,
@@ -2160,15 +2428,19 @@ func TestPendingCalendarsAre503AndLeftOutOfTheHomeSet(t *testing.T) {
 // Thunderbird's detection reports a temporary failure, not "no calendars"
 // (ruling M3-R30). One synced calendar is enough to list it.
 func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
+	forBases(t, testHomeSetIs503WhileEveryCalendarIsPending)
+}
+
+func testHomeSetIs503WhileEveryCalendarIsPending(t *testing.T, b urlBase) {
 	t.Parallel()
 	var logs bytes.Buffer
 	s := newStub()
 	for i := range s.colls {
 		s.colls[i].Pending, s.colls[i].CTag, s.colls[i].SyncToken = true, "", ""
 	}
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	for _, depth := range []string{"0", "1"} {
-		for _, p := range []string{home, strings.TrimSuffix(home, "/")} {
+		for _, p := range []string{b.home, strings.TrimSuffix(b.home, "/")} {
 			rec := do(h, "PROPFIND", p, tbHomeSet, "Depth", depth)
 			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "30" || rec.Body.Len() != 0 {
 				t.Errorf("PROPFIND %s Depth %s, all pending: %d, Retry-After %q, body %q; want 503, 30, none",
@@ -2180,11 +2452,11 @@ func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
 		t.Errorf("all-pending logged:\n%s", logs.String())
 	}
 	// Discovery above the home set still answers.
-	parseMS(t, do(h, "PROPFIND", principal, tbDetect, "Depth", "0"))
+	parseMS(t, do(h, "PROPFIND", b.principal, tbDetect, "Depth", "0"))
 
 	s.colls[0].Pending = false
 	for _, depth := range []string{"0", "1"} {
-		ms := parseMS(t, do(h, "PROPFIND", home, tbHomeSet, "Depth", depth))
+		ms := parseMS(t, do(h, "PROPFIND", b.home, tbHomeSet, "Depth", depth))
 		want := map[string]int{"0": 1, "1": 2}[depth]
 		if len(ms.responses) != want {
 			t.Errorf("one synced, Depth %s: %d responses, want %d", depth, len(ms.responses), want)
@@ -2198,6 +2470,10 @@ func TestHomeSetIs503WhileEveryCalendarIsPending(t *testing.T) {
 // timeout does not cut the request's context meanwhile (a cut context is a
 // 503 here, as the service would give).
 func TestSlowWriteStillDeliversItsAnswer(t *testing.T) {
+	forBases(t, testSlowWriteStillDeliversItsAnswer)
+}
+
+func testSlowWriteStillDeliversItsAnswer(t *testing.T, b urlBase) {
 	t.Parallel()
 	const timeout = 250 * time.Millisecond
 	s := newStub()
@@ -2210,7 +2486,7 @@ func TestSlowWriteStillDeliversItsAnswer(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	srv := httptest.NewUnstartedServer(caldav.Handler(s, caldav.Options{}))
+	srv := httptest.NewUnstartedServer(handler(s, caldav.Options{}))
 	srv.Config.ReadTimeout, srv.Config.WriteTimeout = timeout, timeout
 	srv.Start()
 	t.Cleanup(srv.Close)
@@ -2223,7 +2499,7 @@ func TestSlowWriteStillDeliversItsAnswer(t *testing.T) {
 		{http.MethodPut, ics("new@x", "New"), []string{"Content-Type", "text/calendar", "If-None-Match", "*"}, http.StatusCreated},
 		{http.MethodDelete, nil, nil, http.StatusNoContent},
 	} {
-		req, err := http.NewRequestWithContext(t.Context(), tc.method, srv.URL+objPath(workID, "new@x"), bytes.NewReader(tc.body))
+		req, err := http.NewRequestWithContext(t.Context(), tc.method, srv.URL+b.objPath(workID, "new@x"), bytes.NewReader(tc.body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2258,6 +2534,10 @@ func TestWriteBudgetCoversTheService(t *testing.T) {
 // and in both reports (audit surface-I1: it is echoed on every resource); the
 // service is not asked. 256 bytes still passes.
 func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
+	forBases(t, testPropertyNamesAndNamespacesOver256BytesAre400)
+}
+
+func testPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T, b urlBase) {
 	t.Parallel()
 	long, ok := strings.Repeat("a", 257), strings.Repeat("b", 256)
 	prop := func(local, space string) string { return `<x:` + local + ` xmlns:x="` + space + `"/>` }
@@ -2266,7 +2546,7 @@ func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
 			return `<D:propfind xmlns:D="DAV:"><D:prop>` + p + `</D:prop></D:propfind>`
 		},
 		"multiget": func(p string) string {
-			return `<C:calendar-multiget xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:prop>` + p + `</D:prop><D:href>` + calPath(workID) + `a.ics</D:href></C:calendar-multiget>`
+			return `<C:calendar-multiget xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:prop>` + p + `</D:prop><D:href>` + b.calPath(workID) + `a.ics</D:href></C:calendar-multiget>`
 		},
 		"sync": func(p string) string {
 			return `<D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:sync-level>1</D:sync-level><D:prop>` + p + `</D:prop></D:sync-collection>`
@@ -2279,13 +2559,13 @@ func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
 		}
 		for what, p := range map[string]string{"name": prop(long, "u:x"), "namespace": prop("n", "u:"+long)} {
 			s := newStub()
-			h := caldav.Handler(s, caldav.Options{})
-			wantStatus(t, do(h, method, calPath(workID), build(p), "Depth", "0"), http.StatusBadRequest)
+			h := handler(s, caldav.Options{})
+			wantStatus(t, do(h, method, b.calPath(workID), build(p), "Depth", "0"), http.StatusBadRequest)
 			if _, reads := s.counts(); reads != 0 {
 				t.Errorf("%s with a long %s made %d reads", name, what, reads)
 			}
 		}
-		rec := do(caldav.Handler(newStub(), caldav.Options{}), method, calPath(workID), build(prop("n", "u:"+ok[:253])), "Depth", "0")
+		rec := do(handler(newStub(), caldav.Options{}), method, b.calPath(workID), build(prop("n", "u:"+ok[:253])), "Depth", "0")
 		if rec.Code == http.StatusBadRequest {
 			t.Errorf("%s: a 256-byte namespace was refused", name)
 		}
@@ -2299,20 +2579,24 @@ func TestPropertyNamesAndNamespacesOver256BytesAre400(t *testing.T) {
 // event's text or the client's password. A write that succeeds, or one
 // answered 404, logs no such line.
 func TestEachRefusedWriteLogsOneWarning(t *testing.T) {
+	forBases(t, testEachRefusedWriteLogsOneWarning)
+}
+
+func testEachRefusedWriteLogsOneWarning(t *testing.T, b urlBase) {
 	t.Parallel()
 	const summary = "Secret board meeting"
 	body := string(ics(plainUID, summary, "ATTENDEE;CN=Ann Example:mailto:ann@example.org"))
 	put := func(calID string, hdr ...string) func(h http.Handler) *httptest.ResponseRecorder {
 		return func(h http.Handler) *httptest.ResponseRecorder {
-			return do(h, http.MethodPut, objPath(calID, plainUID), body, append([]string{"Content-Type", "text/calendar"}, hdr...)...)
+			return do(h, http.MethodPut, b.objPath(calID, plainUID), body, append([]string{"Content-Type", "text/calendar"}, hdr...)...)
 		}
 	}
 	del := func(calID string, hdr ...string) func(h http.Handler) *httptest.ResponseRecorder {
 		return func(h http.Handler) *httptest.ResponseRecorder {
-			return do(h, http.MethodDelete, objPath(calID, plainUID), "", hdr...)
+			return do(h, http.MethodDelete, b.objPath(calID, plainUID), "", hdr...)
 		}
 	}
-	href := objPath(workID, plainUID)
+	href := b.objPath(workID, plainUID)
 	// The IDs hold "=", which slog's text handler quotes.
 	for _, tc := range []struct {
 		name    string
@@ -2333,10 +2617,10 @@ func TestEachRefusedWriteLogsOneWarning(t *testing.T) {
 		{"If-None-Match naming no ETag", nil, put(workID, "If-None-Match", ","), http.StatusPreconditionFailed,
 			[]string{"status=412", "code=precondition-failed", `calendar=""`, "href=" + href}, false},
 		{"UID conflict", svcErr(exitcode.Usage, &service.UIDConflictError{Href: "other one.ics"}), put(workID), http.StatusConflict,
-			[]string{"status=409", "code=no-uid-conflict", "calendar=" + strconv.Quote(workID), "href=" + href, "conflict=" + calPath(workID) + "other%20one.ics",
+			[]string{"status=409", "code=no-uid-conflict", "calendar=" + strconv.Quote(workID), "href=" + href, "conflict=" + b.calPath(workID) + "other%20one.ics",
 				`reason="the UID or the name belongs to another object of the calendar"`}, false},
 		{"read-only calendar", nil, put(holID), http.StatusForbidden,
-			[]string{"status=403", "code=need-privileges", "calendar=" + strconv.Quote(holID), "href=" + objPath(holID, plainUID), `reason="the calendar is read only"`}, false},
+			[]string{"status=403", "code=need-privileges", "calendar=" + strconv.Quote(holID), "href=" + b.objPath(holID, plainUID), `reason="the calendar is read only"`}, false},
 		{"service read only", svcErr(exitcode.Usage, service.ErrNotWritable), del(workID), http.StatusForbidden,
 			[]string{"method=DELETE", "status=403", "code=need-privileges", "calendar=" + strconv.Quote(workID)}, false},
 		{"success", nil, put(workID), http.StatusNoContent, nil, true},
@@ -2347,7 +2631,7 @@ func TestEachRefusedWriteLogsOneWarning(t *testing.T) {
 			var logs bytes.Buffer
 			s := newStub()
 			s.writeErr = tc.err
-			h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+			h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 			wantStatus(t, tc.send(h), tc.status)
 			var lines []string
 			for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
@@ -2381,11 +2665,13 @@ func TestEachRefusedWriteLogsOneWarning(t *testing.T) {
 // If-Match reaches the service as sent, a list included, and several
 // If-Match headers as one list (RFC 9110 §5.3): the service compares them
 // (write-M4).
-func TestIfMatchListsReachTheService(t *testing.T) {
+func TestIfMatchListsReachTheService(t *testing.T) { forBases(t, testIfMatchListsReachTheService) }
+
+func testIfMatchListsReachTheService(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
-	h := caldav.Handler(s, caldav.Options{})
-	req := authed(call(http.MethodPut, objPath(workID, plainUID), "x", "Content-Type", "text/calendar"))
+	h := handler(s, caldav.Options{})
+	req := authed(call(http.MethodPut, b.objPath(workID, plainUID), "x", "Content-Type", "text/calendar"))
 	req.Header.Add("If-Match", `"v1-a", W/"v1-b"`)
 	req.Header.Add("If-Match", `"v1-plain"`)
 	wantStatus(t, serve(h, req), http.StatusNoContent)
@@ -2398,15 +2684,19 @@ func TestIfMatchListsReachTheService(t *testing.T) {
 // line after the window carries repeated=N, and the refusal itself is still
 // answered every time. Another href or code is a new line (A12).
 func TestRepeatedRefusalsAreLoggedOncePerWindow(t *testing.T) {
+	forBases(t, testRepeatedRefusalsAreLoggedOncePerWindow)
+}
+
+func testRepeatedRefusalsAreLoggedOncePerWindow(t *testing.T, b urlBase) {
 	t.Parallel()
 	var logs bytes.Buffer
 	s := newStub()
 	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
-	h := caldav.Handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return now }})
+	h := handler(s, caldav.Options{Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return now }})
 	put := func(uid string) {
 		t.Helper()
-		wantStatus(t, do(h, http.MethodPut, objPath(workID, uid), string(ics(uid, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`), http.StatusPreconditionFailed)
+		wantStatus(t, do(h, http.MethodPut, b.objPath(workID, uid), string(ics(uid, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`), http.StatusPreconditionFailed)
 	}
 	lines := func() []string {
 		return slices.DeleteFunc(strings.Split(logs.String(), "\n"), func(l string) bool { return l == "" })
@@ -2426,7 +2716,7 @@ func TestRepeatedRefusalsAreLoggedOncePerWindow(t *testing.T) {
 	now = now.Add(2 * time.Minute) // 11 minutes after the first line
 	put(plainUID)
 	got := lines()
-	if len(got) != 3 || !strings.Contains(got[2], "repeated=2") || !strings.Contains(got[2], "href="+objPath(workID, plainUID)) {
+	if len(got) != 3 || !strings.Contains(got[2], "repeated=2") || !strings.Contains(got[2], "href="+b.objPath(workID, plainUID)) {
 		t.Fatalf("after the window want a third line with repeated=2:\n%s", logs.String())
 	}
 	put(plainUID) // the window restarts
@@ -2437,15 +2727,17 @@ func TestRepeatedRefusalsAreLoggedOncePerWindow(t *testing.T) {
 
 // The dedup memory is bounded: a flood of distinct hrefs never grows it past
 // its cap, and the newest is always remembered (A12).
-func TestRefusalLogMemoryIsBounded(t *testing.T) {
+func TestRefusalLogMemoryIsBounded(t *testing.T) { forBases(t, testRefusalLogMemoryIsBounded) }
+
+func testRefusalLogMemoryIsBounded(t *testing.T, b urlBase) {
 	t.Parallel()
 	s := newStub()
 	s.writeErr = svcErr(exitcode.Usage, service.ErrPreconditionFailed)
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
-	h := caldav.Handler(s, caldav.Options{Now: func() time.Time { return now }})
+	h := handler(s, caldav.Options{Now: func() time.Time { return now }})
 	for i := range caldav.RefusalLogSize + 500 {
 		now = now.Add(time.Millisecond) // all inside one window: only the cap can prune
-		do(h, http.MethodPut, objPath(workID, "uid-"+strconv.Itoa(i)), string(ics(plainUID, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`)
+		do(h, http.MethodPut, b.objPath(workID, "uid-"+strconv.Itoa(i)), string(ics(plainUID, "x")), "Content-Type", "text/calendar", "If-Match", `"v1"`)
 	}
 	if n := caldav.RefusalLogLen(h); n != caldav.RefusalLogSize {
 		t.Errorf("dedup holds %d entries, want exactly %d", n, caldav.RefusalLogSize)

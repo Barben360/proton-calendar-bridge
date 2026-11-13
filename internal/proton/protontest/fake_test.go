@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 )
 
@@ -217,5 +219,85 @@ func TestRefreshOfARefreshedPairNeedsItsAccessToken(t *testing.T) {
 	b := login(t, f, f.Username, f.Password)
 	if status, _, _ := refresh(t, f, b.UID, b.RefreshToken, b.AccessToken); status != http.StatusOK {
 		t.Fatalf("a login's refresh token with its access token answered %d, want 200", status)
+	}
+}
+
+func TestFailNextForHitsOnlyThatUser(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	f.AddUser("b", "b-pass")
+	a := login(t, f, f.Username, f.Password)
+	b := login(t, f, "b", "b-pass")
+	f.FailNextFor("b", "GET", "/core/v4/users", 500, 0, 0)
+	if status, _, _ := getUser(t, f, a); status != 200 {
+		t.Fatalf("call as the other user = %d, want 200", status)
+	}
+	if status, _, _ := getUser(t, f, b); status != 500 {
+		t.Fatalf("call as b = %d, want 500", status)
+	}
+	if status, _, _ := getUser(t, f, b); status != 200 {
+		t.Fatalf("second call as b = %d, want 200 (one failure queued)", status)
+	}
+}
+
+func TestStallNextForHitsOnlyThatUser(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	f.AddUser("b", "b-pass")
+	a := login(t, f, f.Username, f.Password)
+	b := login(t, f, "b", "b-pass")
+	f.StallNextFor("b", "GET", "/core/v4/users", 300*time.Millisecond)
+	start := time.Now()
+	if status, _, _ := getUser(t, f, a); status != 200 || time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("call as the other user = %d after %v, want 200 without a stall", status, time.Since(start))
+	}
+	start = time.Now()
+	if status, _, _ := getUser(t, f, b); status != 200 || time.Since(start) < 300*time.Millisecond {
+		t.Fatalf("call as b = %d after %v, want 200 after the 300ms stall", status, time.Since(start))
+	}
+}
+
+func TestCaptchaForChallengesOnlyThatUser(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	f.AddUser("b", "b-pass")
+	f.SetCaptchaFor("b", "tok")
+	_ = login(t, f, f.Username, f.Password) // not challenged
+	m := gpa.New(gpa.WithHostURL(f.URL), gpa.WithAppVersion("Other"), gpa.WithRetryCount(0))
+	t.Cleanup(m.Close)
+	_, _, err := m.NewClientWithLogin(t.Context(), "b", []byte("b-pass"))
+	var ae *gpa.APIError
+	if !errors.As(err, &ae) || ae.Code != 9001 || ae.Status != 422 || !strings.Contains(string(ae.Details), "tok") {
+		t.Fatalf("login as b: %v (%s), want 422/9001 with token tok", err, ae.Details)
+	}
+}
+
+func TestTwoFAPerUser(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	f.AddUser("b", "b-pass")
+	uri := f.SetTwoFA("b", true)
+	if a := login(t, f, f.Username, f.Password); a.TwoFA.Enabled != 0 {
+		t.Fatalf("other user's 2FA.Enabled = %d, want 0", a.TwoFA.Enabled)
+	}
+	m := gpa.New(gpa.WithHostURL(f.URL), gpa.WithAppVersion("Other"), gpa.WithRetryCount(0))
+	t.Cleanup(m.Close)
+	c, a, err := m.NewClientWithLogin(t.Context(), "b", []byte("b-pass"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if a.TwoFA.Enabled != 1 {
+		t.Fatalf("b's 2FA.Enabled = %d, want 1", a.TwoFA.Enabled)
+	}
+	if err := c.Auth2FA(t.Context(), gpa.Auth2FAReq{TwoFactorCode: "000000"}); err == nil {
+		t.Fatal("a wrong code was accepted")
+	}
+	key, err := otp.Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Auth2FA(t.Context(), gpa.Auth2FAReq{TwoFactorCode: key.Code(time.Now())}); err != nil {
+		t.Fatalf("code from the returned URI refused: %v", err)
 	}
 }

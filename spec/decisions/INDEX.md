@@ -15,3 +15,5 @@
 | [0011](0011-client-identity.md) | Client identity: Other by default (provisional) |
 | [0012](0012-icalendar-native-model.md) | iCalendar-native model for v1 (accepted) |
 | [0013](0013-viewable-caldav-credentials.md) | CalDAV credentials can be shown again, Bridge-style (accepted) |
+| [0014](0014-several-accounts-per-process.md) | Several Proton accounts per process; per-account CalDAV URLs (accepted) |
+| [0015](0015-pcb-ui.md) | pcb-ui: a separate cgo binary running the daemon in process; the keyring sealer (accepted) |

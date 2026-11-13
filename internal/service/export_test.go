@@ -133,6 +133,95 @@ func (l *Local) SkipSRP(session func(username string) (api.Tokens, string)) {
 	}
 }
 
+// SkipReloginSRP makes the unattended relogins take what SRP would answer
+// from relogin, called under the login guard where SRP would run: a
+// session (its tokens and user ID; all that follows SRP runs as usual), or
+// an error as auth.Begin's (CaptchaError: Proton asks for a CAPTCHA). The
+// stored password is not checked. nil restores SRP. Set it before the
+// relogin.
+func (l *Local) SkipReloginSRP(relogin func(username string) (api.Tokens, string, error)) {
+	if relogin == nil {
+		l.skipRelogin = nil
+		return
+	}
+	l.skipRelogin = func(username string) (*auth.Pending, error) {
+		tok, id, err := relogin(username)
+		if err != nil {
+			return nil, err
+		}
+		return auth.Resume(l.mgr, tok, id), nil
+	}
+}
+
+// CaptchaError is the error a login's SRP step returns when Proton asks for
+// a CAPTCHA, its verification URL and token as given.
+func CaptchaError(url, token string) error { return &auth.CaptchaError{URL: url, Token: token} }
+
 // SetKeyPassHook makes fn see the key passphrase a login derives, before it
 // is sealed (to check that it is zeroed after). Set it before Login.
 func (l *Local) SetKeyPassHook(fn func(keyPass []byte)) { l.keyPassHook = fn }
+
+// SkipSRP makes the logins of every Local the Hub holds or opens take their
+// session from session instead of SRP, as Local.SkipSRP does. nil restores
+// SRP.
+func (h *Hub) SkipSRP(session func(username string) (api.Tokens, string)) {
+	h.mu.Lock()
+	h.onOpen = func(l *Local) { l.SkipSRP(session) }
+	locals := make([]*Local, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		locals = append(locals, a.local)
+	}
+	h.mu.Unlock()
+	for _, l := range locals {
+		l.SkipSRP(session)
+	}
+}
+
+// LocalOf is the Local of the Hub's account id, nil if none.
+func (h *Hub) LocalOf(id string) *Local {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if a, ok := h.accounts[id]; ok {
+		return a.local
+	}
+	return nil
+}
+
+// OnPark makes f run each time a serve loop parked its account (after
+// a.loop is cleared, before the loop's end is signalled). Set it before
+// Serve.
+func (h *Hub) OnPark(f func(id string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onPark = f
+}
+
+// SyncLockRetry is how long a loop waits before it takes a held sync.lock
+// again.
+const SyncLockRetry = syncLockRetry
+
+// KeyringRetry is how long a loop waits before it asks a locked desktop
+// keyring again.
+const KeyringRetry = keyringRetry
+
+// AlsoOnOpen makes f run on every Local the Hub holds now and opens later,
+// after the hook SkipSRP set (call it after SkipSRP: SkipSRP replaces the
+// hook).
+func (h *Hub) AlsoOnOpen(f func(l *Local)) {
+	h.mu.Lock()
+	prev := h.onOpen
+	h.onOpen = func(l *Local) {
+		if prev != nil {
+			prev(l)
+		}
+		f(l)
+	}
+	locals := make([]*Local, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		locals = append(locals, a.local)
+	}
+	h.mu.Unlock()
+	for _, l := range locals {
+		f(l)
+	}
+}

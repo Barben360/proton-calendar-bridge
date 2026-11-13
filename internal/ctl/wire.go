@@ -1,5 +1,5 @@
 // Package ctl is the control socket (CTL) of pcb serve: JSON over HTTP/1.1
-// on <state>/pcb.sock, internal and versioned under /v1/, and its client.
+// on <state>/pcb.sock, internal and versioned under /v2/, and its client.
 // Every answer is one output.Envelope: 200 when the command succeeds, 422
 // when it fails (its exit code, message and hint), 400, 403, 404, 405 or
 // 413 for a transport error (ruling M5-Rpre1).
@@ -16,19 +16,40 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
-// Status is what pcb status shows: the login's fields flat at the top level
-// as M1–M4 printed them (ruling M5-P4), then the daemon's live state. Daemon
-// is nil in the offline view, with Health and Listener left out.
+// Status is what GET /v2/status answers: the process (Daemon, Listener),
+// each account and the process-level Alerts (the TLS certificate's);
+// the alerts of an account are its own.
 type Status struct {
-	service.Status
 	Daemon   *Daemon         `json:"daemon"`
-	Health   *service.Health `json:"health,omitempty"`
 	Listener *Listener       `json:"listener,omitempty"`
+	Accounts []AccountStatus `json:"accounts"`
 	Alerts   []Alert         `json:"alerts"`
 }
 
-// TOTPRequest is the body of POST /v1/login/totp: the 2FA code (or the
-// otpauth:// URI) of the login the daemon holds.
+// AccountStatus is one account of Status: its AccountInfo flat, its login,
+// Serve's health for it, the CalDAV URL to enter in a client (empty while
+// no listener is bound) and its alerts.
+type AccountStatus struct {
+	service.AccountInfo
+	Login  service.Status  `json:"login"`
+	Health *service.Health `json:"health,omitempty"`
+	URL    string          `json:"url,omitempty"`
+	Alerts []Alert         `json:"alerts"`
+}
+
+// Accounts is the data of GET /v2/accounts.
+type Accounts struct {
+	Accounts []service.AccountInfo `json:"accounts"`
+}
+
+// CalDAVRequest is the body of POST /v2/accounts/{id}/caldav: the
+// account's CalDAV switch.
+type CalDAVRequest struct {
+	On bool `json:"on"`
+}
+
+// TOTPRequest is the body of POST /v2/accounts/{id}/login/totp: the 2FA
+// code (or the otpauth:// URI) of the login the daemon holds for the account.
 type TOTPRequest struct {
 	Code string `json:"code"`
 }
@@ -46,6 +67,8 @@ func (TOTPRequest) LogValue() slog.Value { return slog.StringValue(redactedTOTP)
 
 // Daemon is the pcb serve process that answers on the socket.
 type Daemon struct {
+	// Kind is "serve" (pcb serve) or "ui" (the desktop app pcb-ui).
+	Kind      string    `json:"kind"`
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
@@ -53,13 +76,14 @@ type Daemon struct {
 	Socket    string    `json:"socket"`
 }
 
-// NewDaemon describes this process: its PID and build version.
-func NewDaemon(socket, logLevel string, startedAt time.Time) Daemon {
-	return Daemon{PID: os.Getpid(), Version: buildinfo.Version, StartedAt: startedAt, LogLevel: logLevel, Socket: socket}
+// NewDaemon describes this process, of kind "serve" or "ui": its PID and
+// build version.
+func NewDaemon(kind, socket, logLevel string, startedAt time.Time) Daemon {
+	return Daemon{Kind: kind, PID: os.Getpid(), Version: buildinfo.Version, StartedAt: startedAt, LogLevel: logLevel, Socket: socket}
 }
 
-// Listener is the CalDAV listener, once bound: its address, the URL to
-// enter in Thunderbird and, over TLS, the certificate's fingerprint and end.
+// Listener is the CalDAV listener, once bound: its address, its base URL
+// (scheme://host:port; an account's URL adds service.AccountPath) and, over TLS, the certificate's fingerprint and end.
 type Listener struct {
 	Addr         string     `json:"addr"`
 	URL          string     `json:"url"`
@@ -69,8 +93,10 @@ type Listener struct {
 }
 
 // Alert is a problem a person should look at (ruling M5-P7). Codes are
-// stable; Calendar is the calendar's ID for a per-calendar alert.
+// stable; Account is the local ID of the account an alert is about (none
+// for a process alert), Calendar the calendar's ID for a per-calendar alert.
 type Alert struct {
+	Account  string `json:"account,omitempty"`
 	Code     string `json:"code"`
 	Severity string `json:"severity"`
 	Message  string `json:"message"`
@@ -112,3 +138,14 @@ const maxPath = sunPathLen - 1
 
 // maxBody is the largest request body.
 const maxBody = 64 << 10
+
+// ShowUIRequest is the body of POST /v2/ui/show: the account whose pane to
+// show (a local ID; none: wherever the window was).
+type ShowUIRequest struct {
+	Account string `json:"account,omitempty"`
+}
+
+// ShowUI is the answer of POST /v2/ui/show.
+type ShowUI struct {
+	Shown bool `json:"shown"`
+}

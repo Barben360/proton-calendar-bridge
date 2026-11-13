@@ -1,6 +1,7 @@
 # pcb as a container (M5-Rpre7, M5-P20): a pure-Go static binary on
 # distroless, non-root, all its files in the /data volume. Log in with
-# docker exec -it <container> pcb login; until then CalDAV answers 503.
+# docker exec -it <container> pcb login; until then no CalDAV client exists
+# (CalDAV answers 401), and while a login is needed again it answers 503.
 
 # golang:1.27-trixie
 FROM golang:1.27-trixie@sha256:c47c3fda018d13d43a6bf5ebac3e5bba8a23a35782aa4faf531afaf47c64c39f AS build

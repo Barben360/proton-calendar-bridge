@@ -10,7 +10,7 @@ import (
 )
 
 // SchemaVersion of the envelope; bumped on any breaking change.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Envelope is the one JSON object a command prints: Data on success, Error
 // on failure.

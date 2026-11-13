@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -42,6 +43,7 @@ type detail struct {
 	final      bool          // a retry cannot help: a person must change something
 	class      string        // the error class Health reports (errorClass), "" when the code says enough
 	login      bool          // a MustAct a login fixes (loginFixes)
+	locked     bool          // the desktop keyring is locked (keyringLocked)
 	switched   bool          // another account is logged in than Serve serves (accountSwitched)
 	// protonStatus and protonCode are what Proton answered when it ended the
 	// session (sessionEndedBy); 0 when it answered nothing.
@@ -111,6 +113,33 @@ func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
 	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
 }
 
+// KeyringFix is what a person does about a locked desktop keyring; the
+// alert's fix says the same.
+const KeyringFix = "unlock it (log in to the desktop session), pcb retries every 30 s"
+
+// keyringLockedError is the Blocked error of a locked desktop keyring: no
+// retry of the same call fixes it, but the desktop session unlocking does.
+func keyringLockedError() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "the desktop keyring is locked", locked: true}, Hint: KeyringFix}
+}
+
+// KeyringUnavailableFix is what a person does when no desktop keyring
+// answers for a state sealed with it; the alert's fix says the same.
+const KeyringUnavailableFix = "run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state"
+
+// keyringUnavailableError is the Blocked error of a secret-service state
+// whose keyring does not answer (seal.ErrNoService, ruling R15): the
+// sealed session is intact, so it never suggests a logout.
+func keyringUnavailableError() *exitcode.Error {
+	return blocked("the desktop keyring is not available", KeyringUnavailableFix)
+}
+
+// keyringLocked reports whether err is keyringLockedError's, by type.
+func keyringLocked(err error) bool {
+	var d *detail
+	return errors.As(err, &d) && d.locked
+}
+
 // loginFixes reports whether err is a MustAct a login fixes: Serve with
 // WaitForLogin waits for one after it; any other stop ends Serve (ruling
 // M5-R8). It reads the type only, never the text.
@@ -149,6 +178,11 @@ func stopsWatch(err error) bool {
 	)
 	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && d.final)
 }
+
+// stopsServe is stopsWatch plus a locked desktop keyring: Serve's watch
+// ends on it and Serve waits for the keyring (keyringRetry). pcb sync
+// --watch keeps its back-off instead.
+func stopsServe(err error) bool { return stopsWatch(err) || keyringLocked(err) }
 
 // retryAfter is how long err asks a watch to wait before the next pass.
 func retryAfter(err error) time.Duration {
@@ -249,6 +283,14 @@ func mapError(err error, keyFile string) error {
 		return rolledBack(rb)
 	case errors.As(err, &use):
 		return unsupportedStore(use)
+	case errors.Is(err, seal.ErrLocked):
+		return keyringLockedError()
+	case errors.Is(err, seal.ErrNoService):
+		return keyringUnavailableError()
+	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
+		return mustAct("the sealing key is not in the desktop keyring", "pcb logout then pcb login")
+	case errors.Is(err, seal.ErrCorrupt) && keyFile == keyringRef:
+		return mustAct("the stored secrets cannot be opened with the key in the desktop keyring", "pcb logout then pcb login")
 	case errors.Is(err, seal.ErrNoKey):
 		return mustAct("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
@@ -368,11 +410,14 @@ func keyFailure(err error, msg, hint string) *exitcode.Error {
 // keyFix is the hint for a key file that cannot be used.
 const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
 
+// keyringFailFix is keyFix's for a key in the desktop keyring that cannot be used.
+const keyringFailFix = "check that the desktop keyring is running and unlocked (pcb doctor)"
+
 // storeError maps a failure of the sealed store: a lost or foreign key names
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack) ||
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
 		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}
@@ -381,6 +426,9 @@ func storeError(err error, keyFile string) error {
 		return mapError(err, keyFile)
 	}
 	if cause := keyCause(err); cause != "" {
+		if keyFile == keyringRef { // a PathError of the sealed file or the state directory, not of a key
+			return keyFailure(err, "cannot use the stored secrets: "+cause, "make sure the state directory and its files are readable and writable by this user (pcb doctor)")
+		}
 		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
@@ -476,4 +524,68 @@ func cacheFailure(err error) *exitcode.Error {
 		return fail(exitcode.Blocked, "the event cache could not be updated", "run pcb doctor to check it, then pcb sync again")
 	}
 	return nil
+}
+
+// SeveralAccountsError is the cause of a refusal to choose an account when
+// several could be meant and none is named. Accounts lists them, sorted by
+// address (--json: data.accounts).
+type SeveralAccountsError struct {
+	Accounts []AccountInfo
+}
+
+func (*SeveralAccountsError) Error() string { return "several accounts: name one with --account" }
+
+// SeveralAccounts is the refusal (Usage) to choose among list, sorted by
+// address, when none is named: its cause is a *SeveralAccountsError.
+func SeveralAccounts(list []AccountInfo) error { return severalAccounts(list) }
+
+func severalAccounts(list []AccountInfo) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: &SeveralAccountsError{Accounts: list},
+		Hint: "name one with --account or PCB_ACCOUNT (pcb account list)"}
+}
+
+// ErrNoAccount is the cause of a refusal to choose an account when none
+// matches: the selector names none (or one since removed), or none is
+// ready to be chosen without a selector.
+var ErrNoAccount = errors.New("no account")
+
+// noAccount is the refusal (Usage) to choose the account selector names,
+// with hint.
+func noAccount(selector, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%w %s", ErrNoAccount, selector), Hint: hint}
+}
+
+// noReadyAccount is the refusal to choose without a selector when no
+// account is ready, with hint: a person must add one or finish a pending
+// login (MustAct, ruling R38).
+func noReadyAccount(hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.MustAct, Err: ErrNoAccount, Hint: hint}
+}
+
+// layoutError maps a failure to read or migrate the state layout of root.
+// legacy names the account files of an older pcb at the root. A layout pcb
+// cannot use needs a person (MustAct, ruling R36, as stateError's): a unit
+// restarted on 20 would loop on it. Its own refusals (exitcode.Error: a
+// lock another pcb holds, Blocked) pass through.
+func layoutError(err error, root string, legacy []string) error {
+	var (
+		ee *exitcode.Error
+		pe *fs.PathError
+	)
+	switch {
+	case errors.As(err, &ee):
+		return err
+	case errors.Is(err, store.ErrLegacyBesideLayout):
+		msg := "account files of an older pcb are beside the per-account layout"
+		if len(legacy) > 0 {
+			msg += ": " + strings.Join(legacy, ", ")
+		}
+		return mustAct(msg+" in "+root, "remove them or move the state directory aside: this pcb version cannot be downgraded")
+	case errors.Is(err, store.ErrNewerLayout), errors.Is(err, store.ErrUnknownSealer):
+		return mustAct("the state layout (layout.json) was written by a newer pcb", "upgrade pcb")
+	case errors.As(err, &pe):
+		return mustAct("cannot use the state layout: "+pe.Op+" "+pe.Path+": "+pe.Err.Error(),
+			"check the permissions of "+root+" and of the files in it")
+	}
+	return mustAct("the state layout in "+root+" is damaged (layout.json, accounts/)", "run pcb doctor")
 }

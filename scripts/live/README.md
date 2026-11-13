@@ -28,7 +28,7 @@ mkdir -p ~/.config/pcb-live && printf 'production <name>\nworkstation <name>\n' 
 
 The guard's refusal of `~/.config/*` concerns pcb's and proton-cal's dirs; this file is only read, never a dir a command writes to.
 
-## `--vm` (step 7 only)
+## `--vm` (steps 7 to 9)
 
 `run.sh --vm` is for the throwaway VM, where pcb deliberately runs with the host's default dirs, so the dir guard cannot apply and `PCB_*_DIR` are removed from the command's environment; its banner says so (the run root, for its `bin` and ledger, and that pcb's default directories are in force) instead of listing the dirs the guard checked. It runs only when `/etc/pcb-live-vm` exists and contains the word `throwaway` (the author creates it on the VM), `systemd-detect-virt` reports a VM or container, and the hosts file lists the host neither as production nor as workstation (any case). The VM needs its own `~/.config/pcb-live/hosts` (the same two lines, so a VM cloned under a listed name is still refused). Its ledger budget is 3. No `pass-cli` or secret exists on the VM: the author types the credentials at the prompts of an interactive `pcb login`.
 

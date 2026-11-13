@@ -110,7 +110,7 @@ func (h *noteHandler) WithGroup(string) slog.Handler { return h }
 
 type loggerKey struct{}
 
-// withLogger is ctx carrying log, the logger NewService gives the service.
+// withLogger is ctx carrying log, the logger IO.OpenHub gives the accounts.
 func withLogger(ctx context.Context, log *slog.Logger) context.Context {
 	return context.WithValue(ctx, loggerKey{}, log)
 }

@@ -22,9 +22,10 @@ func NewRoot() *cobra.Command {
 
 func newRoot(a *app) *cobra.Command {
 	root := Root("pcb", "Proton Calendar to CalDAV bridge",
-		newVersion(), a.newDoctor(), a.newLogin(), a.newLogout(), a.newStatus(), a.newCalendar(), a.newSync(), a.newEvent(), a.newClient(), a.newServe(),
+		newVersion(), a.newDoctor(), a.newLogin(), a.newLogout(), a.newStatus(), a.newAccount(), a.newCalendar(), a.newSync(), a.newEvent(), a.newClient(), a.newServe(),
 		a.newInstall(), a.newUninstall(), a.newService())
 	root.PersistentFlags().Bool("non-interactive", false, "never prompt: exit 10 naming what is missing")
+	addSelector(root)
 	return root
 }
 

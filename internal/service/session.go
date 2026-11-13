@@ -212,6 +212,15 @@ func (l *Local) relogin(ctx context.Context, ended api.Tokens, cause error) (*ap
 	return l.session(ctx)
 }
 
+// beginRelogin runs a relogin's SRP step, under the login guard, unless a
+// test replaced it (skipRelogin).
+func (l *Local) beginRelogin(ctx context.Context, username string, password []byte) (*auth.Pending, error) {
+	if l.skipRelogin != nil {
+		return l.skipRelogin(username)
+	}
+	return auth.Begin(ctx, l.mgr, username, password, "")
+}
+
 // reloginOnce is the login flow with the sealed password and the TOTP code
 // of the sealed URI, under the login guard. A CAPTCHA marks the login
 // needs-captcha and a failure a person must fix (MustAct) needs-login, so no
@@ -234,11 +243,11 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 	defer release()
 	password := []byte(acc.Relogin.Password)
 	defer clear(password)
-	p, err := auth.Begin(ctx, l.mgr, acc.Username, password, "")
+	p, err := l.beginRelogin(ctx, acc.Username, password)
 	var ce *auth.CaptchaError
 	switch {
 	case errors.As(err, &ce):
-		if _, err := l.needsCaptcha(ctx, ce, st, now, acc.Username); err != nil {
+		if _, err := l.needsCaptcha(ctx, ce, st, now, acc.Username, true); err != nil {
 			return err
 		}
 		return phaseError(store.State{Phase: store.PhaseNeedsCaptcha, Captcha: &store.Captcha{URL: ce.URL, Token: ce.Token}})
