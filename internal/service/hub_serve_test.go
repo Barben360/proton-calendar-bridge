@@ -4,10 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,11 +15,15 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 )
+
+// captchaURL is the verification URL of the CAPTCHAs relogins meet here.
+const captchaURL = "https://verify.proton.me/?methods=captcha&token=captcha-a"
 
 // blockSleep is a Sleep that lasts until its context ends: a serve loop
 // runs one pass when it starts, then waits.
@@ -208,23 +208,6 @@ func lockFree(t *testing.T, path string) bool {
 	return ok
 }
 
-// interpose puts a proxy in front of the fake for the services opened
-// next: before sees each request (logins included) before the fake does.
-func (e *hubEnv) interpose(t *testing.T, before func(r *http.Request)) {
-	t.Helper()
-	target, err := url.Parse(e.f.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := &httputil.ReverseProxy{Rewrite: func(pr *httputil.ProxyRequest) { pr.SetURL(target) }}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		before(r)
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	e.cfg.Proton.BaseURL = srv.URL
-}
-
 func syncLock(e *hubEnv, id string) string {
 	return filepath.Join(store.AccountDir(e.dirs.State, id), "sync.lock")
 }
@@ -278,9 +261,12 @@ func TestOneAccountsCaptchaDoesNotStallTheOther(t *testing.T) {
 	a := ra.Account
 	e.mustLogin(t, h, userB)
 	// a's session ends; b logs in again, so only a's is dead. a's relogin
-	// meets a CAPTCHA.
+	// meets a CAPTCHA, with no SRP: under -race an SRP login inside the
+	// wait could outlast it on a busy runner.
 	e.f.RevokeSessions()
-	e.f.SetCaptchaFor(userA, "captcha-a")
+	h.LocalOf(a).SkipReloginSRP(func(string) (api.Tokens, string, error) {
+		return api.Tokens{}, "", service.CaptchaError(captchaURL, "captcha-a")
+	})
 	b := e.mustLogin(t, h, userB).Account
 	e.clk.advance(loginguard.MinInterval + time.Second)
 	r := newServeRig(h)
@@ -590,8 +576,11 @@ func TestSecondServeIsRefused(t *testing.T) {
 
 // The login guard at the root spaces the unattended relogins of two
 // accounts whose sessions ended together: the stamp each attempt took
-// (read as its /auth/v4 call goes out, under the guard's lock) is at least
-// loginguard.MinInterval after the previous one.
+// (read where its SRP step runs, under the guard's lock) is at least
+// loginguard.MinInterval after the previous one. The relogins skip SRP and
+// take sessions opened before Serve starts (the guard is the subject, not
+// the login): under -race, two SRP logins inside the wait for both to pass
+// outlasted it on a busy CI runner.
 func TestReloginsOfTwoAccountsAreSpaced(t *testing.T) {
 	t.Parallel()
 	e := newServeEnv(t)
@@ -601,20 +590,19 @@ func TestReloginsOfTwoAccountsAreSpaced(t *testing.T) {
 		bad    []string
 	)
 	stamp := filepath.Join(e.dirs.State, "last-login")
-	e.interpose(t, func(r *http.Request) {
-		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/auth/v4") {
-			return
-		}
+	fresh := map[string]api.Tokens{} // by username, opened after the revoke
+	relogin := func(username string) (api.Tokens, string, error) {
 		raw, err := os.ReadFile(stamp)
+		at, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
 		mu.Lock()
 		defer mu.Unlock()
-		at, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
 		if err != nil || perr != nil {
 			bad = append(bad, fmt.Sprintf("%v %v", err, perr))
-			return
+		} else {
+			stamps = append(stamps, at)
 		}
-		stamps = append(stamps, at)
-	})
+		return fresh[username], e.f.UserID(username), nil
+	}
 	// Every back-off moves the clock; once both relogged, loops wait.
 	var settled sync.Once
 	quiet := make(chan struct{})
@@ -638,8 +626,14 @@ func TestReloginsOfTwoAccountsAreSpaced(t *testing.T) {
 			t.Fatal(err)
 		}
 		ids = append(ids, res.Account)
+		h.LocalOf(res.Account).SkipReloginSRP(relogin)
 	}
 	e.f.RevokeSessions()
+	mu.Lock()
+	for _, u := range []string{userA, userB} {
+		fresh[u] = e.f.Login(t, u) // SRP, outside the wait
+	}
+	mu.Unlock()
 	e.clk.advance(loginguard.MinInterval + time.Second)
 	r := newServeRig(h)
 	r.serve(t, r.options(true))
@@ -656,11 +650,11 @@ func TestReloginsOfTwoAccountsAreSpaced(t *testing.T) {
 		t.Fatalf("the root login stamp could not be read at a login: %v", bad)
 	}
 	if len(stamps) < 2 {
-		t.Fatalf("%d logins, want one per account", len(stamps))
+		t.Fatalf("%d relogins, want one per account", len(stamps))
 	}
 	for i := 1; i < len(stamps); i++ {
 		if gap := stamps[i].Sub(stamps[i-1]); gap < loginguard.MinInterval {
-			t.Errorf("login %d came %v after the previous one, want at least %v", i, gap, loginguard.MinInterval)
+			t.Errorf("relogin %d came %v after the previous one, want at least %v", i, gap, loginguard.MinInterval)
 		}
 	}
 }
@@ -679,19 +673,23 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	}
 	a := res.Account
 	e.f.RevokeSessions()
+	// The relogin takes a session opened now instead of SRP: under -race
+	// an SRP login inside the wait for its key calls could outlast it.
+	tok := e.f.Login(t, userA)
+	h.LocalOf(a).SkipReloginSRP(func(u string) (api.Tokens, string, error) { return tok, e.f.UserID(u), nil })
 	e.clk.advance(loginguard.MinInterval + time.Second)
 	entered, release := make(chan struct{}), make(chan struct{})
 	h.LocalOf(a).SetKeyPassHook(func([]byte) {
 		close(entered)
 		<-release
 	})
-	api, _, err := h.Account(a)
+	acct, _, err := h.Account(a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := api.Calendars(t.Context())
+		_, err := acct.Calendars(t.Context())
 		done <- err
 	}()
 	select {
@@ -722,25 +720,10 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	t.Parallel()
 	e := newHubEnv(t)
-	var armed sync.Once
-	arm := make(chan struct{})
 	entered, release := make(chan struct{}), make(chan struct{})
 	var freed sync.Once
 	free := func() { freed.Do(func() { close(release) }) }
-	e.interpose(t, func(r *http.Request) {
-		select {
-		case <-arm:
-		default:
-			return
-		}
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/auth/v4") {
-			armed.Do(func() {
-				close(entered)
-				<-release
-			})
-		}
-	})
-	t.Cleanup(free) // before the proxy closes: it waits for the held request
+	t.Cleanup(free) // a relogin still held when the test stops early
 	h := e.open(t)
 	e.skip(t, h)
 	e.clk.advance(loginguard.MinInterval + time.Second)
@@ -750,22 +733,31 @@ func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	}
 	a := res.Account
 	e.f.RevokeSessions()
-	e.f.SetCaptchaFor(userA, "captcha-a")
+	// The relogin is held where its SRP step runs, then meets a CAPTCHA,
+	// with no SRP: under -race an SRP login inside the wait for it could
+	// outlast it on a busy runner.
+	var held sync.Once
+	h.LocalOf(a).SkipReloginSRP(func(string) (api.Tokens, string, error) {
+		held.Do(func() {
+			close(entered)
+			<-release
+		})
+		return api.Tokens{}, "", service.CaptchaError(captchaURL, "captcha-a")
+	})
 	e.clk.advance(loginguard.MinInterval + time.Second)
-	close(arm)
-	api, _, err := h.Account(a)
+	acct, _, err := h.Account(a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := api.Calendars(t.Context())
+		_, err := acct.Calendars(t.Context())
 		done <- err
 	}()
 	select {
 	case <-entered:
 	case <-time.After(waitLimit):
-		t.Fatal("the relogin never sent its login")
+		t.Fatal("the relogin never reached its SRP step")
 	}
 	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
 		t.Fatal(err)

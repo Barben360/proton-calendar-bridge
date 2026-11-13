@@ -130,6 +130,9 @@ type Local struct {
 	wipeHook     func()                                 // runs in Logout just before the wipe
 	serveHook    func()                                 // runs between a ready login check and serveOn
 	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer
+
+	// skipRelogin replaces an unattended relogin's SRP step when set.
+	skipRelogin func(username string) (*auth.Pending, error)
 }
 
 // cachedClient is the one API client of a stored session, so its limiter and

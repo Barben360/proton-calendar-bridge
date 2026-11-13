@@ -133,6 +133,30 @@ func (l *Local) SkipSRP(session func(username string) (api.Tokens, string)) {
 	}
 }
 
+// SkipReloginSRP makes the unattended relogins take what SRP would answer
+// from relogin, called under the login guard where SRP would run: a
+// session (its tokens and user ID; all that follows SRP runs as usual), or
+// an error as auth.Begin's (CaptchaError: Proton asks for a CAPTCHA). The
+// stored password is not checked. nil restores SRP. Set it before the
+// relogin.
+func (l *Local) SkipReloginSRP(relogin func(username string) (api.Tokens, string, error)) {
+	if relogin == nil {
+		l.skipRelogin = nil
+		return
+	}
+	l.skipRelogin = func(username string) (*auth.Pending, error) {
+		tok, id, err := relogin(username)
+		if err != nil {
+			return nil, err
+		}
+		return auth.Resume(l.mgr, tok, id), nil
+	}
+}
+
+// CaptchaError is the error a login's SRP step returns when Proton asks for
+// a CAPTCHA, its verification URL and token as given.
+func CaptchaError(url, token string) error { return &auth.CaptchaError{URL: url, Token: token} }
+
 // SetKeyPassHook makes fn see the key passphrase a login derives, before it
 // is sealed (to check that it is zeroed after). Set it before Login.
 func (l *Local) SetKeyPassHook(fn func(keyPass []byte)) { l.keyPassHook = fn }
