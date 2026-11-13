@@ -47,8 +47,10 @@ const (
 )
 
 // Options configure a page. Username and Hub are required; TTL defaults to
-// DefaultTTL, Now to time.Now. Unattended is the unattended-relogin box's
-// first state (the person decides).
+// DefaultTTL, Now to time.Now. Unattended is the agent's suggestion of
+// unattended relogin: shown as a note, never as a ticked box (the person
+// decides, as in pcb login and pcb-ui, and a ticked box would refuse a
+// 2FA person's one-time code).
 type Options struct {
 	Username   string
 	Unattended bool
@@ -157,7 +159,7 @@ func (p *page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Header.Get("Origin") != "" && r.Header.Get("Origin") != p.origin:
 		plain(w, http.StatusForbidden, "this page accepts forms from itself only")
 		return
-	case r.URL.Path != p.path:
+	case subtle.ConstantTimeCompare([]byte(r.URL.Path), []byte(p.path)) != 1: // the nonce is a secret
 		plain(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -282,11 +284,12 @@ type view struct {
 	Err        string
 	Hint       string
 	CaptchaURL string
-	Unattended bool
+	Suggested  bool   // the agent suggested unattended relogin
+	Warning    string // the keyring warning shown with the box
 }
 
 func (p *page) render(w http.ResponseWriter, step loginflow.Step) {
-	v := view{Username: p.o.Username, Step: string(step), Unattended: p.o.Unattended}
+	v := view{Username: p.o.Username, Step: string(step), Suggested: p.o.Unattended, Warning: loginflow.UnattendedWarning}
 	if step != loginflow.StepDone && step != stepCancelled {
 		if e := p.flow.Err(); e != nil {
 			v.Err, v.Hint = e.Error(), e.Hint
@@ -312,7 +315,9 @@ label{display:block;margin:.8rem 0}input[type=password],input[type=text]{width:1
 {{if eq .Step "credentials"}}<form method="post">
 <input type="hidden" name="step" value="credentials">
 <label>Proton password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
-<label><input type="checkbox" name="unattended" value="1"{{if .Unattended}} checked{{end}}> Repair the session without me (unattended relogin: pcb keeps the password, sealed)</label>
+<label><input type="checkbox" name="unattended" value="1"> Repair the session without me (unattended relogin: pcb keeps the password, sealed)</label>
+<p class="note">If ticked: {{.Warning}}. With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code.</p>
+{{if .Suggested}}<p class="note">The agent suggests unattended relogin. Tick the box only if you want it.</p>{{end}}
 <button type="submit">Sign in</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
 </form>
 {{else if eq .Step "totp"}}<form method="post">

@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginflow"
 )
 
@@ -20,9 +19,10 @@ const (
 )
 
 // UnattendedWarning is the line pcb doctor prints when unattended relogin is
-// on (one format, shared with internal/doctor): the wizard shows it next to
-// the unattended-relogin checkbox.
-var UnattendedWarning = doctor.UnattendedKeyringWarning("secrets.sealed")
+// on (one format, shared with internal/doctor and with the MCP login page
+// through loginflow): the wizard shows it next to the unattended-relogin
+// checkbox.
+var UnattendedWarning = loginflow.UnattendedWarning
 
 // doneTimeout bounds what Done reads from the Bridge.
 const doneTimeout = 10 * time.Second

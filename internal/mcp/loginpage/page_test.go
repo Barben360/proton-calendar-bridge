@@ -2,7 +2,10 @@ package loginpage_test
 
 import (
 	"errors"
+	"go/ast"
 	"go/build"
+	"go/parser"
+	"go/token"
 	"html"
 	"io"
 	"net"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginflow"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp/loginpage"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -469,5 +473,71 @@ func TestLoginPageArch(t *testing.T) {
 		if ours == 0 {
 			t.Errorf("GOOS=%s: no import of this module: the check would pass vacuously", goos)
 		}
+	}
+}
+
+// Review C M1: the unattended-relogin box is never ticked for the person,
+// as in pcb login and pcb-ui; an agent's suggestion is a note, and the box
+// carries pcb-ui's keyring warning. A person with 2FA who leaves it
+// unticked finishes with a 6-digit code.
+func TestLoginPageNeverTicksUnattended(t *testing.T) {
+	box := regexp.MustCompile(`<input type="checkbox" name="unattended"[^>]*>`)
+	for _, suggested := range []bool{true, false} {
+		l := newLab(t)
+		uri := l.f.SetTwoFA(l.f.Username, true)
+		o := l.options(nil)
+		o.Unattended = suggested
+		p := start(t, o)
+		_, body := p.get(false)
+		m := box.FindString(body)
+		if m == "" || strings.Contains(m, "checked") {
+			t.Errorf("suggested %t: box %q, want it present and unticked", suggested, m)
+		}
+		if got := strings.Contains(body, "The agent suggests unattended relogin"); got != suggested {
+			t.Errorf("suggested %t: the page shows the agent's suggestion: %t\n%s", suggested, got, body)
+		}
+		if !strings.Contains(body, html.EscapeString(loginflow.UnattendedWarning)) {
+			t.Errorf("suggested %t: no keyring warning next to the box:\n%s", suggested, body)
+		}
+		p.post("credentials", "password", l.f.Password)
+		_, body = p.post("totp", "code", totpCode(t, uri))
+		if !strings.Contains(body, "added") {
+			t.Fatalf("suggested %t: a 6-digit code did not finish the login:\n%s", suggested, body)
+		}
+	}
+}
+
+// Review C M4: the nonce in the path is a secret, compared in constant
+// time (subtle.ConstantTimeCompare), never with == or !=. The timing is
+// not observable in a test, so this reads the code.
+func TestLoginPageComparesTheNonceInConstantTime(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "page.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isPath := func(e ast.Expr) bool {
+		s, ok := e.(*ast.SelectorExpr)
+		return ok && s.Sel.Name == "path"
+	}
+	constant := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.BinaryExpr:
+			if (n.Op == token.EQL || n.Op == token.NEQ) && (isPath(n.X) || isPath(n.Y)) {
+				t.Errorf("page.go compares a path with %s", n.Op)
+			}
+		case *ast.CallExpr:
+			if s, ok := n.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "ConstantTimeCompare" {
+				for _, a := range n.Args {
+					if c, ok := a.(*ast.CallExpr); ok && len(c.Args) == 1 && isPath(c.Args[0]) {
+						constant++
+					}
+				}
+			}
+		}
+		return true
+	})
+	if constant == 0 {
+		t.Error("page.go never compares the nonce's path with subtle.ConstantTimeCompare")
 	}
 }

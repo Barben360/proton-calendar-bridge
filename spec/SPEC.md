@@ -1376,7 +1376,10 @@ step 10, not run yet.
   - any other (a session daemon, `pcb serve` reached by relay) opens a page for this one login at
     `http://127.0.0.1:<ephemeral port>/login/<128-bit nonce>` (never the `[caldav]` address): Host and Origin
     checked (403), `Cache-Control: no-store`, the username shown read-only, then the password, the 2FA code or the
-    CAPTCHA link; the first form post claims the page with a cookie and any other browser gets 410; it closes when the
+    CAPTCHA link, the unattended-relogin box always unticked with `pcb-ui`'s keyring warning (an agent's
+    `unattended_relogin: true` is a note, "The agent suggests unattended relogin", so a person with 2FA finishes with a
+    6-digit code) [verified: `TestLoginPageNeverTicksUnattended`], the nonce compared in constant time [verified:
+    `TestLoginPageComparesTheNonceInConstantTime`]; the first form post claims the page with a cookie and any other browser gets 410; it closes when the
     login ends, on Cancel, after 5 minutes or when replaced, removing a half-way add [verified: `TestLoginPageBindsLoopbackWithANonce`,
     `TestLoginPageSingleUse`, `TestLoginPageExpires`, `TestLoginPageRefusesForeignHostAndOrigin`, `TestLoginPageNoStore`,
     `TestLoginPageNeverEchoesThePassword`, `TestLoginPageRunsTOTPAndCaptchaSteps`, `TestLoginPageStopCancels`]. A client that

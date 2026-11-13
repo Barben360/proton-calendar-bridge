@@ -170,7 +170,6 @@ Known limits found in review (the ledger `.superpowers/sdd/2026-11-13-m8-mcp/pro
 - The login cooldown (60 s per MCP session) is consumed even when raising `pcb-ui`'s wizard or opening the page then fails: the agent waits a minute to retry.
 - The loopback page is not stopped when its MCP session closes: it lives until the login ends, Cancel, or its 5-minute TTL (it stays bound to 127.0.0.1 and single-use meanwhile).
 - `pcb-ui`'s `ShowLogin` re-opens the wizard on the credentials step and discards what the person had typed there (`internal/ui/desktop/window.go`); a login past that step (2FA, CAPTCHA, done) is kept.
-- An agent's `unattended_relogin: true` pre-ticks the page's "Repair the session without me" box (the person can untick it; unticked by default).
 - `NotifyElicitationComplete` is not sent when the page's login ends (a relay drops notifications outside a request); the agent reads the phase with `status`.
 - `pcb mcp` cannot be wrapped by `scripts/live/run.sh`: the guard prints its `live guard ok` lines on stdout, which carries the MCP session, so step 10 registers the run root's `pcb` directly (after a `live --vm` check on the same VM).
 - Remote: no test that a token removed or expired in mid-session gets 401 on its next request (each request is verified, so it should); no `/mcp` test over TLS on a non-loopback bind or with an absolute-form request URI; `Touch` errors are dropped silently; `LiveSessions` stops counting a session whose server left the per-grant cache (past 256 grants, the cache is cleared whole).

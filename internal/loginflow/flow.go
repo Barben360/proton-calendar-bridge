@@ -45,6 +45,12 @@ const (
 	StepDone        Step = "done"
 )
 
+// UnattendedWarning is the line shown next to the unattended-relogin box
+// (pcb-ui's wizard, the MCP login page): pcb doctor's for a state sealed
+// with the desktop keyring (doctor.UnattendedKeyringWarning, which a test
+// of internal/ui compares it with).
+const UnattendedWarning = "unattended relogin is on: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account"
+
 // cancelTimeout bounds what Cancel does with the Hub.
 const cancelTimeout = 10 * time.Second
 
