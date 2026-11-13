@@ -609,6 +609,33 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 			t.Errorf("title edit: Notifications = %s, want the parts' reminder sent", got.field("Notifications"))
 		}
 	})
+	t.Run("a row without Notifications whose VALARM is changed", func(t *testing.T) {
+		// The parts hold -PT30M. A changed alarm is sent as an explicit
+		// list, also when it equals the calendar's defaults (-PT15M):
+		// null would follow later changes of the defaults.
+		alarm30 := with(t, alarm15, map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"})
+		parts := masterParts()
+		parts[ical.SharedEncrypted] = frag(append([]string{"UID:" + planUID, stamp, "DESCRIPTION:Daily sync", "SUMMARY:Standup", "X-MOZ-GENERATION:3"}, alarm30...)...)
+		bare := seed{id: "row-w", parts: parts, fields: map[string]any{"Notifications": nil}}.row(t)
+		gw := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
+		served := with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"})
+		if p := plan(t, gw, cal(served)); len(p.Ops) != 0 {
+			t.Errorf("unchanged body: ops = %s, want none", describe(p))
+		}
+		for _, c := range []struct{ trigger, want string }{
+			{"-PT1H", `[{"Type":1,"Trigger":"-PT1H"}]`},
+			{"-PT15M", `[{"Type":1,"Trigger":"-PT15M"}]`},
+		} {
+			p := plan(t, gw, cal(with(t, served, map[string]string{"TRIGGER:-PT30M": "TRIGGER:" + c.trigger})))
+			if len(p.Ops) != 1 || p.Ops[0].Update == nil {
+				t.Errorf("the alarm changed to %s: ops = %s, want one update", c.trigger, describe(p))
+				continue
+			}
+			if got := open(t, p.Ops[0], &bare).field("Notifications"); got != c.want {
+				t.Errorf("the alarm changed to %s: Notifications = %s, want %s sent", c.trigger, got, c.want)
+			}
+		}
+	})
 	t.Run("a custom list read back is kept as stored", func(t *testing.T) {
 		custom := seed{id: "row-c", parts: masterParts(), notifications: `[{"Type":0,"Trigger":"-PT1H"}]`}.row(t)
 		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
@@ -1840,8 +1867,23 @@ func TestASeriesWriteGivesAMasterWithoutSequenceItsSequence(t *testing.T) {
 			t.Errorf("%s: ops = %s, want %s", c.name, got, c.want)
 			continue
 		}
-		if got := seqOf(open(t, p.Ops[0], &m)); got != "SEQUENCE:0" {
-			t.Errorf("%s: the master's %q, want SEQUENCE:0", c.name, got)
+		got := open(t, p.Ops[0], &m)
+		if s := seqOf(got); s != "SEQUENCE:0" {
+			t.Errorf("%s: the master's %q, want SEQUENCE:0", c.name, s)
+		}
+		// Only SEQUENCE is added: every other line of the master, in
+		// every part, comes back as stored.
+		if len(got.parts) != len(parts) {
+			t.Errorf("%s: the master has %d part kinds, want %d", c.name, len(got.parts), len(parts))
+		}
+		for k, text := range parts {
+			have := got.parts[k]
+			if k == ical.SharedSigned {
+				have = strings.Replace(have, "\r\nSEQUENCE:0", "", 1)
+			}
+			if have != text {
+				t.Errorf("%s: the master's %s, SEQUENCE:0 aside =\n%q\nwant as stored\n%q", c.name, k, have, text)
+			}
 		}
 	}
 }
