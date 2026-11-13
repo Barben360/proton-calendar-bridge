@@ -486,7 +486,7 @@ func parseWhen(p *Property, value string, n *notes) (when, *Refusal) {
 		p.Params = setParam(p.Params, "TZID", name)
 		n.add(noteMozilla)
 	}
-	t, err := time.ParseInLocation(localLayout, value, loc)
+	t, err := parseWall(value, loc)
 	if err != nil {
 		return when{}, refuse(BadData, "a malformed DATE-TIME")
 	}
@@ -634,27 +634,9 @@ var (
 // malformed rule is BadData. Whether DTSTART is one of the rule's
 // occurrences is StartOffRule's, which the planner applies.
 func checkRRule(rule string, start when) *Refusal {
-	parts := map[string]string{}
-	for kv := range strings.SplitSeq(rule, ";") {
-		k, v, ok := strings.Cut(kv, "=")
-		k = strings.ToUpper(k)
-		if !ok || k == "" || v == "" {
-			return refuse(BadData, "a malformed RRULE")
-		}
-		if _, dup := parts[k]; dup {
-			return refuse(BadData, "an RRULE part given twice")
-		}
-		parts[k] = v
-	}
-	freq, ok := parts["FREQ"]
-	if !ok {
-		return refuse(BadData, "an RRULE without FREQ")
-	}
-	freq = strings.ToUpper(freq)
-	switch freq {
-	case "DAILY", "WEEKLY", "MONTHLY", "YEARLY":
-	default:
-		return refuse(UnsupportedRecurrence, "RRULE FREQ is not DAILY, WEEKLY, MONTHLY or YEARLY")
+	parts, freq, r := rruleParts(rule)
+	if r != nil {
+		return r
 	}
 	if v, ok := parts["INTERVAL"]; ok {
 		if !isCount(v) || atoi(v) == 0 {
@@ -685,6 +667,42 @@ func checkRRule(rule string, start when) *Refusal {
 			return refuse(UnsupportedRecurrence, "RRULE UNTIL after 2037-12-31")
 		}
 	}
+	return rruleShape(freq, parts)
+}
+
+// rruleParts splits an RRULE into its parts (names upper-cased) and returns
+// FREQ upper-cased: a malformed rule is BadData, a FREQ other than DAILY,
+// WEEKLY, MONTHLY or YEARLY UnsupportedRecurrence.
+func rruleParts(rule string) (map[string]string, string, *Refusal) {
+	parts := map[string]string{}
+	for kv := range strings.SplitSeq(rule, ";") {
+		k, v, ok := strings.Cut(kv, "=")
+		k = strings.ToUpper(k)
+		if !ok || k == "" || v == "" {
+			return nil, "", refuse(BadData, "a malformed RRULE")
+		}
+		if _, dup := parts[k]; dup {
+			return nil, "", refuse(BadData, "an RRULE part given twice")
+		}
+		parts[k] = v
+	}
+	freq, ok := parts["FREQ"]
+	if !ok {
+		return nil, "", refuse(BadData, "an RRULE without FREQ")
+	}
+	freq = strings.ToUpper(freq)
+	switch freq {
+	case "DAILY", "WEEKLY", "MONTHLY", "YEARLY":
+	default:
+		return nil, "", refuse(UnsupportedRecurrence, "RRULE FREQ is not DAILY, WEEKLY, MONTHLY or YEARLY")
+	}
+	return parts, freq, nil
+}
+
+// rruleShape refuses the parts and WKST outside Proton's set for freq
+// (ruling M4-R10), whatever the numeric limits: checkRRule uses it for
+// writes, Expand for rules already stored.
+func rruleShape(freq string, parts map[string]string) *Refusal {
 	for k := range parts {
 		if !allowedParts[freq][k] {
 			return refuse(UnsupportedRecurrence, "an RRULE part Proton does not support for this FREQ")

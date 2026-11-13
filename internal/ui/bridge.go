@@ -14,10 +14,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -40,6 +42,10 @@ type BridgeOptions struct {
 	// socket has no ui/show). It never blocks the daemon: each call runs on
 	// its own goroutine.
 	ShowUI func(account string)
+	// ShowLogin raises the window's add-account wizard with username filled
+	// in, for an agent's login tool (nil: the tool opens a loopback page
+	// instead). It runs on its own goroutine, like ShowUI.
+	ShowLogin func(username string)
 	// Listen opens the CalDAV listener (nil: net.Listen).
 	Listen func(network, addr string) (net.Listener, error)
 	// Keyring is the desktop keyring a state sealed with it uses (nil: the
@@ -198,10 +204,17 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		// callback runs on a goroutine of its own and the answer is "shown".
 		showUI = func(account string) error { go b.o.ShowUI(account); return nil } //nolint:unparam // daemon.Options.ShowUI has an error to return
 	}
+	var showLogin func(string) error
+	if b.o.ShowLogin != nil {
+		// The MCP tool's handler must not wait for the window.
+		showLogin = func(username string) error { go b.o.ShowLogin(username); return nil } //nolint:unparam // mcp.Options.ShowLogin has an error to return
+	}
 	go func() {
 		defer cancel()
 		err := daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
+			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
+				ShowLogin: showLogin}),
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI,
 			OnState: func(string, service.ServeState) { b.poke() },
 			// The same records as pcb serve's, for the same log file content.
@@ -338,24 +351,38 @@ func (b *Bridge) Restart(ctx context.Context) error {
 // the caller exits 0.
 var ErrShown error = &exitcode.Error{Code: exitcode.OK, Err: errors.New("pcb-ui already runs; its window is shown")}
 
-// ServeRunningError is what Probe returns when a pcb serve daemon serves the
-// state directory: exit 20, with the hint to stop it.
-type ServeRunningError struct{ PID int }
+// ServeRunningError is what Probe returns when another daemon serves the
+// state directory: exit 20, with the hint to stop it. Kind is the daemon's
+// kind: "mcp" is an agent session (pcb mcp), to be ended; any other is
+// named as pcb serve.
+type ServeRunningError struct {
+	PID  int
+	Kind string
+}
+
+// mcpKind is the kind of pcb mcp's session daemon.
+const mcpKind = "mcp"
 
 func (e *ServeRunningError) Error() string {
+	if e.Kind == mcpKind {
+		return fmt.Sprintf("an agent session (pcb mcp, PID %d, kind mcp) already serves this state directory", e.PID)
+	}
 	return fmt.Sprintf("pcb serve (PID %d) already serves this state directory", e.PID)
 }
 
 // Unwrap gives the exit code and the hint.
 func (e *ServeRunningError) Unwrap() error {
-	return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New(e.Error()),
-		Hint: "stop it (pcb service stop when installed as a service) and start pcb-ui again"}
+	hint := "stop it (pcb service stop when installed as a service) and start pcb-ui again"
+	if e.Kind == mcpKind {
+		hint = "end the agent session (pcb mcp), then try again"
+	}
+	return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New(e.Error()), Hint: hint}
 }
 
 // Probe asks the daemon on the state directory's control socket who it is:
 // nil when none answers; ErrShown after a ui daemon showed its window
 // (account selects what to show, "" for none); *ServeRunningError for a serve
-// daemon. It is a fast path: Start still fails on serve.lock when another
+// daemon or an agent session (kind mcp). It is a fast path: Start still fails on serve.lock when another
 // process wins the race.
 func Probe(ctx context.Context, env func(string) string, account string) error {
 	dirs, err := daemon.ResolveDirs(env)
@@ -383,5 +410,5 @@ func Probe(ctx context.Context, env func(string) string, account string) error {
 		}
 		return ErrShown
 	}
-	return &ServeRunningError{PID: st.Daemon.PID}
+	return &ServeRunningError{PID: st.Daemon.PID, Kind: st.Daemon.Kind}
 }

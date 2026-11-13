@@ -16,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginflow"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
@@ -94,6 +95,35 @@ func TestWizardPlainLogin(t *testing.T) {
 	}
 	if w.PasswordBuf() != nil {
 		t.Errorf("the wizard still holds the password after the login")
+	}
+}
+
+// The wizard is pcb-ui's face of the shared loginflow.Flow (ruling R18): a
+// CAPTCHA then a 2FA code walk the same steps against the Bridge's Hub, and
+// Done reads the new account's connection from the Bridge.
+func TestWizardStillDrivesTheDesktop(t *testing.T) {
+	l := newLab(t)
+	b := l.start(t)
+	uri := l.f.SetTwoFA(l.f.Username, true)
+	l.f.SetCaptchaFor(l.f.Username, "tok")
+	w := ui.NewWizard(b)
+	flow := w.Flow // the wizard runs the shared flow
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepCaptcha {
+		t.Fatalf("Submit: %v, Step %q", err, w.Step())
+	}
+	l.forgetLastLogin(t)
+	if err := w.CaptchaSolved(t.Context()); err != nil || w.Step() != ui.StepTOTP {
+		t.Fatalf("CaptchaSolved: %v, Step %q", err, w.Step())
+	}
+	if err := w.SubmitTOTP(t.Context(), totpCode(t, uri)); err != nil || flow.Step() != loginflow.StepDone {
+		t.Fatalf("SubmitTOTP: %v, Step %q", err, flow.Step())
+	}
+	view, pw := w.Done()
+	if view.ID == "" || view.ID != flow.Account() || pw == "" {
+		t.Fatalf("Done = %+v, %q; flow account %q", view, pw, flow.Account())
+	}
+	if got := l.status(t, b, view.ID, pw); got == http.StatusUnauthorized {
+		t.Errorf("the shown password is refused: %d", got)
 	}
 }
 

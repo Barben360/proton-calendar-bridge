@@ -15,9 +15,10 @@ it as a CalDAV server. Proton Calendar is end-to-end encrypted and has no
 public API, no CalDAV, and no official bridge [verified:
 proton.me/support/subscribe-to-external-calendar, 2026-11-10].
 
-**Scope of this spec: a connectable CalDAV interface, nothing more**
-[decided 0007]. Other adapters (REST, MCP, `.ics` feeds) are not planned;
-the architecture only keeps the door open for them (§4).
+**Scope of this spec: a connectable CalDAV interface** [decided 0007] **and,
+since M8, an MCP adapter for AI agents** [decided 0016, which amends 0007
+for MCP]. Other adapters (REST, `.ics` feeds) are not planned; the
+architecture only keeps the door open for them (§4).
 
 Success means:
 1. Thunderbird shows every calendar of the account, and two-way edits
@@ -31,6 +32,12 @@ Success means:
    CAPTCHA; then one URL to solve from any device and one command resume it.
 5. No silent data loss: an event that cannot be represented faithfully is
    refused or flagged, never mangled (§8.4).
+6. (M8) An agent reads and edits the calendars it is granted through MCP,
+   on this machine over stdio (`pcb mcp`) or from another one with a bearer
+   token, and never handles a Proton secret: a login it starts is finished
+   by the person, in `pcb-ui`'s wizard or a one-time page on 127.0.0.1
+   (§12) [decided 0016; built and tested against the fake Proton, with a
+   real agent client `[assumed → step 10]`].
 
 ## 2. Principles
 
@@ -63,15 +70,18 @@ Goals: CalDAV read/write for owned calendars; read-only for subscribed and
 holidays calendars; login with password, or password + TOTP [decided
 0010]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); several Proton
-accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
+accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); an MCP adapter for agents (M8, decision 0016: stdio and remote, grants per agent, login finished by the person, §12); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
 Windows only build, and the CLI there runs offline (§13, "Platforms").
 
-Not planned (not designed here): REST API, MCP, `.ics` feeds, event
+Not planned (not designed here): REST API, `.ics` feeds, event
 commands in the CLI (Thunderbird is the client), updates/signed
 releases (while private), shared calendars, invitations, two-password mode,
 FIDO2, CardDAV, macOS/Windows service management, a GUI on Windows or macOS (`pcb-ui` is Linux only; Windows is next, macOS is not planned). The desktop app
 `pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
-`spec/designs/2026-11-12-multi-account-and-ui-design.md`.
+`spec/designs/2026-11-12-multi-account-and-ui-design.md`. MCP is built (M8; "not planned"
+before it), designed in `spec/designs/2026-11-13-mcp-design.md`; out of it stay OAuth (claude.ai and
+mobile connectors), any login over remote MCP, invitations and RSVP, calendar management, and MCP
+resources, prompts and sampling (tools only).
 
 Anti-goals (failure even if it works):
 - Plaintext calendar data or reusable credentials on disk unsealed.
@@ -80,21 +90,27 @@ Anti-goals (failure even if it works):
   loops, unbounded polling).
 - Silent lossy round-trips (an edit in Thunderbird that drops alarms or
   exceptions in Proton).
+- (M8) A secret in an agent's reach: a Proton password, 2FA code or CAPTCHA token in a tool
+  argument, result or the agent's transcript; an MCP token anywhere after `pcb mcp token add`
+  printed it (§12, §19).
 
 ## 4. Architecture
 
 ```
                  ┌──────────────── pcb daemon (every account) ───────────────────┐
  Thunderbird ──▶ │ A1 CalDAV ──▶ C3 service (use cases, access checks)            │
+ remote agent ─▶ │ A4 MCP /mcp ─▶│  (M8: listener, bearer token)                 │
                  │                    │                                           │
  pcb CLI ──────▶ │ control API ──────▶│   C4 sync engine                          │
- (unix socket)   │ (internal)         │        │                                  │
+ (unix socket)   │ (internal; /mcp:   │        │                                  │
+ pcb mcp relay ─▶│  A4 for stdio)     │                                           │
                  │               C2 store (cache, state, sealed secrets)          │
                  │                    │                                           │
                  │               C1 proton (transport, auth, keys, calendar API,  │
                  │                    change feed, codecs: model ⇄ Proton)        │
                  └───────────────────────────────────────────────────────────────┘
- Later adapters (REST, MCP, .ics) would plug into C3 like A1; not planned.
+ pcb mcp with no daemon runs this same daemon itself (kind mcp, no listener, §12).
+ Later adapters (REST, .ics) would plug into C3 like A1 and A4; not planned.
 ```
 
 Binary name: `pcb` [call; short, no "proton" in it, rename-proof].
@@ -108,12 +124,16 @@ Blocks and their contracts:
 | C2 store | SQLite cache of ciphertext rows and sync state; sealed secret store | `store.Cache`, `store.Secrets` | modernc.org/sqlite (pure Go) [call], C0 |
 | C3 service | Use cases: list/get/search/create/update/delete events, calendars, free-busy (local), login flows; applies C5 | `service.API` (Go interface, the only thing adapters call) | C1, C2, C4, C5 |
 | C4 sync | Initial and incremental sync, write queue, conflict detection, backoff | `sync.Engine` | C1, C2 |
-| C5 access | CalDAV client credentials (app passwords), read-only enforcement for subscribed/holidays calendars; per-client grants designed but not built | `access.Check(client, op, calendar)` | C2 |
+| C5 access | CalDAV client credentials (app passwords), read-only enforcement for subscribed/holidays calendars; per-client grants designed but not built; MCP bearer tokens with their grants (M8, `access.TokenStore`, hash only) | `access.Check(client, op, calendar)`, `access.TokenStore` | C2 |
 | C6 daemon | Process lifecycle, listeners, config, logs, metrics, health | `pcb serve` | all |
 | A1 | CalDAV adapter (§9) | CalDAV | C3 only |
-| CTL | Control API for the CLI: JSON over HTTP on a unix socket, internal, versioned, not a public API | `pcb` subcommands | C3, C6 |
+| A4 | MCP adapter (§12, M8): tools, grants, untrusted marking, audit, the loopback login page; built on the official Go SDK | MCP over streamable HTTP (`/mcp`) and stdio | C3 only, `internal/access` (token types), `internal/loginflow` [verified: `TestMCPArch`, `TestLoginPageArch`] |
+| CTL | Control API for the CLI: JSON over HTTP on a unix socket, internal, versioned, not a public API; since M8 it also carries A4's `/mcp` route for `pcb mcp` relays, as an opaque handler | `pcb` subcommands | C3, C6 |
 
-Rule: adapters never import C1, C2 or C4; they only call `service.API`. Since M6
+Rule: adapters never import C1, C2 or C4; they only call `service.API` (A4 also `service.Hub`'s
+`Agenda`, the structured event layer of M8: event view, occurrences in a range, edits as patches).
+`internal/mcp` never imports `internal/ui`: the login state machine both use is `internal/loginflow`
+(ruling R18) [verified: `TestMCPArch`, `TestLoginflowArch`]. Since M6
 a second account is a second `service.Local` in the same process, held by
 `service.Hub` (decision 0014; built, below).
 
@@ -138,12 +158,12 @@ a second account is a second `service.Local` in the same process, held by
   touches the root `sync.lock`, so CLI commands work while a daemon serves (R2)
   [verified: `TestOpenHubIgnoresSyncLockOnLayoutV2`, `TestOpenHubRefusesWhileM5SyncLockHeld`].
 - **One loop per account.** `Hub.Serve` runs one `Local.Serve` per account that is not
-  pending and has its CalDAV adapter on, each in its own goroutine and always waiting for a
+  pending and has either adapter (CalDAV, MCP; M8) on, each in its own goroutine and always waiting for a
   login when it has none (R3; the process exit rule below is the Hub's own). An account
   added, completed or switched on while serving starts its loop at once; a removed or
   switched-off one has its loop stopped (and waited for) first (R18)
   [verified: `TestServeRunsEveryAccount`, `TestAddedAccountStartsServing`,
-  `TestRemovedAccountStopsFirst`, `TestCalDAVOffPausesTheLoop`]. One account's CAPTCHA or
+  `TestRemovedAccountStopsFirst`, `TestBothAdaptersOffPausesTheLoop`]. One account's CAPTCHA or
   failure never stalls or stops another [verified: `TestOneAccountsCaptchaDoesNotStallTheOther`].
 - **Parked accounts.** A loop that ends on an error its context did not cause (a damaged
   cache: exit code 10, as the single account of M5 (R21)) is **parked**: `AccountInfo.Stopped`
@@ -163,7 +183,9 @@ a second account is a second `service.Local` in the same process, held by
   it, it refuses to start when no account is logged in (exit 10; the only account's own error when
   there is one) and exits with the first stopped account's code once **every** account that is not
   pending has stopped (parked, or waiting for a login); with one account that is the M5 behaviour.
-  An account with CalDAV off counts as running [verified: `TestServeExitsWhenEveryAccountStopped`,
+  An account with either adapter on is served and counts as any served account does (M8: one with
+  CalDAV off and MCP on whose login ends has stopped); one with both off, its loop paused, counts as
+  running [verified: `TestServeExitRuleCountsMCPOnAsRunning`, `TestServeExitsWhenEveryAccountStopped`,
   `TestServeRefusesWithNoLoggedInAccount`, `TestServeWithoutTheFlagExitsWhenTheOnlyAccountNeedsALogin`,
   `TestServeWaitForLoginParksAnUnreadableAccount`, `TestServeWaitsForALoginWithNoAccount`].
 - **Adding, relogin, pending.** `Hub.Login` takes the username: an account whose address matches
@@ -209,15 +231,27 @@ a second account is a second `service.Local` in the same process, held by
   CalDAV client (decision 0013).
 - **Adapters switch.** `pcb account caldav on|off` writes `caldav` (a boolean; absent, as in an M5
   `state.json`, means on) into the account's `state.json`; the design's `adapters: {"caldav": ...}`
-  became this one key, CalDAV being the only adapter. Off: CalDAV refuses the account's clients (401)
-  and its loop pauses; on: the loop resumes with a pass at once, and a switch made while a relogin runs
-  is kept (R19) [verified: `TestSetCalDAVPersists`, `TestCalDAVSwitchDuringAReloginIsKept`,
-  `TestCalDAVSwitchDuringACaptchaReloginIsKept`].
+  became this one key. M8 adds `pcb account mcp on|off`, the key `mcp` (absent means on), beside it
+  (design `2026-11-13-mcp-design.md` §5.5b). CalDAV off: CalDAV refuses the account's clients (401,
+  no charge, R28). MCP off: the account is hidden from every MCP entry. The loop pauses only once
+  both are off; an adapter switched on resumes it with a pass at once, and a switch made while a
+  relogin runs, or kept across a sign-out, is kept (R19) [verified: `TestSetCalDAVPersists`,
+  `TestSetMCPPersists`, `TestBothAdaptersOffPausesTheLoop`, `TestCalDAVOffMCPOnKeepsSyncing`,
+  `TestCalDAVSwitchDuringAReloginIsKept`, `TestCalDAVSwitchDuringACaptchaReloginIsKept`,
+  `TestMCPSwitchDuringAReloginIsKept`, `TestMCPSwitchDuringACaptchaReloginIsKept`].
 - **Daemon wiring** is `internal/daemon` (one entry point, `daemon.Run`: Hub.Serve, control socket,
   CalDAV listener with TLS, the 5 s drain), used by `pcb serve` and, later, `pcb-ui`; it follows the
   `cli` import rule and owns no account (the caller opens and closes the Hub, and closes it only after
   `Run` returns) [verified: `TestRunServesCalDAVAndControl`, `TestRunDrainsOnCancel`,
   `TestDaemonArch`].
+- **Daemon kinds (M8).** `serve` (`pcb serve`), `ui` (`pcb-ui`) and `mcp` (`pcb mcp` serving one agent's
+  session itself, §12): `daemon.Run` with `NoListener` opens the control socket only, no CalDAV listener
+  and no remote `/mcp`, even with `[mcp] remote = true`. `serve.lock` holds `<pid> <kind>` (an older
+  `<pid>` alone still reads), so a second server names what holds the state: `pcb is already serving
+  (pid N, kind mcp)`, hint `end the agent session (pcb mcp), then try again` for an agent session, `stop it
+  first, or use pcb status` otherwise; a kind is echoed only when it is a plain lower-case word
+  [verified: `TestRunWithoutListenerOpensNoPort`, `TestServeLockNamesTheKind`, `TestServeLockReadsTheOldFormat`,
+  `TestASecondServeNamesTheRunningDaemon`, `TestBridgeNamesAnAgentSession`; `make rehearse` step 22].
 
 ## 5. C1 — Proton block
 
@@ -617,8 +651,8 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
   clients may want generated VTIMEZONEs, which stay unbuilt [call].
 - JSCalendar (0006) returns with the first adapter that is not iCalendar-native, as a
   codec over this model. Cost if wrong: that layer is added later.
-- Recurrence: no expansion in M3 (no `calendar-query`, no free-busy); library choice
-  after the audit E16 when time-range queries or free-busy are needed [call].
+- Recurrence: no expansion in M3 (no `calendar-query`, no free-busy); expansion in
+  `ical.Expand`, our own expander over Proton's set (E16).
 - Fuzz tests on every parser (`internal/ical`, `internal/caldav` request bodies)
   [verified: `FuzzReportBody`, `FuzzPropfindBody`]; golden files from real Proton,
   Thunderbird and Apple exports are not yet collected.
@@ -1295,14 +1329,181 @@ OpenAPI, and may change between versions.
 
 ## 12. A4 — MCP adapter
 
-Not planned [decided 0007]. Notes kept for whoever designs it later:
-calendar content is a prompt-injection channel (mark external text as
-untrusted, flag outside invitations), grants per agent with none by
-default, agents never on the control socket, audit log of every call.
+Built in M8 (decision 0016, design `spec/designs/2026-11-13-mcp-design.md`, rulings in §18):
+`internal/mcp` (server, grants, tools, audit, remote and relay handlers, stdio),
+`internal/mcp/loginpage`, `internal/loginflow` (the login steps `pcb-ui`'s wizard and the page share),
+`access.TokenStore`, `service.Agenda` and, in `internal/ical`, recurrence expansion, the event view and
+edits as patches. It replaces decision 0007's "MCP not planned" and the old note "agents never on the
+control socket": agents reach the control socket only through its `/mcp` route, under the socket's
+same-UID trust, never through `/v2` routes. Everything below is tested against the fake Proton and the
+SDK's own client; a real agent client (Claude Code) and the Proton web app are `spec/HUMAN-CHECKS.md`
+step 10, not run yet.
+
+- **One server, three entries.** One `mcp.Server` per daemon, on `service` only and the official Go SDK
+  (`modelcontextprotocol/go-sdk` v1.8.0, E19), serves:
+  - **remote**: `/mcp` on the daemon's CalDAV listener, for bearer-token holders, only when `[mcp] remote = true`
+    (§14). Off (the default), `/mcp` is just another CalDAV path, never MCP [verified: `TestRemoteMCPOffByDefault`,
+    `TestRemoteMCPServesTools`, `TestServeServesRemoteMCP`, `TestBridgeServesRemoteMCP`];
+  - **relay**: `pcb mcp` forwards the agent's session to a running daemon (`pcb serve`, `pcb-ui`, or another
+    `pcb mcp`) on the control socket's `/mcp` route, every daemon kind serving it; the grant travels in the
+    `X-Pcb-Mcp-Grant` header, re-checked by the daemon, and the audit names it `stdio:read-only`, `stdio:full`
+    or `stdio:custom` from its capabilities, whatever name was sent. The peer-UID check of §15 runs first
+    [verified: `TestMCPStdioRelaysToARunningDaemon`, `TestControlSocketMCPInServe`, `TestRelayAuthNeedsTheGrantHeader`,
+    `TestControlSocketServesMCP`, `TestControlSocketMCPRefusesOtherUID`; `make rehearse` step 19];
+  - **stdio**: with no daemon, `pcb mcp` becomes the daemon for the session (kind `mcp`, control socket, no network
+    listener) and serves the agent in process (§13) [verified: `TestMCPStdioBecomesTheDaemon`,
+    `TestRunWithoutListenerOpensNoPort`; `make rehearse` step 22].
+- **Tools**, exactly: `status`, `calendars_list`, `free_busy` (capability `freebusy`); `events_list`, `event_get`,
+  `events_search` (`read`); `event_create`, `event_update` (`write`); `event_delete` (`delete`); `login` (`login`);
+  `logout` (`manage`). `tools/list` holds only what the grant allows, and `login` and `logout` are never built for
+  remote [verified: `TestToolsListFollowsTheGrant`, `TestWriteToolsAbsentForReadGrant`, `TestLoginAndLogoutNeverRemote`].
+  Every result carries `structuredContent` with an `outputSchema` and a one-line text; annotations: `readOnlyHint`
+  on the reads, `destructiveHint` on `event_delete` and `logout`. A tool error is a result with `isError` whose text
+  is `{"error": {"class", "message", "hint", "reason"?, "retry_after_s"?}}`, the class one of `must-act`, `retry`,
+  `refused`, `conflict`, `not-found`; the message and hint are those of a pcb error, and an error that is not one
+  says only `the call failed` (built: a JSON text, not structured content, which would have to match the success
+  schema) [verified: `TestErrorClasses`].
+- **Grants.** Capabilities `freebusy` < `read` < `write`, plus `delete` (needs `write`: refused otherwise),
+  `login` and `manage` (stdio only, refused on tokens); `read` brings `freebusy`, `write` brings `read`
+  [verified: `TestParseCapsAppliesImplications`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`].
+  stdio profiles: `read-only` (`read` + `login`, the default) and `full` (all six); `--allow` replaces the profile
+  [verified: `TestProfiles`]. A grant names accounts (address, case-insensitive, or local ID; none: every account,
+  later ones included) and, for a token, calendar IDs (none: all). An account outside the grant, pending, with
+  MCP off (`pcb account mcp off`, the person's kill switch for every agent) or signed out (`logged-out`) is
+  invisible: a call naming it or one of its `event_id`s answers as for something that does not exist (`no account
+  X`, `no event X`), and its agenda is never asked [verified: `TestScopedGrantCannotSeeOtherAccounts`,
+  `TestMCPOffAccountIsInvisible`, `TestAccountRemovedMidSessionIsNotFound`, `TestEventIDOfAnotherAccountOutsideGrant`,
+  `TestEventIDToolsHideAccountsLikeMissing`]. An account that needs a login stays visible, so `status` can name the
+  step. Under a calendar grant an account counts only when it holds a granted calendar, and one whose calendars are
+  not known yet (before its first sync) counts as holding none (ruling R14: fail closed); named in a call's `accounts`
+  or `account`, such an account answers `not-found` exactly as an account pcb does not have, so a calendar-scoped token
+  cannot probe which accounts exist [verified: `TestCalendarGrantHidesAccountsWithoutThem`,
+  `TestCalendarGrantNamedAccountAnswersAsUnknown`]. Over stdio the grant is a guard rail, not a boundary (§19).
+- **Ids, times, paging.** `event_id` is opaque (base64url of the account's local ID, calendar ID, UID and
+  RECURRENCE-ID); an occurrence's part keeps the series' own form (a date, a floating wall clock or a zoned
+  instant), so an id does not depend on the zone a call reads in (ruling R10) [verified: `TestEventIDRoundTrip`,
+  `TestOccurrenceIDsKeepTheSeriesForm`]. Inputs: RFC 3339 with an offset, or a wall clock or date read in `tz` (an
+  IANA name; `Local` refused), else `[mcp] timezone`, else the process's zone; a malformed one is `refused`, naming
+  the argument [verified: `TestNaiveTimeUsesTzThenZone`, `TestMalformedTimeIsRefused`]. Outputs give each time with
+  its TZID and UTC offset, floating times marked `floating`, all-day as dates (end exclusive); `status` gives `now`
+  (instant, zone, offset) [verified: `TestStatusGivesNow`, `TestEventsListGivesTimesIdsAndFlags`]. Limits: a range of
+  at most 366 days, `limit` 100 by default and 500 at most with `truncated` and `next_cursor`, 1000 occurrences per
+  series per call, 2000 objects decrypted per call (a page cut by it is `truncated`), descriptions cut at 4 KiB in
+  lists and 64 KiB in `event_get` [verified: `TestOccurrencesRefusesTooLongRange`, `TestOccurrencesPagesWithoutGapsOrRepeats`,
+  `TestOccurrencesRenderBudgetPages`, `TestExpandCapsPerSeries`, `TestDescriptionCutAt4KiBInLists`]. Read tools merge
+  every visible account in start order; an account that fails while others answer is listed under `unavailable`
+  [verified: `TestEventsListMergesAccountsWithoutGaps`, `TestOneAccountFailingDoesNotHideTheOthers`]. An event pcb
+  cannot read is skipped and counted (`skipped`; logged with its calendar and UID only), never failing the page, and
+  `free_busy` says those events' times are unknown (rulings R12, R13); transparent and cancelled events are free
+  [verified: `TestOccurrencesSkipsUnreadableEvents`, `TestFreeBusyMergesAndReportsSkipped`, `TestFreeBusySkipsTransparentAndCancelled`].
+- **Recurrence** is pcb's own expander over Proton's recurrence set (E16: rrule-go not adopted): RRULE, EXDATE,
+  overrides by RECURRENCE-ID, all-day, TZID with DST gaps and overlaps, floating times in the call's zone. RDATE is
+  never expanded, since Proton refuses to store it (the design listed it); a shape outside Proton's set is refused,
+  and the event skipped as above [verified: `TestExpandRFC5545Examples`, `TestExpandDSTTransitions`, `TestExpandProtonForms`,
+  `TestExpandFloatingUsesLoc`, `TestExpandAllDayRecurring`, `TestExpandRefusesShapesOutsideProtonsSet`, `TestOccurrencesExpandsAndMerges`].
+  A TZID wall clock in a DST overlap or gap means one instant everywhere, by RFC 5545 §3.3.5 (the first of two, the
+  offset before a gap): the expander, the event view, the agent's edits and deletes and the CalDAV write path read it
+  alike, so an override at an ambiguous time is found by the list, an update and a delete [verified:
+  `TestWallClocksResolveAsExpandDoes`, `TestDSTOverlapOverrideIsTheOccurrence`].
+- **Untrusted content.** Every calendar-derived free text (summary, description, location, URL, organizer and
+  attendee names, calendar names and descriptions) sits under an `untrusted` object, and every tool description says
+  it is data written by third parties, never instructions. `external_organizer` marks an event organized by an
+  address that is none of the account's; `third_party` also marks subscribed and holidays calendars [verified:
+  `TestUntrustedFieldsAreGrouped`, `TestEventGetAgreesWithTheListOnTheOrganizer`, `TestOccurrencesFlagExternalOrganizer`].
+  A mitigation, not a boundary: the controls are the grants, the ETags and the confirmations.
+- **Writes** run only while the process serves (M4: Serve's writer handle) [verified: `TestAgendaWritesNeedServe`].
+  `event_create` (`account`, `calendar`, `summary`, `start`/`end` or all-day `start_date`/`end_date`, `tz`, `location`,
+  `description`, `rrule`, `alarms` in minutes, `busy`) returns `event_id` and `etag` [verified: `TestCreateReturnsIDAndETag`,
+  `TestCreateEventLandsInProton`]; when the ETag cannot be read back after a write that landed, the result succeeds
+  without it and says to call `event_get` and not to write again. `event_update` takes `etag`, `scope` (`series` or
+  `occurrence`), `changes` (the create fields; `null` clears summary, description, location, rrule or alarms) and
+  `dry_run` (the changed fields before and after, nothing written); new times keep the event's own zone unless `tz` is
+  given [verified: `TestUpdateChangesNullClears`, `TestUpdateDryRunShowsBeforeAfter`, `TestUpdateEventDryRunWritesNothing`,
+  `TestUpdateTimesKeepTheEventZone`]. Edits patch the stored iCalendar, so what the call did not touch (alarms,
+  exceptions, unknown properties) stays [verified: `TestApplyEditKeepsUntouchedLines`]; `alarms` given keeps an existing
+  alarm at the same minutes as it is (an `ACTION:EMAIL` alarm keeps its lines and is not refused; the write leaves e-mail
+  notifications to Proton, `spec/mapping.md` §5), and only a new minute value becomes a device (DISPLAY) alarm
+  [verified: `TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain`]; one occurrence becomes an
+  override, deleting one adds an EXDATE [verified: `TestApplyEditOccurrenceCreatesOverride`, `TestDeleteOccurrenceAddsExdate`,
+  `TestDeleteOneOccurrence`]. A series that only moves in time takes its EXDATEs, its overrides' RECURRENCE-IDs and its
+  UNTIL along; a change that would leave an exception, or the start, off the rule kept is refused (`refused`,
+  reason `pcb:series-has-exceptions`, or `pcb:bad-data` for a start off its own BYDAY or BYMONTHDAY; ruling R11), never
+  dropped [verified: `TestApplyEditSeriesShiftMovesExceptions`, `TestApplyEditShiftMovesUntil`, `TestApplyEditShiftOffTheRuleIsRefused`,
+  `TestApplyEditRRuleChangeWithExceptionsIsRefused`, `TestUpdateSeriesWithExceptionsRefused`]. A stale ETag is `conflict`
+  and writes nothing; a calendar the write gate keeps read-only is `refused` before any write; every M4 refusal is
+  `refused` with its `pcb:` reason [verified: `TestUpdateStaleETagIsConflict`, `TestUpdateEventStaleETagIsConflict`,
+  `TestWriteToReadOnlyCalendarRefused`, `TestErrorClasses`].
+- **Delete confirmation.** When the client declares form elicitation (or elicitation with no mode), `event_delete`
+  checks everything first (a stale ETag is `conflict`, asked nothing), then asks `Delete the event on <date>: «<summary>»?`
+  (one occurrence: `Delete one occurrence, on <date>, of the series «<summary>»?`; the whole series of a recurring
+  event: `Delete the whole series (every occurrence, first on <date>): «<summary>»?`, ruling R16). What goes comes
+  first; the summary, a third party's text, comes last without control or format characters (bidirectional,
+  zero-width) and with `«»` replaced by `‹›`, so it cannot rewrite the question [verified:
+  `TestDeletePromptResistsSpoofing`]. Only `accept` deletes,
+  `decline` or `cancel` is `refused` and nothing is deleted. A client that declares no form elicitation (none, or URL
+  only) deletes with the `delete` grant alone [verified: `TestDeleteAsksWhenElicitationDeclared`,
+  `TestDeleteWithoutElicitationNeedsDeleteCap`, `TestRelayCarriesAConfirmation`]. What real clients declare is
+  `[assumed → step 10]`.
+- **Login and logout** (stdio and relay only). `login(username, unattended_relogin?)` takes no secret (the schema refuses
+  any other argument; the username must look like an address, so no shell, page or log can misread it). The
+  process that owns the accounts acts:
+  - `pcb-ui` raises its add-account wizard with the username filled in (a login the person is already in keeps its
+    step) and answers `where: pcb-ui`, no URL [verified: `TestLoginToolRaisesTheWizardInPcbUI`,
+    `TestBridgeRaisesTheWizardForAnAgentLogin`, `TestShowLoginOpensTheWizardPrefilled`, `TestShowLoginKeepsALoginInProgress`];
+  - any other (a session daemon, `pcb serve` reached by relay) opens a page for this one login at
+    `http://127.0.0.1:<ephemeral port>/login/<128-bit nonce>` (never the `[caldav]` address): Host and Origin
+    checked (403), `Cache-Control: no-store`, the username shown read-only, then the password, the 2FA code or the
+    CAPTCHA link, the unattended-relogin box always unticked with `pcb-ui`'s keyring warning (an agent's
+    `unattended_relogin: true` is a note, "The agent suggests unattended relogin", so a person with 2FA finishes with a
+    6-digit code) [verified: `TestLoginPageNeverTicksUnattended`], the nonce compared in constant time [verified:
+    `TestLoginPageComparesTheNonceInConstantTime`]; the first form post claims the page with a cookie and any other browser gets 410; it closes when the
+    login ends, on Cancel, after 5 minutes or when replaced, removing a half-way add [verified: `TestLoginPageBindsLoopbackWithANonce`,
+    `TestLoginPageSingleUse`, `TestLoginPageExpires`, `TestLoginPageRefusesForeignHostAndOrigin`, `TestLoginPageNoStore`,
+    `TestLoginPageNeverEchoesThePassword`, `TestLoginPageRunsTOTPAndCaptchaSteps`, `TestLoginPageStopCancels`]. A client that
+    declares URL elicitation is handed the link that way (declined or cancelled: the page closes, `refused`); otherwise
+    the URL is in the result. Every result carries the CLI fallback `pcb login --username U` (the `cli_fallback` field, and
+    the hint of a refusal), for a `pcb mcp` in a container whose loopback the browser cannot reach [verified:
+    `TestLoginToolResultHasNoSecret`, `TestLoginToolRaisesTheWizardInPcbUI`].
+  - An account already `ready` (and not stopped) is refused before anything opens (`refused`: "already logged in";
+    the hint names `pcb logout` then `pcb login`), and does not start the cooldown [verified:
+    `TestLoginToolRefusesAReadyAccount`]. A login flow (the page or pcb-ui's wizard) abandoned on its 2FA step for an
+    account that was ready before it started only drops the login waiting for the code: the stored session keeps
+    serving, never signed out [verified: `TestFlowCancelKeepsAnAccountThatWasReady`, `TestAbandonLoginKeepsTheStoredSession`].
+  - One `login` per 60 s per MCP session (`retry`, with `retry_after_s`), on top of the Hub's login guard and its one
+    login at a time; a later login of the same session replaces its page [verified: `TestLoginToolCooldown`,
+    `TestLoginToolReplacesTheSessionsPage`]. A session daemon asks its sealer guard (§13) first [verified: `TestLoginToolAsksTheGuard`].
+  - `logout(account)` signs one account out as `pcb logout` does, confirmed by form elicitation when the client
+    declares it (decline: nothing changes), else on the `manage` grant alone [verified: `TestLogoutConfirms`].
+  - Over remote there is no login: `status` shows `needs-login` with the step "run `pcb login` on the server, or open
+    pcb-ui" [verified: `TestStatusGivesNow`].
+- **Remote access.** `Authorization: Bearer pcbm_<43 base64url characters>` (256 bits), made by `pcb mcp token add`
+  (§13), kept in `<state>/mcp-tokens.json` (0600, version 1, strict decoding) as a salted SHA-256 only, never sealed or
+  shown again; the prefix keeps a CalDAV password from passing as a token [verified: `TestTokenAddStoresOnlyAHash`,
+  `TestTokenFileStrictDecoding`, `TestTokenFileMode0600`, `TestTokenWrongPrefixRefused`]. No token, or a bad, unknown or
+  expired one: 401 with `WWW-Authenticate: Bearer`, counted by the remote's own failure limiter (`access.Limiter`: after 5
+  failures in a minute from one IP, IPv6 keyed by its /64, further requests get 503 with `Retry-After`); a token whose stored
+  grant is refused: 403 [verified: `TestRemoteMCPNeedsAToken`, `TestRemoteMCPLimiter503AfterFiveFailures`,
+  `TestLimiterKeysIPv6ByPrefix64`, `TestTokenExpired`]. `Host` must be a loopback name, a `[caldav] hostnames`
+  entry or the IP the request arrived on, and a present `Origin` must equal it (`null` refused): else 403, a
+  DNS-rebinding guard of pcb's own (the SDK checks no Origin, E19) [verified: `TestRemoteMCPRefusesForeignHost`,
+  `TestRemoteMCPRefusesForeignOrigin`, `TestE19HostCheckedOriginNot`]. Sessions are stateful, bound to the token that opened
+  them (another token: 403), forgotten after 1 h idle (their ID then answers 404, and the client initialises again), and their
+  streams outlive the listener's write timeout [verified: `TestRemoteMCPSessionBoundToItsToken`,
+  `TestRemoteMCPSessionEndsWhenIdle`, `TestRemoteMCPStreamOutlivesWriteTimeout`]. The token never reaches a tool [verified: `TestRemoteMCPKeepsTheTokenFromTools`].
+  TLS follows the listener's rule (§9: TLS on any non-loopback bind).
+- **Audit.** One `info` line `mcp call` per tool call in the daemon's log (stderr of `pcb serve` and `pcb mcp`, `pcb-ui.log`):
+  `tool`, `entry` (`remote`, `relay`, `stdio`), `grant` (token name or stdio profile), `account` (local IDs), `calendar`,
+  `uid`, `outcome` (`ok` or the error class), `ms`; never an argument's text, content, a page URL or a secret; a
+  tool name pcb does not serve is `(unknown)`. A run that only asks the person writes none; the call's completion writes
+  its one line [verified: `TestAuditLineHasNoContent`, `TestDeleteAsksWhenElicitationDeclared`; `make rehearse` step 19].
+- **No secret in any output.** An end-to-end scan (logins with 2FA and CAPTCHA through the page, every tool, remote with a
+  token, a relayed logout) finds no password, otpauth secret, 2FA code, CAPTCHA token, MCP token or page nonce in any tool
+  result, MCP log message, audit line, stderr or file under the state and config directories, the nonce allowed only in the
+  URL elicitation itself [verified: `TestNoSecretInAnyMCPOutput`].
 
 ## 13. A5 — CLI and ops
 
-Conventions (as backsight) [call]: every command has `--json` except `serve` and `service logs`, which refuse it (exit 2) (one
+Conventions (as backsight) [call]: every command has `--json` except `serve`, `service logs` and `mcp` (M8: stdout carries the MCP session), which refuse it (exit 2) (one
 envelope `{schema_version, command, ok, data | error}`; the four keys are always present, and `data` and `error` may both be set,
 see "Initial-version audit behaviour" below); state-changing
 setup commands have `--plan`; `--non-interactive` never prompts and exits 10
@@ -1327,8 +1528,13 @@ pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no 
 pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
 pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL (M6: the account's /dav/<local-id>/), username (M6: the account's address; any username is accepted), password and, over TLS, the certificate fingerprint; without NAME: `default`, else the only client
 pcb client rotate NAME|ID                    # M5, decision 0013: a new password, the old one stops working at once
-pcb account list                            # M6: local ID, address, phase, CalDAV on/off, last sync; pending adds included; the daemon's view when one answers
+pcb account list                            # M6: local ID, address, phase, CalDAV on/off (M8: and MCP on/off), last sync; pending adds included; the daemon's view when one answers
 pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
+pcb account mcp on|off                      # M8: the account's MCP switch (§4.1)
+pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
+pcb mcp token add NAME --allow CAPS [--account A]... [--calendar ID]... [--expires D] [--plan]   # M8: a remote agent's bearer token, printed once (§12)
+pcb mcp token list                          # M8: name, grants, created, last used, expiry (expired ones marked)
+pcb mcp token remove NAME [--yes]           # M8: the token stops working at once
 pcb account restart                         # M6: serve the account again after its loop stopped on an error (§4.1, "Parked accounts")
 pcb account remove [--yes]                  # M6: sign out, then delete the account's directory (cache and CalDAV passwords included)
 pcb config get|set|validate                  # not built (M5 out of scope: edit config.toml, run pcb doctor)
@@ -1336,7 +1542,7 @@ pcb version
 ```
 Several accounts per process since M6 (decision 0014, §4.1); the "one account per daemon in v1" rule is gone.
 The account selector (`--account A`, else `PCB_ACCOUNT`) is taken by `logout`, `login resume`, `status`, `calendar list`,
-`event list`, `sync`, `client add|list|show|rotate|remove` and `account caldav|restart|remove`; every other command
+`event list`, `sync`, `client add|list|show|rotate|remove` and `account caldav|mcp|restart|remove`; every other command
 refuses `--account` (exit 2, `pcb login takes no --account: the username decides ...`).
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
@@ -1453,11 +1659,12 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   (a lone pending add is found without one; with several waiting and none named it lists them, exit 2); `pcb logout` of a state whose only account is a pending add acts on it
   (R34) [verified: `TestLoginAddsAccountByUsername`, `TestLoginResumeSelectsThePendingLogin`, `TestLoginResumeNamesTheWaitingLogins`,
   `TestLogoutOfTheOnlyPendingAccount`].
-- With a daemon, every account-changing command (login, 2FA code, logout, `account remove`, `caldav`, `restart`) goes through the control socket, which runs the
+- With a daemon, every account-changing command (login, 2FA code, logout, `account remove`, `caldav`, `mcp`, `restart`) goes through the control socket, which runs the
   Hub's own rules: a running Hub does not rescan `accounts/`, so an offline add would stay unseen until the next start (R15). Offline, `account restart` only
-  says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountRestartOffline`].
+  says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountMCPThroughTheDaemon`, `TestAccountRestartOffline`].
 - `pcb account remove` asks you to type `remove` (or `--yes`; without a terminal or with `--non-interactive` and no `--yes`: exit 10) [verified: `TestAccountRemoveNeedsYes`];
-  `pcb account caldav on|off` [verified: `TestAccountCalDAVOff`].
+  `pcb account caldav on|off` and `pcb account mcp on|off`; `account list` and `status` show both switches [verified: `TestAccountCalDAVOff`,
+  `TestAccountListShowsBothSwitches`].
 - `pcb status`: the process (daemon, listener, process alerts: `needs-login` with no account at all (ruling R44), the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
   render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
   is the command's (the `pcb status` key-fault exception of §13 stands). `pcb status --daemon --json` is still the container's health check [verified:
@@ -1496,7 +1703,7 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   [verified: `TestSecondInstanceShowsTheFirst`, `TestProbeNoDaemon`, `TestProbeNamesARunningServe`, `TestStartBlockedByAServeLeaksNothing`, `TestQuitDrainsAndReleases`, `TestRestartReadsTheConfig`, `TestBridgeNoticesTheDaemonEnding`;
   the dialog and the X `[assumed → step 9]`: Fyne's source says a master window's close quits, no test driver can show it].
 - The window never holds a secret longer than a call: the wizard's password lives in the `Wizard` until the login ends (ready, an error or a 2FA step) and is then zeroed, except while a CAPTCHA waits (its retry needs it); Cancel zeroes it and removes an account the wizard created
-  (an existing account is only signed out); a shown CalDAV password is hidden again when the account pane changes or the window hides, and one that arrives after that is dropped; a notification never carries a password or a URL (the CAPTCHA link is replaced by `the link in the pcb-ui window`)
+  (an existing account is only signed out, and one that was ready before the wizard started keeps its session: only the login waiting for its code is dropped, `TestFlowCancelKeepsAnAccountThatWasReady`); a shown CalDAV password is hidden again when the account pane changes or the window hides, and one that arrives after that is dropped; a notification never carries a password or a URL (the CAPTCHA link is replaced by `the link in the pcb-ui window`)
   [verified: `TestWizardPlainLogin`, `TestWizardTOTP`, `TestWizardKeepsPasswordForCaptchaThenZeroes`, `TestWizardZeroesOnError`, `TestWizardZeroesTheBufferWhenTheCaptchaRetryFails`, `TestWizardCopiesThePassword`,
   `TestWizardCancelDuringTOTPLeavesNoAccount`, `TestWizardCancelDuringCaptchaLeavesNoAccountAndZeroes`, `TestWizardCancelKeepsAnExistingAccount`, `TestWizardErrorIsTheCLIText`, `TestWizardRefusesWhileTheBridgeIsNotRunning`,
   `TestWizardCancelAfterTheBridgeRestarted`, `TestShownPasswordHidesOnAccountChange`, `TestShownPasswordHidesOnHide`, `TestPasswordArrivingAfterPaneChangeStaysHidden`, `TestWizardClearsPasswordEntryOnSubmit`,
@@ -1516,6 +1723,56 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
 - `pcb doctor` (and the window's doctor report) warns `pcb-ui and the pcb service are both installed: only one can serve this state directory` (fix `uninstall one (pcb uninstall, or remove pcb-ui.desktop)`) when a pcb systemd unit is installed and `pcb-ui.desktop`
   lies in `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), `/usr/local/share/applications` or `/usr/share/applications` (ruling P3: a custom `PREFIX` install is missed, it is a warning only); quiet otherwise
   [verified: `TestDesktopCheckWarnsWhenBothAreInstalled`, `TestDesktopCheckIsQuietWithOnlyOne`, `TestDoctorWarnsBothInstalled`, `TestDoctorQuietWithOnlyOne`, `TestDoctorChecksShared`].
+
+M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal/access`; rulings in §18):
+- `pcb mcp` speaks MCP on stdin and stdout and writes nothing else there; its logs and the audit lines of a session it
+  serves go to stderr, at `[log] level`. `--json`, an unknown profile or capability, an empty `--allow`, `delete` without
+  `write`, and `--profile` with `--allow` are exit 2; `--account` (repeatable) is not checked against the accounts, since a
+  grant may name one a later login adds [verified: `TestMCPStdioWritesNothingButProtocolOnStdout`, `TestMCPStdioRefusesJSON`].
+- At start, and whenever the daemon it relays to goes away: a daemon answering on the control socket gets the session
+  relayed (a stopping one counts as none); else, with a system-scope pcb unit installed (detected as `pcb uninstall` does),
+  exit 20 `pcb runs as a system service here`, hint `use its remote /mcp with a token ([mcp] remote = true; a loopback listen
+  is enough)`, so a second state never serves the same Proton account unseen; else, with a pcb user unit installed that
+  systemd reports active or starting (`activating`, the `Restart=` gap included, or `reloading`/`deactivating`), `pcb mcp`
+  never takes the state from it: it probes the control socket for 30 s and relays once the unit's daemon answers, else
+  exit 20 with the hint to run `pcb service start` (final review C I2: a session daemon there made the unit fail its
+  restarts until `StartLimitBurst` left it `failed`) [verified: `TestMCPStdioWaitsForARestartingUserUnit`]; a user unit
+  inactive, failed or disabled changes nothing [verified: `TestMCPStdioServesNextToAStoppedUserUnit`]; else `pcb mcp`
+  becomes the session daemon (kind `mcp`, §4.1). Two started together end as one session daemon and one relay. A start another pcb blocks (the
+  state's locks) or a daemon that refuses the relay is retried after 250 ms, doubling, 10 s in all, then exit 20
+  [verified: `TestMCPStdioRelaysToARunningDaemon`, `TestMCPStdioRefusesNextToASystemUnit`, `TestMCPStdioBecomesTheDaemon`,
+  `TestTwoMCPStdioEndAsDaemonAndRelay`, `TestMCPLockRaceBacksOffAtMostTenSeconds`, `TestRelayRefusedIsNotADaemonGone`].
+- A relayed daemon that ends mid-session: a tool call in flight is answered `retry` (it may or may not have taken effect:
+  read before writing again), other requests are re-sent, and the next message probes again and either relays to another
+  daemon or makes this `pcb mcp` the session daemon, without the agent initialising again (pcb replays its handshake)
+  [verified: `TestRelayAnswersRetryWhenItsDaemonEnds`, `TestRelayTakesOverAfterItsDaemonEnds`, `TestStdioMovesFromARelayToTheProcess`].
+  The end of stdin ends the session: answers still due get up to 5 s, the session daemon drains and releases the state,
+  exit 0 [verified: `TestMCPStdioBecomesTheDaemon`; `make rehearse` steps 19 and 22].
+- **Sealer guard** (ruling R20): on a state not created yet (no `layout.json`) under `[secrets] backend = auto` with no
+  Secret Service answering (no session bus, none on it), the session daemon refuses to start, exit 10 on stderr, `pcb mcp
+  will not choose how secrets are sealed: set [secrets] backend in <config path>, or run the first pcb login in a terminal`,
+  and creates nothing; an explicit backend, an answering keyring or an existing state pass. It runs at start, not only at
+  `login` as the design said, because opening a new state already records its sealer (§7.3) [verified:
+  `TestSealerGuardRefusesWithoutAKeyring`, `TestSealerGuardAllowsAnExplicitBackend`].
+- While a session daemon serves, `pcb serve` exits 20 naming `kind mcp` with the hint `end the agent session (pcb mcp), then
+  try again`, and `pcb-ui` shows `an agent session (pcb mcp, PID N, kind mcp) already serves this state directory` with the
+  same hint; `pcb status` and `pcb doctor` show `kind mcp` on their daemon line (`daemon: running since T (pid N,
+  version V, kind mcp)`) and no listener (§4.1, §15) [verified: `TestStatusAndDoctorNameTheDaemonsKind`, `TestBridgeNamesAnAgentSession`,
+  `TestServeLockNamesTheKind`; `make rehearse` step 22].
+- `pcb mcp token add NAME --allow CAPS`: `CAPS` among `freebusy`, `read`, `write`, `delete` (duplicates dropped); `login` or
+  `manage` is exit 2 `login and manage are stdio only: grant them with pcb mcp --profile`, `delete` without `write` exit 2
+  `delete needs write: a grant that may delete may also edit` (ruling R19), an unknown one exit 2 naming the valid ones.
+  `--account` (repeatable) must name an account (the daemon's view when one answers; else `no account X`, exit 2) and is
+  stored as typed; `--calendar` IDs are stored unchecked; `--expires` takes whole days (`30d`) or a Go duration. The token is
+  printed once (text with the `Authorization: Bearer` line to use and the remove command; `--json` in `data.token`);
+  `--plan` checks everything and prints no token. Names follow the CalDAV client rules, unique case-insensitively
+  [verified: `TestMCPTokenAddPrintsOnce`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`,
+  `TestMCPTokenUnknownAccount`, `TestMCPTokenExpires`, `TestMCPTokenPlanChangesNothing`, `TestTokenAddRefusals`].
+- `pcb mcp token list` (NAME, ALLOWS, ACCOUNTS, CALENDARS, CREATED, LAST USED, EXPIRES; `(expired)` marked; `--json`
+  `{"tokens": [...]}` with `expired`; with none, `No MCP token yet` and a hint) and `pcb mcp token remove NAME`
+  (an unknown name is exit 2; type `remove` or `--yes`; no terminal and no `--yes`: exit 10) [verified: `TestMCPTokenListEmpty`,
+  `TestMCPTokenRemoveNeedsYes`, `TestTokenRemove`]. A token's last use is recorded at most once a minute
+  [verified: `TestTokenVerify`].
 
 Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
 the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
@@ -1549,6 +1806,11 @@ echoing the value); `pcb serve --log-level` overrides it [verified: `TestLogLeve
 `[secrets] backend` (M7): `auto` (default), `keyfile` or `secret-service`: which sealer a state gets when it is created (§7.3). `auto` takes the desktop keyring when an unlocked
 one answers and the key file otherwise; it is never read again once `layout.json` records the sealer. Any other value is refused at load, exit 10, hint `fix <config path>`, without echoing it
 [verified: `TestBackendDefaultsToAuto`, `TestBadBackendIsRefused`]. `pcb-ui` re-reads `[log] level` at each start of its bridge and does not write it back: the level chosen in its Settings lasts until the bridge restarts.
+`[mcp]` (M8, §12): `remote` (default `false`: serve `/mcp` on the `[caldav]` listener, under its TLS rule, for agents with a
+token; a `pcb mcp` session daemon never does, having no listener) and `timezone` (an IANA zone for times given without one;
+default `""`, the process's zone; `Local` and paths are refused at load without echoing the value), strictly decoded like
+every section [verified: `TestMCPConfigStrict`, `TestServeServesRemoteMCP`, `TestRunWithoutListenerOpensNoPort`]. The
+`config.toml` that `pcb install` writes names both, commented [verified: `TestDefaultConfigGolden`, `TestDefaultConfigLoadsAsDefaults`].
 
 ## 15. Observability
 
@@ -1591,7 +1853,7 @@ Render counters and the read path (initial-version audit; `internal/service/rend
 Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v2/` since M6 (`/v1/` is gone and answers 404, as does any unclean path), internal and versioned:
   `GET /v2/accounts`, `GET /v2/status` (every account; one account that cannot be read still gets its entry, with an `account-unreadable` alert, instead of failing the others),
-  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` (body `{"on": bool}`) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7), and a `pcb-ui` daemon adds `POST /v2/ui/show` (below). Each answer is one `output.Envelope`:
+  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` and `/mcp` (M8; body `{"on": bool}`, required) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7), and a `pcb-ui` daemon adds `POST /v2/ui/show` (below). Each answer is one `output.Envelope`:
   200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
   are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
   dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.
@@ -1673,6 +1935,22 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
     `TestDoctorReportsAKeyFileStateAsKeyFile`, `TestDoctorTextOK`].
   - The unattended-relogin warning is built by `doctor.UnattendedKeyringWarning(sealedPath)` (ruling R10; the plan wanted one shared constant, but `pcb doctor` names the full `secrets.sealed` path and the wizard, which does not know it, names `secrets.sealed`)
     [verified: `TestWizardUnattendedWarningIsDoctors`, `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`].
+- M8 additions (`internal/ctl`, `internal/daemon`, `internal/doctor`, `internal/mcp`; §12):
+  - The control socket serves `/mcp` (every method, the exact path) to `pcb mcp` relays, after the peer-UID check and the
+    unclean-path 404; its answers are MCP's own (no envelope), streamed, and its log line keeps method, path and status only.
+    A daemon with no MCP server answers it with the usual 404 envelope [verified: `TestControlSocketServesMCP`,
+    `TestControlSocketMCPRefusesOtherUID`].
+  - `Status.MCP` (`mcp` in `pcb status --json`, with a daemon only): `remote` (whether `/mcp` is on the listener) and
+    `sessions` (live MCP sessions per entry, `remote`, `relay`, `stdio`); text: `mcp: remote on|off; live sessions: remote N,
+    relay N, stdio N`. `Daemon.kind` may be `mcp` (§4.1), with no `listener` [verified: `TestStatusShowsRemoteMCP`,
+    `TestRemoteMCPServesTools`, `TestRunWithoutListenerOpensNoPort`; `make rehearse` steps 19 and 22].
+  - `pcb doctor`: `mcp tokens` (ok with the count; an unreadable `mcp-tokens.json` is an error with the fix `fix or restore
+    <path>`), one warning `mcp token NAME` per expired token (fix `pcb mcp token remove NAME`), and a warning `mcp remote`
+    when `[mcp] remote` is on with a non-loopback bind and no usable token; nothing at all when no token exists and remote is
+    off [verified: `TestDoctorWarnsRemoteWithoutToken`, `TestDoctorWarnsRemoteMCPWithoutToken`].
+  - The audit line `mcp call` per tool call (§12) and, per session, the `pcb mcp` mode line on its stderr (`relaying to the
+    daemon on the control socket` or `serving this agent session: kind mcp, no network listener`) [verified: `TestMCPStdioWritesNothingButProtocolOnStdout`]. No metrics for MCP:
+    there is no Prometheus endpoint for CalDAV either.
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. How it is tested
@@ -1701,6 +1979,17 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   - *No GUI dependency in `pcb`*: `cmd/pcb/arch_test.go` builds `./cmd/pcb` with `CGO_ENABLED=0` and fails when its dependencies include `fyne.io/` [verified: `TestPcbHasNoGUIDependency`]; `internal/ui` and `internal/ui/desktop` follow the `cli` import rule, `internal/logfile` imports only the standard library
     [verified: `TestUIArch`, `TestDesktopArch`, `TestLogfileImportsOnlyTheStandardLibrary`].
 
+- **M8 (MCP).** Every tool is driven through the SDK's own client against `service.Hub` on the fake Proton or a stub
+  hub, over the in-memory transport, the listener's `/mcp`, the control socket and stdin/stdout pipes, on the protocol
+  versions 2025-11-25 and 2026-07-28 [verified: `TestRelayServesBothProtocolVersions`, `TestRunStdioServesBothProtocolVersions`].
+  `TestNoSecretInAnyMCPOutput` scans every output of a whole session for the secrets of §12. `make rehearse` drives the
+  real `pcb mcp` binary as an agent would against `pcb-fake`: a session relayed to `pcb serve` (step 19: tools of the full
+  profile, `status`, `calendars_list`, the seeded series expanded by `events_list`, then `event_create`, `event_get`,
+  `events_search`, `event_update` keeping location and alarm, a stale ETag refused as `conflict`, `event_delete`, each
+  write counted at the fake, the audit line and no password in any output) and a session `pcb mcp` serves itself (step 22:
+  kind `mcp`, no listener, `pcb serve` refused naming it) [verified: `make rehearse`, PASS on 2026-11-13]. A real agent
+  client is `spec/HUMAN-CHECKS.md` step 10 `[assumed → step 10]`.
+
 ## 17. Experiments (assumptions to settle before the code that needs them)
 
 | # | Question | Needed by | Method |
@@ -1720,9 +2009,10 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
 | E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on a headless Debian 13 server |
-| E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
+| E16 | RRULE library audit vs our own | C0 | done (M8): rrule-go v1.8.2 not adopted (DST gap and overlap instants differ from RFC 5545 §3.3.5); own expander over Proton's set, `E16-rrule.md` |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
 | E18 | (dropped: no REST API planned) | – | – |
+| E19 | MCP Go SDK: version, names, CGO-freeness, Host/Origin checks, which agent clients declare elicitation | A4 (M8) | done (M8): `modelcontextprotocol/go-sdk` v1.8.0 pinned, pure Go (Go ≥ 1.25), stateful streamable HTTP, elicitation through `InputRequests`, the SDK checks loopback `Host` but never `Origin`; client declarations from Claude Code's docs, live check in HUMAN-CHECKS 10; `E19-mcp-go-sdk.md` |
 
 Status at the close of M0 (2026-11-11):
 - E03: gate passed on the fork's evidence (R13); scope list and other candidates pending the live run.
@@ -1767,8 +2057,9 @@ raw results (redacted), conclusion, and the decision it feeds.
 
 | M6 Several accounts per process (built 2026-11-12, live session pending) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run is `spec/HUMAN-CHECKS.md` step 8, on the one test account |
 | M7 `pcb-ui` desktop app (built 2026-11-13, live session pending) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard, notifications, autostart; the Secret Service sealer (§7.3); `pcb-ui` log file; `make ui` and `make install-ui` | the UI logic and the keyring sealer are tested against the fake Proton, a fake Secret Service and Fyne's headless driver; the GUI itself is `spec/HUMAN-CHECKS.md` step 9, on a throwaway desktop VM (a GNOME session) fenced like step 7 with its own login ledger, the test account only (decision 0015) |
+| M8 MCP adapter (built 2026-11-13, live session pending) | E16, E19; the structured event layer (`ical.Expand`, `DecodeEvent`, `ApplyEdit`, `service.Agenda`); the per-account MCP switch; `internal/mcp` (tokens, grants, the eleven tools, untrusted marking, audit); remote `/mcp`; `/mcp` on the control socket; `pcb mcp` (relay or session daemon); `login` and `logout` (`pcb-ui` wizard or loopback page) | every tool tested through the SDK's client against the fake Proton, a secrets scan over a whole session, and `make rehearse` driving `pcb mcp` against `pcb-fake`; Claude Code over stdio and remote, the loopback login and one create/update/delete seen in the Proton web app are `spec/HUMAN-CHECKS.md` step 10, the test account only (decision 0016) |
 
-Nothing else is planned [decided 0007].
+Nothing else is planned [decided 0007; MCP by 0016].
 
 Initial-version audit (2026-11-12, main at 557fe84): six read-only auditors, 0 Critical, 17 Important, about 48 Minor findings; the Important ones and the Minors worth their cost are fixed on branch `audit-fixes`, the rest parked in `OPEN.md` ("Parked by the initial-version audit") or accepted, each with its reason in `spec/audits/2026-11-12-initial-version.md`.
 
@@ -1864,6 +2155,27 @@ M7 delivered (2026-11-13, branch m7-pcb-ui; the live checks of `spec/HUMAN-CHECK
 
 Where the built behaviour differs from the design (§5 of the design document, each marked there): the sealer is chosen when the state is created, by `[secrets] backend`, and the key file stays for every existing state; the 404 wording (R5); `sync-stalled` notifies although it is a warning (R9); the unattended-relogin warning is a function (R10); `CaptchaSolved` takes no token (P4); the log level chosen in Settings is not written to `config.toml`; no Proton login is made while the keyring is locked; the GUI is a human step (R11).
 
+M8 delivered (2026-11-13, branch m8-mcp; the live checks of `spec/HUMAN-CHECKS.md` step 10 are pending, test account only): E16 (own recurrence expander, rrule-go not adopted) and E19 (the MCP Go SDK v1.8.0), the event view, recurrence expansion and edits as patches (`internal/ical`), `service.Agenda` and `Hub.Agenda`, the per-account MCP switch (`pcb account mcp`, the loop rule "either adapter on"), MCP tokens (`access.TokenStore`, `pcb mcp token`), `internal/mcp` (grants, ids, times, the read and write tools, untrusted marking, audit, the remote handler with its Host and Origin guard and limiter, the relay handler), `/mcp` on the listener and on the control socket, the listener-less daemon kind `mcp` and the kind in `serve.lock`, `pcb mcp` (relay, session daemon, the lock race, the sealer guard), `internal/loginflow`, the `login` and `logout` tools with `pcb-ui`'s wizard and the loopback page (`internal/mcp/loginpage`), the `[mcp]` section, the doctor's `mcp tokens` check, and the rehearsal's MCP steps. Deferred: the live session (step 10); a hand-over from a session daemon to `pcb-ui` or the service; the minors in `OPEN.md` ("Parked by M8"). Rulings that change what a user or an agent sees (`.superpowers/sdd/2026-11-13-m8-mcp/progress.md`, kept out of the repository; the plan `spec/plans/2026-11-13-m8-mcp.md` is left as written, except its import line, amended for R18):
+
+| Ruling | Decision |
+|---|---|
+| R4 | with `[mcp] remote = false`, `/mcp` on the listener is just another CalDAV path: it never answers MCP (no `Mcp-Session-Id`, never 2xx) |
+| R8 | the exit rule of `pcb serve` without `--wait-for-login`: an account with either adapter on counts as a served account does (one with CalDAV off and MCP on whose login ends has stopped); one with both off, its loop paused, counts as running |
+| R9, R12 | an event pcb cannot read (an unknown TZID, a shape outside Proton's set, unparsable data) is skipped, counted (`skipped`) and logged with its calendar and UID only, never failing a list; `event_get` on it is `must-act`, naming why |
+| R10 | an `event_id` holds the occurrence in the series' own form (date, floating wall clock, zoned instant), so the same occurrence has the same id whatever zone a call reads in |
+| R11 | a series change that moves the date and would leave an exception, or the start, off the rule kept is refused (`pcb:series-has-exceptions`, `pcb:bad-data`); pcb never rewrites a BYDAY by itself: change the rule and the start together |
+| R13 | `free_busy` reports `skipped` with a note that those events' times are unknown, so unreadable events do not read as free; a create or update whose ETag cannot be read back is a success without `etag`, with a note to call `event_get` and not to write again |
+| R14 | under a grant that names calendars, an account whose calendars are not known yet (before its first sync) counts as holding none: it is hidden until it is known to hold one (fail closed) |
+| R15 | every tool taking an `event_id` hides an invisible account or calendar as missing (`no event X`, the same text as a malformed id), whatever the agenda would answer; one audit line per logical call, a run that only asks the person writes none |
+| R16 | the delete confirmation for a whole recurring series names it: `Delete the whole series (every occurrence, first on D): «S»?` (final review: the scope first, the title last and sanitised) |
+| R17 | remote sessions are forgotten after 1 h idle (the client initialises again; `TestRemoteMCPSessionEndsWhenIdle`); `Host` may also be the IP the request arrived on; a present `Origin` must equal `Host` exactly, `null` refused; `pcb status` shows the `mcp:` line only when a daemon answers |
+| R19 | `pcb mcp token add --allow delete` without `write` is refused at creation (exit 2), as the grant itself would refuse it |
+| R20 | `pcb mcp`'s sealer guard runs when the session daemon starts (exit 10 on a new state with `backend = auto` and no Secret Service), before it opens the state, not only in the `login` tool; the relay's own connections are not UID-checked beyond the probe (same-UID trust, a 0700 directory) |
+| T9 | an account signed out (`logged-out`) is invisible to agents, as if outside the grant; one that needs a login stays visible with its step; a tool error is a JSON text `{"error": {...}}` |
+| T14 | the loopback page binds `127.0.0.1:0` (an ephemeral port); one `login` per 60 s per MCP session; URL elicitation declined or cancelled closes the page and answers `refused`, accepted it answers without the URL; `pcb-ui` raises its wizard with the username filled in and keeps a login already in progress |
+
+Where the built behaviour differs from the design (each marked "Built:" in `spec/designs/2026-11-13-mcp-design.md`): RDATE is not expanded (Proton never stores it); the sealer guard runs at the session daemon's start (R20); signed-out accounts are invisible rather than listed `logged-out` (T9); tool errors are a JSON text (T9); a client with URL-only elicitation deletes on the `delete` grant alone, as one with none; the login steps live in `internal/loginflow`, shared by `pcb-ui`'s wizard and the loopback page, and `internal/mcp` never imports `internal/ui` (R18, R21); remote sessions end after 1 h idle (R17); there are no MCP metrics, as there are none for CalDAV.
+
 ## 19. Security model (summary)
 
 Assets: Proton session and key passphrase (account takeover), decrypted
@@ -1894,6 +2206,36 @@ M5 additions:
   access already exposes the Proton session, which is more sensitive.
 - Residual (documented): restoring the whole state directory, `state.json` included, defeats the rollback check (§7.3);
   the daemon's memory holds the decrypted calendar and, for at most 5 minutes, a pending login.
+M8 additions (MCP, §12):
+- Adversaries added: an agent acting beyond what its person meant (prompt injection through calendar text included), a
+  leaked MCP token, a web page in the person's browser aiming at loopback (DNS rebinding).
+- **Remote is a boundary**: a bearer token per agent, `pcbm_` and 256 bits, kept as a salted SHA-256 only and shown once;
+  its grant (capabilities, accounts, calendars) is enforced by the daemon, scope included (what is outside is answered as
+  missing); `login` and `manage` can never be granted to a token; 401 failures are limited per IP; `/mcp` inherits the
+  listener's TLS rule, is off by default, and checks `Host` and `Origin` (403) on top of the token [verified:
+  `TestTokenAddStoresOnlyAHash`, `TestRemoteMCPNeedsAToken`, `TestRemoteMCPLimiter503AfterFiveFailures`,
+  `TestRemoteMCPRefusesForeignHost`, `TestRemoteMCPRefusesForeignOrigin`, `TestRemoteMCPSessionBoundToItsToken`,
+  `TestScopedGrantCannotSeeOtherAccounts`, `TestMCPTokenRefusesLoginCap`].
+- **stdio is same-UID trust**: any process of the person's UID can run `pcb` or dial the control socket, so a `pcb mcp`
+  profile or `--allow` is a guard rail against a careless agent, not a boundary against a hostile process; the socket's
+  peer-UID check (§15) stays the boundary, and its `/mcp` route takes the grant the relaying process sends. Agents reach
+  no `/v2` route: `pcb mcp` uses only the status probe [verified: `TestControlSocketMCPRefusesOtherUID`, `TestRelayAuthNeedsTheGrantHeader`].
+- **The person's switch**: `pcb account mcp off` hides an account from every agent and every token at once [verified:
+  `TestMCPOffAccountIsInvisible`].
+- **Secrets never pass through the agent**: `login` takes a username only; the password, 2FA code and CAPTCHA are typed by
+  the person in `pcb-ui`'s window or on the loopback page (127.0.0.1 only, an ephemeral port, a 128-bit single-use path
+  bound to that username, claimed by the first browser that posts, 5 minutes, `no-store` and `Referrer-Policy:
+  same-origin`, no field ever rendered with a value, no log). The nonce is not a secret beyond that: it lets one browser type
+  credentials for that one username, once. Neither the nonce nor any secret reaches a log or audit line [verified:
+  `TestLoginPageSingleUse`, `TestLoginPageRefusesForeignHostAndOrigin`, `TestLoginPageNeverEchoesThePassword`,
+  `TestLoginPageNoStore`, `TestNoSecretInAnyMCPOutput`]. The agent alone cannot attach an account (a person must type the
+  secrets), so `login` sits in the stdio `read-only` profile; its cost is spam, bounded by one call per 60 s per session.
+- **Writes**: an agent edit is an ETag-guarded patch (no lost update, nothing it did not touch dropped), the M4 refusals and
+  the write gate apply unchanged, and a delete asks the person when the client can ask (§12). Calendar text reaches the
+  agent marked `untrusted`; that is a mitigation, not a control.
+- Residual: over stdio the grant does not hold against same-UID code; a client without form elicitation deletes on the
+  grant alone; a URL-elicitation client shows the page link in the agent's interface (the nonce is then in the client's
+  transcript, still single-use and bound to one username).
 Residual risk, stated in the docs: the bridge holds the decrypted calendar
 in memory, like Mail Bridge does for mail; whoever can unseal the store
 owns the Proton session (and the account, if unattended relogin is on).
@@ -1929,9 +2271,11 @@ piece of logic is reused:
   freedesktop Secret Service specification, with no other implementation consulted.
 - ProtonMail/WebClients (GPL-3.0 [verified: GitHub licence 2026-11-10]:
   read for understanding only, never copy code), go-proton-api, gopenpgp,
-  go-srp, rrule-go (MIT, candidate dependencies),
-  modelcontextprotocol/go-sdk (MIT moving to Apache-2.0, both fine for an
-  MIT project as a dependency).
+  go-srp (MIT, used as dependencies); rrule-go (MIT) audited in E16 and not
+  adopted (M8 expands recurrences with its own code);
+  modelcontextprotocol/go-sdk v1.8.0 (MIT moving to Apache-2.0, both fine for
+  an MIT project as a dependency) is the MCP server of M8, audited in E19,
+  credited in `README.md`.
 
 ## 21. Open questions for the author
 

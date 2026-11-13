@@ -138,4 +138,7 @@ const defaultConfig = `# pcb configuration (SPEC §14). Unknown keys are refused
 # hostnames = ["pcb.example"] # names clients use: certificate SANs, first one in the URL
 [log]
 # level = "info"              # debug, info, warn or error
+[mcp]
+# remote = false              # serve /mcp on the [caldav] listener, for agents with a token (pcb mcp token add)
+# timezone = ""               # IANA zone for times given without one; empty: the process's zone
 `

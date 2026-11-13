@@ -288,3 +288,54 @@ func TestDoneErrorIsShown(t *testing.T) {
 		t.Errorf("Done error not shown with its hint: %v", f.texts())
 	}
 }
+
+// An agent's login tool (pcb-ui is the daemon): the window shows the
+// add-account wizard with the username filled in.
+func TestShowLoginOpensTheWizardPrefilled(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.ShowLogin("carol@example.org")
+	f.wait()
+	if !f.w.visible {
+		t.Error("the window is not shown")
+	}
+	if f.w.mode != paneWizard || f.w.wizard == nil {
+		t.Fatalf("mode %v: want the wizard", f.w.mode)
+	}
+	if got := f.entry("name@example.org").Text; got != "carol@example.org" {
+		t.Errorf("address = %q, want the username filled in", got)
+	}
+	if !f.hasButton("Sign in") {
+		t.Errorf("no Sign in: %v", f.texts())
+	}
+}
+
+// A login the person is in the middle of is not replaced by an agent's:
+// the window only comes to the front.
+func TestShowLoginKeepsALoginInProgress(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.script = map[string]ui.Step{"submit carol@example.org": ui.StepTOTP, "cancel": ui.StepCredentials}
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("+ Add account")
+	f.entry("name@example.org").SetText("carol@example.org")
+	f.entry("Proton password").SetText("pw")
+	f.tap("Sign in")
+	if f.wiz.Step() != ui.StepTOTP {
+		t.Fatalf("control: step %q", f.wiz.Step())
+	}
+	f.w.ShowLogin("dave@example.org")
+	f.wait()
+	if slices.Contains(f.wiz.got(), "cancel") {
+		t.Errorf("the login in progress was cancelled: %v", f.wiz.got())
+	}
+	f.entry("123456") // the 2FA screen is still there
+	// Once that login is left, the wizard opens for the agent's username.
+	f.w.Hide()
+	f.wait()
+	f.w.ShowLogin("dave@example.org")
+	f.wait()
+	if got := f.entry("name@example.org").Text; got != "dave@example.org" {
+		t.Errorf("address = %q, want dave", got)
+	}
+}

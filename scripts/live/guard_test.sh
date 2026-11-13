@@ -164,7 +164,10 @@ out=$(runsh PCB_LIVE_NOW=2010 "$here/run.sh" --run t3 --login 2b 'too soon' -- p
 check "run.sh --login refuses a second login at once (exit 20)" "$rc" 20
 check "run.sh --login did not run the command when refused" "$(grep -c 'pcb sees' <<<"$out")" 0
 # The banners (the guard's, the ledger's) go to stderr: stdout is the command's alone,
-# so `run.sh ... -- pcb ... --json | jq` reads JSON only.
+# so `run.sh ... -- pcb ... --json | jq` (and pcb mcp's MCP session) reads the command's output only,
+# with and without --login.
+out=$(runsh "$here/run.sh" --run t3 -- pcb status 2>/dev/null)
+check "run.sh's stdout is the command's only (no --login)" "$(grep -vc 'pcb sees' <<<"$out")" 0
 so=$(runsh PCB_LIVE_NOW=5000 "$here/run.sh" --run t3 --login 9 'banner check' -- pcb status 2>"$tmp/banner.err"); rc=$?
 check "run.sh: stdout holds the command's output only" "$rc $(grep -vc '^pcb sees ' <<<"$so") $(grep -c '^pcb sees ' <<<"$so")" "0 0 1"
 check "run.sh: the guard and ledger banners are on stderr" \

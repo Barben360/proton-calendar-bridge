@@ -204,6 +204,10 @@ const SyncLockRetry = syncLockRetry
 // keyring again.
 const KeyringRetry = keyringRetry
 
+// SetRenderBudget sets how many objects one agenda call may render (set it
+// before the call).
+func (l *Local) SetRenderBudget(n int) { l.agendaBudget = n }
+
 // AlsoOnOpen makes f run on every Local the Hub holds now and opens later,
 // after the hook SkipSRP set (call it after SkipSRP: SkipSRP replaces the
 // hook).

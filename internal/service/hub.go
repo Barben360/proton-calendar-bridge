@@ -504,7 +504,7 @@ func inspect(a *hubAccount) described {
 // cannot be read is needs-login, as Status says of unreadable secrets.
 func (h *Hub) info(a *hubAccount) AccountInfo {
 	d := inspect(a)
-	info := AccountInfo{ID: a.id, Address: d.address, Pending: d.pending, CalDAV: d.st.CalDAV == nil || *d.st.CalDAV}
+	info := AccountInfo{ID: a.id, Address: d.address, Pending: d.pending, CalDAV: switchOn(d.st.CalDAV), MCP: switchOn(d.st.MCP)}
 	h.mu.Lock()
 	if a.stopped != nil {
 		s := *a.stopped
@@ -545,6 +545,17 @@ func (h *Hub) Accounts() []AccountInfo {
 // ready MustAct (SelectAccount); several carry a *SeveralAccountsError
 // listing them.
 func (h *Hub) Account(selector string) (API, AccountInfo, error) {
+	h.sweep()
+	a, err := h.pick(selector)
+	if err != nil {
+		return nil, AccountInfo{}, err
+	}
+	return accountAPI{a}, h.info(a), nil
+}
+
+// Agenda is the Agenda of the account selector names, chosen as Account
+// chooses; it answers like Account's API once the account is removed.
+func (h *Hub) Agenda(selector string) (Agenda, AccountInfo, error) {
 	h.sweep()
 	a, err := h.pick(selector)
 	if err != nil {
@@ -1006,6 +1017,20 @@ func (h *Hub) signOut(ctx context.Context, selector string, req LogoutRequest) (
 	return a.local.Logout(ctx, req)
 }
 
+// AbandonLogin drops the login waiting for the account's 2FA code, if one
+// does, and changes nothing else: an account that was ready keeps its
+// stored session (a login flow abandoned on its 2FA step, review C I1).
+func (h *Hub) AbandonLogin(ctx context.Context, selector string) error {
+	h.ops.Lock()
+	a, err := h.pick(selector)
+	if err == nil {
+		a.local.AbandonLogin(ctx)
+	}
+	h.ops.Unlock()
+	h.notify(err == nil)
+	return err
+}
+
 // Remove stops the account's serve loop and waits for its end (ruling
 // R18), signs the account out, then deletes its directory. A sign-out it
 // refuses leaves the account as it was, its loop started again.
@@ -1043,19 +1068,37 @@ func (h *Hub) remove(ctx context.Context, selector string, req LogoutRequest) (A
 	return info, true, nil
 }
 
-// SetCalDAV switches the account's CalDAV adapter, in its state.json; while
-// the Hub serves, off stops the account's loop (it returns once the loop
-// ended) and on starts it, with a pass at once. It is refused while a
+// switchOn is an adapter switch of a state.json: absent is on.
+func switchOn(s *bool) bool { return s == nil || *s }
+
+// SetCalDAV switches the account's CalDAV adapter, in its state.json. Off,
+// CalDAV refuses the account's clients; while the Hub serves, the
+// account's loop runs while either adapter is on (wantsLoop): a switch that
+// leaves both off stops it (it returns once the loop ended), one that turns
+// an adapter on starts it, with a pass at once. It is refused while a
 // login of the account waits for its 2FA code (that login would write the
 // switch back as it found it).
 func (h *Hub) SetCalDAV(ctx context.Context, selector string, on bool) (AccountInfo, error) {
-	info, err := h.setCalDAV(ctx, selector, on)
+	return h.setSwitch(ctx, selector, "CalDAV", func(s *store.State) { s.CalDAV = &on })
+}
+
+// SetMCP switches the account's MCP adapter, in its state.json, as
+// SetCalDAV does the CalDAV one. Off, the account is hidden from every MCP
+// entry, whatever their grants; its loop pauses only when CalDAV is off too.
+func (h *Hub) SetMCP(ctx context.Context, selector string, on bool) (AccountInfo, error) {
+	return h.setSwitch(ctx, selector, "MCP", func(s *store.State) { s.MCP = &on })
+}
+
+// setSwitch writes an adapter switch (set) of the account into its
+// state.json, then makes the loops match.
+func (h *Hub) setSwitch(ctx context.Context, selector, adapter string, set func(*store.State)) (AccountInfo, error) {
+	info, err := h.writeSwitch(ctx, selector, adapter, set)
 	h.loops()
 	h.notify(err == nil)
 	return info, err
 }
 
-func (h *Hub) setCalDAV(ctx context.Context, selector string, on bool) (AccountInfo, error) {
+func (h *Hub) writeSwitch(ctx context.Context, selector, adapter string, set func(*store.State)) (AccountInfo, error) {
 	h.ops.Lock()
 	defer h.ops.Unlock()
 	a, err := h.pick(selector)
@@ -1063,13 +1106,13 @@ func (h *Hub) setCalDAV(ctx context.Context, selector string, on bool) (AccountI
 		return AccountInfo{}, err
 	}
 	if a.local.waitingLogin() != nil {
-		return AccountInfo{}, mustAct("a login of this account waits for its 2FA code", "finish it (pcb login resume) or let it expire, then switch CalDAV again")
+		return AccountInfo{}, mustAct("a login of this account waits for its 2FA code", "finish it (pcb login resume) or let it expire, then switch "+adapter+" again")
 	}
 	if _, err := store.LoadState(a.dir); err != nil {
 		return AccountInfo{}, stateError(err)
 	}
 	if err := store.UpdateStateContext(ctx, a.dir, func(s *store.State) error {
-		s.CalDAV = &on
+		set(s)
 		return nil
 	}); err != nil {
 		return AccountInfo{}, a.local.stateWriteError(err)

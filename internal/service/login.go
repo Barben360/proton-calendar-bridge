@@ -235,6 +235,19 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	return l.finish(ctx, pl, totp, l.o.Now())
 }
 
+// AbandonLogin drops the login waiting for the 2FA code (its half session
+// revoked) and changes nothing else: a stored session stays and serves.
+// Nothing waiting, nothing happens.
+func (l *Local) AbandonLogin(ctx context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return
+	}
+	l.dropPending(ctx)
+	l.expired = false
+}
+
 // dropPending aborts a login waiting for its code. It holds mu.
 func (l *Local) dropPending(ctx context.Context) {
 	if l.pending == nil {
@@ -280,6 +293,7 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 			LastRelogin: last.LastRelogin,
 			Address:     loginAddress(cur, username, relogin),
 			CalDAV:      cur.CalDAV,
+			MCP:         cur.MCP,
 			Created:     createdOr(cur, now),
 		}
 	})
@@ -291,7 +305,7 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 
 // writeLogin writes the state.json a login ends with, built by next from
 // the file as it is now, under state.lock (ruling R19): what the login does
-// not own (the CalDAV switch, the creation time, the address a relogin
+// not own (the adapter switches, the creation time, the address a relogin
 // keeps) is read there, not from last, the state the login began with, so
 // a switch made meanwhile is kept. The secrets generation mirror is the
 // file's. A state.json that can no longer be read is replaced as is, built
@@ -428,7 +442,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		st := store.State{
 			AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 			LastLogin: now, LastRelogin: pl.last.LastRelogin,
-			Address: loginAddress(cur, pl.username, pl.relogin), CalDAV: cur.CalDAV, Created: createdOr(cur, now),
+			Address: loginAddress(cur, pl.username, pl.relogin), CalDAV: cur.CalDAV, MCP: cur.MCP, Created: createdOr(cur, now),
 		}
 		if pl.relogin {
 			st.LastLogin, st.LastRelogin = pl.last.LastLogin, now

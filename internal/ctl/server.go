@@ -41,6 +41,7 @@ type Hub interface {
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	SetCalDAV(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
+	SetMCP(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
 	Restart(ctx context.Context, selector string) (service.AccountInfo, error)
 	Health(ctx context.Context, selector string) (service.Health, error)
 }
@@ -61,6 +62,14 @@ type Server struct {
 	// unknown endpoint. It runs on the HTTP handler goroutine and must
 	// return quickly, for example by posting to the UI loop.
 	ShowUI func(account string) error
+	// MCPStatus describes the process's MCP adapter for GET /v2/status
+	// (nil: the status has no mcp).
+	MCPStatus func() *MCP
+	// MCP serves /mcp, every method, for the relays of pcb mcp (decision
+	// 0016: an agent reaches the control socket only through this route).
+	// It runs behind the peer-UID check like every route, and its answers
+	// are its own, not envelopes. nil: /mcp is an unknown endpoint.
+	MCP http.Handler
 
 	once, initOnce sync.Once
 	srv            *http.Server
@@ -87,6 +96,7 @@ var routes = []route{
 	{"/v2/accounts/{id}/logout", http.MethodPost, "logout", (*Server).logout},
 	{"/v2/accounts/{id}/remove", http.MethodPost, "account remove", (*Server).remove},
 	{"/v2/accounts/{id}/caldav", http.MethodPost, "account caldav", (*Server).setCalDAV},
+	{"/v2/accounts/{id}/mcp", http.MethodPost, "account mcp", (*Server).setMCP},
 	{"/v2/accounts/{id}/restart", http.MethodPost, "account restart", (*Server).restart},
 }
 
@@ -172,6 +182,13 @@ func (s *Server) init() {
 	for _, rt := range routes {
 		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
 	}
+	if s.MCP != nil {
+		s.mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
+			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+			s.MCP.ServeHTTP(sw, r)
+			record(r, outcome{status: sw.status})
+		})
+	}
 	if s.ShowUI != nil {
 		rt := route{"/v2/ui/show", http.MethodPost, "ui show", (*Server).showUI}
 		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
@@ -180,6 +197,32 @@ func (s *Server) init() {
 		record(r, transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon"))
 	})
 }
+
+// mcpPath is the route of Server.MCP.
+const mcpPath = "/mcp"
+
+// statusWriter keeps the status an MCP answer was sent with, for its log
+// line. Unwrap lets http.ResponseController reach the connection's writer
+// (the SDK flushes its streams and lifts the write deadline through it).
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.status, w.wroteHeader = code, true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func record(r *http.Request, o outcome) {
 	if out, ok := r.Context().Value(outcomeKey{}).(*outcome); ok {
@@ -275,7 +318,11 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
-	return BuildStatus(ctx, s.Hub, s.Daemon, ln, now()), nil
+	st := BuildStatus(ctx, s.Hub, s.Daemon, ln, now())
+	if s.MCPStatus != nil {
+		st.MCP = s.MCPStatus()
+	}
+	return st, nil
 }
 
 // BuildStatus is what GET /v2/status answers, built in-process (the desktop
@@ -404,13 +451,33 @@ func logoutRequest(body []byte) (req service.LogoutRequest, err error) {
 // setCalDAV is POST /v2/accounts/{id}/caldav: Hub.SetCalDAV on the body's
 // "on", which must be given.
 func (s *Server) setCalDAV(ctx context.Context, id string, body []byte) (any, error) {
+	on, err := switchBody(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.SetCalDAV(ctx, id, on)
+}
+
+// setMCP is POST /v2/accounts/{id}/mcp: Hub.SetMCP on the body's "on",
+// which must be given.
+func (s *Server) setMCP(ctx context.Context, id string, body []byte) (any, error) {
+	on, err := switchBody(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.SetMCP(ctx, id, on)
+}
+
+// switchBody is the "on" of an adapter switch's body (CalDAVRequest,
+// MCPRequest); a body without it is errBadBody.
+func switchBody(body []byte) (bool, error) {
 	var req struct {
 		On *bool `json:"on"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.On == nil {
-		return nil, errBadBody
+		return false, errBadBody
 	}
-	return s.Hub.SetCalDAV(ctx, id, *req.On)
+	return *req.On, nil
 }
 
 // restart is POST /v2/accounts/{id}/restart: Hub.Restart.

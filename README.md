@@ -4,13 +4,14 @@ Private. The calendar counterpart of Proton Mail Bridge: a local
 daemon that logs into Proton, decrypts Proton Calendar (end-to-end encrypted,
 undocumented API) and serves it through standard and agent-friendly adapters.
 
-Shape (built through M7, see Status):
+Shape (built through M8, see Status):
 
 - **Core** (Go): accounts and login (as unattended as Proton allows), sync
   engine on Proton's change feed, encrypted local cache, access policy, and an
   iCalendar-native event model (decision 0012; JSCalendar deferred).
-- **Adapters**: CalDAV (Thunderbird first; read and write) and a CLI; REST and
-  MCP adapters are out of scope for now (decision 0007).
+- **Adapters**: CalDAV (Thunderbird first; read and write), MCP for AI agents
+  (M8, decision 0016: `pcb mcp` over stdio, or `/mcp` with a bearer token; below)
+  and a CLI; a REST adapter is out of scope (decision 0007).
 - **Runs** headless (systemd / Docker), one process for any number of Proton accounts; on a Linux desktop the same daemon runs inside `pcb-ui`, a tray icon and a window (M7, below).
 - **Platforms**: Linux amd64 and arm64 are supported. macOS and Windows only build (`GOOS=darwin` and `GOOS=windows` compile `./cmd/pcb`), are not tested, and have no service management; off Unix there is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 on Windows (`run pcb on Linux or macOS`) and the CLI otherwise runs offline on the files (`spec/SPEC.md` §13, "Platforms").
 
@@ -34,6 +35,8 @@ and a Debian container with systemd as PID 1) passed locally, and CI publishes t
 
 Milestone M7 adds the Linux desktop app `pcb-ui` (below) and a sealer that keeps the sealing key in the desktop keyring (Secret Service). Both are tested against the fake Proton, a fake Secret Service and Fyne's headless test driver; the GUI itself (tray, notifications, the real keyring) is `spec/HUMAN-CHECKS.md` step 9, in a throwaway VM with a GNOME session and the test account, not run yet. See `spec/decisions/0015-pcb-ui.md`.
 
+Milestone M8 adds an MCP adapter, so AI agents read and edit the calendars they are granted ("Agents (MCP)", below): `pcb mcp` over stdio for an agent on this machine, remote `/mcp` with a bearer token for one elsewhere, grants per agent, and a login the agent starts but you finish (in `pcb-ui` or on a one-time page on 127.0.0.1). It is tested against the fake Proton through the MCP SDK's own client, with a scan for secrets over a whole session, and `make rehearse` drives `pcb mcp` against `pcb-fake`; a real agent client (Claude Code) against the test account is `spec/HUMAN-CHECKS.md` step 10, not run yet. See `spec/decisions/0016-mcp-adapter.md` and `spec/SPEC.md` §12.
+
 ## Usage
 
 ```sh
@@ -42,8 +45,9 @@ pcb login --username alice             # the username may be a flag (default: $P
 pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
 pcb login --unattended-relogin         # store the credentials so pcb can log in again without you
 pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
-pcb account list                       # every account: local ID, address, phase, CalDAV on or off, last sync (a pending add, stopped by a CAPTCHA, is listed too)
-pcb account caldav off                 # an account's CalDAV switch (on|off): off, its CalDAV clients are refused and its sync pauses
+pcb account list                       # every account: local ID, address, phase, CalDAV and MCP on or off, last sync (a pending add, stopped by a CAPTCHA, is listed too)
+pcb account caldav off                 # an account's CalDAV switch (on|off): off, its CalDAV clients are refused; its sync pauses only when MCP is off too
+pcb account mcp off                    # an account's MCP switch (on|off): off, agents do not see it; its sync pauses only when CalDAV is off too
 pcb account restart                    # serve an account again after it stopped on an error (pcb status shows it as account-stopped)
 pcb account remove [--yes]             # sign the account out, then delete its directory (its cache and CalDAV passwords too)
 pcb status                             # every account's login; with pcb serve running, its live state too (listener, per-calendar sync and write gate, alerts)
@@ -63,9 +67,11 @@ pcb uninstall [--delete-data] [--plan]
 pcb service start|stop|restart|status|logs [-f]
 pcb doctor                             # every check (service, daemon, listener, certificate, clients included), with the fix; exit 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable
 pcb logout [--yes]                     # revokes the session, through the daemon when it runs; --yes discards a store this pcb cannot read
+pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]   # MCP for the agent that runs it, on stdin and stdout (see "Agents (MCP)")
+pcb mcp token add NAME --allow read    # a remote agent's bearer token, printed once; also list, remove NAME
 ```
 
-With several accounts, a command about one account names it: `--account ADDRESS|LOCAL-ID` or `PCB_ACCOUNT` (`logout`, `login resume`, `status`, `calendar list`, `event list`, `sync`, `client ...`, `account caldav|restart|remove`); with one account (a pending add does not count) it is optional, and with several and none named the command exits 2, says `several accounts: name one with --account` and lists them (`--json`: `data.accounts`). With no account yet (or only a pending add) it exits 10, `no account`, hint `add one with pcb login`; a selector that names no account exits 2. `pcb login` takes no `--account`. `--json` is schema version 2 since M6: `pcb status` data is `{daemon, listener, accounts[], alerts}` (an account's login fields moved under `accounts[].login`), and `pcb doctor` names each per-account result `<address>: <check>` (the local ID when the account has no address).
+With several accounts, a command about one account names it: `--account ADDRESS|LOCAL-ID` or `PCB_ACCOUNT` (`logout`, `login resume`, `status`, `calendar list`, `event list`, `sync`, `client ...`, `account caldav|mcp|restart|remove`); with one account (a pending add does not count) it is optional, and with several and none named the command exits 2, says `several accounts: name one with --account` and lists them (`--json`: `data.accounts`). With no account yet (or only a pending add) it exits 10, `no account`, hint `add one with pcb login`; a selector that names no account exits 2. `pcb login` takes no `--account`. `--json` is schema version 2 since M6: `pcb status` data is `{daemon, listener, accounts[], alerts}` (an account's login fields moved under `accounts[].login`), and `pcb doctor` names each per-account result `<address>: <check>` (the local ID when the account has no address).
 
 Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. When `pcb serve` runs, `pcb login` goes through it, over a control socket only its own user can open; a login that waits for its 2FA code stays in the daemon for 5 minutes, and `PCB_TOTP=<code> pcb login resume --totp` finishes it (the code is never an argument). With no daemon, `pcb login` says so and logs in on its own. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run). A login that hits a CAPTCHA while the stored session is still working leaves that session as it was. Each Proton call of a login has a 30 s deadline (exit 20, run the command again), and a Proton 429 names the wait (`Retry-After`).
 
@@ -92,7 +98,7 @@ pcb client show              # in another terminal: URL, username, password and,
 In Thunderbird: New Calendar > On the Network, format CalDAV, the URL of `pcb client show` as Location (`/dav/<local-id>/`: one per account), its username (the account's address; any username is accepted) and its
 password (the live session against the bridge, `spec/HUMAN-CHECKS.md` step 6, ran on 2026-11-13 on the M5 build; its write-up is still to come). `pcb serve` keeps the cache in sync (a pass every 30 s, every 5 min once nobody has used the bridge for 35 minutes, and at once when a client asks again) and serves it, with writes, until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0; a second signal exits 20). Plain `pcb serve` refuses to start logged out (exit 10, `pcb login`),
-while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb is already serving (pid N)`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
+while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb is already serving (pid N, kind K)`, K being `serve`, `ui` or `mcp`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
 listening instead: with no account it waits for the first login (no CalDAV client exists before one, so CalDAV answers 401), and an account waiting for a login, from any process, has its CalDAV answer 503 with `Retry-After: 30` until it completes (again whenever Proton ends the session), with no restart.
 Logs go to stderr, IDs only; `--log-level debug` (or `[log] level`) adds what a write normalised.
 After each sync pass, while an event is served as a placeholder (it could not be decrypted) or marked
@@ -158,6 +164,64 @@ A state created on a desktop session whose keyring (GNOME Keyring, KWallet) is u
 `pcb` and `pcb-ui` both open what the other sealed. A locked keyring (a service started before you logged in) is not an error to fix: the account waits, shows the alert `keyring-locked`, makes no Proton login and retries every 30 s until you unlock it. pcb never prompts for the keyring. Any process of your login session can read the item, so against a same-user process it is no stronger than a key file; it keeps the key off the disk beside the data. `pcb uninstall --delete-data` removes the item (a `remove keyring` step after the state directory); when the keyring is locked or not available it deletes the data anyway and its output says how to delete the item by hand in Seahorse. `pcb account remove` keeps it, since the key belongs to the state `[verified: TestUninstallDeleteDataRemovesTheKeyringItem, TestUninstallDeleteDataWithoutTheKeyringSaysHowToRemoveTheItem, TestAccountRemoveKeepsTheKeyringItem]`.
 
 When no keyring answers at all (`pcb` over SSH, or a service started outside the desktop session), commands on a keyring state exit 20 with `the desktop keyring is not available` and the hint to run pcb inside the desktop session; `pcb status` shows `secrets: keyring-unavailable` and the alert `keyring-unavailable`, never `needs-login`: the stored session is intact, so do not log out. A login checks the keyring first and, when it is locked or not available, refuses before contacting Proton.
+
+## Agents (MCP)
+
+`pcb` is an MCP server, so an AI agent (Claude Code, or any client that speaks MCP and can send a header) reads your calendars and, when you allow it, edits them. It has eleven tools: `status` (with the current time: agents have no reliable clock), `calendars_list`, `free_busy`, `events_list` (recurring events expanded), `event_get`, `events_search`, `event_create`, `event_update`, `event_delete`, `login` and `logout`. Text that comes from calendars (titles, descriptions, locations, attendee names) reaches the agent marked `untrusted`, with a note that it is data written by others, never instructions, and invitations from someone else are flagged; that helps, but your controls are the grants below, the ETags (an agent edits only what it just read, and only the fields it names: alarms, exceptions and anything else stay) and the delete confirmation `[verified: TestUntrustedFieldsAreGrouped, TestOccurrencesFlagExternalOrganizer, TestUpdateStaleETagIsConflict, TestApplyEditKeepsUntouchedLines]`. Built and tested against the fake Proton only; with a real client and Proton it is `spec/HUMAN-CHECKS.md` step 10, not run yet `[assumed → step 10]`.
+
+**On this machine (stdio).** The agent starts `pcb mcp`, which speaks MCP on stdin and stdout. When pcb already runs (`pcb serve`, the service, `pcb-ui`), it relays the session to it over the control socket; otherwise it serves your accounts itself for as long as the agent's session lasts, and meanwhile `pcb serve` and `pcb-ui` refuse to start, saying an agent session holds the state (end it first) `[verified: TestMCPStdioRelaysToARunningDaemon, TestMCPStdioBecomesTheDaemon, TestServeLockNamesTheKind, TestBridgeNamesAnAgentSession]`. With the pcb user service installed and running or restarting, `pcb mcp` never takes its place: it waits up to 30 s for the service and relays to it, else exits 20 asking for `pcb service start`; a service you stopped changes nothing `[verified: TestMCPStdioWaitsForARestartingUserUnit, TestMCPStdioServesNextToAStoppedUserUnit]`. For Claude Code `[assumed → step 10]`:
+
+```sh
+claude mcp add pcb -- pcb mcp                    # read-only (the default): read, plus starting a login
+claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete, log out
+```
+
+or in a project's `.mcp.json`: `{"mcpServers": {"pcb": {"command": "pcb", "args": ["mcp", "--profile", "full"]}}}`. Give the absolute path of `pcb` when the agent's `PATH` lacks it.
+
+What an agent may do:
+
+| Profile or `--allow` capability | Tools |
+|---|---|
+| `freebusy` | `status`, `calendars_list`, `free_busy` (busy times only) |
+| `read` (includes `freebusy`) | + `events_list`, `event_get`, `events_search` |
+| `write` (includes `read`) | + `event_create`, `event_update` |
+| `delete` (needs `write`) | + `event_delete` |
+| `login` (stdio only) | `login` |
+| `manage` (stdio only) | `logout` |
+| `--profile read-only` (default) | `read` + `login` |
+| `--profile full` | all six |
+
+`--allow write,delete` replaces the profile; `--account ADDRESS` (repeatable) limits the session to those accounts. Over stdio a profile is a guard rail, not a lock: any program running as you can run `pcb` itself. `pcb account mcp off` hides an account from every agent at once, whatever their grants (its sync keeps running while CalDAV is on) `[verified: TestToolsListFollowsTheGrant, TestProfiles, TestParseCapsAppliesImplications, TestScopedGrantCannotSeeOtherAccounts, TestMCPOffAccountIsInvisible, TestCalDAVOffMCPOnKeepsSyncing]`.
+
+**From another machine (remote, a token).** Off by default `[verified: TestRemoteMCPOffByDefault, TestMCPConfigStrict]`. Turn on `/mcp` on the CalDAV listener, then give each agent its own token:
+
+```toml
+# config.toml
+[mcp]
+remote = true            # serve /mcp on the [caldav] listener (same port and TLS rule)
+# timezone = "Europe/Paris"   # for times given without a zone; empty: this machine's zone
+```
+
+```sh
+pcb mcp token add laptop-agent --allow read [--account ADDRESS] [--calendar ID] [--expires 30d]   # prints the token once: pcbm_...
+pcb mcp token list                     # names, grants, last use, expiry; never the tokens
+pcb mcp token remove laptop-agent      # it stops working at once
+```
+
+A token is stored as a salted hash only: lost, remove it and add another. It can never be granted `login` or `manage`, and an account or calendar outside its grant does not exist for it `[verified: TestTokenAddStoresOnlyAHash, TestMCPTokenRefusesLoginCap, TestScopedGrantCannotSeeOtherAccounts]`. The agent sends `Authorization: Bearer <token>`; keep the token out of command lines, for example in Claude Code's `.mcp.json` from an environment variable `[assumed → step 10]`:
+
+```json
+{"mcpServers": {"pcb": {"type": "http", "url": "http://127.0.0.1:1080/mcp",
+  "headers": {"Authorization": "Bearer ${PCB_MCP_TOKEN}"}}}}
+```
+
+The URL is your listener's plus `/mcp`. On a non-loopback bind pcb serves TLS, with its own certificate unless you set yours (`<state>/tls/cert.pem`, the fingerprint in `pcb status`): the agent's runtime must trust it (for Node-based clients, `NODE_EXTRA_CA_CERTS` pointing at that file) `[assumed → step 10]`, or keep the listener on loopback and reach it through `ssh -L 1080:127.0.0.1:1080 <server>`. After five bad tokens in a minute from one address, further requests from it get 503 with a `Retry-After` (IPv6 counted per /64); a request whose `Host` is not a loopback name, one of `[caldav] hostnames` or the address it came to, or whose `Origin` differs from `Host`, gets 403. With a system service installed (`pcb install --system`), `pcb mcp` does not serve on its own (it would be a second server of the same Proton account): use the remote `/mcp` with a loopback listen and a token instead `[verified: TestRemoteMCPLimiter503AfterFiveFailures, TestLimiterKeysIPv6ByPrefix64, TestRemoteMCPRefusesForeignHost, TestRemoteMCPRefusesForeignOrigin, TestMCPStdioRefusesNextToASystemUnit]`.
+
+**Logging in from an agent.** `login` takes a username and nothing else: you type the password, 2FA code or CAPTCHA, never the agent. In `pcb-ui` it opens the add-account wizard with the address filled in. Otherwise pcb opens a one-time page on `http://127.0.0.1:<port>/login/...` for that username (5 minutes, the first browser to use it keeps it), and the agent shows you the link (or your client opens it, when it supports that). Every answer also names `pcb login --username ADDRESS`, for a `pcb mcp` in a container whose loopback your browser cannot reach. An agent may start one login a minute per session. An account that is already logged in is refused (nothing opens), and a login you abandon at the 2FA step never signs out an account that was working before it `[verified: TestLoginToolRefusesAReadyAccount, TestFlowCancelKeepsAnAccountThatWasReady]`. Over remote there is no login: an account that needs one shows `needs-login` and the step (`pcb login` on the server, or `pcb-ui`) `[verified: TestLoginToolRaisesTheWizardInPcbUI, TestLoginPageSingleUse, TestLoginPageBindsLoopbackWithANonce, TestLoginPageExpires, TestLoginToolResultHasNoSecret, TestLoginToolCooldown, TestLoginAndLogoutNeverRemote, TestStatusGivesNow]`.
+
+**Deletes and sign-outs ask you** when your client supports MCP form elicitation: `Delete the event on <date>: «title»?` (what goes comes first, and the title, which a third party may write, cannot rewrite the question `[verified: TestDeletePromptResistsSpoofing]`); declining deletes nothing. A client without it deletes on the `delete` grant alone, so grant `delete` only to an agent you would let delete unasked `[verified: TestDeleteAsksWhenElicitationDeclared, TestDeleteWithoutElicitationNeedsDeleteCap, TestLogoutConfirms]`. Which clients ask is `[assumed → step 10]`.
+
+**Audit.** Every tool call is one `mcp call` line in the daemon's log (`pcb serve`'s stderr or the journal, `pcb-ui.log`, `pcb mcp`'s stderr when it serves the session itself): the tool, how the agent came (`remote`, `relay`, `stdio`), the token name or profile, the accounts, calendars and event UID, the outcome and the duration; never a title, a description, a link or a secret. `pcb status` shows `mcp: remote on|off; live sessions: ...` while a daemon runs, and `pcb doctor` lists expired tokens and warns when remote is on with a non-loopback bind and no usable token. `[verified: TestAuditLineHasNoContent, TestNoSecretInAnyMCPOutput, TestStatusShowsRemoteMCP, TestDoctorWarnsRemoteWithoutToken]`
 
 ## Run in a container
 
@@ -314,6 +378,7 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **go-proton-api**, **go-srp**, **gopenpgp** (MIT, used as libraries). go-proton-api's in-memory test server pattern is the model for and the engine behind our shared fake Proton (`internal/proton/protontest`, an httptest front over its server, which the lab's `internal/lab/labtest` builds on). The developer-only `pcb-lab probe sessions` takes the sessions endpoints and their auth from go-proton-api's `AuthSessions` and `AuthRevoke` (`GET /auth/v4/sessions`, `DELETE /auth/v4/sessions/{UID}`, the session's own token, no extra scope), on our own code and transport (`internal/lab/probe/sessions.go`).
 - **develonrails/carbonate**, **WentTheFox/caloxide**, **ProtonMail/WebClients** (GPL-3.0): read only for the client identity strings tried in experiment E03 (`spec/experiments/E03-client-identity.md`). No code from any of them; WebClients is never copied.
 - **emersion/go-webdav** (MIT): audited in experiment E17 (`spec/experiments/E17-go-webdav-audit.md`) and **not** used as the server; its CalDAV client, with `go-ical` (MIT), is a test-only dependency that checks our server from the outside and never reaches the binary. It moved `go-vcard` to a newer revision through module version selection (only README and an example differ).
+- **modelcontextprotocol/go-sdk** v1.8.0 (the official MCP Go SDK; Apache-2.0, with the contributions not yet relicensed under MIT): the MCP server, transports and test client of the MCP adapter, used as a dependency, nothing copied; audited in experiment E19 (`spec/experiments/E19-mcp-go-sdk.md`). It brings `google/jsonschema-go` (MIT), `segmentio/encoding` and `segmentio/asm` (MIT), `yosida95/uritemplate` (BSD-3-Clause) and `golang.org/x/oauth2` (BSD-3-Clause).
 - **Fyne** v2.8.2 (fyne.io/fyne/v2, BSD-3-Clause): the toolkit of `pcb-ui` (window, tray, notifications, headless test driver), used as a dependency, nothing copied (`internal/ui/desktop`, `cmd/pcb-ui`).
 - **godbus/dbus** v5.2.4 (BSD-2-Clause): the D-Bus client of the Secret Service sealer and of the desktop notifications, used as a dependency, nothing copied. The Secret Service client is written from the freedesktop.org specification, with no other implementation read (`internal/store/seal`).
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.

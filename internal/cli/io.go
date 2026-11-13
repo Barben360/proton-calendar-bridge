@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +26,9 @@ import (
 // IO is what pcb touches outside its own process state, so tests can replace
 // each part.
 type IO struct {
+	// Stdin is what pcb mcp reads its agent's MCP messages from (nil: an
+	// empty input).
+	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	// Env looks up an environment variable.
 	Env func(string) string
@@ -45,6 +50,10 @@ type IO struct {
 	// Keyring is the desktop keyring pcb doctor probes for a state sealed
 	// with it (nil: the session bus's, doctor.SystemKeyring).
 	Keyring service.Keyring
+	// UnitWait is how long pcb mcp waits for the daemon of a pcb user unit
+	// that systemd reports active or starting (0: 30 s, longer than the
+	// unit's RestartSec).
+	UnitWait time.Duration
 	// Signals subscribes to SIGINT and SIGTERM (signal.Notify) and returns
 	// the function that unsubscribes: pcb serve exits at once on a second
 	// one while it stops (ruling M5-P22).
@@ -60,12 +69,15 @@ func osSignals() (<-chan os.Signal, func()) {
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
-	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), OpenHub: localHub, Listen: net.Listen,
+	return IO{Stdin: os.Stdin, Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), OpenHub: localHub, Listen: net.Listen,
 		DialDaemon: ctl.Dial, Host: install.OSHost(), Signals: osSignals}
 }
 
 // withDefaults fills the nil fields with the operating system's values.
 func (o IO) withDefaults() IO {
+	if o.Stdin == nil {
+		o.Stdin = strings.NewReader("")
+	}
 	if o.Stdout == nil {
 		o.Stdout = io.Discard
 	}

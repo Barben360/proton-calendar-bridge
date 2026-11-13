@@ -61,12 +61,13 @@ type stubHub struct {
 	removed   []string
 	restarted []string
 	caldav    []string // "selector=on|off"
+	mcp       []string // "selector=on|off"
 }
 
 // newHub is a hub of one account, idA, whose login is st.
 func newHub(st service.Status) *stubHub {
 	return &stubHub{
-		infos:  []service.AccountInfo{{ID: idA, Address: addrA, Phase: st.Phase, CalDAV: true}},
+		infos:  []service.AccountInfo{{ID: idA, Address: addrA, Phase: st.Phase, CalDAV: true, MCP: true}},
 		status: map[string]service.Status{idA: st},
 		health: map[string]service.Health{},
 	}
@@ -159,6 +160,17 @@ func (h *stubHub) SetCalDAV(_ context.Context, selector string, on bool) (servic
 		h.caldav = append(h.caldav, selector+"="+map[bool]string{true: "on", false: "off"}[on])
 		h.mu.Unlock()
 		i.CalDAV = on
+	}
+	return i, err
+}
+
+func (h *stubHub) SetMCP(_ context.Context, selector string, on bool) (service.AccountInfo, error) {
+	i, err := h.find(selector)
+	if err == nil {
+		h.mu.Lock()
+		h.mcp = append(h.mcp, selector+"="+map[bool]string{true: "on", false: "off"}[on])
+		h.mu.Unlock()
+		i.MCP = on
 	}
 	return i, err
 }
@@ -314,7 +326,7 @@ func TestStatusOverTheSocket(t *testing.T) {
 	}
 	a := accounts[0].(map[string]any)
 	// The AccountInfo is flat; the login, health, URL and alerts are the account's own.
-	if a["id"] != idA || a["address"] != addrA || a["caldav"] != true || a["url"] != "http://localhost:1080/dav/"+idA+"/" {
+	if a["id"] != idA || a["address"] != addrA || a["caldav"] != true || a["mcp"] != true || a["url"] != "http://localhost:1080/dav/"+idA+"/" {
 		t.Errorf("account = %v", a)
 	}
 	if l := a["login"].(map[string]any); l["phase"] != "ready" || l["username"] != "alice" || l["secrets"] != "sealed" {
@@ -655,6 +667,7 @@ func TestUnknownPathAndMethod(t *testing.T) {
 		{http.MethodGet, "/v2/accounts/" + idA + "/logout", http.MethodPost, http.StatusMethodNotAllowed},
 		{http.MethodGet, "/v2/accounts/" + idA + "/remove", http.MethodPost, http.StatusMethodNotAllowed},
 		{http.MethodGet, "/v2/accounts/" + idA + "/caldav", http.MethodPost, http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v2/accounts/" + idA + "/mcp", http.MethodPost, http.StatusMethodNotAllowed},
 		{http.MethodGet, "/v2/accounts/" + idA + "/restart", http.MethodPost, http.StatusMethodNotAllowed},
 		{http.MethodGet, "/v2/accounts/" + idA + "/login/totp", http.MethodPost, http.StatusMethodNotAllowed},
 	} {
@@ -740,7 +753,7 @@ func TestUnknownAccountRoute(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{Phase: "ready"})
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
-	for _, action := range []string{"login/totp", "logout", "remove", "caldav", "restart"} {
+	for _, action := range []string{"login/totp", "logout", "remove", "caldav", "mcp", "restart"} {
 		target := "/v2/accounts/zzzzzzzz/" + action
 		resp, env := raw(t, s.path, http.MethodPost, target, strings.NewReader(`{"on":true}`))
 		if resp.StatusCode != http.StatusUnprocessableEntity || env["ok"] != false {
@@ -760,7 +773,7 @@ func TestUnknownAccountRoute(t *testing.T) {
 	if _, err := c.SubmitTOTP(t.Context(), "zzzzzzzz", "123456"); exitcode.From(err) != exitcode.Usage {
 		t.Errorf("SubmitTOTP of an unknown account = %v; want exit 2", err)
 	}
-	if len(hub.removed)+len(hub.restarted)+len(hub.caldav)+hub.logouts != 0 {
+	if len(hub.removed)+len(hub.restarted)+len(hub.caldav)+len(hub.mcp)+hub.logouts != 0 {
 		t.Errorf("the hub changed something: %+v", hub)
 	}
 }
@@ -770,7 +783,7 @@ func TestUnknownAccountRoute(t *testing.T) {
 func TestAccountRoutesReachTheHub(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{Phase: "ready"})
-	hub.infos = append(hub.infos, service.AccountInfo{ID: idB, Address: addrB, CalDAV: true})
+	hub.infos = append(hub.infos, service.AccountInfo{ID: idB, Address: addrB, CalDAV: true, MCP: true})
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
 	c := dial(t, s.path)
 	ctx := t.Context()
@@ -789,6 +802,13 @@ func TestAccountRoutesReachTheHub(t *testing.T) {
 	if info, err = c.SetCalDAV(ctx, idB, true); err != nil || !info.CalDAV {
 		t.Fatalf("SetCalDAV on = %+v, %v", info, err)
 	}
+	info, err = c.SetMCP(ctx, addrB, false) // by address
+	if err != nil || info.ID != idB || info.MCP || !info.CalDAV {
+		t.Fatalf("SetMCP off = %+v, %v", info, err)
+	}
+	if info, err = c.SetMCP(ctx, idB, true); err != nil || !info.MCP {
+		t.Fatalf("SetMCP on = %+v, %v", info, err)
+	}
 	if info, err = c.Restart(ctx, idA); err != nil || info.ID != idA {
 		t.Fatalf("Restart = %+v, %v", info, err)
 	}
@@ -796,27 +816,31 @@ func TestAccountRoutesReachTheHub(t *testing.T) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	if !slices.Equal(hub.logoutFor, []string{idB}) || !slices.Equal(hub.removed, []string{addrA}) ||
-		!slices.Equal(hub.caldav, []string{idB + "=off", idB + "=on"}) || !slices.Equal(hub.restarted, []string{idA}) {
-		t.Errorf("hub calls: logout %v, remove %v, caldav %v, restart %v", hub.logoutFor, hub.removed, hub.caldav, hub.restarted)
+		!slices.Equal(hub.caldav, []string{idB + "=off", idB + "=on"}) || !slices.Equal(hub.mcp, []string{addrB + "=off", idB + "=on"}) ||
+		!slices.Equal(hub.restarted, []string{idA}) {
+		t.Errorf("hub calls: logout %v, remove %v, caldav %v, mcp %v, restart %v", hub.logoutFor, hub.removed, hub.caldav, hub.mcp, hub.restarted)
 	}
 	if !slices.Equal(hub.discard, []bool{true, false}) {
 		t.Errorf("Discard of the logout and the remove = %v, want [true false]", hub.discard)
 	}
 }
 
-// The caldav switch must be given: a body without "on" is no request.
+// The caldav and mcp switches must be given: a body without "on" is no
+// request.
 func TestCalDAVNeedsItsSwitch(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{Phase: "ready"})
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
-	for _, body := range []string{``, `{}`, `{"on":`, `{"on":"yes"}`} {
-		resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/"+idA+"/caldav", strings.NewReader(body))
-		if resp.StatusCode != http.StatusBadRequest || env["ok"] != false {
-			t.Errorf("body %q: HTTP %d, envelope %v; want 400", body, resp.StatusCode, env)
+	for _, adapter := range []string{"caldav", "mcp"} {
+		for _, body := range []string{``, `{}`, `{"on":`, `{"on":"yes"}`} {
+			resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/"+idA+"/"+adapter, strings.NewReader(body))
+			if resp.StatusCode != http.StatusBadRequest || env["ok"] != false {
+				t.Errorf("%s, body %q: HTTP %d, envelope %v; want 400", adapter, body, resp.StatusCode, env)
+			}
 		}
 	}
-	if len(hub.caldav) != 0 {
-		t.Errorf("a refused body switched CalDAV: %v", hub.caldav)
+	if len(hub.caldav)+len(hub.mcp) != 0 {
+		t.Errorf("a refused body switched an adapter: caldav %v, mcp %v", hub.caldav, hub.mcp)
 	}
 }
 
@@ -1242,5 +1266,114 @@ func TestShowUIWithoutCallbackIsAnUnknownEndpoint(t *testing.T) {
 	}
 	if err := dial(t, s.path).ShowUI(t.Context(), ""); err == nil {
 		t.Error("ShowUI against a server without it succeeded")
+	}
+}
+
+// mcpStub is the /mcp handler the daemon mounts: it records what reaches
+// it and answers a streamed body, flushed through the server's writer.
+type mcpStub struct {
+	mu    sync.Mutex
+	calls []string // "METHOD path header body"
+}
+
+func (m *mcpStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	m.mu.Lock()
+	m.calls = append(m.calls, r.Method+" "+r.URL.Path+" "+r.Header.Get("X-Pcb-Mcp-Grant")+" "+string(body))
+	m.mu.Unlock()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = io.WriteString(w, "event: message\n")
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_, _ = io.WriteString(w, "flush: "+err.Error()+"\n")
+	}
+	_, _ = io.WriteString(w, "data: {}\n\n")
+}
+
+func (m *mcpStub) seen() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.calls)
+}
+
+// rawMCP sends one request to the socket's /mcp and returns its response
+// and body as they are (no envelope).
+func rawMCP(t *testing.T, path, method, body string) (*http.Response, string) {
+	t.Helper()
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", path)
+	}}}
+	defer hc.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), method, "http://pcb/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Pcb-Mcp-Grant", `{"Name":"read-only"}`)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, string(b)
+}
+
+// The control socket hands /mcp, every method, to its MCP handler as is:
+// headers and body in, status and a flushed stream out, never an envelope.
+// Without a handler /mcp is an unknown endpoint; /v2 routes are unchanged.
+func TestControlSocketServesMCP(t *testing.T) {
+	t.Parallel()
+	stub := &mcpStub{}
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{Phase: "ready", Username: "alice"}), Daemon: daemon(), MCP: stub})
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		resp, body := rawMCP(t, s.path, method, `{"jsonrpc":"2.0"}`)
+		if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Content-Type") != "text/event-stream" ||
+			body != "event: message\ndata: {}\n\n" {
+			t.Errorf("%s /mcp: HTTP %d %q, body %q; want the handler's 202 stream", method, resp.StatusCode, resp.Header.Get("Content-Type"), body)
+		}
+	}
+	want := []string{
+		`POST /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+		`GET /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+		`DELETE /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+	}
+	if got := stub.seen(); !slices.Equal(got, want) {
+		t.Errorf("the handler saw %q, want %q", got, want)
+	}
+	if logs := s.logs.String(); !strings.Contains(logs, "path=/mcp status=202") {
+		t.Errorf("the request log lacks /mcp's status:\n%s", logs)
+	}
+	// Only /mcp itself: a path below it is an unknown endpoint.
+	if resp, env := raw(t, s.path, http.MethodPost, "/mcp/x", nil); resp.StatusCode != http.StatusNotFound || env["ok"] != false {
+		t.Errorf("/mcp/x: HTTP %d %v, want 404", resp.StatusCode, env)
+	}
+	if resp, env := raw(t, s.path, http.MethodGet, "/v2/status", nil); resp.StatusCode != http.StatusOK || env["ok"] != true {
+		t.Errorf("/v2/status beside /mcp: HTTP %d %v", resp.StatusCode, env)
+	}
+
+	plain := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon()})
+	if resp, env := raw(t, plain.path, http.MethodPost, "/mcp", strings.NewReader("{}")); resp.StatusCode != http.StatusNotFound || env["ok"] != false {
+		t.Errorf("/mcp without a handler: HTTP %d %v, want the 404 envelope", resp.StatusCode, env)
+	}
+}
+
+// The peer-UID check covers /mcp: a peer of another UID gets 403 and the
+// handler never runs.
+func TestControlSocketMCPRefusesOtherUID(t *testing.T) {
+	t.Parallel()
+	stub := &mcpStub{}
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon(), MCP: stub,
+		PeerUID: func(net.Conn) (int, bool) { return os.Geteuid() + 1, true }})
+	resp, body := rawMCP(t, s.path, http.MethodPost, `{"jsonrpc":"2.0"}`)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(body), &env); err != nil || resp.StatusCode != http.StatusForbidden || env["ok"] != false {
+		t.Errorf("/mcp from another UID: HTTP %d %s, want the 403 envelope", resp.StatusCode, body)
+	}
+	if got := stub.seen(); len(got) != 0 {
+		t.Errorf("the MCP handler ran for another UID: %q", got)
 	}
 }

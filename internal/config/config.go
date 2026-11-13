@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
@@ -36,6 +37,39 @@ type Config struct {
 	Secrets Secrets `toml:"secrets"`
 	CalDAV  CalDAV  `toml:"caldav"`
 	Log     Log     `toml:"log"`
+	MCP     MCP     `toml:"mcp"`
+}
+
+// MCP is the MCP adapter's configuration (design §5.9).
+type MCP struct {
+	Remote   bool   `toml:"remote"`   // serve /mcp on the [caldav] listener, for token holders
+	Timezone string `toml:"timezone"` // IANA zone for times given without one; empty: the process's zone
+}
+
+// Location is the zone of Timezone, the process's zone when it is empty
+// (Load validated it; one that no longer loads is the process's too).
+func (m MCP) Location() *time.Location {
+	if m.Timezone == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(m.Timezone)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+// validate refuses a zone that is not an IANA name, without echoing it.
+// "Local" loads as the process's zone and a path loads a file: neither is
+// a zone name.
+func (m MCP) validate() error {
+	if m.Timezone == "" {
+		return nil
+	}
+	if _, err := time.LoadLocation(m.Timezone); err != nil || m.Timezone == "Local" || strings.HasPrefix(m.Timezone, "/") {
+		return errors.New("mcp.timezone must be an IANA zone name, such as Europe/Paris, or empty for the process's zone")
+	}
+	return nil
 }
 
 // Log is the logging of pcb serve.
@@ -174,6 +208,9 @@ func (c Config) validate() error {
 	}
 	if _, err := ParseLevel(c.Log.Level); err != nil {
 		return fmt.Errorf("log.level %w", err)
+	}
+	if err := c.MCP.validate(); err != nil {
+		return err
 	}
 	return c.CalDAV.validate()
 }

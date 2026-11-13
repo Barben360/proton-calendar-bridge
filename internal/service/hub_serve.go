@@ -17,7 +17,8 @@ import (
 )
 
 // serveLockName is the root's lock of the serving process (design §4.1):
-// it holds the PID as decimal text and a newline (ruling R20).
+// it holds the PID as decimal text and a newline (ruling R20), the PID
+// followed by a space and the process's kind since M8 (lockServe).
 const serveLockName = "serve.lock"
 
 // HubServeOptions tune Hub.Serve: the ServeOptions of every account's loop
@@ -30,13 +31,17 @@ const serveLockName = "serve.lock"
 //
 // The callbacks run on the account's loop goroutine: they must not wait
 // for a change of the accounts (Login, SubmitTOTP, Remove, SetCalDAV,
-// Restart), which may wait for that loop to end. OnState also gets
+// SetMCP, Restart), which may wait for that loop to end. OnState also gets
 // ServeStopped when a loop ends: parked (AccountInfo.Stopped), paused
-// (CalDAV off), removed, or Serve ending.
+// (CalDAV and MCP off), removed, or Serve ending.
 type HubServeOptions struct {
 	ServeOptions
 	OnState func(accountID string, s ServeState)
 	OnPass  func(accountID string, p WatchPass)
+	// Kind is the serving process's kind ("serve", "ui", "mcp"), recorded
+	// in serve.lock beside its PID so a second start can say who serves.
+	// "": none recorded.
+	Kind string
 }
 
 // hubServe is one run of Hub.Serve.
@@ -74,13 +79,14 @@ func (run *accountLoop) stop() {
 }
 
 // Serve serves every account until ctx ends: one Local.Serve loop per
-// account that is not pending and has its CalDAV adapter on, each in its
-// own goroutine and waiting for a login while it has none (ruling R3). It
-// holds the root's serve.lock (another holder: Blocked, naming the PID it
-// wrote) and the root's sync.lock, so an older pcb refuses to write, for
-// its whole run. A loop starts when its account is added, completes its
-// first login or has CalDAV switched on, and stops (Serve waits for its
-// end) when the account is removed or CalDAV switched off. A loop that
+// account that is not pending and has either adapter (CalDAV, MCP) on,
+// each in its own goroutine and waiting for a login while it has none
+// (ruling R3). It holds the root's serve.lock (another holder: Blocked,
+// naming the PID it wrote) and the root's sync.lock, so an older pcb
+// refuses to write, for its whole run. A loop starts when its account is
+// added, completes its first login or has an adapter switched on, and
+// stops (Serve waits for its end) when the account is removed or its last
+// adapter on is switched off (design §5.5b). A loop that
 // ends on an error its context did not cause parks its account
 // (AccountInfo.Stopped, OnChange runs) until Restart, a login of that
 // account, or a new Hub. One account's loop never stops another's.
@@ -91,7 +97,9 @@ func (run *accountLoop) stop() {
 // account that is not pending has stopped (parked, or waiting for a login:
 // the loop of one account without WaitForLogin would have ended there),
 // with the error of the first to stop; with one account that is the
-// single-account Serve. An account with CalDAV off counts as running.
+// single-account Serve. An account with either adapter on is served, and
+// counts as any served account does; one with both off (its loop paused)
+// counts as running.
 // Serve returns once every loop ended, its locks released.
 func (h *Hub) Serve(ctx context.Context, o HubServeOptions) error {
 	if h.isClosed() {
@@ -100,7 +108,7 @@ func (h *Hub) Serve(ctx context.Context, o HubServeOptions) error {
 	if _, err := watchInterval(o.Interval); err != nil {
 		return err
 	}
-	unlockServe, err := lockServe(h.root)
+	unlockServe, err := lockServe(h.root, o.Kind)
 	if err != nil {
 		return err
 	}
@@ -164,9 +172,11 @@ func (h *Hub) supervise(sv *hubServe) error {
 }
 
 // lockServe takes root's serve.lock without waiting and writes this
-// process's PID in it; the release empties it. Held, it is Blocked naming
-// the PID its holder wrote. Off Unix there is no lock to take.
-func lockServe(root string) (func(), error) {
+// process's PID and kind in it ("<pid> <kind>\n"; "<pid>\n" without a
+// kind); the release empties it. Held, it is Blocked naming the PID and
+// kind its holder wrote, with a hint for an agent session (kind mcp).
+// Off Unix there is no lock to take.
+func lockServe(root, kind string) (func(), error) {
 	path := filepath.Join(root, serveLockName)
 	unlock, ok, err := filelock.TryLock(path)
 	switch {
@@ -175,16 +185,15 @@ func lockServe(root string) (func(), error) {
 	case err != nil:
 		return nil, blocked("cannot take "+serveLockName+" in "+root, "make sure "+root+" is writable by this user")
 	case !ok:
-		msg := "pcb is already serving"
-		if raw, err := os.ReadFile(path); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
-				msg += " (pid " + strconv.Itoa(pid) + ")"
-			}
-		}
-		return nil, blocked(msg, "stop it first, or use pcb status")
+		raw, _ := os.ReadFile(path)
+		return nil, servingError(string(raw))
+	}
+	line := strconv.Itoa(os.Getpid())
+	if kind != "" {
+		line += " " + kind
 	}
 	// Written in place: the lock is on this file, a rename would drop it.
-	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
 		unlock()
 		return nil, blocked("cannot write "+path, "make sure "+root+" is writable by this user")
 	}
@@ -192,6 +201,48 @@ func lockServe(root string) (func(), error) {
 		_ = os.Truncate(path, 0)
 		unlock()
 	}, nil
+}
+
+// servingError is the refusal of a start while another process holds
+// serve.lock, whose content is raw: "<pid> <kind>\n", or "<pid>\n" as an
+// older pcb wrote it. What cannot be read is left out of the message: a
+// PID that is not a positive number, a kind that is not a lower-case word.
+func servingError(raw string) error {
+	msg := "pcb is already serving"
+	fields := strings.Fields(raw)
+	pid, kind := "", ""
+	if len(fields) >= 1 {
+		if n, err := strconv.Atoi(fields[0]); err == nil && n > 0 {
+			pid = strconv.Itoa(n)
+		}
+	}
+	if pid != "" && len(fields) == 2 && plainWord(fields[1]) {
+		kind = fields[1]
+	}
+	switch {
+	case kind != "":
+		msg += " (pid " + pid + ", kind " + kind + ")"
+	case pid != "":
+		msg += " (pid " + pid + ")"
+	}
+	hint := "stop it first, or use pcb status"
+	if kind == "mcp" {
+		hint = "end the agent session (pcb mcp), then try again"
+	}
+	return blocked(msg, hint)
+}
+
+// plainWord: s is 1 to 16 lower-case ASCII letters.
+func plainWord(s string) bool {
+	if s == "" || len(s) > 16 {
+		return false
+	}
+	for _, r := range s {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // anyLoggedIn is nil when an account that is not pending holds a ready
@@ -217,8 +268,8 @@ func (h *Hub) anyLoggedIn() error {
 
 // allStopped is the error of the account that stopped first once every
 // account that is not pending has stopped (parked, or waiting for a
-// login), nil while one runs (or starts, or has CalDAV off). With no such
-// account left it is MustAct, as a start with none.
+// login), nil while one runs (or starts, or is paused with both adapters
+// off). With no such account left it is MustAct, as a start with none.
 func (h *Hub) allStopped() error {
 	var (
 		first error
@@ -254,8 +305,8 @@ func (h *Hub) allStopped() error {
 }
 
 // loops makes the serve loops match the accounts while the Hub serves: a
-// loop runs for every account that is not pending, has CalDAV on and is
-// not parked; the others' loops are stopped, each waited for.
+// loop runs for every account wantsLoop names; the others' loops are
+// stopped, each waited for.
 func (h *Hub) loops() {
 	h.srv.Lock()
 	defer h.srv.Unlock()
@@ -276,11 +327,12 @@ func (h *Hub) loops() {
 	sv.poke() // the accounts may have changed: the exit rule looks again
 }
 
-// wantsLoop reports whether a is served: not pending, CalDAV on, not
-// parked.
+// wantsLoop reports whether a is served: not pending, not parked, and
+// either adapter on (design §5.5b: CalDAV off only refuses its clients;
+// the loop pauses once MCP is off too).
 func (h *Hub) wantsLoop(a *hubAccount) bool {
 	d := inspect(a)
-	if d.pending || (d.st.CalDAV != nil && !*d.st.CalDAV) {
+	if d.pending || (!switchOn(d.st.CalDAV) && !switchOn(d.st.MCP)) {
 		return false
 	}
 	h.mu.Lock()
@@ -413,8 +465,8 @@ func (h *Hub) clearStop(a *hubAccount) bool {
 }
 
 // Restart clears the account's park (AccountInfo.Stopped) and, while the
-// Hub serves, starts its loop (unless it is pending or has CalDAV off).
-// An account that is not parked is left as it is.
+// Hub serves, starts its loop (unless it is pending or has both adapters
+// off). An account that is not parked is left as it is.
 func (h *Hub) Restart(ctx context.Context, selector string) (AccountInfo, error) {
 	h.ops.Lock()
 	a, err := h.pick(selector)

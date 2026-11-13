@@ -186,14 +186,16 @@ type LoginResult struct {
 // Proton address (the username it was added with); Phase is Status.Phase.
 // Pending: an add that has not completed its first login (it waits for a
 // CAPTCHA or a 2FA code); it does not count for the account selector.
-// CalDAV is the account's CalDAV switch. Stopped is set while its serve
-// loop is parked on an error a login cannot fix.
+// CalDAV and MCP are the account's adapter switches (its serve loop runs
+// while either is on). Stopped is set while its serve loop is parked on an
+// error a login cannot fix.
 type AccountInfo struct {
 	ID      string    `json:"id"`
 	Address string    `json:"address"`
 	Phase   string    `json:"phase"`
 	Pending bool      `json:"pending"`
 	CalDAV  bool      `json:"caldav"`
+	MCP     bool      `json:"mcp"`
 	Stopped *StopInfo `json:"stopped,omitempty"`
 }
 

@@ -74,6 +74,7 @@ type accountRow struct {
 	Phase    string     `json:"phase"`
 	Pending  bool       `json:"pending"`
 	CalDAV   bool       `json:"caldav"`
+	MCP      bool       `json:"mcp"`
 	LastSync *time.Time `json:"last_sync"`
 }
 
@@ -114,8 +115,8 @@ func TestLoginAddsAccountByUsername(t *testing.T) {
 		t.Fatalf("accounts = %+v, want a then b, two IDs", list)
 	}
 	for _, a := range list {
-		if !localIDPattern.MatchString(a.ID) || a.Phase != string(service.StateReady) || a.Pending || !a.CalDAV {
-			t.Errorf("account %+v, want an 8-hex ID, ready, not pending, CalDAV on", a)
+		if !localIDPattern.MatchString(a.ID) || a.Phase != string(service.StateReady) || a.Pending || !a.CalDAV || !a.MCP {
+			t.Errorf("account %+v, want an 8-hex ID, ready, not pending, CalDAV and MCP on", a)
 		}
 	}
 	loginAs(t, r, userA, exitcode.OK)
@@ -349,6 +350,53 @@ func TestAccountCalDAVOff(t *testing.T) {
 		t.Errorf("account list after on = %+v, want caldav true", list)
 	}
 	r.want(exitcode.Usage, "account", "caldav", "maybe", "--json")
+}
+
+// Design §5.5b: pcb account list and pcb status show both adapter switches,
+// each account's own.
+func TestAccountListShowsBothSwitches(t *testing.T) {
+	t.Parallel()
+	r := twoAccounts(t)
+	r.want(exitcode.OK, "account", "mcp", "off", "--account", userA, "--json")
+	var info service.AccountInfo
+	mustUnmarshal(t, r.envelope().Data, &info)
+	if info.MCP || !info.CalDAV || info.Address != userA {
+		t.Errorf("mcp off = %+v, want a with MCP off, CalDAV on", info)
+	}
+	r.want(exitcode.OK, "account", "caldav", "off", "--account", userB)
+	list := accountList(t, r)
+	if len(list) != 2 || list[0].MCP || !list[0].CalDAV || !list[1].MCP || list[1].CalDAV {
+		t.Fatalf("account list --json = %+v; want a MCP off CalDAV on, b MCP on CalDAV off", list)
+	}
+	r.want(exitcode.OK, "account", "list")
+	lines := strings.Split(strings.TrimSpace(r.out.String()), "\n")
+	if len(lines) != 3 || strings.Join(strings.Fields(lines[0]), " ") != "ID ADDRESS PHASE CALDAV MCP LAST SYNC" {
+		t.Fatalf("account list:\n%s\nwant a header ID ADDRESS PHASE CALDAV MCP LAST SYNC and two rows", r.out.String())
+	}
+	for i, want := range []string{"on off", "off on"} {
+		f := strings.Fields(lines[i+1])
+		if len(f) < 5 || f[1] != list[i].Address || f[3]+" "+f[4] != want {
+			t.Errorf("row %q: want %s with CALDAV MCP %q", lines[i+1], list[i].Address, want)
+		}
+	}
+	r.want(exitcode.OK, "status")
+	out := r.out.String()
+	for _, want := range []string{
+		"account: " + userA + " (" + list[0].ID + "), MCP off\n",
+		"account: " + userB + " (" + list[1].ID + "), CalDAV off\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status lacks %q:\n%s", want, out)
+		}
+	}
+	r.want(exitcode.OK, "account", "mcp", "on", "--account", userA)
+	if want := "MCP of " + userA + " (" + list[0].ID + "): on.\n"; r.out.String() != want {
+		t.Errorf("mcp on: stdout %q, want %q", r.out.String(), want)
+	}
+	if list := accountList(t, r); !list[0].MCP {
+		t.Errorf("account list after mcp on = %+v, want a's MCP on", list)
+	}
+	r.want(exitcode.Usage, "account", "mcp", "maybe", "--account", userA, "--json")
 }
 
 // Design §4.6: the --json shapes changed: every envelope says schema 2.
@@ -700,6 +748,43 @@ func TestAccountChangesGoThroughTheDaemon(t *testing.T) {
 	}
 	if list := accountList(t, r); len(list) != 1 || list[0].Address != userA {
 		t.Errorf("account list after the removal = %+v, want a only", list)
+	}
+}
+
+// Design §5.5b: pcb account mcp goes through the daemon as pcb account
+// caldav does (rulings R14, R15, R31): with two accounts and none named it
+// exits 2 listing them, sending nothing; named, it reaches the daemon's Hub
+// and the daemon's account list shows the switch.
+func TestAccountMCPThroughTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	hub := newStubHub(&stubAPI{statusPhase: "ready"}, &stubAPI{statusPhase: "ready"})
+	hub.accounts[0].address, hub.accounts[1].address = userA, userB
+	startDaemon(t, r, hub, nil)
+	noInProcess(t, r)
+	r.want(exitcode.Usage, "account", "mcp", "off", "--json")
+	var data struct {
+		Accounts []service.AccountInfo `json:"accounts"`
+	}
+	mustUnmarshal(t, r.envelope().Data, &data)
+	if len(data.Accounts) != 2 || len(hub.calls()) != 0 {
+		t.Fatalf("data.accounts = %+v, calls %v; want both listed, nothing sent", data.Accounts, hub.calls())
+	}
+	r.want(exitcode.OK, "account", "mcp", "off", "--account", "B@X")
+	if want := "MCP of " + userB + " (00000001): off.\n"; r.out.String() != want {
+		t.Errorf("stdout %q, want %q", r.out.String(), want)
+	}
+	if list := accountList(t, r); len(list) != 2 || !list[0].MCP || list[1].MCP || !list[1].CalDAV {
+		t.Errorf("the daemon's account list = %+v, want b's MCP off, its CalDAV on, a's MCP on", list)
+	}
+	r.want(exitcode.OK, "account", "mcp", "on", "--account", "00000001", "--json")
+	var info service.AccountInfo
+	mustUnmarshal(t, r.envelope().Data, &info)
+	if info.ID != "00000001" || !info.MCP {
+		t.Errorf("mcp on = %+v, want b with MCP on", info)
+	}
+	if want := []string{"mcp 00000001 off", "mcp 00000001 on"}; !slices.Equal(hub.calls(), want) {
+		t.Errorf("Hub calls = %v, want %v", hub.calls(), want)
 	}
 }
 

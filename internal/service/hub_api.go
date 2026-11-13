@@ -5,14 +5,17 @@ import (
 	"time"
 )
 
-// accountAPI is the API of one account of a Hub, as Account hands it out:
-// each call runs on the account's Local unless the account was removed
+// accountAPI is the API (and the Agenda) of one account of a Hub, as
+// Account (and Agenda) hands it out: each call runs on the account's Local unless the account was removed
 // (then a Usage error, "no account"), and Remove waits for the calls in
 // flight, ending the long ones (Serve, WatchSync), before it deletes the
 // directory. Close is the Hub's: here it does nothing.
 type accountAPI struct{ a *hubAccount }
 
-var _ API = accountAPI{}
+var (
+	_ API    = accountAPI{}
+	_ Agenda = accountAPI{}
+)
 
 func (x accountAPI) Login(ctx context.Context, req LoginRequest) (LoginResult, error) {
 	leave, err := x.a.enter()
@@ -220,6 +223,60 @@ func (x accountAPI) CheckClient(ctx context.Context, password, remote string) (b
 	}
 	defer leave()
 	return x.a.local.CheckClient(ctx, password, remote)
+}
+
+func (x accountAPI) Occurrences(ctx context.Context, req OccurrencesRequest) (OccurrencePage, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return OccurrencePage{}, err
+	}
+	defer leave()
+	return x.a.local.Occurrences(ctx, req)
+}
+
+func (x accountAPI) Event(ctx context.Context, ref EventRef) (EventDetail, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return EventDetail{}, err
+	}
+	defer leave()
+	return x.a.local.Event(ctx, ref)
+}
+
+func (x accountAPI) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return nil, 0, err
+	}
+	defer leave()
+	return x.a.local.FreeBusy(ctx, req)
+}
+
+func (x accountAPI) CreateEvent(ctx context.Context, calID string, f EventFields) (EventRef, string, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return EventRef{}, "", err
+	}
+	defer leave()
+	return x.a.local.CreateEvent(ctx, calID, f)
+}
+
+func (x accountAPI) UpdateEvent(ctx context.Context, ref EventRef, etag string, scope EditScope, f EventFields, dryRun bool) (UpdateResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	defer leave()
+	return x.a.local.UpdateEvent(ctx, ref, etag, scope, f, dryRun)
+}
+
+func (x accountAPI) DeleteEvent(ctx context.Context, ref EventRef, etag string, scope EditScope) error {
+	leave, err := x.a.enter()
+	if err != nil {
+		return err
+	}
+	defer leave()
+	return x.a.local.DeleteEvent(ctx, ref, etag, scope)
 }
 
 // Close does nothing: the Hub closes its accounts.

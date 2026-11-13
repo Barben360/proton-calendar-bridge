@@ -51,7 +51,8 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 	bind := &Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
 	checks = append(checks,
 		ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
-		CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live})
+		CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
+		MCPTokensCheck{StateRoot: dirs.State, Remote: cfg.MCP.Remote, Listen: cfg.CalDAV.Listen, Bind: bind, Live: live})
 	var layoutErr *LayoutError
 	switch {
 	case errors.As(lerr, &layoutErr):

@@ -379,6 +379,19 @@ func (w *Window) openWizard(address string) {
 	w.drawRows()
 }
 
+// ShowLogin shows the window on the add-account wizard with username filled
+// in (an agent's login tool, pcb-ui being the daemon). A login the person
+// is in the middle of (2FA, CAPTCHA, the Done screen) is kept: the window
+// only comes to the front. Call it on the main goroutine.
+func (w *Window) ShowLogin(username string) {
+	if w.mode != paneWizard || w.wizard == nil || w.wizard.Step() == ui.StepCredentials {
+		w.openWizard(username)
+	}
+	w.visible = true
+	w.win.Show()
+	w.win.RequestFocus()
+}
+
 // Show shows the window, on account when it names one the window knows.
 func (w *Window) Show(account string) {
 	if account != "" {

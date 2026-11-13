@@ -16,14 +16,23 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
-// Status is what GET /v2/status answers: the process (Daemon, Listener),
-// each account and the process-level Alerts (the TLS certificate's);
-// the alerts of an account are its own.
+// Status is what GET /v2/status answers: the process (Daemon, Listener,
+// MCP), each account and the process-level Alerts (the TLS
+// certificate's); the alerts of an account are its own.
 type Status struct {
 	Daemon   *Daemon         `json:"daemon"`
 	Listener *Listener       `json:"listener,omitempty"`
+	MCP      *MCP            `json:"mcp,omitempty"`
 	Accounts []AccountStatus `json:"accounts"`
 	Alerts   []Alert         `json:"alerts"`
+}
+
+// MCP is the process's MCP adapter (design §5.8): whether /mcp is served
+// on the listener ([mcp] remote), and the live sessions per entry
+// ("remote", "relay", "stdio").
+type MCP struct {
+	Remote   bool           `json:"remote"`
+	Sessions map[string]int `json:"sessions"`
 }
 
 // AccountStatus is one account of Status: its AccountInfo flat, its login,
@@ -48,6 +57,12 @@ type CalDAVRequest struct {
 	On bool `json:"on"`
 }
 
+// MCPRequest is the body of POST /v2/accounts/{id}/mcp: the account's MCP
+// switch.
+type MCPRequest struct {
+	On bool `json:"on"`
+}
+
 // TOTPRequest is the body of POST /v2/accounts/{id}/login/totp: the 2FA
 // code (or the otpauth:// URI) of the login the daemon holds for the account.
 type TOTPRequest struct {
@@ -67,7 +82,8 @@ func (TOTPRequest) LogValue() slog.Value { return slog.StringValue(redactedTOTP)
 
 // Daemon is the pcb serve process that answers on the socket.
 type Daemon struct {
-	// Kind is "serve" (pcb serve) or "ui" (the desktop app pcb-ui).
+	// Kind is "serve" (pcb serve), "ui" (the desktop app pcb-ui) or "mcp"
+	// (the session daemon of pcb mcp, an agent session).
 	Kind      string    `json:"kind"`
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
@@ -76,7 +92,7 @@ type Daemon struct {
 	Socket    string    `json:"socket"`
 }
 
-// NewDaemon describes this process, of kind "serve" or "ui": its PID and
+// NewDaemon describes this process, of kind "serve", "ui" or "mcp": its PID and
 // build version.
 func NewDaemon(kind, socket, logLevel string, startedAt time.Time) Daemon {
 	return Daemon{Kind: kind, PID: os.Getpid(), Version: buildinfo.Version, StartedAt: startedAt, LogLevel: logLevel, Socket: socket}

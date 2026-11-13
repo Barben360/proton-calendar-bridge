@@ -121,6 +121,7 @@ type Local struct {
 	// Tests only: a write's pre-send budget when set (preSendBudget
 	// otherwise), and a failure injected at a write's cache steps (fault).
 	preSend      time.Duration
+	agendaBudget int // the agenda's render budget when set (renderBudget otherwise)
 	writeFault   func(stage string) error
 	humanHook    func()                                 // runs once a needs-login mark is decided, before its write
 	keyPassHook  func([]byte)                           // sees a login's key passphrase before it is sealed
@@ -402,10 +403,10 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	// Seeded with the wiped generation + 1: over an unreadable state.json
 	// (the reset logout is) the mirror write failed and SaveState cannot
 	// read the old one, so the mirror must not restart at 0.
-	// The address, the CalDAV switch and the creation time are not login
+	// The address, the adapter switches and the creation time are not login
 	// fields: they stay. A state.json too damaged to read loses them.
 	kept, _ := store.LoadState(l.o.Dirs.State)
-	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, Created: kept.Created}
+	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, MCP: kept.MCP, Created: kept.Created}
 	if err := store.SaveStateContext(wipe, l.o.Dirs.State, reset); err != nil {
 		return LogoutResult{}, l.stateWriteError(err)
 	}

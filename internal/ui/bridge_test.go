@@ -515,3 +515,56 @@ func TestFailedRestartShowsTheBridgeStopped(t *testing.T) {
 		t.Errorf("after a good Restart: Bridge = %q, %d accounts; want none and the one account", v.Bridge, len(v.Accounts))
 	}
 }
+
+// An agent session (pcb mcp's session daemon, kind mcp, no listener)
+// blocks pcb-ui like a pcb serve, and the dialog says so: the probe names
+// the session, its PID and kind, with the hint to end it; a Start that
+// loses the race to it gets serve.lock's refusal, worded the same way.
+func TestBridgeNamesAnAgentSession(t *testing.T) {
+	l := newLab(t)
+	cfg, err := config.Load(config.Path(l.dirs), l.dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: l.dirs, Config: cfg}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	ready, fin := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(fin)
+		_ = daemon.Run(ctx, daemon.Options{Dirs: l.dirs, Config: cfg, Hub: hub, Kind: "mcp", NoListener: true, WaitForLogin: true,
+			Ready: func(daemon.Info) { close(ready) }})
+	}()
+	t.Cleanup(func() { cancel(); <-fin })
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session daemon never got ready")
+	}
+	const hint = "end the agent session (pcb mcp), then try again"
+
+	err = ui.Probe(t.Context(), l.env, "")
+	var sr *ui.ServeRunningError
+	if !errors.As(err, &sr) || sr.PID != os.Getpid() || sr.Kind != "mcp" {
+		t.Fatalf("Probe = %#v, want a *ServeRunningError of PID %d, kind mcp", err, os.Getpid())
+	}
+	if want := fmt.Sprintf("an agent session (pcb mcp, PID %d, kind mcp) already serves this state directory", os.Getpid()); err.Error() != want {
+		t.Errorf("message = %q, want %q", err.Error(), want)
+	}
+	if exitcode.From(err) != exitcode.Blocked || exitcode.HintOf(err) != hint {
+		t.Errorf("exit %d, hint %q; want 20, %q", exitcode.From(err), exitcode.HintOf(err), hint)
+	}
+
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env})
+	t.Cleanup(func() { _ = b.Stop() })
+	err = b.Start(t.Context())
+	if want := fmt.Sprintf("pcb is already serving (pid %d, kind mcp)", os.Getpid()); err == nil || err.Error() != want {
+		t.Errorf("Start = %v, want %q", err, want)
+	}
+	if exitcode.From(err) != exitcode.Blocked || exitcode.HintOf(err) != hint {
+		t.Errorf("Start: exit %d, hint %q; want 20, %q", exitcode.From(err), exitcode.HintOf(err), hint)
+	}
+}

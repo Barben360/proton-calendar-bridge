@@ -17,7 +17,7 @@ import (
 
 func (a *app) newAccount() *cobra.Command {
 	return Group("account", "The Proton accounts pcb holds (add one with pcb login)",
-		a.newAccountList(), a.newAccountCalDAV(), a.newAccountRestart(), a.newAccountRemove())
+		a.newAccountList(), a.newAccountCalDAV(), a.newAccountMCP(), a.newAccountRestart(), a.newAccountRemove())
 }
 
 // accountEntry is one account of pcb account list: what the Hub says of
@@ -34,7 +34,7 @@ type accountListData struct {
 func (a *app) newAccountList() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List the accounts: local ID, address, phase, CalDAV on or off, last sync",
+		Short: "List the accounts: local ID, address, phase, CalDAV and MCP on or off, last sync",
 		Long: "List the accounts, pending adds included, sorted by address: the running daemon's view when one " +
 			"answers (a stopped account shows stopped), else the files'.",
 		Args: NoArgs,
@@ -110,7 +110,7 @@ func accountTable(list []accountEntry) string {
 	}
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tADDRESS\tPHASE\tCALDAV\tLAST SYNC")
+	fmt.Fprintln(w, "ID\tADDRESS\tPHASE\tCALDAV\tMCP\tLAST SYNC")
 	for _, e := range list {
 		phase := e.Phase
 		switch {
@@ -118,10 +118,6 @@ func accountTable(list []accountEntry) string {
 			phase = "stopped"
 		case e.Pending:
 			phase += " (pending)"
-		}
-		caldav := "on"
-		if !e.CalDAV {
-			caldav = "off"
 		}
 		synced := "never"
 		if e.LastSync != nil {
@@ -131,10 +127,17 @@ func accountTable(list []accountEntry) string {
 		if address == "" {
 			address = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.ID, address, phase, caldav, synced)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, address, phase, onOff(e.CalDAV), onOff(e.MCP), synced)
 	}
 	_ = w.Flush() // a strings.Builder does not fail
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // accountChange is an account-changing call (ruling R14: through the Hub,
@@ -187,9 +190,37 @@ func (a *app) changeAccount(cmd *cobra.Command, ch accountChange) (service.Accou
 }
 
 func (a *app) newAccountCalDAV() *cobra.Command {
+	return a.adapterSwitch("caldav", "CalDAV",
+		"Turn the account's CalDAV on or off (off: its clients are refused; its sync pauses only when MCP is off too)",
+		func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error) {
+			return c.SetCalDAV(ctx, id, on)
+		},
+		func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error) {
+			return h.SetCalDAV(ctx, id, on)
+		})
+}
+
+func (a *app) newAccountMCP() *cobra.Command {
+	return a.adapterSwitch("mcp", "MCP",
+		"Turn the account's MCP on or off (off: agents do not see it; its sync pauses only when CalDAV is off too)",
+		func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error) {
+			return c.SetMCP(ctx, id, on)
+		},
+		func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error) {
+			return h.SetMCP(ctx, id, on)
+		})
+}
+
+// adapterSwitch is pcb account <use> on|off: an adapter switch (named
+// adapter in its output), set through the daemon when one answers, else on
+// the in-process accounts.
+func (a *app) adapterSwitch(use, adapter, short string,
+	daemon func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error),
+	local func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error),
+) *cobra.Command {
 	return OneOperand(selecting(&cobra.Command{
-		Use:   "caldav on|off",
-		Short: "Turn the account's CalDAV on or off (off: its clients are refused and its sync pauses)",
+		Use:   use + " on|off",
+		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var on bool
 			switch args[0] {
@@ -201,16 +232,16 @@ func (a *app) newAccountCalDAV() *cobra.Command {
 			}
 			info, err := a.changeAccount(cmd, accountChange{
 				daemon: func(ctx context.Context, c *ctl.Client, id string) (service.AccountInfo, error) {
-					return c.SetCalDAV(ctx, id, on)
+					return daemon(ctx, c, id, on)
 				},
 				local: func(ctx context.Context, h Hub, id string) (service.AccountInfo, error) {
-					return h.SetCalDAV(ctx, id, on)
+					return local(ctx, h, id, on)
 				},
 			})
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			return Finish(cmd, info, fmt.Sprintf("CalDAV of %s: %s.", accountName(info), args[0]), nil)
+			return Finish(cmd, info, fmt.Sprintf("%s of %s: %s.", adapter, accountName(info), args[0]), nil)
 		},
 	}), "on or off")
 }

@@ -11,9 +11,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -173,8 +175,12 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 	}()
 	var counters daemon.RenderLog
 	notice := &waitNotice{w: cmd.OutOrStdout()}
+	var mcpServer *mcp.Server
+	if mh, ok := hub.(mcp.Hub); ok { // the accounts' Hub always is; a test's stand-in may not be
+		mcpServer = mcp.NewServer(mcp.Options{Hub: mh, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version})
+	}
 	return daemon.Run(runCtx, daemon.Options{
-		Dirs: dirs, Config: cfg, Hub: hub, Kind: "serve", LogLevel: cfg.Log.Level,
+		Dirs: dirs, Config: cfg, Hub: hub, Kind: "serve", LogLevel: cfg.Log.Level, MCP: mcpServer,
 		Logger: log, Warn: a.Stderr, Listen: a.Listen, WaitForLogin: waitForLogin, Cut: cut,
 		OnState: notice.state,
 		OnPass: func(id string, p service.WatchPass) {

@@ -1230,7 +1230,7 @@ func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
 }
 
 // ux-I1: a second pcb serve names the running one (exit 20, as any refused
-// start): the Hub's serve.lock holds its PID.
+// start): the Hub's serve.lock holds its PID and its kind.
 func TestASecondServeNamesTheRunningDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
@@ -1243,7 +1243,7 @@ func TestASecondServeNamesTheRunningDaemon(t *testing.T) {
 	if code := second.exit(); code != exitcode.Blocked {
 		t.Fatalf("second pcb serve: exit %d, want 20\nstderr: %s", code, second.errb.String())
 	}
-	want := "Error: pcb is already serving (pid " + strconv.Itoa(os.Getpid()) + ")\nHint: stop it first, or use pcb status\n"
+	want := "Error: pcb is already serving (pid " + strconv.Itoa(os.Getpid()) + ", kind serve)\nHint: stop it first, or use pcb status\n"
 	if got := second.errb.String(); got != want {
 		t.Errorf("second pcb serve: stderr %q, want %q", got, want)
 	}

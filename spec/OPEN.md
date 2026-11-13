@@ -1,6 +1,6 @@
 # Open questions and pending items
 
-State at the close of M7 (2026-11-13; M6 closed 2026-11-12, M5 earlier the same day), after the initial-version audit fixes (`spec/audits/2026-11-12-initial-version.md`), with the fixes of the 2026-11-13 live sessions (M1, M2, steps 6 and 7, run on the M5 build) merged in. M7 is built and tested against fakes; its live session is `spec/HUMAN-CHECKS.md` step 9.
+State at the close of M8 (2026-11-13; M7 closed the same day, M6 on 2026-11-12, M5 earlier), after the initial-version audit fixes (`spec/audits/2026-11-12-initial-version.md`), with the fixes of the 2026-11-13 live sessions (M1, M2, steps 6 and 7, run on the M5 build) merged in. M7 and M8 are built and tested against fakes; their live sessions are `spec/HUMAN-CHECKS.md` steps 9 and 10.
 
 ## Answered
 
@@ -16,6 +16,7 @@ State at the close of M7 (2026-11-13; M6 closed 2026-11-12, M5 earlier the same 
 - Can CalDAV credentials be looked up again: yes, decision 0013 (2026-11-12), `pcb client show`.
 - Several Proton accounts in one process: built in M6 (SPEC §4.1, §7.1, §9, §13; decision 0014), contract-tested against the fake Proton with two or more users; the live checks (the upgrade of the test account's M5 state, one account, Thunderbird on the per-account URL) are `spec/HUMAN-CHECKS.md` step 8.
 - The desktop app and a keyring-sealed state: built in M7 (SPEC §7.3, §13, §15; decision 0015): the tray, window, wizard, notifications, autostart, `make install-ui` and the Secret Service sealer (`[secrets] backend`, the locked-keyring wait); tested against the fake Proton, a fake Secret Service on a private bus and Fyne's headless driver; the real desktop is step 9 (below).
+- An MCP adapter for agents: built in M8 (SPEC §12, §13, §19; decision 0016): `pcb mcp` over stdio (relayed to a running daemon, or serving the session itself), remote `/mcp` with bearer tokens, grants per agent, eleven tools, login finished by the person in `pcb-ui` or on a loopback page; tested against the fake Proton, with a secrets scan and `make rehearse`; a real agent client is step 10 (below).
 - How CalDAV writes reach Proton, and what is refused: built in M4 (SPEC §8.1, §8.4, §9; `spec/mapping.md`), contract-tested against the fake Proton; the live confirmations are listed below.
 
 ## Still open for the author
@@ -30,6 +31,8 @@ State at the close of M7 (2026-11-13; M6 closed 2026-11-12, M5 earlier the same 
 7. The M6 live session (`spec/HUMAN-CHECKS.md` step 8, on a new throwaway VM fenced like step 7 with its own login ledger, built from main at or after the merge of the `live-fixes` branch): after step 7, one author sitting in Thunderbird (a new calendar on the per-account URL beside the old one, the saved-password and rotate observations of 8.3) and the web app's session list (8.4). Also: whether the author wants a second Proton test account later; without one, several accounts stay proven on the fake only.
 
 8. The M7 live session (`spec/HUMAN-CHECKS.md` step 9, built from main at or after the merge of the `live-fixes` branch): the author alone, on a throwaway desktop VM fenced like step 7 (its own run root and login ledger, budget 3), in a GNOME session (the AppIndicator extension enabled), with the test account only and the VM's default state: a fresh state picks the keyring (one `pcb sealing key` item in Seahorse), the tray states, the wizard with the 2FA code (and a CAPTCHA if Proton asks), copying the CalDAV connection into Thunderbird, a notification click, Quit, the second `pcb-ui` and the `pcb serve` conflict dialog (exit 20), closing the startup error dialog with the X, autostart across a real logout and login, a lock of the VM's keyring in Seahorse (`keyring-locked`, then unlock and recovery), and `pcb uninstall --delete-data` removing the keyring item. One login (two with one CAPTCHA re-solve; a second CAPTCHA stops the step), typed in the window after taking its slot in step 9's ledger, the first at least 60 s after the last login of any ledger; a CAPTCHA goes through the wizard only, never the CLI. The VM needs a GNOME desktop installed. Nothing in it runs without the author, and the agent only writes it up (`spec/experiments/M7-live.md`).
+
+9. The M8 live session (`spec/HUMAN-CHECKS.md` step 10): the author, in the step 9 VM's GNOME session, with Claude Code installed and signed in there: an agent session over stdio that starts the login through the loopback page (one login), creates, updates and deletes one event seen in the Proton web app, then a session relayed to `pcb-ui` (its wizard raised), then remote `/mcp` with a token; and what Claude Code declares for elicitation (form, URL, none). The agent writes it up (`spec/experiments/M8-live.md`).
 
 ## Still open, run by the agent (deferred live runs, `spec/HUMAN-CHECKS.md` steps 2 to 4)
 
@@ -156,6 +159,63 @@ Minors deferred by the M7 reviews (the ledger `.superpowers/sdd/2026-11-13-m7-pc
 - `GOOS=darwin go vet ./...` fails in Fyne's `internal/widget` (undefined `scrollBarAlwaysVisible`, `isScrollerPageOnTap`), the same on main 07496da (found when the `live-fixes` branch was merged; the gate of that merge records it): Fyne has no darwin build without cgo. Options: build tags on the UI packages (`cmd/pcb-ui`, `internal/ui/desktop`) so a darwin vet skips them, or vet darwin without `cmd/pcb-ui` and `internal/ui/desktop` (that passes today).
 - Left by the final fix wave (residual minors of its re-review): a `Restart` whose `Stop` fails returns before `start` and leaves `startErr` nil, so the window reads healthy (set `startErr` on that branch; rare: `daemon.Run` or `hub.Close` must fail); `--delete-data` on a state left mid-migration (`ErrLegacyBesideLayout`) keeps the keyring item although `info.Sealer` was read; `service.DeleteSealingKey` has no nil-keyring default like `OpenHub` (latent: its one caller always passes one); the `--delete-data` confirmation does not name the keyring item; in the no-tray case a second `pcb-ui` launched during the quit drain re-shows the closing window (≤ 5 s).
 - Not run by the build, so only step 9 can settle them: closing the startup error dialog with the title bar's X (Fyne's source says a master window's close quits; step 9.9), how GNOME handles a notification click, whether a lock of the keyring is noticed within 30 s, and the tray on a desktop without the AppIndicator extension (where closing the window now quits, R14).
+
+## Parked by M8
+
+Residuals of the design, by choice (decision 0016, design §2):
+- **No hand-over** from a `pcb mcp` session daemon to `pcb-ui` or the service: while an agent session serves a state, `pcb serve` exits 20 and `pcb-ui` shows its dialog, both naming kind `mcp` [verified: `TestServeLockNamesTheKind`, `TestBridgeNamesAnAgentSession`]. End the agent session first. A hand-over is a later improvement.
+- **No login over remote MCP, ever**: a headless account is logged in with `pcb login` on the server or `pcb-ui`; a remote agent sees `needs-login` and the step.
+- **Elicitation support of real clients is not known**: which clients declare form or URL elicitation is from Claude Code's documentation only (E19); step 10 records what Claude Code declares. A client without form elicitation deletes on the `delete` grant alone (one declaring URL elicitation only counts as one without), and logs out on `manage` alone; without URL elicitation the login page's URL is in the tool result.
+- No OAuth: claude.ai and mobile custom connectors cannot use the remote `/mcp` (header-capable clients only).
+- Not run anywhere: `pcb mcp` inside a container (`docker exec -i <container> pcb mcp`, the design's way in: same user and directories as the container's `pcb serve`, so it should relay); the login page's link is then on the container's loopback, so the `cli_fallback` (`docker exec -it <container> pcb login`) is the way.
+
+Known limits found in review (the ledger `.superpowers/sdd/2026-11-13-m8-mcp/progress.md`, kept out of the repository):
+- `NotifyElicitationComplete` is not sent when the page's login ends (a relay drops notifications outside a request); the agent reads the phase with `status`.
+- A relay's own connections verify the daemon's UID only at the probe (ruling R20: same-UID trust, a 0700 directory).
+- Not run by the build, so only step 10 can settle them: Claude Code over stdio and remote, what it declares for elicitation, whether its environment keeps the session bus (else the sealer guard refuses a fresh state), a create, update and delete seen in the Proton web app, and a login through the loopback page in a real browser.
+
+Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ruled CAN-WAIT, one per line. Fixed in the same review: the delete prompt's spoofing, an account probe under a calendar grant, DST overlaps and gaps outside Expand, alarm actions, a relogin that could sign a ready account out, `pcb mcp` against a restarting user unit, the login page's ticked box and nonce compare, the daemon's kind in text, the live guard's stdout.
+- Event core: a COUNT rule from an ancient DTSTART is walked from its start (0.1–0.3 s CPU per object), with no context check in the occurrence and free/busy loops (`internal/ical/expand.go:477-509`, `internal/service/agenda.go:293`, `:318`); pcb's own writes keep Proton's COUNT limits.
+- Event core: an orphan override (a RECURRENCE-ID the rule does not yield, shown as Thunderbird does) cannot be deleted by occurrence, only with its series (`internal/ical/edit.go:159` `DeleteOccurrence` → `seriesStart`).
+- Event core: a series moved to another zone with no exceptions keeps a UTC UNTIL unshifted, so its last occurrence can drop (`internal/ical/edit.go:454` `moveSeries` returns before `shiftUntil`, `:552`).
+- Event core: a new override's DTEND is its RECURRENCE-ID plus the master's exact length: 1 h off for a multi-day timed series across DST, and in a DST overlap hour a 1 h override is written with DTEND's wall clock equal to DTSTART's (`internal/ical/edit.go:407`).
+- Event core: a new override or EXDATE in a DST gap is written as the resolved wall clock (03:30), not the generated one (02:30); the instant is right, a client matching wall-clock text may miss it (`internal/ical/edit.go` `encodeLike`).
+- Event core: the agent's wall-clock arguments and an occurrence's end in `event_get` still read with Go's rule, not RFC 5545 §3.3.5, so an agent's 02:30 on a DST day can be echoed an hour off from what is written (`internal/mcp/timeargs.go:41`, `internal/mcp/tools_write.go:508`).
+- Event core: RANGE=THISANDFUTURE on a stored RECURRENCE-ID is not refused by edits (`internal/ical/edit.go:374` `overrideAt`); such events are unlistable, so no ETag reaches an edit.
+- Event core: an override without DTEND or DURATION gets zero length, not the master's (`internal/ical/expand.go:169` `readTiming`), as RFC 5545 says.
+- Event view: DURATION is dropped uncounted when DTEND is present, and DTEND's value type is unchecked (`internal/ical/view.go:123` `decodeVEvent`); Expand refuses the mismatch.
+- Event view: CN values are not RFC 6868-decoded and extra attendee parameters are dropped uncounted (`internal/ical/view.go:314` `personOf`); edits keep the lines.
+- Event core tests: a DATE EXDATE on a timed series, a far range with EXDATE and overrides, a leap-day YEARLY, a floating series with a UTC UNTIL (`internal/ical/expand_test.go`, `internal/ical/edit_test.go`).
+- Event core style: a stale comment and a `max` that shadows the builtin (`internal/ical/expand.go:528`); the "same as stored" rule check is in two places (`internal/ical/edit.go:113`, `moveSeries`).
+- Agenda: `etagOf` swallows its error without a log (`internal/service/agenda.go:721`, `:748`); the result tells the agent to call `event_get`.
+- Agenda: `skipped` is counted per page and may count an event twice across pages (`internal/service/agenda.go:293`, `internal/mcp/tools_read.go:320`).
+- Agenda: with no own address known, every organizer reads external (`internal/service/agenda.go:554`); fails safe.
+- Agenda: the cursor does not encode the zone, so a changed `tz` only shifts all-day pages (`internal/service/agenda.go:202`, `:218`); a long doc line and a weak "cannot advance" hint there.
+- Tools: a floating event updated without `tz` becomes zoned in the call's zone, silently (`internal/mcp/tools_write.go:63` `storeZone`).
+- Tools: an empty scope skips the range check (`from` after `to`, or past 366 days, is an empty success when no account is visible) (`internal/mcp/scope.go:251` `span`).
+- Tools: the zone is echoed `Local` when the process's zone has no IANA name, which an agent cannot pass back as `tz` (`internal/mcp/timeargs.go:60` `localZone`); `[mcp] timezone` fixes it.
+- Tools: the confirmation is not bound to the call (no request state): a hostile client could answer `accept` unasked, as it could skip elicitation (`internal/mcp/tools_write.go:610-631`, `internal/mcp/tools_account.go` `logout`).
+- Tools: a client declaring URL elicitation only deletes on the `delete` grant alone, as one with none (`internal/mcp/tools_write.go:588` `asksForm`); documented.
+- Remote: the failure limiter is keyed by the TCP peer, so behind a reverse proxy five bad tokens lock every holder out for a minute (`internal/mcp/http.go:164`, `internal/access/limiter.go`); as for CalDAV (surface-M6).
+- Remote: the per-grant server cache is cleared whole past 256 grants, and `LiveSessions` stops counting the sessions of a dropped server (`internal/mcp/server.go:76`, `:106`).
+- Remote: no test that a token removed or expired mid-session gets 401 on its next request (`internal/mcp/http.go:153` `TokenAuth`, verified per request); `Touch` errors are dropped (`:185`); no `/mcp` test over TLS on a non-loopback bind or with an absolute-form URI.
+- Tokens: the expiry rule is written twice (`internal/cli/mcp_token.go:306`, `internal/access/tokens.go:83`); `Touch` matches the name case-sensitively (`internal/access/tokens.go:352`); repeated `--account`/`--calendar` are not deduplicated (`internal/cli/mcp_token.go:114-115`); a CalDAV-shaped token is refused by its length, not its prefix (`internal/access/tokens.go:53`); `Touch` errors are discarded in tests.
+- Relay: `ErrDaemonGone` resets the back-off with no minimum delay, a hot loop with a daemon that answers the probe and dies at once (`internal/cli/mcp_stdio.go:92`).
+- Relay: `notifications/initialized` may reach a new backend twice after a re-queue (`internal/mcp/stdio.go:476`); a wire error on a notification marks the backend gone (`internal/mcp/stdio.go:38` `goneError`).
+- Relay tests: the back-off running out, the `ErrRelayRefused` back-off and exactly-once counting across a failover are tested in units, not through `pcb mcp` (`internal/cli/mcp_stdio.go` `runMCP`).
+- Session daemon: the loser of the start race runs `OpenHub`'s cleanups before it meets `serve.lock`, as `pcb serve` does (`internal/cli/mcp_stdio.go:243`).
+- Login: the 60 s cooldown is consumed even when raising `pcb-ui`'s wizard or opening the page then fails (`internal/mcp/tools_account.go:191`).
+- Login: the loopback page is not stopped when its MCP session closes; it lives until the login ends, Cancel or its 5-minute TTL, single use on 127.0.0.1 meanwhile (`internal/mcp/tools_account.go` `hold`).
+- Login: `pcb-ui`'s `ShowLogin` on the credentials step discards what the person had typed there (`internal/ui/desktop/window.go:386`).
+- Login: `ui.Wizard.Done` reads the step and the account in two calls (`internal/ui/wizard.go:58`); the desktop calls it only once a step is done (R22).
+- Tests: the secrets test's remote session does not call every tool (`internal/cli/mcp_secrets_test.go`); the stdio sessions do, and the handlers are shared.
+- Control socket: `statusWriter` has no `Flush` of its own, reached through `http.ResponseController` (`internal/ctl/server.go:207`); a 1xx `WriteHeader` is logged as the final status (`:213`); `lockServe` reads `serve.lock` uncapped (`internal/service/hub_serve.go:179`).
+- `pcb-ui`: an account with CalDAV off and MCP on shows `CalDAV off` and no freshness in its one-line state (`internal/ui/model.go:191`); the comment at `internal/daemon/daemon.go:77` lists `SetCalDAV` without `SetMCP`.
+- E19: its wording, and the legacy double run of an elicitation verified in a scratch test only (`spec/experiments/E19-mcp-go-sdk.md`).
+- Login: a ready account whose relogin hits a CAPTCHA and is then cancelled stays `needs-captcha` instead of returning to `ready` (`internal/loginflow/flow.go` `Cancel`); `pcb login` or `pcb-ui` clears it.
+- `pcb mcp`: the user unit's state is read once before the 30 s wait, so a `pcb service stop` during that wait ends in exit 20 instead of serving the session (`internal/cli/mcp_stdio.go`); run `pcb mcp` again.
+- `pcb mcp`: the `systemctl show` probe of the user unit has no timeout of its own (`internal/cli/mcp_stdio.go`).
+- Edits: an alarm kept by its minutes whose ACTION is neither DISPLAY, AUDIO nor EMAIL (e.g. PROCEDURE, which Proton drops) now makes the edit refused instead of silently changed; an EMAIL one is kept and left to Proton (since #16 e-mail notifications are Proton-side) (`internal/ical/edit.go` `replaceAlarms`).
 
 ## Parked by the initial-version audit (2026-11-12)
 

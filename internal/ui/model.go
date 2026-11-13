@@ -40,7 +40,8 @@ type View struct {
 type AccountView struct {
 	ID, Address, Short         string
 	Dot                        TrayState
-	SignedIn, Pending, CalDAV  bool
+	SignedIn, Pending          bool
+	CalDAV, MCP                bool // the adapter switches
 	LastSync                   *time.Time
 	Calendars                  []CalendarView
 	Alerts                     []ctl.Alert
@@ -91,7 +92,7 @@ func hasError(alerts []ctl.Alert) bool {
 func accountView(as ctl.AccountStatus, ln *ctl.Listener, now time.Time) AccountView {
 	a := AccountView{
 		ID: as.ID, Address: as.Address, Username: as.Address, URL: as.URL,
-		SignedIn: as.Phase == "ready", Pending: as.Pending, CalDAV: as.CalDAV,
+		SignedIn: as.Phase == "ready", Pending: as.Pending, CalDAV: as.CalDAV, MCP: as.MCP,
 		Alerts: as.Alerts, Calendars: []CalendarView{},
 	}
 	if a.Address == "" {
@@ -184,6 +185,8 @@ func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) strin
 		return "needs CAPTCHA"
 	}
 	switch {
+	case !a.CalDAV && !a.MCP: // the sync is paused
+		return "CalDAV and MCP off"
 	case !a.CalDAV:
 		return "CalDAV off"
 	case stale || a.LastSync == nil:
@@ -212,6 +215,7 @@ type Actions interface {
 	SignOut(ctx context.Context, id string) error
 	Remove(ctx context.Context, id string) error
 	SetCalDAV(ctx context.Context, id string, on bool) error
+	SetMCP(ctx context.Context, id string, on bool) error
 	// Password is the account's CalDAV password (the client default,
 	// created when there is none).
 	Password(ctx context.Context, id string) (string, error)
@@ -275,6 +279,15 @@ func (a actions) SetCalDAV(ctx context.Context, id string, on bool) error {
 		return err
 	}
 	_, err = h.SetCalDAV(ctx, id, on)
+	return err
+}
+
+func (a actions) SetMCP(ctx context.Context, id string, on bool) error {
+	h, err := a.hub()
+	if err != nil {
+		return err
+	}
+	_, err = h.SetMCP(ctx, id, on)
 	return err
 }
 
