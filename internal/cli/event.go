@@ -27,7 +27,7 @@ func (a *app) newEvent() *cobra.Command {
 
 func (a *app) newEventList() *cobra.Command {
 	var calendar, from, to string
-	c := &cobra.Command{
+	c := selecting(&cobra.Command{
 		Use:   "list",
 		Short: "List a calendar's cached events (no network call)",
 		Args:  NoArgs,
@@ -44,11 +44,11 @@ func (a *app) newEventList() *cobra.Command {
 			if req.To, req.ToDate, err = parseWhen("--to", to); err != nil {
 				return err
 			}
-			svc, err := a.service(cmd)
+			svc, _, done, err := a.account(cmd)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer a.closeService(svc)
+			defer done()
 			evs, err := svc.Events(cmd.Context(), req)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
@@ -58,7 +58,7 @@ func (a *app) newEventList() *cobra.Command {
 			}
 			return Finish(cmd, eventData{evs}, eventTable(evs, from != "" || to != ""), nil)
 		},
-	}
+	})
 	c.Flags().StringVar(&calendar, "calendar", "", "the calendar's ID or exact name (required)")
 	c.Flags().StringVar(&from, "from", "", "only events ending after this: RFC 3339 (instants), or YYYY-MM-DD (local midnight; all-day events are compared by date)")
 	c.Flags().StringVar(&to, "to", "", "only events starting before this (recurring events always kept): RFC 3339 (instants), or YYYY-MM-DD (local midnight; all-day events are compared by date)")

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -448,4 +449,68 @@ func cacheFailure(err error) *exitcode.Error {
 		return fail(exitcode.Blocked, "the event cache could not be updated", "run pcb doctor to check it, then pcb sync again")
 	}
 	return nil
+}
+
+// SeveralAccountsError is the cause of a refusal to choose an account when
+// several could be meant and none is named. Accounts lists them, sorted by
+// address (--json: data.accounts).
+type SeveralAccountsError struct {
+	Accounts []AccountInfo
+}
+
+func (*SeveralAccountsError) Error() string { return "several accounts: name one with --account" }
+
+// SeveralAccounts is the refusal (Usage) to choose among list, sorted by
+// address, when none is named: its cause is a *SeveralAccountsError.
+func SeveralAccounts(list []AccountInfo) error { return severalAccounts(list) }
+
+func severalAccounts(list []AccountInfo) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: &SeveralAccountsError{Accounts: list},
+		Hint: "name one with --account or PCB_ACCOUNT (pcb account list)"}
+}
+
+// ErrNoAccount is the cause of a refusal to choose an account when none
+// matches: the selector names none (or one since removed), or none is
+// ready to be chosen without a selector.
+var ErrNoAccount = errors.New("no account")
+
+// noAccount is the refusal (Usage) to choose the account selector names,
+// with hint.
+func noAccount(selector, hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%w %s", ErrNoAccount, selector), Hint: hint}
+}
+
+// noReadyAccount is the refusal to choose without a selector when no
+// account is ready, with hint: a person must add one or finish a pending
+// login (MustAct, ruling R38).
+func noReadyAccount(hint string) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.MustAct, Err: ErrNoAccount, Hint: hint}
+}
+
+// layoutError maps a failure to read or migrate the state layout of root.
+// legacy names the account files of an older pcb at the root. A layout pcb
+// cannot use needs a person (MustAct, ruling R36, as stateError's): a unit
+// restarted on 20 would loop on it. Its own refusals (exitcode.Error: a
+// lock another pcb holds, Blocked) pass through.
+func layoutError(err error, root string, legacy []string) error {
+	var (
+		ee *exitcode.Error
+		pe *fs.PathError
+	)
+	switch {
+	case errors.As(err, &ee):
+		return err
+	case errors.Is(err, store.ErrLegacyBesideLayout):
+		msg := "account files of an older pcb are beside the per-account layout"
+		if len(legacy) > 0 {
+			msg += ": " + strings.Join(legacy, ", ")
+		}
+		return mustAct(msg+" in "+root, "remove them or move the state directory aside: this pcb version cannot be downgraded")
+	case errors.Is(err, store.ErrNewerLayout):
+		return mustAct("the state layout (layout.json) was written by a newer pcb", "upgrade pcb")
+	case errors.As(err, &pe):
+		return mustAct("cannot use the state layout: "+pe.Op+" "+pe.Path+": "+pe.Err.Error(),
+			"check the permissions of "+root+" and of the files in it")
+	}
+	return mustAct("the state layout in "+root+" is damaged (layout.json, accounts/)", "run pcb doctor")
 }

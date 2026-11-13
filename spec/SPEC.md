@@ -34,8 +34,10 @@ Success means:
 
 ## 2. Principles
 
-- **Headless first** [decided]. One Go binary. No GUI in v1; GUIs are later
-  clients of the same local API.
+- **Headless first** [decided]. One Go binary. No GUI in v1; a desktop app
+  (`pcb-ui`, a separate cgo binary running the same daemon in process) is planned
+  in M7 (`spec/designs/2026-11-12-multi-account-and-ui-design.md`), and `pcb` never
+  gains a GUI dependency.
 - **Blocks** [decided]. Each block (§4) has a narrow interface, its own
   tests, and can be built, reviewed and replaced alone.
 - **No unverified assumptions** [decided]. Facts about Proton or clients come
@@ -48,8 +50,9 @@ Success means:
 - **Least plaintext** [call]. Disk holds what Proton's servers already hold
   (ciphertext rows, plaintext time ranges and IDs) plus sealed secrets;
   decrypted content lives in memory only (§7).
-- **Good citizen** [call]. One process per account, one shared rate limiter,
-  backoff on 429/5xx, no busy polling, a truthful client identity (§5.1).
+- **Good citizen** [call]. One Proton session and rate limiter per account (since
+  M6 every account of a state directory runs in one process, and one login guard
+  spaces their logins), backoff on 429/5xx, no busy polling, a truthful client identity (§5.1).
   A flagged or banned Proton account is a failure even if the code works.
 - **Scriptable CLI** (backsight conventions) [call]: `--json` envelope,
   `--plan`, `--non-interactive`, fixed exit codes (§13).
@@ -59,14 +62,16 @@ Success means:
 Goals: CalDAV read/write for owned calendars; read-only for subscribed and
 holidays calendars; login with password, or password + TOTP [decided
 0010]; a CLI for everything about the bridge itself (install, service,
-login, status, doctor, CalDAV client credentials, uninstall); a container
-image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
+login, status, doctor, CalDAV client credentials, uninstall); several Proton
+accounts in one process (M6, decision 0014); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
 Windows only build, and the CLI there runs offline (§13, "Platforms").
 
 Not planned (not designed here): REST API, MCP, `.ics` feeds, event
-commands in the CLI (Thunderbird is the client), GUIs, updates/signed
+commands in the CLI (Thunderbird is the client), updates/signed
 releases (while private), shared calendars, invitations, two-password mode,
-FIDO2, CardDAV, macOS/Windows service management.
+FIDO2, CardDAV, macOS/Windows service management. A desktop UI is planned as M7
+(not built; M6 amends the earlier "GUIs not planned"), designed in
+`spec/designs/2026-11-12-multi-account-and-ui-design.md`.
 
 Anti-goals (failure even if it works):
 - Plaintext calendar data or reusable credentials on disk unsealed.
@@ -79,7 +84,7 @@ Anti-goals (failure even if it works):
 ## 4. Architecture
 
 ```
-                 ┌──────────────── pcb daemon (one per account) ─────────────────┐
+                 ┌──────────────── pcb daemon (every account) ───────────────────┐
  Thunderbird ──▶ │ A1 CalDAV ──▶ C3 service (use cases, access checks)            │
                  │                    │                                           │
  pcb CLI ──────▶ │ control API ──────▶│   C4 sync engine                          │
@@ -108,9 +113,111 @@ Blocks and their contracts:
 | A1 | CalDAV adapter (§9) | CalDAV | C3 only |
 | CTL | Control API for the CLI: JSON over HTTP on a unix socket, internal, versioned, not a public API | `pcb` subcommands | C3, C6 |
 
-Rule: adapters never import C1, C2 or C4; they only call `service.API`. A
-second account is a second `service` instance in the same daemon [call;
-multi-account in v1 data model, one account tested in v1].
+Rule: adapters never import C1, C2 or C4; they only call `service.API`. Since M6
+a second account is a second `service.Local` in the same process, held by
+`service.Hub` (decision 0014; built, below).
+
+### 4.1 One process, several accounts (M6)
+
+`internal/service` (`Hub`, `Local`), `internal/daemon`, `internal/caldav`, `internal/ctl`.
+
+- A `service.Hub` owns one `Local` per account directory (`accounts/<local-id>/`, §7.1)
+  and what they share: the config, the sealer (one key file), the CalDAV failure limiter,
+  the login guard (at the state root, so unattended relogins of several accounts are spaced
+  by the same interval) and the root `tls/` and `pcb.sock`. `Local` stays single-account
+  and runs on its own directory, with the guard directory and the limiter passed in
+  [verified: `TestHubSharesTheLimiter`, `TestReloginsOfTwoAccountsAreSpaced`].
+- **Locks.** The serving process (`pcb serve`) holds, for its whole life, the root
+  `serve.lock` (it holds the PID as decimal text; a second serve exits 20 `pcb is already
+  serving (pid N)`, hint `stop it first, or use pcb status`) and the root `sync.lock`, so
+  an M5 binary run by mistake refuses instead of writing (ruling R7: M6 keeps the M5 name for
+  the root lock). Each account keeps its own `sync.lock` in its directory, so an offline
+  `pcb sync --account X` still excludes the daemon for that account only
+  [verified: `TestSecondServeIsRefused`]. `OpenHub` takes the root `sync.lock` (and
+  `layout.lock`, new) only while it migrates an M5 layout; with layout v2 it never
+  touches the root `sync.lock`, so CLI commands work while a daemon serves (R2)
+  [verified: `TestOpenHubIgnoresSyncLockOnLayoutV2`, `TestOpenHubRefusesWhileM5SyncLockHeld`].
+- **One loop per account.** `Hub.Serve` runs one `Local.Serve` per account that is not
+  pending and has its CalDAV adapter on, each in its own goroutine and always waiting for a
+  login when it has none (R3; the process exit rule below is the Hub's own). An account
+  added, completed or switched on while serving starts its loop at once; a removed or
+  switched-off one has its loop stopped (and waited for) first (R18)
+  [verified: `TestServeRunsEveryAccount`, `TestAddedAccountStartsServing`,
+  `TestRemovedAccountStopsFirst`, `TestCalDAVOffPausesTheLoop`]. One account's CAPTCHA or
+  failure never stalls or stops another [verified: `TestOneAccountsCaptchaDoesNotStallTheOther`].
+- **Parked accounts.** A loop that ends on an error its context did not cause (a damaged
+  cache: exit code 10, as the single account of M5 (R21)) is **parked**: `AccountInfo.Stopped`
+  carries the error's code, message and hint, the alert `account-stopped` (error, message the
+  stop error's, fix its hint, §15) appears, and the account's CalDAV answers 503 with
+  `Retry-After: 30`. It leaves the park when the person acts (`pcb account restart`, a login
+  of that account) or at a process restart; there is no automatic retry. A Restart that races
+  the loop's own park leaves the account shown stopped, and a later Restart works (R25)
+  [verified: `TestDamagedCacheParksOnlyThatAccount`, `TestLoginRestartsAParkedAccount`,
+  `TestRestartWhileALoopParksServesAgain`]. The one exception is a sync lock another process
+  holds (an offline `pcb sync --account X`, a `--watch`): that is not a park, the loop retries
+  every 30 s and logs it once per distinct cause (R23) [verified: `TestHeldSyncLockIsRetriedNotParked`].
+- **Exit rule of `pcb serve`** (so the units' `Restart=on-failure`, `RestartPreventExitStatus=10`
+  and the container keep their meaning). With `--wait-for-login` (what the units and the image
+  run) the process never exits for an account's sake: it ends only when its context ends
+  (also with no account at all, where it prints `Waiting for a login: run pcb login`). Without
+  it, it refuses to start when no account is logged in (exit 10; the only account's own error when
+  there is one) and exits with the first stopped account's code once **every** account that is not
+  pending has stopped (parked, or waiting for a login); with one account that is the M5 behaviour.
+  An account with CalDAV off counts as running [verified: `TestServeExitsWhenEveryAccountStopped`,
+  `TestServeRefusesWithNoLoggedInAccount`, `TestServeWithoutTheFlagExitsWhenTheOnlyAccountNeedsALogin`,
+  `TestServeWaitForLoginParksAnUnreadableAccount`, `TestServeWaitsForALoginWithNoAccount`].
+- **Adding, relogin, pending.** `Hub.Login` takes the username: an account whose address matches
+  (case-insensitive, pending or not) is relogged; an account whose `state.json` cannot be read
+  matches by its sealed account's username and the login meets its fault (exit 10), and a login
+  of its Proton user under another address is refused as a duplicate (R37). Else, when exactly
+  one account is signed out with no address and a readable `state.json` (an M5 account migrated
+  signed out, R16, R37), that one is **adopted** by this first login whose address matches no
+  account, whoever it is: the login inherits the account's `clients.json`, so the old Thunderbird
+  password then reads the new user's calendars. When you add a different account after signing
+  an M5 account out, run `pcb client rotate NAME` for each of its clients (`pcb client list`)
+  [verified: `TestLoginAdoptsTheSignedOutM5Account`, `TestLoginDoesNotAdoptAnUnreadableAccount`,
+  `TestLoginDoesNotAdoptALoggedInAddresslessAccount`, `TestLoginOfAnUnreadableAccountsUserAddsNothing`].
+  Else a new `<local-id>` directory is made, the login runs on it and, on success, the account joins the running set.
+  One login runs at a time per process (`a login is already in progress`). A failed add (wrong
+  password, refusal, a 2FA code not given within the 5 min TTL) removes the new directory. An
+  add stopped by a CAPTCHA keeps its directory as a **pending** account (phase `needs-captcha`,
+  address in `state.json`, no Proton user ID): listed by `account list` and `status`, chosen by
+  `login resume --account` (or alone), not counted by the "exactly one account" selector rule,
+  and removed at the first Hub open more than 24 h after `State.Created`. An add waiting for its 2FA
+  code is pending too. An abandoned add (no Proton user, never logged in, no data, no CAPTCHA, no 2FA
+  code held here) is removed lazily at `Accounts`, `Account` and `Login`, and by `OpenHub` when its
+  directory is older than the 5 min TTL plus one minute (R11, R13: a younger one may be another
+  process's add in flight). A login whose Proton user ID is already another account's is refused
+  (exit 10, naming it, hint `pcb account remove --account ...`): the session it opened is revoked
+  first (R12; `pcb could not revoke` adds the sessions page to the hint) and an add's directory is
+  removed. A 2FA code goes through `Hub.SubmitTOTP` so these rules also apply to it (R10)
+  [verified: `TestLoginAddsSecondAccount`, `TestLoginAddsSecondAccountWithTOTP`,
+  `TestLoginExistingAddressRelogsThatAccount`, `TestFailedAddLeavesNothing`, `TestCaptchaAddIsPending`,
+  `TestLoginSameAddressReusesPendingAccount`, `TestPendingExpiresAfter24h`,
+  `TestSignedOutAccountStoppedByCaptchaDoesNotExpire`, `TestSameUserOtherAddressIsRefused`,
+  `TestExpiredTOTPAddIsRemovedLazily`, `TestOpenHubRemovesOldAbandonedAdds`,
+  `TestLoginAdoptsTheSignedOutM5Account`, `TestSecondLoginWhileOneRunsIsRefused`,
+  `TestSubmitTOTPWrongCodesLeaveNothing`].
+- **Sign out, remove.** `pcb logout` signs one account out: session revoked, `secrets.sealed` and
+  `pcb.db` wiped, the login reset, the directory, the address and `clients.json` kept (CalDAV passwords
+  stay valid and viewable, decision 0013); it is listed as `logged-out`. `pcb account remove` signs
+  out, then deletes the directory, confirmed as `logout --yes` is (`--non-interactive` without `--yes`:
+  exit 10); a sign-out the store refuses keeps the directory, and calls in flight finish first;
+  a CalDAV request does not wait for a removal: the account being removed is skipped (R39)
+  [verified: `TestRemoveDeletesOnlyThatAccount`, `TestRemoveWaitsForTheCallsInFlight`,
+  `TestCallDuringRemoveFindsNoAccount`, `TestCompatibilityRouteSkipsAnAccountBeingRemoved`]. The first completed login of an account creates its `default`
+  CalDAV client (decision 0013).
+- **Adapters switch.** `pcb account caldav on|off` writes `caldav` (a boolean; absent, as in an M5
+  `state.json`, means on) into the account's `state.json`; the design's `adapters: {"caldav": ...}`
+  became this one key, CalDAV being the only adapter. Off: CalDAV refuses the account's clients (401)
+  and its loop pauses; on: the loop resumes with a pass at once, and a switch made while a relogin runs
+  is kept (R19) [verified: `TestSetCalDAVPersists`, `TestCalDAVSwitchDuringAReloginIsKept`,
+  `TestCalDAVSwitchDuringACaptchaReloginIsKept`].
+- **Daemon wiring** is `internal/daemon` (one entry point, `daemon.Run`: Hub.Serve, control socket,
+  CalDAV listener with TLS, the 5 s drain), used by `pcb serve` and, later, `pcb-ui`; it follows the
+  `cli` import rule and owns no account (the caller opens and closes the Hub, and closes it only after
+  `Run` returns) [verified: `TestRunServesCalDAVAndControl`, `TestRunDrainsOnCancel`,
+  `TestDaemonArch`].
 
 ## 5. C1 — Proton block
 
@@ -213,7 +320,7 @@ A part authored by an address that is not ours (an invitation, another
 member of a shared calendar) is not verified in v1 and never marks the
 event: there is no public-key lookup, and invitations and shared calendars
 are out of scope (`OPEN.md`). An `X-PCB-INTEGRITY` a part carries itself is
-dropped [verified: `TestObjectReads/TestUnverifiedSignatureIsMarked`,
+dropped [verified: `TestObjectReads/UnverifiedSignatureIsMarked`,
 `TestUnverifiedOnlyForOwnAuthoredParts`, `TestOpenTellsOwnAuthoredParts`,
 `TestMarkIntegrity`]. Which parts are signed by which key [assumed → E10]:
 if Proton signs a part of ours with another key than its author address's,
@@ -467,7 +574,8 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
 
 ### 7.1 Layout
 `$XDG_STATE_HOME/pcb/` (`/var/lib/pcb/` for a system service, `/data/state` in
-the container): `pcb.db` (SQLite, WAL), `secrets.sealed`, `state.json`,
+the container). M1 to M5 (one account at the root; since M6 an existing one is moved,
+"Layout v2" below): `pcb.db` (SQLite, WAL), `secrets.sealed`, `state.json`,
 `state.lock`, `clients.json`, `tls/`, `pcb.sock`, `logs/`. Config in
 `$XDG_CONFIG_HOME/pcb/config.toml` (`/etc/pcb/`, `/data/config`). Directories
 0700, files 0600; `doctor` checks them.
@@ -497,6 +605,58 @@ M5 additions:
   and config directories (and `.key-*` only in a key file's own directory) are removed; links are never followed
   [verified: `TestRemoveStaleRemovesOnlyOldTemporaryFiles`, `TestRemoveStaleNeverFollowsSymlinks`,
   `TestOpenRemovesStaleTemporaryFiles`, `TestOpenSweepsOnlyKeyFilesInTheKeyDirectory`].
+
+Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.go`):
+
+```
+<state>/
+  serve.lock  sync.lock  layout.lock  login.lock  last-login  layout.json  pcb.sock  tls/  logs/
+  accounts/<local-id>/
+    state.json  state.lock  secrets.sealed  secrets.lock  clients.json  clients.lock  pcb.db (+ -wal, -shm)  sync.lock
+```
+
+- `<local-id>`: 8 random lowercase hex characters, drawn when an account is added and never reused
+  or renamed (it is a directory name and appears in the CalDAV URL, §9). Proton's user ID stays inside
+  (`state.json`, the cache's `meta`) and is checked as before [verified: `TestLocalIDShape`].
+- `layout.json` is `{"version": 2}`; anything else is refused (malformed or an unknown version: damaged,
+  exit 10 `run pcb doctor`; a version above 2: `ErrNewerLayout`, exit 10 `upgrade pcb`, ruling R9; a layout pcb
+  cannot read, exit 10 naming the file: a person must act, so a unit that does not restart on 10 stops instead of
+  looping, ruling R36) [verified: `TestOpenHubRefusesDamagedLayout`, `TestOpenHubRefusesUnreadableLayout`].
+  Root files: `serve.lock` (the serving process, holds its PID, §4.1), `sync.lock` (the root lock, kept
+  under its M5 name, ruling R7: held by the serving process, and by `OpenHub` while it migrates), `layout.lock`
+  (serialises migrations), `login.lock` and `last-login` (the login guard, shared by every account).
+- **Migration.** A state with no `layout.json` and account data at the root (`state.json`, `secrets.sealed`,
+  `clients.json`, `pcb.db`, `-wal`, `-shm`: data files only, locks do not count, R6) is the M5 layout. The first
+  command that opens the state (`pcb doctor` does not: it reads both layouts and never writes)
+  moves the account's files into `accounts/<new-id>.migrating/`, renames the directory,
+  then writes `layout.json`, each step fsynced; a start that finds the staging directory (or the account
+  directory without `layout.json`) resumes with the same ID. It holds `layout.lock` and the root `sync.lock`
+  without waiting: an M5 `pcb serve` or `pcb sync` running makes it exit 20 `another pcb holds the state`,
+  hint `stop the running pcb first`; another pcb migrating (`layout.lock` held) is exit 20 too, `another pcb is
+  moving the state to the per-account layout` (both may pass by themselves, R36)
+  [verified: `TestOpenHubRefusesWhileM5SyncLockHeld`, `TestOpenHubRefusesWhileLayoutLockHeld`]. The root `sync.lock` is not moved (R7: it is v2's root lock); the
+  other lock files move with the account. A root `state.lock`, `secrets.lock` or `clients.lock` found beside
+  `layout.json` later (an older binary recreates them when it opens the state) is stale and harmless: lock
+  files hold no data and never count as an older pcb's account files (R6)
+  [verified: `TestLayoutRootLockFilesAreNoAccount`]. Session, event cache and CalDAV passwords come across untouched; a migrated M5 account has no
+  address in its `state.json`, so `OpenHub` backfills it from the sealed account's username (R16)
+  [verified: `TestMigrateMovesM5Files`, `TestMigrationResumesAfterEachStep`,
+  `TestMigrateLeavesTheRootSyncLock`, `TestMigrateSyncsTheDirectories`, `TestOpenHubMigratesM5State`,
+  `TestOpenHubBackfillsTheM5Address`, `TestMigratedThunderbirdKeepsItsTokens`,
+  `TestAccountsOfAnM5StateLeaveItAsItIs`, `TestAccountsOfAnInterruptedMigration`].
+- **No downgrade.** An M5 binary cannot be changed: on a v2 state it sees no root `state.json` (logged out) and,
+  if it logs in, writes `state.json` and `secrets.sealed` at the root beside `layout.json`. M6 then refuses
+  (exit 10, `account files of an older pcb are beside the per-account layout: <names>`, hint `remove them or
+  move the state directory aside: this pcb version cannot be downgraded`, R36) and never guesses which copy is current; `pcb doctor`
+  reports it on its `accounts` check. The root `sync.lock` held by a serving M6 process stops an older binary from
+  writing meanwhile [verified: `TestLegacyBesideLayoutIsRefused`, `TestOpenHubRefusesLegacyBesideLayout`,
+  `TestAccountsWithLegacyFilesBesideTheLayout`, `TestOpenHubRefusesNewerLayout`, `TestLayoutUnknownVersionIsRefused`].
+- `state.json` gains `address` (the account's Proton address, kept after a sign-out so a signed-out account
+  keeps its name; not a secret; the design wrote `username`, ruling R8), `caldav` (the CalDAV switch, §4.1; absent
+  is on) and `created` (when the add began, for the 24 h pending expiry) [verified: `TestStateKeepsAddressAndSwitch`].
+- The sealer is shared: every account's `secrets.sealed` and `clients.json` are sealed with the one key
+  (`[secrets] key_file`); `secrets.sealed` keeps its v2 format and its generation mirror in the account's own
+  `state.json` (§7.3).
 
 ### 7.2 What is cached [call]
 What M2 stores, in `pcb.db` (SQLite, WAL, mode 0600, schema version 2 in
@@ -597,7 +757,7 @@ it (a one-shot `pcb sync`, or a serve that is not this process) the logout still
 `TestStateWithUnknownFieldsIsNewer`, `TestNewerStateSaysUpgrade`, `TestLogoutOfAStoreItCannotReadNeedsConfirmation`,
 `TestLogoutOfAStoreItCannotReadAsksOnATerminal`, `TestLogoutRefusalKeepsAPendingLogin`, `TestLoginOverAStoreThisPcbCannotRead`,
 `TestLogoutKeepsAStoreItCannotRead`, `TestLogoutSaysWhenAnotherProcessSyncs`]. The control socket's
-`POST /v1/logout` takes an optional body `{"discard": bool}`; an empty body is the zero request, so an older pcb
+`POST /v2/accounts/{id}/logout` (`/v1/logout` before M6) takes an optional body `{"discard": bool}`; an empty body is the zero request, so an older pcb
 still works (§15).
 M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAndIsMirrored`, `TestRestoredOlderSecretsAreRefused`,
 `TestFileRemovedByLogoutIsRefusedIfRestored`, `TestV1FileIsReadAndUpgraded`, `TestSealedAheadOfMirrorIsAccepted`,
@@ -913,9 +1073,41 @@ writes (PUT, DELETE) since M4.
   `TestPendingCalendarsAre503AndLeftOutOfTheHomeSet`,
   `TestUnknownCalendarIs503WhileACalendarIsPending`,
   `TestMust01BlockedClientsGet503WithWholeSecondsRetryAfter`].
-- Auth (M3-R17 to R21, amended by decision 0013): HTTP Basic, any username; the password is an
+- Accounts and URLs (M6, decision 0014, rulings R26 to R30; `internal/caldav`, `service.Hub.Route`).
+  Each account is served under `/dav/<local-id>/` (`service.AccountPath`): its root answers
+  `current-user-principal`, then `/dav/<local-id>/principals/me/` and `/dav/<local-id>/calendars/me/<calendar>/...`,
+  the M3/M4 tree under that base; every 401 there carries `WWW-Authenticate: Basic realm="pcb <local-id>"`. The
+  password must be one of that account's clients, else 401: account B's password on account A's paths is refused,
+  and a request is never served by another account's API. An unknown but well-shaped local ID (8 lowercase hex) is a
+  401 with that realm and a limiter charge, as a wrong password is (no probe oracle for which IDs exist). The
+  compatibility URLs, M5's, stay: `/`, `/.well-known/caldav`, `/dav/principals/me/`, `/dav/calendars/me/...`,
+  realm `pcb`; there the password alone picks the account (each account's client store verifies it: salted SHA-256 over
+  192-bit random passwords, a few hashes per request, no ambiguity), so a migrated install's Thunderbird needs no
+  change; a first segment under `/dav/` that is not a local ID is a compatibility path. On either kind of root,
+  `/` and `/.well-known/caldav` point at the authenticated account's own per-account principal, so a new setup ends on
+  per-account URLs. The URL printed by `pcb serve` and `pcb client show` is `<scheme>://<host>:<port>/dav/<local-id>/` and
+  the username shown is the account's address (any username is accepted). Responses are in the namespace the request
+  came on (hrefs of another namespace in a multiget are 404). Why the prefix and the realm: one Thunderbird profile holding
+  two accounts on the same host would otherwise see one origin, one realm and the same paths, and its HTTP auth cache
+  could send account A's password on B's URLs [assumed → `HUMAN-CHECKS.md` step 8: that Thunderbird keeps the two
+  passwords apart; nothing here depends on it, a wrong password is a 401]. One failure limiter serves every account,
+  charged once per request and only for a password no account holds; a client of an account whose CalDAV adapter is off is
+  401 with no charge and no activity (every Thunderbird shares 127.0.0.1, a client left configured would otherwise
+  lock every account out, R28); while any account's `clients.json` or `state.json` cannot be read, a password no other
+  account holds is 503 and not charged, on an account's URLs only that account's store counting (R29, a 192-bit
+  password makes guessing moot). A client of an account whose loop is parked or waits for a login is 503 with
+  `Retry-After: 30` after authentication; a removal waits for the requests in flight; the adapter's request log
+  carries `account=<local-id>` (R30)
+  [verified: `TestPrefixedURLServesOnlyThatAccount`, `TestOtherAccountsPasswordIsRefusedOnPrefixedURL`,
+  `TestCompatibilityURLRoutesByPassword`, `TestRootPointsToPrefixedPrincipal`, `TestCalDAVOffAccountIs401`,
+  `TestBrokenClientsFile`, `TestParkedAccountIs503`, `TestSignedOutAccountIs503`, `TestLimiterIsSharedAcrossAccounts`,
+  `TestUnknownAccountIs401`, `TestRouteToAnotherAccountIsRefused`, `TestMultigetHrefsOfAnotherNamespaceAre404`,
+  `TestRouterErrorIs503`, `TestWarningsNameTheAccount`, `TestRouteKeepsEachAccountToItsOwnURLs`,
+  `TestRouteChargesTheLimiterOncePerRequest`, `TestRouteCalDAVOffClientIsNotCharged`,
+  `TestRouteCalDAVOffMatchDoesNotTouch`, `TestRouteUnreadableStateIs503Uncharged`, `TestTwoAccountsSideBySide`].
+- Auth (M3-R17 to R21, amended by decision 0013; per account since M6): HTTP Basic, any username; the password is an
   app password (24 random bytes, base64url) from `pcb client add NAME`. It is kept in
-  `<state>/clients.json` (0600, format version 2) twice: as a salted SHA-256, compared in
+  `<state>/accounts/<local-id>/clients.json` (`<state>/clients.json` before M6; 0600, format version 2) twice: as a salted SHA-256, compared in
   constant time, and sealed with the key that seals the session (§7.3), so it can be shown
   again. This amends M3-R17 ("printed once, salted hash only"). Every `pcb login` that
   completes (not an unattended relogin) creates a client named `default` when none exists, so a fresh
@@ -929,7 +1121,7 @@ writes (PUT, DELETE) since M4.
   `TestDefaultIsNotRecreatedOnceAnyClientExists`, `TestShowClientPicksDefaultElseTheOnlyClient`,
   `TestShowClientMadeBeforeSealingIsNotRecoverable`, `TestClientCredentialsRedactThemselves`, `TestNoPasswordInLogs`,
   `TestClientShowJSONHidesThePasswordWithoutReveal`]. 401 with
-  `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"`; 5 failures per minute per IP
+  `WWW-Authenticate: Basic realm="pcb", charset="UTF-8"` (realm `pcb <local-id>` on an account's URLs, above); 5 failures per minute per IP
   (IPv4 /32, IPv6 /64) then 503. A `clients.json` that cannot be read or parsed is not a wrong password: the
   request answers 503 with `Retry-After: 30`, charges no limiter slot, and `pcb serve` logs the load error at
   error level once per distinct failure (path and cause, no content; a repaired file works at once) [verified:
@@ -971,7 +1163,7 @@ Not planned [decided 0007].
 
 Not planned [decided 0007]. The control API (CTL, §4) is internal: JSON
 over HTTP on a unix socket (0600, peer UID checked), versioned
-(`/ctl/v1/…`), used only by `pcb`. It is documented in code, not in
+(`/v2/…` since M6), used only by `pcb`. It is documented in code, not in
 OpenAPI, and may change between versions.
 
 ## 12. A4 — MCP adapter
@@ -998,21 +1190,27 @@ pcb uninstall [--system|--user] [--delete-data [--yes]] [--plan]   # M5
 pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients; M5: service, daemon, alerts)
 pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level L]   # sync loop (30 s, 5 min idle) + CalDAV listener + control socket in one process (M3 reads, M4 writes, M5 daemon; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Without --wait-for-login: refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20), stops with Proton's error code when the session ends (M3-R28); with it: waits for a login (§8.1). Prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0, a second one exits 20
 pcb service start|stop|restart|status|logs [-f] [--system|--user]   # M5: systemctl and journalctl, scope from what is installed
-pcb login [--username U] [--password-fd N] [--unattended-relogin]   # M5: through the running daemon when there is one
+pcb login [--username U] [--password-fd N] [--unattended-relogin]   # M5: through the running daemon when there is one; M6: no --account, the username decides: a known address is relogged, a new one adds an account (§4.1)
 pcb login resume (--captcha-token T | --totp)   # --totp takes no value: the 2FA code of the login the daemon holds comes from PCB_TOTP or a prompt, never argv (M5-P11)
-pcb logout [--yes]                          # revokes the session; --yes discards a store pcb cannot read, without the confirmation (§7.3)
+pcb logout [--yes]                          # M6: for one account (--account); revokes the session; --yes discards a store pcb cannot read, without the confirmation (§7.3)
 pcb status [--daemon]                       # login state; with a daemon: its live state, listener, per-calendar sync and write gate, render counters, alerts (§15); --daemon exits 20 when none answers
 pcb calendar list                           # what Thunderbird will see; read_only is the write gate (M4-R1: false only for a normal calendar with the Write bit and a verified passphrase signature)
 pcb sync [--full] [--watch [--interval 30s]] # M2: fill/refresh the event cache (--watch not with --json)
 pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no network call
 pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
-pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL, username (the client's name), password and, over TLS, the certificate fingerprint; without NAME: `default`, else the only client
+pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL (M6: the account's /dav/<local-id>/), username (M6: the account's address; any username is accepted), password and, over TLS, the certificate fingerprint; without NAME: `default`, else the only client
 pcb client rotate NAME|ID                    # M5, decision 0013: a new password, the old one stops working at once
+pcb account list                            # M6: local ID, address, phase, CalDAV on/off, last sync; pending adds included; the daemon's view when one answers
+pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
+pcb account restart                         # M6: serve the account again after its loop stopped on an error (§4.1, "Parked accounts")
+pcb account remove [--yes]                  # M6: sign out, then delete the account's directory (cache and CalDAV passwords included)
 pcb config get|set|validate                  # not built (M5 out of scope: edit config.toml, run pcb doctor)
 pcb version
 ```
-One account per daemon in v1 [call]; the data model keeps an account ID so a
-second one is an addition, not a migration.
+Several accounts per process since M6 (decision 0014, §4.1); the "one account per daemon in v1" rule is gone.
+The account selector (`--account A`, else `PCB_ACCOUNT`) is taken by `logout`, `login resume`, `status`, `calendar list`,
+`event list`, `sync`, `client add|list|show|rotate|remove` and `account caldav|restart|remove`; every other command
+refuses `--account` (exit 2, `pcb login takes no --account: the username decides ...`).
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
 
@@ -1108,6 +1306,41 @@ PID 1, both scopes, install, active, 503 with a client, uninstall) and `make con
 commit e5faeb8; the CI jobs have not run until the branch is pushed. Real systemd on a real host, linger across a
 reboot and a real login are [assumed → step 7].]
 
+M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`, `internal/doctor`; rulings in §18):
+- Selector: `A` is the account's address (case-insensitive) or its local ID (`pcb account list`), pending adds included; empty, it is the only account
+  that is not pending. With several and none given: exit 2, `several accounts: name one with --account`, hint listing them, and `--json` `data.accounts` carries the
+  list (also over the control socket, R31); a selector that names none: exit 2, `no account X`, hint `see pcb account list`; none given and no account
+  to choose: exit 10 (a person must add one, R38), `no account`, hint `add one with pcb login` (`finish the pending login (pcb login resume), or add an
+  account with pcb login` while only pending adds exist). `PCB_ACCOUNT` is read when the flag is not
+  given [verified: `TestSelectAccount`, `TestSelectorRules`, `TestSelectorRequiredWithTwoAccounts`, `TestPCBAccountEnv`,
+  `TestOnlySelectingCommandsTakeAccount`, `TestLoginRefusesAnAccountSelector`, `TestSeveralAccountsCrossTheSocket`, `TestNoAccountIsExit10`].
+- `pcb login` takes the username first and decides (§4.1); the result names its account (`data.account`, the local ID); `pcb login resume` takes the selector
+  (a lone pending add is found without one; with several waiting and none named it lists them, exit 2); `pcb logout` of a state whose only account is a pending add acts on it
+  (R34) [verified: `TestLoginAddsAccountByUsername`, `TestLoginResumeSelectsThePendingLogin`, `TestLoginResumeNamesTheWaitingLogins`,
+  `TestLogoutOfTheOnlyPendingAccount`].
+- With a daemon, every account-changing command (login, 2FA code, logout, `account remove`, `caldav`, `restart`) goes through the control socket, which runs the
+  Hub's own rules: a running Hub does not rescan `accounts/`, so an offline add would stay unseen until the next start (R15). Offline, `account restart` only
+  says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountRestartOffline`].
+- `pcb account remove` asks you to type `remove` (or `--yes`; without a terminal or with `--non-interactive` and no `--yes`: exit 10) [verified: `TestAccountRemoveNeedsYes`];
+  `pcb account caldav on|off` [verified: `TestAccountCalDAVOff`].
+- `pcb status`: the process (daemon, listener, process alerts: `needs-login` with no account at all (ruling R44), the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
+  render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
+  is the command's (the `pcb status` key-fault exception of §13 stands). `pcb status --daemon --json` is still the container's health check [verified:
+  `TestStatusShowsEveryAccount`, `TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone`, `TestStatusShowsTheDaemon`].
+- `pcb doctor`: process-wide checks once; per account, results named `<address>: <check>` (the local ID when the account has no address) (`sealed secrets`, `secrets`, `cache`, `caldav clients`, the sealed-client
+  warnings); an `accounts` result for the layout (no account: a warning; a move to layout v2 stopped midway, or `.migrating`: a warning naming it; files of an older
+  pcb beside the layout, a newer or an unreadable layout: a failed check with the fix, exit 10 as every failed file check, R36) [verified: `TestDoctorNamesTheAccount`, `TestAccountsOfTheV2Layout`, `TestAccountsOfAStateWithNothing`,
+  `TestAccountsOfAnUnreadableLayout`].
+- `pcb serve`'s intro prints one `Thunderbird URL (<address>): <base>/dav/<local-id>/` line per account CalDAV serves (a pending add and an account with CalDAV off are left
+  out), the TLS fingerprint once, and, per served account with no client, the `client add`/`login` hint; with `--wait-for-login` and no account, `Waiting for a login: run pcb login`
+  [verified: `TestServePrintsEveryAccountURL`, `TestServeIntroSkipsPendingAndCalDAVOffAccounts`, `TestServeWaitsForALoginWithNoAccount`]. `pcb client show` prints the account's own
+  URL and its address as the username, with a daemon's listener or the configuration's [verified: `TestClientShowPerAccountURL`].
+- `pcb sync` takes one account's own `sync.lock` (the daemon holds it while it serves the account); refused while `pcb serve` answers, it exits 0 `pcb serve is running and already syncs` as in M5.
+- `pcb uninstall --delete-data` signs out every account (revoking each session; a session that cannot be revoked is reported) before deleting the directories [verified: `TestUninstallSignsOutEveryAccount`].
+- `output.SchemaVersion` is 2 since M6 (the shapes of `status`, `doctor` and `client show` changed: `status` data is `{daemon, listener, accounts[], alerts}`, each account its
+  `AccountInfo` fields flat plus `login` (the former flat fields), `health`, `url`, `alerts`; the former top-level fields moved into `accounts[].login`); a consumer of version 1
+  reads `schema_version` first, and there is no compatibility shim (private, pre-release) [verified: `TestSchemaVersionIs2`].
+
 Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
 the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
 and `:sha-<12 hex>`, first success 2026-11-12) and stays private, confirmed Private by the author on 2026-11-12 (`HUMAN-CHECKS.md` 7.8): pulling it needs
@@ -1177,8 +1410,9 @@ Render counters and the read path (initial-version audit; `internal/service/rend
   [verified: `TestApplyNotificationsDropsMalformedReminders`].
 
 Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
-- `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v1/`, internal and versioned:
-  `GET /v1/status`, `POST /v1/login`, `POST /v1/login/totp`, `POST /v1/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request). Each answer is one `output.Envelope`:
+- `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v2/` since M6 (`/v1/` is gone and answers 404, as does any unclean path), internal and versioned:
+  `GET /v2/accounts`, `GET /v2/status` (every account; one account that cannot be read still gets its entry, with an `account-unreadable` alert, instead of failing the others),
+  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` (body `{"on": bool}`) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7). Each answer is one `output.Envelope`:
   200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
   are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
   dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.
@@ -1186,7 +1420,8 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   own state directory or `sudo -u`); other Unix rely on the 0600 mode and the 0700 directory; off Unix there is no CTL
   and the CLI is always offline. Before dialling, the client checks that the socket file is a socket (not a symlink)
   owned by the caller's UID (M5-R2); on Linux it also checks the connected server's UID before sending a login, on
-  every redial. A refusal exits 20 [verified: `TestOtherUIDIsRefused`, `TestDefaultPeerUID`,
+  every redial. A refusal exits 20 [verified: `TestV1RoutesAreGone`, `TestUncleanPathsAre404`, `TestAccountsRoute`, `TestAccountRoutesReachTheHub`, `TestUnknownAccountRoute`, `TestCalDAVNeedsItsSwitch`,
+  `TestTOTPGoesToItsAccount`, `TestLoginResultNamesItsAccount`, `TestDaemonKind`, `TestOtherUIDIsRefused`, `TestDefaultPeerUID`,
   `TestDialChecksTheSocketBeforeDialling`, `TestSymlinkAtTheSocketPathIsRefused`, `TestClientRefusesAServerOfAnotherUID`,
   `TestOversizedBodyIs413`, `TestLoginBodyIsBounded`, `TestErrorsCrossTheSocket`, `TestStatusRefusesAForeignSocketPath`].
 - Login through the daemon (M5-Rpre4, R12, P11, P12): with a daemon running, `pcb login`, `pcb login resume` and `pcb logout`
@@ -1203,11 +1438,11 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   `TestResumeTOTPWithoutADaemonIsExit10`, `TestResumeNeedsExactlyOneMode`, `TestNoDaemonLoginSaysSo`].
   Ctrl-C at the 2FA prompt leaves the held login until it expires or is replaced (at most 5 minutes) [source: ruling
   M5-R12 (4); no test].
-- `pcb status` keeps `service.Status`'s fields flat at the top level of its JSON (M5-P4) and adds `daemon` (null
-  offline), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
-  with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
-  Text lines: first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
-  (offline: `daemon: not running (offline view)`), `listener:`, one `calendar:` line
+- `pcb status` since M6 (schema 2): `daemon` (null offline), `listener` (the base URL, TLS, fingerprint, certificate end), `alerts` (the process's) and `accounts[]`, each with its
+  `AccountInfo` (`id`, `address`, `phase`, `pending`, `caldav`, `stopped`) flat, `login` (`service.Status`'s fields, which M5-P4 kept flat at the top level), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
+  with its reason, render counters, human verification), `url` (its CalDAV URL while a listener is bound) and its own `alerts` [verified: `TestStatusListsEveryAccount`, `TestOneFailingAccountDoesNotFailTheStatus`, `TestVanishedAccountIsSkipped`].
+  Text lines, once for the process then per account (the block starts at `account: <address> (<local-id>)`, marks `pending`, `CalDAV off`, `stopped`): first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
+  (offline: `daemon: not running (offline view)`), `listener:`, `url:`, one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
   the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the
   host: `pcb service start` where a unit is installed, the container's restart where `/.dockerenv` or `/run/.containerenv`
@@ -1224,15 +1459,17 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   `TestStatusShowsADaemonWaitingForALogin`, `TestStatusFallsBackOffline`, `TestStatusDaemonFlagNeedsADaemon`,
   `TestOnlyNoDaemonFallsBackOffline`, `TestDoctorListsAlerts`, `TestDoctorReportsTheService`,
   `TestServeServesTheControlSocket`, `TestHealthReportsGatesWithReasons`, `TestHumanVerificationIsHeldUntilAWriteLands`].
-- Alerts: `{code, severity: error|warning, message, fix, calendar?}`, errors first, then code, then calendar ID. Codes
-  (stable): `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
+- Alerts: `{account?, code, severity: error|warning, message, fix, calendar?}` (`account` the local ID; none on a process alert), errors first, then account, code, then calendar ID. Codes
+  (stable): `account-stopped` (error, M6: the account's serve loop is parked, §4.1; message the stop error's, fix its hint, `pcb account restart` or a login clears it) [verified: `TestAccountStoppedAlert`],
+  `account-unreadable` (error, M6: the account's login state or store cannot be read, with that error's message and fix; the other accounts still answer) [verified: `TestOneFailingAccountDoesNotFailTheStatus`, `TestStatusShowsEveryAccount`],
+  `needs-login` (error; also a process alert, message `not logged in to Proton`, when no account exists, ruling R44: an existing account carries its own) [verified: `TestProcessNeedsLoginWithNoAccount`, `TestStatusOfNoAccountNeedsALogin`], `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
   Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
-  and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
-  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
+  and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error; these two are the process's alone, `ProcessAlerts`)
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestProcessAlerts`, `TestCertificateAlertIsTheProcesss`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
-## 16. Testing
+## 16. How it is tested
 
 - Unit tests per block; every test must fail when its behaviour breaks
   (checked by sabotage in review, not mutation testing by default).
@@ -1312,7 +1549,10 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M4 CalDAV writes (built, live session pending) | C1 codec write path, A1 writes, fidelity table (E12, E13), write gate (E10, E14) | Thunderbird two-way edits, incl. single occurrences: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
 | M5 Daemon and ops (built, live session pending) | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only: smoke-tested in CI (a Debian container with systemd as PID 1, the image); the live run is `spec/HUMAN-CHECKS.md` step 7 |
 
-Nothing after M5 is planned [decided 0007].
+| M6 Several accounts per process (built 2026-11-12, live session pending) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run is `spec/HUMAN-CHECKS.md` step 8, on the one test account |
+| M7 `pcb-ui` desktop app (planned, not designed in detail, not built) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard; Secret Service sealer (§7.3) | to be planned after M6 merges (`spec/designs/2026-11-12-multi-account-and-ui-design.md` §5) |
+
+Nothing else is planned [decided 0007]; M7 is planned, not yet in a plan file.
 
 Initial-version audit (2026-11-12, main at 557fe84): six read-only auditors, 0 Critical, 17 Important, about 48 Minor findings; the Important ones and the Minors worth their cost are fixed on branch `audit-fixes`, the rest parked in `OPEN.md` ("Parked by the initial-version audit") or accepted, each with its reason in `spec/audits/2026-11-12-initial-version.md`.
 
@@ -1348,6 +1588,35 @@ M5 carry-overs from M1 to M4, as closed:
 - M4-R39 (a calendar whose write gate stays undecided is named by `pcb status` and `pcb doctor`) and M4-R44 (human verification in `pcb status`): done, alerts `write-gate-undecided` and `human-verification` (§15).
 - R16 (`pcb login resume --totp`): done, as a boolean (M5-P11).
 - Open and parked, not carried: see "Later" in `OPEN.md`.
+
+M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMAN-CHECKS.md` step 8 are pending, test account only): `store` layout v2 and the crash-safe M5 migration (`internal/store/layout.go`), the fake Proton's per-user failure injection, `Local` on an account directory with a shared guard and limiter, `service.Hub` (accounts, login rules, pending adds, sign-out, removal, the CalDAV switch, one serve loop per account, the exit rule, the router), the CalDAV router with per-account URLs, control socket v2, `internal/daemon` (the wiring out of `internal/cli/serve.go`), the selector, `pcb account` and schema 2 in the CLI, the doctor's layout and per-account checks, and the two-accounts and upgrade contract tests (`internal/daemon`). Author's choice, recorded: no second Proton test account, so **multi-account is proven on the fake only** (two or more users); the live run uses one account. Deferred: the live session (step 8) and `pcb-ui` (M7). Rulings recorded (`.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`; plan `spec/plans/2026-11-12-m6-multi-account.md`; design `spec/designs/2026-11-12-multi-account-and-ui-design.md`):
+
+| Ruling | Decision |
+|---|---|
+| R1 | `internal/store` tests write an M5 fixture with a minimal `clients.json` literal (no `internal/access` import); the real-format migration test is `TestOpenHubMigratesM5State` |
+| R2 | `OpenHub` takes the root `sync.lock` (and `layout.lock`) only while it migrates an M5 layout; with layout v2 it never touches them, so CLI commands work while a daemon serves |
+| R3, R18, R19, R22 | the Hub runs every `Local.Serve` with `WaitForLogin` and applies the process exit rule itself; a removed account's loop stops first; a login re-reads CalDAV, address and creation time under `state.lock` (a CalDAV switch is not lost to a relogin); `ServeStopped` is reused for parked, paused and ended loops |
+| R4, R5, R26 | `service.AccountPath` is the one URL helper; `daemon.Hub` is the interface `daemon`, `ctl` and `cli` share (`*service.Hub` satisfies it); `Router.Route` returns `(api, localID, retryAfter, err)` so the handler knows which account `/` authenticated |
+| R6, R7, R9 | legacy detection counts data files only, never locks; `Migrate` leaves the root `sync.lock` in place; `ErrNewerLayout` for a `layout.json` above version 2 (exit 10 since R36, `upgrade pcb`) |
+| R8 | the `state.json` key is `address` (the design wrote `username`) |
+| R10, R12, R14, R15, R17 | `Hub.SubmitTOTP` applies the same post-login rules as `Hub.Login`; a duplicate-user refusal revokes the session it opened first; account-changing commands go through Hub methods (CTL when a daemon answers, since a running Hub does not rescan `accounts/`); `SignOut` fires `OnChange` |
+| R11, R13 | an abandoned add (no Proton user, never logged in, no data, no CAPTCHA, no held 2FA login) is removed lazily and by `OpenHub` once older than the 2FA TTL plus a minute |
+| R16, R37 | `OpenHub` backfills a migrated account's address from its sealed username; a migrated signed-out account with no address (and a readable `state.json`, R37) is adopted by the first login that matches no account; cost: that login inherits its `clients.json`, so the old Thunderbird password reads the new user's calendars (`pcb client rotate`, §4.1) |
+| R20 | `serve.lock` holds the PID as decimal text and a newline |
+| R21, R23, R25 | a damaged cache parks the account with exit 10 (not 20), a sync lock held elsewhere is retried every 30 s and never parked, and a Restart racing the park is a no-op that a later Restart repairs |
+| R24 | the serve half of `hub.go` is `hub_serve.go`, the account API `hub_api.go` (a pure move) |
+| R27 | an unknown but well-shaped local ID is 401 realm `pcb <id>` with a limiter charge (no probe oracle); a first segment that is not an ID is a compatibility path |
+| R28, R29 | a client of an account whose CalDAV is off is 401 with no charge; while any `clients.json` is broken an unknown password on a compatibility URL is not charged |
+| R30 | the adapter's log carries `account=<local-id>`; an unreadable `state.json` is 503 with no charge, a Router error 503 |
+| R31 | the control error envelope carries `data.accounts` of a several-accounts refusal and the client rebuilds an error exposing it |
+| R32 | an unclean control path (the ServeMux 301) is a 404 envelope |
+| R33 | `pcb serve` opens the Hub itself (`service.OpenHub`) and runs `daemon.Run` with kind `serve` |
+| R34 | upgrade-path fixes: `pcb doctor` warns on a `.migrating` directory and names the layout fix; `pcb logout` with only a pending account acts on it; offline status drops an account only on the Hub's "no account" refusal |
+| R36 | layout refusals (files of an older pcb beside the layout, a newer, damaged or unreadable `layout.json`) are exit 10, as state faults; another pcb holding `layout.lock` or the root `sync.lock` stays exit 20 |
+| R38 | with no selector, no account (or only pending adds) is exit 10; a selector naming none and several accounts stay exit 2; `ErrNoAccount` stays the cause, which offline status and the control socket's status match |
+| R39 | a CalDAV request skips an account being removed instead of waiting for its revoke; the adoption cost of R16 is documented (§4.1) |
+
+Where the built behaviour differs from the design (§4 of the design document, each marked there): the `state.json` key `address`, not `username` (R8); one `caldav` boolean, not an `adapters` object (§7.1); the root `sync.lock` stays at the root and is held by the serving process and the migration (R7); a held per-account sync lock is retried, not parked (R23); a damaged cache parks with exit 10 (R21); root `serve.lock` and `layout.lock` are new; stale root `state.lock`, `secrets.lock` and `clients.lock` an old binary recreates are never cleaned (§7.1).
 
 ## 19. Security model (summary)
 

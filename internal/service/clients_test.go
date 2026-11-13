@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
@@ -862,5 +863,62 @@ func TestEventsWithNoCacheNameTheLoginWhenLoggedOut(t *testing.T) {
 	_, err = svc.Events(t.Context(), service.EventsRequest{Calendar: "Work"})
 	if h := exitcode.HintOf(err); h != "run pcb sync" {
 		t.Errorf("logged in, no cache: %v, hint %q, want run pcb sync", err, h)
+	}
+}
+
+func TestSharedLimiterCountsAcrossLocals(t *testing.T) {
+	t.Parallel()
+	a, b := newClientsEnv(t), newClientsEnv(t)
+	lim := access.NewLimiter(a.clk.Now)
+	mk := func(e *clientsEnv) *service.Local {
+		cfg := config.Defaults(e.dirs)
+		cfg.Proton.BaseURL = "http://127.0.0.1:1"
+		s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, Limiter: lim})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	sa, sb := mk(a), mk(b)
+	sec, err := sb.AddClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		if ok, _ := sa.CheckClient(t.Context(), "wrong", fmt.Sprintf("203.0.113.5:%d", 50000+i)); ok {
+			t.Fatal("a wrong password was accepted")
+		}
+	}
+	ok, retry := sb.CheckClient(t.Context(), sec.Password, "203.0.113.5:1")
+	if ok || retry <= 0 {
+		t.Fatalf("other account: ok=%v retry=%v, want refused with a wait", ok, retry)
+	}
+}
+
+func TestVerifyClientDoesNotChargeTheLimiter(t *testing.T) {
+	t.Parallel()
+	e := newClientsEnv(t)
+	sec, err := e.svc.AddClient(t.Context(), "Phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		found, err := e.svc.VerifyClient(t.Context(), "wrong")
+		if found || err != nil {
+			t.Fatalf("VerifyClient(wrong) = %v, %v", found, err)
+		}
+	}
+	if ok, _ := e.svc.CheckClient(t.Context(), sec.Password, "203.0.113.5:1"); !ok {
+		t.Error("VerifyClient failures were charged to the limiter")
+	}
+	if found, err := e.svc.VerifyClient(t.Context(), sec.Password); !found || err != nil {
+		t.Errorf("VerifyClient(right) = %v, %v", found, err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "clients.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := e.svc.VerifyClient(t.Context(), sec.Password); found || err == nil {
+		t.Errorf("VerifyClient on a corrupt clients.json = %v, %v, want an error", found, err)
 	}
 }

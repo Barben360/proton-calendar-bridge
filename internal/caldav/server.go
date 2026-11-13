@@ -1,13 +1,25 @@
 // Package caldav is A1: the bridge's own read-only CalDAV server on top of
 // service.API (ruling M3-R5), built to Thunderbird's contract
-// (spec/experiments/E08-thunderbird-caldav.md). It serves:
+// (spec/experiments/E08-thunderbird-caldav.md), each request served by the
+// API of the account a service.Router chose (design §4.4). It serves, in
+// each account's namespace (<base> = service.AccountPath(<local-id>),
+// /dav/<local-id>/):
 //
-//	/                                       PROPFIND: current-user-principal
-//	/.well-known/caldav                     308 to the principal
-//	/dav/principals/me/                     the principal: calendar-home-set
-//	/dav/calendars/me/                      the home set
-//	/dav/calendars/me/<calseg>/             a calendar: PROPFIND, REPORT
-//	/dav/calendars/me/<calseg>/<name>.ics   an object: PROPFIND, GET, HEAD
+//	<base>                                    PROPFIND: current-user-principal
+//	<base>principals/me/                      the principal: calendar-home-set
+//	<base>calendars/me/                       the home set
+//	<base>calendars/me/<calseg>/              a calendar: PROPFIND, REPORT
+//	<base>calendars/me/<calseg>/<name>.ics    an object: PROPFIND, GET, HEAD
+//
+// and in the compatibility namespace, M5's URLs, the same tree under /dav/
+// with / as its root, and /.well-known/caldav, 308 to a principal. A
+// request is served in the namespace it came on: its hrefs are in it, and
+// on an account's URLs only that account's password passes (realm
+// "pcb <local-id>"); on the compatibility URLs the password alone chooses
+// the account (realm pcb). The root of either namespace and the well-known
+// URL point to the account's own principal, so a new setup ends on its
+// URLs. A first segment under /dav/ that is not a local ID (8 lowercase hex
+// digits) is outside every account's namespace: a compatibility path.
 //
 // calseg is the first 16 hex digits of sha256 of the calendar's ID. name is
 // the one name the service serves the object at (service.ObjectsByName):
@@ -19,8 +31,9 @@
 // MKCALENDAR are 405.
 //
 // Every method but OPTIONS needs a client's app password (Basic, any
-// username). A service that cannot answer (logged out, waiting for a login,
-// no cache, Proton or session failure) is a 503 with Retry-After: 30, never a 4xx (ruling
+// username), checked by the Router before anything else. A service that
+// cannot answer (logged out, waiting for a login, parked, no cache, Proton
+// or session failure) is a 503 with Retry-After: 30, never a 4xx (ruling
 // M3-R22: a 4xx disables the calendar in Thunderbird, a 5xx is temporary).
 // No body carries error text.
 package caldav
@@ -42,8 +55,9 @@ import (
 
 const (
 	wellKnownPath = "/.well-known/caldav"
-	principalPath = "/dav/principals/me/"
-	homePath      = "/dav/calendars/me/"
+	compatSpace   = space("/dav/") // the compatibility namespace
+	principalPath = string(compatSpace) + "principals/me/"
+	homePath      = string(compatSpace) + "calendars/me/"
 
 	// davClasses never names calendar-schedule or calendar-auto-schedule:
 	// Thunderbird would stop sending invitations itself (E08 §5.1).
@@ -78,20 +92,25 @@ type Options struct {
 	Now func() time.Time
 }
 
-// Handler serves api's calendars over CalDAV. It holds no state: every
-// request reads the service.
-func Handler(api service.API, o Options) http.Handler {
+// Handler serves the calendars of the accounts r routes to over CalDAV. It
+// holds no state: every request reads the service.
+func Handler(r service.Router, o Options) http.Handler {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &server{api: api, log: o.Logger, dataCap: maxCalendarData, refusals: newRefusalLog(o.Now)}
+	return &server{router: r, log: o.Logger, dataCap: maxCalendarData, refusals: newRefusalLog(o.Now)}
 }
 
+// server is the handler; authenticate serves each request on a copy of it
+// that holds the request's account (api, own) and namespace (ns).
 type server struct {
-	api     service.API
+	router  service.Router
+	api     service.API // the account the request was routed to
+	ns      space       // the namespace the request came on
+	own     space       // the account's own namespace
 	log     *slog.Logger
 	dataCap int // maxCalendarData (tests lower it)
 	// refusals deduplicates the refused-write Warn.
@@ -105,13 +124,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		empty(w, http.StatusOK)
 		return
 	}
-	if !s.authenticate(w, r) {
-		return
+	id, t := resolve(r.URL.Path)
+	if rs, ok := s.authenticate(w, r, id); ok {
+		rs.serve(w, r, t)
 	}
-	t := resolve(r.URL.Path)
+}
+
+// serve answers the authenticated request r for t.
+func (s *server) serve(w http.ResponseWriter, r *http.Request, t target) {
 	switch {
 	case t.kind == kindWellKnown:
-		w.Header().Set("Location", principalPath)
+		w.Header().Set("Location", s.own.principal())
 		empty(w, http.StatusPermanentRedirect)
 	case r.Method != "PROPFIND" && r.Method != "REPORT" && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 		r.Method != http.MethodPut && r.Method != http.MethodDelete:
@@ -247,11 +270,11 @@ func (s *server) withData(w http.ResponseWriter, r *http.Request, ms *multistatu
 				gone = append(gone, o.Name)
 				continue
 			}
-			objectResource(calID, o.Name, o.ETag, o.Data, true).write(ms, q)
+			s.ns.objectResource(calID, o.Name, o.ETag, o.Data, true).write(ms, q)
 		}
 	}
 	for _, o := range infos[n:] {
-		objectResource(calID, o.Name, o.ETag, nil, false).write(ms, q)
+		s.ns.objectResource(calID, o.Name, o.ETag, nil, false).write(ms, q)
 	}
 	return gone, true
 }
@@ -310,9 +333,26 @@ type target struct {
 	name   string // kindObject: the resource name, decoded
 }
 
-// resolve maps a request path (decoded) to what it names. Collections
-// answer with or without their trailing slash.
-func resolve(p string) target {
+// resolve maps a request path (decoded) to the account whose namespace it
+// is in ("" for the compatibility one) and what it names there.
+// Collections answer with or without their trailing slash.
+func resolve(p string) (string, target) {
+	if rest, ok := strings.CutPrefix(p, string(compatSpace)); ok {
+		id, sub, _ := strings.Cut(rest, "/")
+		if isLocalID(id) {
+			if sub == "" {
+				return id, target{kind: kindRoot}
+			}
+			// The account's tree is the compatibility one under its base.
+			return id, resolveCompat(string(compatSpace) + sub)
+		}
+	}
+	return "", resolveCompat(p)
+}
+
+// resolveCompat maps a path of the compatibility namespace to what it
+// names.
+func resolveCompat(p string) target {
 	switch {
 	case p == "" || p == "/":
 		return target{kind: kindRoot}
@@ -349,12 +389,45 @@ func calendarSegment(id string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func isSegment(s string) bool {
-	return len(s) == 16 && strings.Trim(s, "0123456789abcdef") == ""
+func isSegment(s string) bool { return isHex(s, 16) }
+
+// isLocalID reports whether s has the shape of an account's local ID: 8
+// lowercase hex digits.
+func isLocalID(s string) bool { return isHex(s, 8) }
+
+func isHex(s string, n int) bool {
+	return len(s) == n && strings.Trim(s, "0123456789abcdef") == ""
 }
 
-func calendarHref(id string) string { return homePath + calendarSegment(id) + "/" }
+// space is a URL namespace, by its base: an account's own
+// (service.AccountPath) or the compatibility one (compatSpace).
+type space string
+
+// accountSpace is the namespace of the account id, the compatibility one
+// for "".
+func accountSpace(id string) space {
+	if id == "" {
+		return compatSpace
+	}
+	return space(service.AccountPath(id))
+}
+
+// root is the namespace's root: / for the compatibility one, else its base.
+func (sp space) root() string {
+	if sp == compatSpace {
+		return "/"
+	}
+	return string(sp)
+}
+
+func (sp space) principal() string { return string(sp) + "principals/me/" }
+
+func (sp space) home() string { return string(sp) + "calendars/me/" }
+
+func (sp space) calendarHref(id string) string { return sp.home() + calendarSegment(id) + "/" }
 
 // objectHref is the href of the object served at name in calendar calID,
 // the name percent-encoded (a canonical name needs none).
-func objectHref(calID, name string) string { return calendarHref(calID) + url.PathEscape(name) }
+func (sp space) objectHref(calID, name string) string {
+	return sp.calendarHref(calID) + url.PathEscape(name)
+}

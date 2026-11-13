@@ -4,14 +4,14 @@ Private. The calendar counterpart of Proton Mail Bridge: a local
 daemon that logs into Proton, decrypts Proton Calendar (end-to-end encrypted,
 undocumented API) and serves it through standard and agent-friendly adapters.
 
-Shape (built through M5, see Status):
+Shape (built through M6, see Status):
 
 - **Core** (Go): accounts and login (as unattended as Proton allows), sync
   engine on Proton's change feed, encrypted local cache, access policy, and an
   iCalendar-native event model (decision 0012; JSCalendar deferred).
 - **Adapters**: CalDAV (Thunderbird first; read and write) and a CLI; REST and
   MCP adapters are out of scope for now (decision 0007).
-- **Runs** headless (systemd / Docker) or on a desktop, same daemon.
+- **Runs** headless (systemd / Docker), one process for any number of Proton accounts; a desktop app is planned (M7), same daemon.
 - **Platforms**: Linux amd64 and arm64 are supported. macOS and Windows only build (`GOOS=darwin` and `GOOS=windows` compile `./cmd/pcb`), are not tested, and have no service management; off Unix there is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 on Windows (`run pcb on Linux or macOS`) and the CLI otherwise runs offline on the files (`spec/SPEC.md` §13, "Platforms").
 
 Reference material, not copied wholesale: `cheeseandcereal/proton-cal` and the
@@ -21,7 +21,7 @@ caloxide.
 
 ## Status
 
-Milestone M5 (daemon and ops) is built, and the initial-version audit (2026-11-12, `spec/audits/2026-11-12-initial-version.md`) is fixed or parked: `pcb login` (password, TOTP,
+Milestone M6 (several Proton accounts in one process) is built on top of M5 (daemon and ops), and the initial-version audit (2026-11-12, `spec/audits/2026-11-12-initial-version.md`) is fixed or parked: `pcb login` (password, TOTP,
 CAPTCHA resume, opt-in unattended relogin), `pcb logout`, `pcb status`,
 `pcb calendar list`, `pcb sync`, `pcb event list`, `pcb client` and
 `pcb serve` (CalDAV for Thunderbird, reads and writes) are built and tested
@@ -31,18 +31,22 @@ socket behind a live `pcb status` and `pcb doctor`, `pcb serve --wait-for-login`
 and CalDAV passwords you can show again (`pcb client show`). Both smoke tests (the image,
 and a Debian container with systemd as PID 1) passed locally, and CI publishes the image from main (below). The live sessions against the test account (M1, M2 for the change feed, step 6
 for Thunderbird and the M4 writes, then step 7 for the M5 daemon, service and container) are deferred until the author can solve a
-CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", steps 6 and 7); until then the cache, sync, write and daemon rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before steps 6 and 7 have run. The design is in
-`spec/SPEC.md`.
+CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", steps 6 and 7); until then the cache, sync, write and daemon rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before steps 6 and 7 have run. M6 is tested against the fake Proton only, with two or more accounts: there is no second Proton test account, so the live check of the migration, one account and Thunderbird on its per-account URL is `spec/HUMAN-CHECKS.md` step 8, not run yet. **No downgrade after M6**: the first M6 command moves an M5 state into `accounts/<id>/` (session, cache and CalDAV passwords come across); an M5 binary then sees no account, and if it logs in anyway M6 refuses to start (exit 10) and names the files (`account files of an older pcb are beside the per-account layout`, hint `remove them or move the state directory aside: this pcb version cannot be downgraded`). Keep a copy of the state directory before upgrading if you may go back. The design is in
+`spec/SPEC.md` and `spec/decisions/0014-several-accounts-per-process.md`.
 
 ## Usage
 
 ```sh
-pcb login                              # prompts for what is missing; or set PCB_USERNAME, PCB_PASSWORD, PCB_TOTP
+pcb login                              # prompts for what is missing; or set PCB_USERNAME, PCB_PASSWORD, PCB_TOTP; the username decides: a known address is a relogin, a new one adds an account
 pcb login --username alice             # the username may be a flag (default: $PCB_USERNAME, else asked)
 pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
 pcb login --unattended-relogin         # store the credentials so pcb can log in again without you
 pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
-pcb status                             # the login; with pcb serve running, its live state too (listener, per-calendar sync and write gate, alerts)
+pcb account list                       # every account: local ID, address, phase, CalDAV on or off, last sync (a pending add, stopped by a CAPTCHA, is listed too)
+pcb account caldav off                 # an account's CalDAV switch (on|off): off, its CalDAV clients are refused and its sync pauses
+pcb account restart                    # serve an account again after it stopped on an error (pcb status shows it as account-stopped)
+pcb account remove [--yes]             # sign the account out, then delete its directory (its cache and CalDAV passwords too)
+pcb status                             # every account's login; with pcb serve running, its live state too (listener, per-calendar sync and write gate, alerts)
 pcb status --daemon                    # exit 20 when no daemon answers (the container's health check)
 pcb calendar list [--json]
 pcb sync [--full]                      # fill or refresh the local event cache from Proton; not needed while pcb serve runs (it syncs by itself: exit 0 and says so)
@@ -61,16 +65,19 @@ pcb doctor                             # every check (service, daemon, listener,
 pcb logout [--yes]                     # revokes the session, through the daemon when it runs; --yes discards a store this pcb cannot read
 ```
 
+With several accounts, a command about one account names it: `--account ADDRESS|LOCAL-ID` or `PCB_ACCOUNT` (`logout`, `login resume`, `status`, `calendar list`, `event list`, `sync`, `client ...`, `account caldav|restart|remove`); with one account (a pending add does not count) it is optional, and with several and none named the command exits 2, says `several accounts: name one with --account` and lists them (`--json`: `data.accounts`). With no account yet (or only a pending add) it exits 10, `no account`, hint `add one with pcb login`; a selector that names no account exits 2. `pcb login` takes no `--account`. `--json` is schema version 2 since M6: `pcb status` data is `{daemon, listener, accounts[], alerts}` (an account's login fields moved under `accounts[].login`), and `pcb doctor` names each per-account result `<address>: <check>` (the local ID when the account has no address).
+
 Secrets come from a terminal prompt, `--password-fd`, or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`: a code or an `otpauth://` URI; `scripts/pcb.env.example`), never from a flag. When `pcb serve` runs, `pcb login` goes through it, over a control socket only its own user can open; a login that waits for its 2FA code stays in the daemon for 5 minutes, and `PCB_TOTP=<code> pcb login resume --totp` finishes it (the code is never an argument). With no daemon, `pcb login` says so and logs in on its own. `--unattended-relogin` seals the password (and, with 2FA, `PCB_TOTP` as an `otpauth://` URI: a one-time code is refused) so a session Proton ends is repaired by one automatic login, at most one per 60 s; without it a login stores tokens only. `pcb login resume` takes the same flags. `--non-interactive` never prompts: it exits 10 naming what is missing (or the CAPTCHA URL and the `pcb login resume` command to run). A login that hits a CAPTCHA while the stored session is still working leaves that session as it was. Each Proton call of a login has a 30 s deadline (exit 20, run the command again), and a Proton 429 names the wait (`Retry-After`).
 
 Exit codes (`--json` has the same ones): `0` done, `2` bad usage, `10` you must act (a login, a lost or unreadable key file, a `secrets.sealed` or `state.json` written by a newer pcb: upgrade pcb), `20` transient or no daemon (retry; systemd does not restart on 10). The same failure has the same code in every command. A `--json` run prints one envelope on stdout; it can carry `data` and `error` together (a CAPTCHA puts `captcha_token` and `captcha_url` in `data`; a partial sync its counts). Warnings from the code that runs a command (a clock set back, a client that could not be created) go to stderr as `Warning: …`, also with `--json`.
 
 `pcb logout` revokes the session. When the stored secrets were written by a newer pcb or another sealer, pcb cannot revoke it: it says so, asks you to end the session in the Proton web app (Settings, Security, Sessions) and then to type `discard` (or run `pcb logout --yes`) to remove the local files. If another process is syncing, the logout finishes and tells you to run it again once that process stops.
 
-CalDAV clients (Thunderbird, a phone) sign in with an app password, not your Proton one. A `pcb login` that completes while no client exists creates one named `default` (also after you removed them all: a new password); `pcb client show` prints it again whenever you need it, as Proton Mail Bridge shows its bridge password (decision 0013). `pcb client add NAME` makes another for one more device, each separately revocable. Each password is 24 random bytes (base64url) kept in `clients.json` (0600) in the state directory twice: as a salted SHA-256 for the check, and sealed with the key that seals your Proton session, so whoever can read both the state directory and that key can read these passwords (the same access already exposes the Proton session). `show` prints `URL:`, `Username:` (the client's name; any username is accepted), `Password:` and, over TLS, the certificate's SHA-256 fingerprint; `--json` leaves the password out unless you add `--reveal`. Clients created before M5 keep only their hash: `show` says so and names `pcb client rotate NAME`. Five wrong passwords from one IP in a minute are refused until the minute ends. `pcb logout` keeps the clients and the key; `pcb uninstall --delete-data` removes them.
+CalDAV clients (Thunderbird, a phone) sign in with an app password, not your Proton one. A `pcb login` that completes while no client exists creates one named `default` (also after you removed them all: a new password); `pcb client show` prints it again whenever you need it, as Proton Mail Bridge shows its bridge password (decision 0013). `pcb client add NAME` makes another for one more device, each separately revocable. Each password is 24 random bytes (base64url) kept in `clients.json` (0600) in the state directory twice: as a salted SHA-256 for the check, and sealed with the key that seals your Proton session, so whoever can read both the state directory and that key can read these passwords (the same access already exposes the Proton session). `show` prints `URL:` (the account's own, `.../dav/<local-id>/`), `Username:` (the account's Proton address; any username is accepted), `Password:` and, over TLS, the certificate's SHA-256 fingerprint; `--json` leaves the password out unless you add `--reveal`. Clients created before M5 keep only their hash: `show` says so and names `pcb client rotate NAME`. Five wrong passwords from one IP in a minute are refused until the minute ends. `pcb logout` keeps the clients and the key; `pcb uninstall --delete-data` removes them.
 
 Notes:
-- A pcb from before M5 refuses the version 2 `clients.json` M5 writes: do not downgrade.
+- A pcb from before M5 refuses the version 2 `clients.json` M5 writes, and an M5 pcb cannot use the per-account layout M6 moves the state to: do not downgrade (above).
+- An M5 account that was signed out when M6 moved it has no address: the first `pcb login` of an address pcb does not know takes it over, with its CalDAV clients. If that login is a different Proton account, the old Thunderbird password would read the new account's calendars: run `pcb client rotate NAME` for each client (`pcb client list`).
 - Without a running daemon, `pcb client show` builds the URL from `config.toml`, so it ignores a `pcb serve --listen` override; with one running it prints the daemon's own listener.
 - With no key file but with `secrets.sealed` present, `pcb client add` and `pcb client rotate` refuse (exit 10): minting a new key would make the stored session unreadable. Restore the key file, or run `pcb logout` then `pcb login`.
 
@@ -78,22 +85,24 @@ Notes:
 
 ```sh
 pcb login                    # a login with no client yet also creates the CalDAV client "default"
-pcb serve                    # prints the URL to enter, e.g. "Thunderbird URL: http://localhost:1080/"
+pcb serve                    # prints the URL to enter per account, e.g. "Thunderbird URL (alice@proton.me): http://localhost:1080/dav/1a2b3c4d/"
 pcb client show              # in another terminal: URL, username, password and, over TLS, the fingerprint
 ```
 
-In Thunderbird: New Calendar > On the Network, format CalDAV, the URL of `pcb client show` as Location, its username (`default`) and its
+In Thunderbird: New Calendar > On the Network, format CalDAV, the URL of `pcb client show` as Location (`/dav/<local-id>/`: one per account), its username (the account's address; any username is accepted) and its
 password (the live session against the bridge is `spec/HUMAN-CHECKS.md` step 6, not run yet). `pcb serve` keeps the cache in sync (a pass every 30 s, every 5 min once nobody has used the bridge for 35 minutes, and at once when a client asks again) and serves it, with writes, until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0; a second signal exits 20). Plain `pcb serve` refuses to start logged out (exit 10, `pcb login`),
-while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb serve is already running`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
-listening instead: CalDAV answers 503 with `Retry-After: 30` until a login completes, from any process, and again whenever Proton ends the session, with no restart.
+while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb is already serving (pid N)`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
+listening instead: with no account it waits for the first login (no CalDAV client exists before one, so CalDAV answers 401), and an account waiting for a login, from any process, has its CalDAV answer 503 with `Retry-After: 30` until it completes (again whenever Proton ends the session), with no restart.
 Logs go to stderr, IDs only; `--log-level debug` (or `[log] level`) adds what a write normalised.
 After each sync pass, while an event is served as a placeholder (it could not be decrypted) or marked
 `X-PCB-INTEGRITY:unverified` (a signature did not verify), a duplicate
 master is left out or a calendar's keys fail, it logs a `render counters` line (counts and calendar IDs), and once
 more when they change, and `pcb status` shows them from the running daemon (`dropped_alarms` counts a malformed reminder left out of an event that is still served; a deleted event stops counting at once), with a calendar's write gate and its reason and the alerts
-(`needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `calendar-keys-failed`, `write-gate-undecided`,
+(`account-stopped`, `account-unreadable`, `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `calendar-keys-failed`, `write-gate-undecided`,
 `clients-file-unreadable`, `tls-certificate-expiring`, `tls-certificate-expired`), each with the fix; `pcb status` exits 0 whatever the alerts.
+
+Several accounts: `pcb login` with another username adds an account to the same process (one CalDAV listener, one control socket, one URL per account). Each account has its own CalDAV passwords, its own cache and its own sync loop, so one account's CAPTCHA, damaged cache or expired session never stops another's (a stopped account shows an `account-stopped` alert, answers 503 and starts again with `pcb account restart` or a login). Use the per-account URL in Thunderbird; the M5 URL (`/`, `/dav/calendars/me/...`) still works, the password alone choosing the account, so an upgraded install keeps syncing with no change. Two accounts in one Thunderbird profile have distinct realms (`pcb <local-id>`) and paths so its HTTP auth cache should keep their passwords apart: that is checked live in `spec/HUMAN-CHECKS.md` step 8, not yet. Wrong passwords count against one limiter shared by all accounts. `pcb serve` without `--wait-for-login` stops once every account has stopped, with the first one's exit code; with it (the service and the image) it never stops for an account.
 
 ## Install as a service
 
@@ -110,7 +119,7 @@ pcb service status           # also: start, stop, restart, logs -f
 pcb doctor                   # service, daemon, listener, certificate, clients, with the fix for each failure; exit 0 while the service waits for your login (needs-login shows as "!")
 ```
 
-The unit runs `pcb serve --wait-for-login`: until you log in, CalDAV answers 503; after a reboot or a restart it
+The unit runs `pcb serve --wait-for-login`: it waits for your first login, and answers 503 while an account needs a login again; after a reboot or a restart it
 serves again by itself. `pcb install` is idempotent (a second run keeps every file, and never replaces an edited `config.toml`);
 edit `[caldav]` (`listen`, `hostnames`) in `~/.config/pcb/config.toml`, then `pcb service restart`.
 
@@ -127,7 +136,7 @@ removes only a directory named `pcb`, and keeps and names a key file kept elsewh
 ## Run in a container
 
 The image (distroless, no shell, UID 65532, one volume `/data`) runs `pcb serve --wait-for-login --listen 0.0.0.0:1080`: it serves
-**self-signed TLS** on 1080, comes up healthy with no login, and CalDAV answers 503 until you log in. Its health check is
+**self-signed TLS** on 1080, comes up healthy with no login and waits for one (CalDAV answers 401 until a login creates the first client). Its health check is
 `pcb status --json --daemon`. The image is published at `ghcr.io/barben360/proton-calendar-bridge` (tags `:main` and `:sha-<12 hex>`; CI pushes it only from main) as a **private** package:
 pulling it needs `docker login ghcr.io` with a token that can read packages. Everyone else builds it with `make image` (tag `pcb:local`).
 
@@ -184,14 +193,14 @@ docker exec pcb pcb status        # live state; docker exec pcb pcb doctor for t
 ```
 
 `pcb client show` prints the URL with the first of `hostnames` and the fingerprint to compare in Thunderbird's certificate exception
-dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no login, 401 and 503
-over TLS, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
+dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no account, 401 over TLS with or without
+credentials, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
 container are `spec/HUMAN-CHECKS.md` step 7.2, not run yet. Five wrong passwords from one IP in a minute lock that IP for the minute:
 Docker's port publishing keeps the client's source IP, but with the userland proxy (rootless Docker, some setups) every client shares
 one IP, so one device's typos lock them all for that minute (`spec/OPEN.md`).
 
 **When the container stops or restarts in a loop.** `docker logs pcb` ends with the error and its hint. Exit 10 is a fault you
-must repair (a lost or unreadable key, a damaged cache, an unreadable `state.json`, a bad `config.toml`), exit 20 one that may pass
+must repair (a lost or unreadable key, a damaged cache, an unreadable `state.json` or `layout.json`, an older pcb's files beside the per-account layout, a bad `config.toml`), exit 20 one that may pass
 (the port in use, `/data` not writable by 65532). `restart: unless-stopped` restarts after either, as Docker has no equivalent of the
 units' `RestartPreventExitStatus=10`, and `docker exec` cannot reach a stopped container. So stop it, run the CLI in a one-off
 container on the same volume, secret and config, then start it again:

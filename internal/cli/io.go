@@ -14,6 +14,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -28,10 +29,10 @@ type IO struct {
 	Env func(string) string
 	// Term asks the person questions.
 	Term Terminal
-	// NewService opens the service a command calls (in process for now; the
-	// socket client replaces it later). The command closes it. ctx carries
-	// the logger the service warns on (loggerFrom; nil: none).
-	NewService func(ctx context.Context, env func(string) string) (service.API, error)
+	// OpenHub opens the accounts of the state directory env resolves to
+	// (config.toml loaded), in process: the command closes it. ctx carries
+	// the logger the accounts warn on (loggerFrom; nil: none).
+	OpenHub func(ctx context.Context, env func(string) string) (Hub, error)
 	// Listen opens pcb serve's listener (net.Listen).
 	Listen func(network, address string) (net.Listener, error)
 	// DialDaemon connects to pcb serve's control socket at path (ctl.Dial):
@@ -56,7 +57,7 @@ func osSignals() (<-chan os.Signal, func()) {
 
 // OSIO is the IO of the pcb process.
 func OSIO(stdout, stderr io.Writer) IO {
-	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), NewService: localService, Listen: net.Listen,
+	return IO{Stdout: stdout, Stderr: stderr, Env: os.Getenv, Term: newOSTerminal(stderr), OpenHub: localHub, Listen: net.Listen,
 		DialDaemon: ctl.Dial, Host: install.OSHost(), Signals: osSignals}
 }
 
@@ -74,8 +75,8 @@ func (o IO) withDefaults() IO {
 	if o.Term == nil {
 		o.Term = newOSTerminal(o.Stderr)
 	}
-	if o.NewService == nil {
-		o.NewService = localService
+	if o.OpenHub == nil {
+		o.OpenHub = localHub
 	}
 	if o.Listen == nil {
 		o.Listen = net.Listen
@@ -119,31 +120,53 @@ func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
 	return dirs, cfg, nil
 }
 
-// localService resolves the directories, loads config.toml and returns the
-// in-process service, logging on the logger ctx carries (loggerFrom).
-func localService(ctx context.Context, env func(string) string) (service.API, error) {
+// Hub is the accounts of a state directory (*service.Hub): what daemon.Run
+// serves, the Hub calls the commands make, and Close.
+type Hub interface {
+	daemon.Hub
+	Close() error
+}
+
+// localHub resolves the directories, loads config.toml and opens the
+// in-process Hub, logging on the logger ctx carries (loggerFrom).
+func localHub(ctx context.Context, env func(string) string) (Hub, error) {
 	dirs, cfg, err := loadConfig(env)
 	if err != nil {
 		return nil, err
 	}
-	l, err := service.NewLocal(service.Options{Dirs: dirs, Config: cfg, Logger: loggerFrom(ctx)})
+	h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg, Logger: loggerFrom(ctx)}})
 	if err != nil {
 		return nil, err
 	}
-	return l, nil
+	return h, nil
 }
 
 // app is the state the pcb commands share.
 type app struct{ IO }
 
-// service opens the service for cmd's run, refusing root on another
-// user's state (stateOwner). Its warnings are lines on stderr
-// (newNoteLogger; ruling A2).
-func (a *app) service(cmd *cobra.Command) (service.API, error) {
+// hub opens the accounts for cmd's run, refusing root on another user's
+// state (stateOwner). Its warnings are lines on stderr (newNoteLogger;
+// ruling A2). The caller closes it (closeHub).
+func (a *app) hub(cmd *cobra.Command) (Hub, error) {
 	if err := a.stateOwner(); err != nil {
 		return nil, err
 	}
-	return a.NewService(withLogger(cmd.Context(), newNoteLogger(a.Stderr)), a.Env)
+	return a.OpenHub(withLogger(cmd.Context(), newNoteLogger(a.Stderr)), a.Env)
+}
+
+// account opens the accounts and selects cmd's (selector): its API and
+// what the Hub says of it. done closes the accounts.
+func (a *app) account(cmd *cobra.Command) (api service.API, info service.AccountInfo, done func(), err error) {
+	h, err := a.hub(cmd)
+	if err != nil {
+		return nil, service.AccountInfo{}, nil, err
+	}
+	api, info, err = h.Account(a.selector(cmd))
+	if err != nil {
+		a.closeHub(h)
+		return nil, service.AccountInfo{}, nil, err
+	}
+	return api, info, func() { a.closeHub(h) }, nil
 }
 
 // stateOwner refuses to open the state as root on another user's state
@@ -183,17 +206,17 @@ func (a *app) daemon(cmd *cobra.Command) (*ctl.Client, error) {
 }
 
 // noDaemonNote tells, in text mode, that the command runs without a daemon:
-// once the in-process service opened, so an error opening it stands alone.
+// once the in-process accounts opened, so an error opening them stands alone.
 func (a *app) noDaemonNote(cmd *cobra.Command) {
 	if !JSONMode(cmd) {
 		fmt.Fprintln(a.Stderr, "Note: no pcb daemon is running; this command runs on its own.")
 	}
 }
 
-// closeService releases svc. A failure is one line on stderr: it never
-// changes the command's result or exit code.
-func (a *app) closeService(svc service.API) {
-	if err := svc.Close(); err != nil {
+// closeHub releases h. A failure is one line on stderr: it never changes
+// the command's result or exit code.
+func (a *app) closeHub(h Hub) {
+	if err := h.Close(); err != nil {
 		fmt.Fprintf(a.Stderr, "Warning: closing the service failed: %s\n", err)
 	}
 }

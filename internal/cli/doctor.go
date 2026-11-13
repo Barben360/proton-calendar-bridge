@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -100,12 +101,13 @@ func (d doctorDaemon) live() *doctor.Live {
 }
 
 // results are what a running pcb serve reports: "daemon", then one
-// result per alert, named "alert CODE[ CALENDAR]" (an error alert fails,
-// a warning warns). needs-login while the daemon waits for a login is the
-// normal state of a fresh install: a warning (ux-I2). A daemon that does
-// not answer cleanly is a transient error, a control socket pcb refuses
-// is not. With no daemon, "daemon" is
-// skipped: offline checks only.
+// result per alert of the process, named "alert CODE[ CALENDAR]", and of
+// each account, named "ACCOUNT: alert CODE[ CALENDAR]" (an error alert
+// fails, a warning warns). needs-login while the account's loop waits for
+// a login is the normal state of a fresh install: a warning (ux-I2). A
+// daemon that does not answer cleanly is a transient error, a control
+// socket pcb refuses is not. With no daemon, "daemon" is skipped: offline
+// checks only.
 func (d doctorDaemon) results() []doctor.Result {
 	const name = "daemon"
 	st := d.st
@@ -120,24 +122,48 @@ func (d doctorDaemon) results() []doctor.Result {
 	case !d.ok:
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}
-	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonState(st)}}
-	for _, al := range st.Alerts {
-		r := doctor.Result{Name: "alert " + al.Code, Status: doctor.StatusWarn, Message: al.Message, Fix: al.Fix}
-		if al.Calendar != "" {
-			r.Name += " " + al.Calendar
-		}
-		waiting := st.Health != nil && st.Health.Serve == service.ServeWaitingForLogin
-		if al.Severity == ctl.SeverityError && (al.Code != ctl.CodeNeedsLogin || !waiting) {
-			r.Status = doctor.StatusError
-		}
-		results = append(results, r)
+	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonText(st.Daemon)}}
+	// The process's needs-login means no account: a daemon that answers
+	// with none waits for a login (pcb serve exits 10 without
+	// --wait-for-login), a warning as for an account (ruling R44).
+	results = append(results, alertResults("", st.Alerts, true)...)
+	for _, as := range st.Accounts {
+		waiting := as.Health != nil && as.Health.Serve == service.ServeWaitingForLogin
+		results = append(results, alertResults(accountLabel(as.AccountInfo)+": ", as.Alerts, waiting)...)
 	}
 	return results
 }
 
+// daemonText is "running since T (pid N, version V)".
+func daemonText(d *ctl.Daemon) string {
+	if d == nil {
+		return "running"
+	}
+	return fmt.Sprintf("running since %s (pid %d, version %s)", d.StartedAt.Format(time.RFC3339), d.PID, d.Version)
+}
+
+// alertResults is one result per alert, its name prefixed: an error alert
+// fails, but needs-login while waiting for a login only warns.
+func alertResults(prefix string, alerts []ctl.Alert, waiting bool) []doctor.Result {
+	var out []doctor.Result
+	for _, al := range alerts {
+		r := doctor.Result{Name: prefix + "alert " + al.Code, Status: doctor.StatusWarn, Message: al.Message, Fix: al.Fix}
+		if al.Calendar != "" {
+			r.Name += " " + al.Calendar
+		}
+		if al.Severity == ctl.SeverityError && (al.Code != ctl.CodeNeedsLogin || !waiting) {
+			r.Status = doctor.StatusError
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // doctorChecks lists the checks, with one failing check per directory when
-// the user directories cannot be located. env looks up an environment
-// variable; live is the running daemon's listener (nil: none).
+// the user directories cannot be located: the process checks, then the
+// account checks of each account directory, named by the account (design
+// §4.6). env looks up an environment variable; live is the running
+// daemon's listener (nil: none).
 func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(env)
@@ -158,15 +184,75 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 		return checks
 	}
 	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
-	return append(checks,
+	checks = append(checks,
 		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
-		doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(dirs.State, "secrets.sealed"), Want: 0o600},
-		doctor.SecretsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile},
-		doctor.CacheCheck{StateDir: dirs.State},
 		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
-		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
-		doctor.ClientsCheck{StateDir: dirs.State},
-		doctor.SealedClientsCheck{StateDir: dirs.State, KeyFile: cfg.Secrets.KeyFile})
+		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live})
+	layout, err := doctor.Accounts(dirs.State)
+	var lerr *doctor.LayoutError
+	switch {
+	case errors.As(err, &lerr):
+		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: lerr.Error(), Fix: lerr.Fix})
+	case layout.Interrupted != "":
+		checks = append(checks, warnCheck{label: "accounts", message: "the move to the per-account layout stopped midway (" + layout.Interrupted +
+			"): the next pcb command that opens the state finishes it", fix: "pcb status"})
+	case len(layout.Accounts) == 0:
+		checks = append(checks, warnCheck{label: "accounts", message: "no account: nothing can sign in to pcb serve",
+			fix: "pcb login (it creates the client default), then pcb client show"})
+	}
+	for _, acct := range layout.Accounts {
+		prefix := ""
+		if acct.Label != "" {
+			prefix = acct.Label + ": "
+		}
+		for _, c := range []doctor.Check{
+			doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(acct.Dir, "secrets.sealed"), Want: 0o600},
+			doctor.SecretsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
+			doctor.CacheCheck{StateDir: acct.Dir},
+			doctor.ClientsCheck{StateDir: acct.Dir},
+			doctor.SealedClientsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
+		} {
+			checks = append(checks, named{prefix: prefix, Check: c})
+		}
+	}
+	return checks
+}
+
+// warnCheck is a warning found without a check of its own to run.
+type warnCheck struct{ label, message, fix string }
+
+func (c warnCheck) Name() string { return c.label }
+
+func (c warnCheck) Run(context.Context) doctor.Result {
+	return doctor.Result{Name: c.label, Status: doctor.StatusWarn, Message: c.message, Fix: c.fix}
+}
+
+// named is a check whose results are named with prefix first (the
+// account's).
+type named struct {
+	prefix string
+	doctor.Check
+}
+
+func (n named) Name() string { return n.prefix + n.Check.Name() }
+
+func (n named) Run(ctx context.Context) doctor.Result {
+	r := n.Check.Run(ctx)
+	r.Name = n.prefix + r.Name
+	return r
+}
+
+func (n named) RunAll(ctx context.Context) []doctor.Result {
+	var rs []doctor.Result
+	if m, ok := n.Check.(doctor.Multi); ok {
+		rs = m.RunAll(ctx)
+	} else {
+		rs = []doctor.Result{n.Check.Run(ctx)}
+	}
+	for i := range rs {
+		rs[i].Name = n.prefix + rs[i].Name
+	}
+	return rs
 }
 
 var marks = map[doctor.Status]string{

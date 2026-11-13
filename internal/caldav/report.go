@@ -80,11 +80,11 @@ func (s *server) syncCollection(w http.ResponseWriter, r *http.Request, t target
 		deleted = append(deleted, gone...) // deleted since the changes were read
 	} else {
 		for _, o := range cs.Changed {
-			objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
+			s.ns.objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
 		}
 	}
 	for _, name := range deleted {
-		ms.notFound(objectHref(c.ID, name))
+		ms.notFound(s.ns.objectHref(c.ID, name))
 	}
 	ms.syncToken(cs.Token)
 	ms.send(w)
@@ -128,7 +128,8 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 		if err != nil {
 			continue
 		}
-		if ht := resolve(u.Path); ht.kind == kindObject && ht.calseg == t.calseg {
+		// An href of another namespace names nothing here.
+		if id, ht := resolve(u.Path); accountSpace(id) == s.ns && ht.kind == kindObject && ht.calseg == t.calseg {
 			nameOf[i] = ht.name
 			names = append(names, ht.name)
 		}
@@ -154,10 +155,10 @@ func (s *server) multiget(w http.ResponseWriter, r *http.Request, t target, root
 		}
 		next++
 		if o.Missing || o.Name != nameOf[i] {
-			ms.notFound(objectHref(c.ID, nameOf[i]))
+			ms.notFound(s.ns.objectHref(c.ID, nameOf[i]))
 			continue
 		}
-		objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
+		s.ns.objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
 	}
 	ms.send(w)
 }

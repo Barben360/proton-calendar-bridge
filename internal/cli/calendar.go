@@ -19,16 +19,16 @@ func (a *app) newCalendar() *cobra.Command {
 }
 
 func (a *app) newCalendarList() *cobra.Command {
-	return &cobra.Command{
+	return selecting(&cobra.Command{
 		Use:   "list",
 		Short: "List the account's calendars",
 		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := a.service(cmd)
+			svc, _, done, err := a.account(cmd)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer a.closeService(svc)
+			defer done()
 			cals, err := svc.Calendars(cmd.Context())
 			if err != nil {
 				return Finish(cmd, nil, "", err)
@@ -38,7 +38,7 @@ func (a *app) newCalendarList() *cobra.Command {
 			}
 			return Finish(cmd, calendarData{cals}, calendarTable(cals), nil)
 		},
-	}
+	})
 }
 
 // noCalendarText is pcb calendar list for an account without a calendar.

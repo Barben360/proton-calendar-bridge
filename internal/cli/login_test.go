@@ -1,7 +1,6 @@
 package cli_test
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/cli"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -461,7 +461,7 @@ func TestCloseFailureIsReportedNotFatal(t *testing.T) {
 func TestBadConfigFailsBeforeAnyPrompt(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	r.mk = nil // the default service: it reads config.toml
+	r.production = true // the accounts as pcb opens them: config.toml read
 	if err := os.WriteFile(config.Path(r.dirs), []byte("bogus = 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -476,80 +476,79 @@ func TestBadConfigFailsBeforeAnyPrompt(t *testing.T) {
 func TestDefaultServiceReadsConfigToml(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	r.mk = nil // the default service points at the fake only through config.toml
+	r.production = true // the accounts point at the fake only through config.toml
 	r.want(exitcode.OK, "status", "--json")
 	if n := r.f.Calls("", "/auth/v4"); n != 0 {
 		t.Errorf("status called Proton (%d)", n)
 	}
 }
 
-// daemonService is the real service on the rig's directories, as the
-// daemon holds it, closed with the test.
-func daemonService(t *testing.T, r *rig) *service.Local {
-	t.Helper()
-	cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
-		Sleep: func(context.Context, time.Duration) error { return nil }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	return l
-}
-
-// noInProcess makes opening the in-process service fail the test: the
+// noInProcess makes opening the in-process accounts fail the test: the
 // commands from here on must go through the daemon.
 func noInProcess(t *testing.T, r *rig) {
 	t.Helper()
-	r.svc = nil
-	r.mk = func() (service.API, error) {
-		t.Error("the command opened the in-process service")
-		return nil, errors.New("no in-process service in this test")
+	r.svc, r.hub = nil, nil
+	r.open = func() (cli.Hub, error) {
+		t.Error("the command opened the in-process accounts")
+		return nil, errors.New("no in-process accounts in this test")
 	}
 }
 
-// serveWaiting starts pcb serve --wait-for-login on the real service,
-// whose login poll is an hour: only a wake moves it within the test.
-func serveWaiting(t *testing.T, r *rig) *fastPoll {
+// serveWaiting starts pcb serve --wait-for-login on the rig's accounts.
+func serveWaiting(t *testing.T, r *rig) *serveRun {
 	t.Helper()
-	fp := &fastPoll{states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16), poll: time.Hour}
-	r.mk = func() (service.API, error) {
-		cfg, err := config.Load(config.Path(r.dirs), r.dirs)
-		if err != nil {
-			return nil, err
-		}
-		l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
-			Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
-		fp.Local = l
-		return fp, err
-	}
 	s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
 	s.listening()
-	fp.run = s
-	return fp
+	return s
+}
+
+// waitForServe waits until the daemon's status shows the loop of the
+// account address in state want, and returns that account's status.
+func waitForServe(t *testing.T, r *rig, address string, want service.ServeState) ctl.AccountStatus {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	var last ctl.Status
+	for {
+		if c, err := ctl.Dial(t.Context(), r.dirs.Socket()); err == nil {
+			st, err := c.Status(t.Context())
+			_ = c.Close()
+			if err == nil {
+				last = st
+				for _, as := range st.Accounts {
+					if strings.EqualFold(as.Address, address) && as.Health != nil && as.Health.Serve == want {
+						return as
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the daemon never showed %s %s: %+v", address, want, last)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 const noDaemonNote = "Note: no pcb daemon is running; this command runs on its own.\n"
 
-// M5-Rpre4: with a daemon, pcb login logs in through it, and the login
-// wakes its Serve at once (the poll is an hour away).
+// M5-Rpre4: with a daemon, pcb login logs in through it (ruling R15: the
+// running Hub would not see an account added in another process), and the
+// account the login adds is served at once.
 func TestLoginGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("no control socket off Unix")
 	}
 	r := newRig(t, &protontest.Options{})
-	fp := serveWaiting(t, r)
-	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+	s := serveWaiting(t, r)
 	noInProcess(t, r)
 	r.want(exitcode.OK, "login", "--non-interactive")
 	if !strings.Contains(r.out.String(), "Logged in as "+r.f.Username) || strings.Contains(r.errb.String(), "Note:") {
 		t.Errorf("stdout %q, stderr %q; want the login without the no-daemon note", r.out.String(), r.errb.String())
 	}
-	wantServeState(t, fp.states, service.ServeServing)
+	waitForServe(t, r, r.f.Username, service.ServeServing)
 	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
 		t.Errorf("%d POST /auth/v4, want 1", n)
 	}
@@ -558,13 +557,13 @@ func TestLoginGoesThroughTheDaemon(t *testing.T) {
 	if !strings.HasSuffix(r.out.String(), "CalDAV credentials: pcb client show\n") {
 		t.Errorf("stdout %q; want the credentials line", r.out.String())
 	}
-	if log := fp.run.errb.String(); !strings.Contains(log, `created the CalDAV client \"default\": see pcb client show`) {
+	if log := s.errb.String(); !strings.Contains(log, `created the CalDAV client \"default\": see pcb client show`) {
 		t.Errorf("daemon log = %q; want the default-client line", log)
 	}
 }
 
-// With a daemon, pcb logout goes through it, and its Serve goes back to
-// waiting for a login (ruling M5-R8).
+// With a daemon, pcb logout goes through it, and the account's loop goes
+// back to waiting for a login (ruling M5-R8).
 func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -572,21 +571,22 @@ func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 	}
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive") // no daemon yet: in process
-	fp := serveWaiting(t, r)
-	wantServeState(t, fp.states, service.ServeServing)
+	serveWaiting(t, r)
+	waitForServe(t, r, r.f.Username, service.ServeServing)
 	noInProcess(t, r)
 	r.want(exitcode.OK, "logout")
 	if r.out.String() != "Logged out.\n" || strings.Contains(r.errb.String(), "Note:") {
 		t.Errorf("stdout %q, stderr %q; want Logged out. without the no-daemon note", r.out.String(), r.errb.String())
 	}
-	wantServeState(t, fp.states, service.ServeWaitingForLogin)
+	waitForServe(t, r, r.f.Username, service.ServeWaitingForLogin)
 	if n := r.f.Calls("DELETE", "/auth/v4"); n != 1 {
 		t.Errorf("%d DELETE /auth/v4, want 1 (the session revoked)", n)
 	}
 	r.want(exitcode.OK, "status", "--json", "--daemon")
 	var st ctl.Status
 	mustUnmarshal(t, r.envelope().Data, &st)
-	if st.Phase != "logged-out" || st.Health == nil || st.Health.Serve != service.ServeWaitingForLogin {
+	if len(st.Accounts) != 1 || st.Accounts[0].Login.Phase != "logged-out" || st.Accounts[0].Health == nil ||
+		st.Accounts[0].Health.Serve != service.ServeWaitingForLogin {
 		t.Errorf("status after the logout = %+v", st)
 	}
 }
@@ -597,7 +597,7 @@ func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 func TestNonInteractiveTOTPIsHeldByTheDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{TwoFA: true})
-	startDaemon(t, r, daemonService(t, r), nil)
+	startDaemon(t, r, realHub(t, r), nil)
 	noInProcess(t, r)
 	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
 	e := r.envelope()
@@ -637,7 +637,7 @@ func TestNonInteractiveTOTPIsHeldByTheDaemon(t *testing.T) {
 func TestInteractiveTOTPThroughTheDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{TwoFA: true})
-	startDaemon(t, r, daemonService(t, r), nil)
+	startDaemon(t, r, realHub(t, r), nil)
 	noInProcess(t, r)
 	r.term = &fakeTerm{interactive: true, secrets: []string{"000000", r.totpCode()}}
 	r.want(exitcode.OK, "login")
@@ -740,7 +740,7 @@ func TestResumeTOTPRefusesCredentialFlags(t *testing.T) {
 func TestNoDaemonNoteNotBeforeADirectoryError(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	r.mk = nil // the default service, which resolves the directories
+	r.production = true // the accounts as pcb opens them, which resolves the directories
 	r.env["PCB_STATE_DIR"] = "relative/state"
 	for _, args := range [][]string{{"login", "--non-interactive"}, {"logout"}} {
 		r.want(exitcode.Blocked, args...)
@@ -756,7 +756,7 @@ func TestNoDaemonNoteNotBeforeADirectoryError(t *testing.T) {
 func TestCommandsPrintTheServiceWarningsOnStderr(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
-	r.mk = nil // the default service, as pcb opens it (real clock)
+	r.production = true // the accounts as pcb opens them (real clock)
 	stamp := filepath.Join(r.dirs.State, "last-login")
 	future := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
 	for _, args := range [][]string{{"login", "--non-interactive"}, {"login", "--non-interactive", "--json"}} {

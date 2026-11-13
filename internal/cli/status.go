@@ -17,55 +17,115 @@ import (
 
 func (a *app) newStatus() *cobra.Command {
 	var daemonOnly bool
-	c := &cobra.Command{
+	c := selecting(&cobra.Command{
 		Use:   "status",
-		Short: "Show the login and, from a running pcb serve, its live state",
-		Long: "Show the login and, when pcb serve runs, its live state over the control socket: the listener, each " +
-			"calendar's sync and write gate, the render counters and the alerts. Without a daemon, the login as the " +
-			"files describe it (the offline view, no network call). Exit 0 whatever the alerts.",
+		Short: "Show every account's login and, from a running pcb serve, its live state",
+		Long: "Show the process and every account (--account: that one): its login and, when pcb serve runs, its " +
+			"live state over the control socket: the listener, each calendar's sync and write gate, the render " +
+			"counters and the alerts. Without a daemon, each login as the files describe it (the offline view, no " +
+			"network call). Exit 0 whatever the alerts.",
 		Args: NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := a.status(cmd, daemonOnly)
-			if err != nil {
+			if st == nil {
 				return Finish(cmd, nil, "", err)
 			}
-			return Finish(cmd, st, liveStatusText(st), nil)
+			return Finish(cmd, st, statusText(*st), err)
 		},
-	}
+	})
 	c.Flags().BoolVar(&daemonOnly, "daemon", false, "exit 20 when no pcb daemon answers, instead of the offline view")
 	return c
 }
 
-// status is the daemon's status, else (unless daemonOnly) the offline view:
-// the login as the files describe it and its alerts.
-func (a *app) status(cmd *cobra.Command, daemonOnly bool) (ctl.Status, error) {
+// status is the daemon's status, else (unless daemonOnly) the offline
+// view: each login as the files describe it and its alerts. An offline
+// account that cannot be read keeps its entry, with an account-unreadable
+// alert, and its error is the command's (st is then set too).
+func (a *app) status(cmd *cobra.Command, daemonOnly bool) (*ctl.Status, error) {
 	ctx := cmd.Context()
+	sel := a.selector(cmd)
 	dirs, err := resolveDirs(a.Env)
 	if err != nil && daemonOnly {
-		return ctl.Status{}, err
+		return nil, err
 	}
 	if err == nil {
 		st, ok, err := a.daemonStatus(ctx, dirs.Socket())
 		switch {
 		case err != nil:
-			return ctl.Status{}, err
+			return nil, err
 		case ok:
-			return st, nil
+			return narrow(st, sel)
 		case daemonOnly:
-			return ctl.Status{}, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
+			return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no pcb daemon answers on " + dirs.Socket()),
 				Hint: startHint(a.Host)}
 		}
 	}
-	svc, err := a.service(cmd)
+	h, err := a.hub(cmd)
 	if err != nil {
-		return ctl.Status{}, err
+		return nil, err
 	}
-	defer a.closeService(svc)
-	local, err := svc.Status(ctx)
+	defer a.closeHub(h)
+	return offlineStatus(ctx, h, sel)
+}
+
+// narrow keeps the account of st that selector names, all of them without one.
+func narrow(st ctl.Status, selector string) (*ctl.Status, error) {
+	if selector == "" {
+		return &st, nil
+	}
+	infos := make([]service.AccountInfo, 0, len(st.Accounts))
+	for _, as := range st.Accounts {
+		infos = append(infos, as.AccountInfo)
+	}
+	info, err := service.SelectAccount(infos, selector)
 	if err != nil {
-		return ctl.Status{}, err
+		return nil, err
 	}
-	return ctl.Status{Status: local, Alerts: ctl.Alerts(ctl.AlertInput{Login: local, Now: time.Now()})}, nil
+	for _, as := range st.Accounts {
+		if as.ID == info.ID {
+			st.Accounts = []ctl.AccountStatus{as}
+		}
+	}
+	return &st, nil
+}
+
+// offlineStatus is the status of h's accounts (the one selector names, when
+// set) with no daemon: no listener, no live state; the process alerts are
+// the daemon's would be (with no account, needs-login: ruling R44).
+func offlineStatus(ctx context.Context, h Hub, selector string) (*ctl.Status, error) {
+	infos := h.Accounts()
+	if selector != "" {
+		_, info, err := h.Account(selector)
+		if err != nil {
+			return nil, err
+		}
+		infos = []service.AccountInfo{info}
+	}
+	st := &ctl.Status{Accounts: make([]ctl.AccountStatus, 0, len(infos))}
+	now := time.Now()
+	var failure error
+	for _, info := range infos {
+		as := ctl.AccountStatus{AccountInfo: info}
+		api, _, err := h.Account(info.ID)
+		if err == nil {
+			as.Login, err = api.Status(ctx)
+		}
+		switch {
+		case err == nil:
+			as.Alerts = ctl.Alerts(ctl.AlertInput{Account: info.ID, Login: as.Login, Stopped: info.Stopped, Now: now})
+		case errors.Is(err, service.ErrNoAccount):
+			continue // removed since Accounts listed it
+		default:
+			as.Alerts = []ctl.Alert{{Account: info.ID, Code: ctl.CodeAccountUnreadable, Severity: ctl.SeverityError,
+				Message: err.Error(), Fix: exitcode.HintOf(err)}}
+			if failure == nil {
+				failure = err
+			}
+		}
+		st.Accounts = append(st.Accounts, as)
+	}
+	st.Alerts = ctl.ProcessAlerts(nil, st.Accounts, now)
+	return st, failure
 }
 
 // daemonStatus asks the daemon on socket for its status; ok is false when
@@ -83,16 +143,16 @@ func (a *app) daemonStatus(ctx context.Context, socket string) (st ctl.Status, o
 	return st, true, nil
 }
 
-// liveStatusText is statusText, then the daemon, its listener, each
-// calendar's live state, the render counters and one line per alert.
-func liveStatusText(s ctl.Status) string {
+// statusText is the process (the daemon, its listener and its alerts),
+// then a block per account: its name, its login (loginText), its serve
+// loop, each calendar's live state, the render counters and its alerts.
+func statusText(s ctl.Status) string {
 	var b strings.Builder
-	b.WriteString(statusText(s.Status))
-	line := func(format string, args ...any) { fmt.Fprintf(&b, "\n"+format, args...) }
-	if s.Daemon == nil {
+	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+	if d := s.Daemon; d == nil {
 		line("daemon: not running (offline view)")
 	} else {
-		line("daemon: %s", daemonState(s))
+		line("daemon: %s", daemonText(d))
 	}
 	if l := s.Listener; l != nil {
 		var tls []string
@@ -109,30 +169,68 @@ func liveStatusText(s ctl.Status) string {
 		}
 		line("listener: %s (%s)", l.URL, strings.Join(tls, ", "))
 	}
-	if h := s.Health; h != nil {
-		for _, c := range h.Calendars {
-			line("calendar: %s", calendarHealthText(c))
+	alerts := func(list []ctl.Alert) {
+		for _, al := range list {
+			line("alert: %s %s: %s (fix: %s)", al.Severity, al.Code, al.Message, al.Fix)
 		}
-		line("render: undecryptable %d, unverified %d, duplicate masters %d, dropped alarms %d", h.Render.Undecryptable, h.Render.Unverified, h.Render.DuplicateMasters, h.Render.DroppedAlarms)
 	}
-	for _, al := range s.Alerts {
-		line("alert: %s %s: %s (fix: %s)", al.Severity, al.Code, al.Message, al.Fix)
+	alerts(s.Alerts)
+	if len(s.Accounts) == 0 {
+		line("accounts: none (add one with pcb login)")
 	}
-	return b.String()
+	for _, as := range s.Accounts {
+		line("")
+		line("account: %s%s", accountName(as.AccountInfo), accountMarks(as.AccountInfo))
+		if as.URL != "" {
+			line("url: %s", as.URL)
+		}
+		b.WriteString(loginText(as.Login))
+		if h := as.Health; h != nil {
+			if st := serveState(*h); st != "" {
+				line("serve: %s", st)
+			}
+			for _, c := range h.Calendars {
+				line("calendar: %s", calendarHealthText(c))
+			}
+			line("render: undecryptable %d, unverified %d, duplicate masters %d, dropped alarms %d", h.Render.Undecryptable, h.Render.Unverified, h.Render.DuplicateMasters, h.Render.DroppedAlarms)
+		}
+		alerts(as.Alerts)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// daemonState is "serving since T (pid N, version V)": since Serve began
-// serving, else since the daemon started; or "waiting for a login since T"
-// while Serve waits for one.
-func daemonState(s ctl.Status) string {
-	since := s.Daemon.StartedAt
-	if s.Health != nil && s.Health.Since != nil {
-		since = *s.Health.Since
+// accountMarks says, after an account's name, what sets it apart: a
+// pending add, CalDAV off, a stopped loop.
+func accountMarks(info service.AccountInfo) string {
+	var marks []string
+	if info.Pending {
+		marks = append(marks, "pending")
 	}
-	if s.Health != nil && s.Health.Serve == service.ServeWaitingForLogin {
-		return "waiting for a login since " + since.Format(time.RFC3339)
+	if !info.CalDAV {
+		marks = append(marks, "CalDAV off")
 	}
-	return fmt.Sprintf("serving since %s (pid %d, version %s)", since.Format(time.RFC3339), s.Daemon.PID, s.Daemon.Version)
+	if info.Stopped != nil {
+		marks = append(marks, "stopped")
+	}
+	if len(marks) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(marks, ", ")
+}
+
+// serveState is "serving since T", or "waiting for a login since T" while
+// the account's loop waits for one; "" when Serve says nothing of it.
+func serveState(h service.Health) string {
+	what := map[service.ServeState]string{
+		service.ServeServing: "serving", service.ServeWaitingForLogin: "waiting for a login", service.ServeStopped: "stopped",
+	}[h.Serve]
+	if what == "" {
+		return ""
+	}
+	if h.Since != nil {
+		what += " since " + h.Since.Format(time.RFC3339)
+	}
+	return what
 }
 
 // calendarHealthText is one calendar's live state; a calendar never synced
@@ -157,9 +255,9 @@ func calendarHealthText(c service.CalendarHealth) string {
 	return v
 }
 
-// statusText is one "key: value" line per field; optional fields are left
-// out when unset.
-func statusText(s service.Status) string {
+// loginText is one "key: value" line per field of a login, each ending in
+// a newline; optional fields are left out when unset.
+func loginText(s service.Status) string {
 	var b strings.Builder
 	line := func(k, v string) { fmt.Fprintf(&b, "%s: %s\n", k, v) }
 	optional := func(k, v string) {
@@ -202,7 +300,7 @@ func statusText(s service.Status) string {
 			line("sync", v)
 		}
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return b.String()
 }
 
 func orNever(s string) string {

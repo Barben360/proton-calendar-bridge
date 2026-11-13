@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,20 +29,37 @@ const (
 	idleTimeout       = 60 * time.Second
 )
 
-// Server answers the control socket for pcb serve. Listener returns the
+// Hub is what the control socket needs of the accounts: *service.Hub. A
+// selector is an account's local ID or address; an account-changing call
+// goes through the Hub, never the per-account API (which Account returns
+// for reads such as Status).
+type Hub interface {
+	Accounts() []service.AccountInfo
+	Account(selector string) (service.API, service.AccountInfo, error)
+	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
+	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
+	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
+	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
+	SetCalDAV(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
+	Restart(ctx context.Context, selector string) (service.AccountInfo, error)
+	Health(ctx context.Context, selector string) (service.Health, error)
+}
+
+// Server answers the control socket of a pcb process. Listener returns the
 // CalDAV listener once bound (nil before). PeerUID reads a peer's UID (ok
 // false: unchecked); nil is SO_PEERCRED on Linux and unchecked elsewhere
 // (ruling M5-P3). A peer of another UID gets 403 and a warning naming its UID.
 type Server struct {
-	API      service.API
+	Hub      Hub
 	Daemon   Daemon
 	Listener func() *Listener
 	Now      func() time.Time
 	Logger   *slog.Logger
 	PeerUID  func(net.Conn) (uid int, ok bool)
 
-	once sync.Once
-	srv  *http.Server
+	once, initOnce sync.Once
+	srv            *http.Server
+	mux            *http.ServeMux
 
 	// logins is held while a login or a 2FA code runs: another one is
 	// refused at once, not queued behind it.
@@ -48,17 +67,22 @@ type Server struct {
 }
 
 // route is one endpoint: its method and command (the envelope's), and what
-// it answers. body is the request's, at most maxBody bytes.
+// it answers. id is the {id} of its path (an account selector), body the
+// request's, at most maxBody bytes.
 type route struct {
-	method, command string
-	run             func(s *Server, ctx context.Context, body []byte) (any, error)
+	pattern, method, command string
+	run                      func(s *Server, ctx context.Context, id string, body []byte) (any, error)
 }
 
-var routes = map[string]route{
-	"/v1/status":     {http.MethodGet, "status", (*Server).status},
-	"/v1/login":      {http.MethodPost, "login", (*Server).login},
-	"/v1/login/totp": {http.MethodPost, "login resume", (*Server).submitTOTP},
-	"/v1/logout":     {http.MethodPost, "logout", (*Server).logout},
+var routes = []route{
+	{"/v2/accounts", http.MethodGet, "accounts", (*Server).accounts},
+	{"/v2/status", http.MethodGet, "status", (*Server).status},
+	{"/v2/login", http.MethodPost, "login", (*Server).login},
+	{"/v2/accounts/{id}/login/totp", http.MethodPost, "login resume", (*Server).submitTOTP},
+	{"/v2/accounts/{id}/logout", http.MethodPost, "logout", (*Server).logout},
+	{"/v2/accounts/{id}/remove", http.MethodPost, "account remove", (*Server).remove},
+	{"/v2/accounts/{id}/caldav", http.MethodPost, "account caldav", (*Server).setCalDAV},
+	{"/v2/accounts/{id}/restart", http.MethodPost, "account restart", (*Server).restart},
 }
 
 // errBadBody is a request body that is not the endpoint's JSON: 400.
@@ -107,58 +131,94 @@ func (s *Server) logger() *slog.Logger {
 	return s.Logger
 }
 
+// outcome is what a request answered, for its log line.
+type outcome struct {
+	status int
+	code   exitcode.Code
+}
+
+type outcomeKey struct{}
+
 // Handler answers the requests: the peer check first, so a refused peer
 // learns nothing, not even which paths exist. Bodies are never logged: a
 // request's log line carries its method, path, HTTP status and exit code.
 func (s *Server) Handler() http.Handler {
+	s.initOnce.Do(s.init)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log := s.logger()
-		rt, known := routes[r.URL.Path]
-		command := "ctl"
-		if known {
-			command = rt.command
+		var out outcome
+		r = r.WithContext(context.WithValue(r.Context(), outcomeKey{}, &out))
+		if uid, refused := s.refusedPeer(r); refused {
+			s.logger().Warn("control socket: refused a peer of another user", "peer_uid", uid)
+			out = transport(w, "ctl", http.StatusForbidden, "the control socket answers only its own user", "run pcb as the user that runs pcb serve")
+		} else if path.Clean(r.URL.Path) != r.URL.Path {
+			// ServeMux would redirect (301, plain text); no path is unclean here.
+			out = transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon")
+		} else {
+			s.mux.ServeHTTP(w, r)
 		}
-		status, code := s.answer(w, r, rt, known, command)
-		log.Debug("control request", "method", r.Method, "path", r.URL.Path, "status", status, "exit", int(code))
+		s.logger().Debug("control request", "method", r.Method, "path", r.URL.Path, "status", out.status, "exit", int(out.code))
 	})
 }
 
-// answer serves r and returns the HTTP status and the exit code it answered.
-func (s *Server) answer(w http.ResponseWriter, r *http.Request, rt route, known bool, command string) (int, exitcode.Code) {
-	if uid, refused := s.refusedPeer(r); refused {
-		s.logger().Warn("control socket: refused a peer of another user", "peer_uid", uid)
-		return transport(w, command, http.StatusForbidden, "the control socket answers only its own user", "run pcb as the user that runs pcb serve")
+// init builds the routing: one pattern per route (the method is checked
+// by answer, for the envelope's 405), and a 404 for the rest.
+func (s *Server) init() {
+	s.mux = http.NewServeMux()
+	for _, rt := range routes {
+		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
 	}
-	switch {
-	case !known:
-		return transport(w, command, http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon")
-	case r.Method != rt.method:
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		record(r, transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon"))
+	})
+}
+
+func record(r *http.Request, o outcome) {
+	if out, ok := r.Context().Value(outcomeKey{}).(*outcome); ok {
+		*out = o
+	}
+}
+
+// answer serves r on rt, and records the HTTP status and the exit code it answered.
+func (s *Server) answer(w http.ResponseWriter, r *http.Request, rt route) {
+	command := rt.command
+	if r.Method != rt.method {
 		w.Header().Set("Allow", rt.method)
-		return transport(w, command, http.StatusMethodNotAllowed, r.Method+" is not allowed on "+r.URL.Path, "use the pcb of the same version as the daemon")
+		record(r, transport(w, command, http.StatusMethodNotAllowed, r.Method+" is not allowed on "+r.URL.Path, "use the pcb of the same version as the daemon"))
+		return
 	}
-	tooLarge := func() (int, exitcode.Code) {
-		return transport(w, command, http.StatusRequestEntityTooLarge, fmt.Sprintf("the request body exceeds %d bytes", maxBody), "")
+	tooLarge := func() {
+		record(r, transport(w, command, http.StatusRequestEntityTooLarge, fmt.Sprintf("the request body exceeds %d bytes", maxBody), ""))
 	}
 	if r.ContentLength > maxBody {
-		return tooLarge()
+		tooLarge()
+		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	defer clear(body) // a login's body holds its secrets
 	var mbe *http.MaxBytesError
 	switch {
 	case errors.As(err, &mbe):
-		return tooLarge()
+		tooLarge()
+		return
 	case err != nil:
-		return transport(w, command, http.StatusBadRequest, "cannot read the request body", "")
+		record(r, transport(w, command, http.StatusBadRequest, "cannot read the request body", ""))
+		return
 	}
-	data, err := rt.run(s, r.Context(), body)
+	data, err := rt.run(s, r.Context(), r.PathValue("id"), body)
 	switch {
 	case errors.Is(err, errBadBody):
-		return transport(w, command, http.StatusBadRequest, errBadBody.Error(), "use the pcb of the same version as the daemon")
+		record(r, transport(w, command, http.StatusBadRequest, errBadBody.Error(), "use the pcb of the same version as the daemon"))
 	case err != nil:
-		return write(w, command, http.StatusUnprocessableEntity, nil, err)
+		// A refusal to choose among several accounts lists them (data.accounts).
+		var several *service.SeveralAccountsError
+		var details any
+		if errors.As(err, &several) {
+			details = Accounts{Accounts: several.Accounts}
+		}
+		record(r, write(w, command, http.StatusUnprocessableEntity, details, err))
+	default:
+		record(r, write(w, command, http.StatusOK, data, nil))
 	}
-	return write(w, command, http.StatusOK, data, nil)
 }
 
 // refusedPeer reports whether r's peer is of another UID than this
@@ -178,30 +238,27 @@ func (s *Server) refusedPeer(r *http.Request) (int, bool) {
 }
 
 // transport answers a transport error: blocked (20), with a hint.
-func transport(w http.ResponseWriter, command string, code int, msg, hint string) (int, exitcode.Code) {
+func transport(w http.ResponseWriter, command string, code int, msg, hint string) outcome {
 	return write(w, command, code, nil, &exitcode.Error{Code: exitcode.Blocked, Err: errors.New(msg), Hint: hint})
 }
 
 // write answers one envelope with HTTP status code, and returns it with
 // the exit code the envelope carries.
-func write(w http.ResponseWriter, command string, code int, data any, err error) (int, exitcode.Code) {
+func write(w http.ResponseWriter, command string, code int, data any, err error) outcome {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = output.Write(w, command, data, err) // a peer gone has nowhere to be told
-	return code, exitcode.From(err)
+	return outcome{code, exitcode.From(err)}
 }
 
-// status is GET /v1/status: the login, Serve's health, the listener and
-// the alerts.
-func (s *Server) status(ctx context.Context, _ []byte) (any, error) {
-	st, err := s.API.Status(ctx)
-	if err != nil {
-		return nil, err
-	}
-	h, err := s.API.Health(ctx)
-	if err != nil {
-		return nil, err
-	}
+// accounts is GET /v2/accounts: the Hub's accounts, pending ones included.
+func (s *Server) accounts(context.Context, string, []byte) (any, error) {
+	return Accounts{Accounts: s.Hub.Accounts()}, nil
+}
+
+// status is GET /v2/status: the process, and per account its login, Serve's
+// health, its CalDAV URL and its alerts.
+func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	var ln *Listener
 	if s.Listener != nil {
 		ln = s.Listener()
@@ -210,15 +267,55 @@ func (s *Server) status(ctx context.Context, _ []byte) (any, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
+	base := ""
+	if ln != nil {
+		base = strings.TrimRight(ln.URL, "/")
+	}
+	infos := s.Hub.Accounts()
+	accounts := make([]AccountStatus, 0, len(infos))
+	for _, info := range infos {
+		as, err := s.accountStatus(ctx, info, now())
+		if errors.Is(err, service.ErrNoAccount) {
+			continue // removed since Accounts listed it
+		}
+		if base != "" {
+			as.URL = base + service.AccountPath(info.ID)
+		}
+		accounts = append(accounts, as)
+	}
 	d := s.Daemon
-	return Status{Status: st, Daemon: &d, Health: &h, Listener: ln,
-		Alerts: Alerts(AlertInput{Login: st, Health: &h, Listener: ln, Now: now()})}, nil
+	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, accounts, now())}, nil
 }
 
-// login is POST /v1/login: service.API.Login on the body, a
-// service.LoginRequest. A login that completes here wakes a Serve waiting
-// for one, as an in-process login does (the same service call).
-func (s *Server) login(ctx context.Context, body []byte) (any, error) {
+// accountStatus is info's entry of Status. An account that cannot be read
+// still has its entry, with an account-unreadable alert saying why (err
+// is then set, for the caller to tell a vanished account), so one account
+// never takes the others' status down.
+func (s *Server) accountStatus(ctx context.Context, info service.AccountInfo, now time.Time) (AccountStatus, error) {
+	as := AccountStatus{AccountInfo: info}
+	api, _, err := s.Hub.Account(info.ID)
+	if err == nil {
+		as.Login, err = api.Status(ctx)
+	}
+	if err == nil {
+		var h service.Health
+		if h, err = s.Hub.Health(ctx, info.ID); err == nil {
+			as.Health = &h
+		}
+	}
+	as.Alerts = Alerts(AlertInput{Account: info.ID, Login: as.Login, Stopped: info.Stopped, Health: as.Health, Now: now})
+	if err != nil && !errors.Is(err, service.ErrNoAccount) {
+		as.Alerts = append(as.Alerts, Alert{Account: info.ID, Code: CodeAccountUnreadable, Severity: SeverityError,
+			Message: err.Error(), Fix: exitcode.HintOf(err)})
+		SortAlerts(as.Alerts)
+	}
+	return as, err
+}
+
+// login is POST /v2/login: Hub.Login on the body, a service.LoginRequest.
+// A login that completes here wakes a Serve waiting for one, as an
+// in-process login does (the same Hub call).
+func (s *Server) login(ctx context.Context, _ string, body []byte) (any, error) {
 	var req service.LoginRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, errBadBody
@@ -228,12 +325,12 @@ func (s *Server) login(ctx context.Context, body []byte) (any, error) {
 		return nil, err
 	}
 	defer unlock()
-	return s.API.Login(ctx, req)
+	return s.Hub.Login(ctx, req)
 }
 
-// submitTOTP is POST /v1/login/totp: service.API.SubmitTOTP on the body's
-// code, for the login the daemon holds.
-func (s *Server) submitTOTP(ctx context.Context, body []byte) (any, error) {
+// submitTOTP is POST /v2/accounts/{id}/login/totp: Hub.SubmitTOTP on the
+// body's code, for the login the Hub holds for that account.
+func (s *Server) submitTOTP(ctx context.Context, id string, body []byte) (any, error) {
 	var req TOTPRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, errBadBody
@@ -243,20 +340,53 @@ func (s *Server) submitTOTP(ctx context.Context, body []byte) (any, error) {
 		return nil, err
 	}
 	defer unlock()
-	return s.API.SubmitTOTP(ctx, req.Code)
+	return s.Hub.SubmitTOTP(ctx, id, req.Code)
 }
 
-// logout is POST /v1/logout: service.API.Logout on the body, a
-// service.LogoutRequest (none from an older pcb: the zero request), which
-// also sends a Serve with --wait-for-login back to waiting (ruling M5-R8).
-func (s *Server) logout(ctx context.Context, body []byte) (any, error) {
-	var req service.LogoutRequest
+// logout is POST /v2/accounts/{id}/logout: Hub.SignOut on the body, a
+// service.LogoutRequest (none: the zero request), which also sends a Serve
+// with --wait-for-login back to waiting (ruling M5-R8).
+func (s *Server) logout(ctx context.Context, id string, body []byte) (any, error) {
+	req, err := logoutRequest(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.SignOut(ctx, id, req)
+}
+
+// remove is POST /v2/accounts/{id}/remove: Hub.Remove on the same body.
+func (s *Server) remove(ctx context.Context, id string, body []byte) (any, error) {
+	req, err := logoutRequest(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.Remove(ctx, id, req)
+}
+
+func logoutRequest(body []byte) (req service.LogoutRequest, err error) {
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
-			return nil, errBadBody
+			return service.LogoutRequest{}, errBadBody
 		}
 	}
-	return s.API.Logout(ctx, req)
+	return req, nil
+}
+
+// setCalDAV is POST /v2/accounts/{id}/caldav: Hub.SetCalDAV on the body's
+// "on", which must be given.
+func (s *Server) setCalDAV(ctx context.Context, id string, body []byte) (any, error) {
+	var req struct {
+		On *bool `json:"on"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || req.On == nil {
+		return nil, errBadBody
+	}
+	return s.Hub.SetCalDAV(ctx, id, *req.On)
+}
+
+// restart is POST /v2/accounts/{id}/restart: Hub.Restart.
+func (s *Server) restart(ctx context.Context, id string, _ []byte) (any, error) {
+	return s.Hub.Restart(ctx, id)
 }
 
 // oneLogin takes the login slot, or refuses at once while another login

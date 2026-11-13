@@ -15,7 +15,7 @@ import (
 func (a *app) newSync() *cobra.Command {
 	var full, watch bool
 	var interval time.Duration
-	c := &cobra.Command{
+	c := selecting(&cobra.Command{
 		Use:   "sync",
 		Short: "Bring the event cache up to date with Proton",
 		Long: "Sync every calendar into the local event cache: the first pass lists each calendar, later passes " +
@@ -37,11 +37,11 @@ func (a *app) newSync() *cobra.Command {
 					Err:  errors.New("--json cannot be combined with --watch: a command prints one envelope"),
 					Hint: "drop --json, or run pcb sync --json without --watch"}
 			}
-			svc, err := a.service(cmd)
+			svc, _, done, err := a.account(cmd)
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			defer a.closeService(svc)
+			defer done()
 			req := service.SyncRequest{Full: full}
 			if watch {
 				err := svc.WatchSync(cmd.Context(), req, interval, func(p service.WatchPass) {
@@ -64,7 +64,7 @@ func (a *app) newSync() *cobra.Command {
 			}
 			return Finish(cmd, res, syncText(res, ""), err)
 		},
-	}
+	})
 	c.Flags().BoolVar(&full, "full", false, "list every calendar in full instead of reading the change feed")
 	c.Flags().BoolVar(&watch, "watch", false, "keep syncing until interrupted (not with --json)")
 	c.Flags().DurationVar(&interval, "interval", service.DefaultWatchInterval, "time between passes with --watch (at least 10s)")

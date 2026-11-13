@@ -157,29 +157,31 @@ func (res *resource) write(ms *multistatus, q propRequest) {
 	ms.props(res.href, found, missing)
 }
 
-var principalHref = hrefXML(principalPath)
-
-func rootResource() *resource {
-	res := &resource{href: "/"}
+// rootResource is the root of namespace sp, naming own's principal: the
+// account's own, whatever the namespace (design §4.4).
+func rootResource(sp, own space) *resource {
+	res := &resource{href: sp.root()}
 	res.add(dav("resourcetype"), "<D:collection/>")
-	res.add(dav("current-user-principal"), principalHref)
+	res.add(dav("current-user-principal"), hrefXML(own.principal()))
 	return res
 }
 
-func principalResource() *resource {
-	res := &resource{href: principalPath}
+func (sp space) principalResource() *resource {
+	principal := hrefXML(sp.principal())
+	res := &resource{href: sp.principal()}
 	res.add(dav("resourcetype"), "<D:collection/><D:principal/>")
-	res.add(dav("current-user-principal"), principalHref)
-	res.add(dav("principal-URL"), principalHref)
-	res.add(caldav("calendar-home-set"), hrefXML(homePath))
+	res.add(dav("current-user-principal"), principal)
+	res.add(dav("principal-URL"), principal)
+	res.add(caldav("calendar-home-set"), hrefXML(sp.home()))
 	return res
 }
 
-func homeResource() *resource {
-	res := &resource{href: homePath}
+func (sp space) homeResource() *resource {
+	principal := hrefXML(sp.principal())
+	res := &resource{href: sp.home()}
 	res.add(dav("resourcetype"), "<D:collection/>")
-	res.add(dav("current-user-principal"), principalHref)
-	res.add(dav("owner"), principalHref)
+	res.add(dav("current-user-principal"), principal)
+	res.add(dav("owner"), principal)
 	return res
 }
 
@@ -193,8 +195,9 @@ const (
 		"<D:privilege><D:bind/></D:privilege><D:privilege><D:unbind/></D:privilege>"
 )
 
-func calendarResource(c service.Collection) *resource {
-	res := &resource{href: calendarHref(c.ID)}
+func (sp space) calendarResource(c service.Collection) *resource {
+	principal := hrefXML(sp.principal())
+	res := &resource{href: sp.calendarHref(c.ID)}
 	res.add(dav("resourcetype"), "<D:collection/><C:calendar/>")
 	if c.Name != "" {
 		res.add(dav("displayname"), text(c.Name))
@@ -221,15 +224,15 @@ func calendarResource(c service.Collection) *resource {
 	}
 	res.add(xml.Name{Space: nsCS, Local: "getctag"}, text(c.CTag))
 	res.addHidden(dav("sync-token"), text(c.SyncToken)) // RFC 6578 §4: not in allprop
-	res.add(dav("owner"), principalHref)
-	res.add(dav("current-user-principal"), principalHref)
+	res.add(dav("owner"), principal)
+	res.add(dav("current-user-principal"), principal)
 	return res
 }
 
 // objectResource is the properties of the object served at name;
 // calendar-data only when data was read (never in allprop, RFC 4791 §9.6).
-func objectResource(calID, name, etag string, data []byte, haveData bool) *resource {
-	res := &resource{href: objectHref(calID, name)}
+func (sp space) objectResource(calID, name, etag string, data []byte, haveData bool) *resource {
+	res := &resource{href: sp.objectHref(calID, name)}
 	res.add(dav("resourcetype"), "")
 	res.add(dav("getetag"), text(etag))
 	res.add(dav("getcontenttype"), componentType)
@@ -264,9 +267,9 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 	ms := newMultistatus()
 	switch t.kind {
 	case kindRoot:
-		rootResource().write(ms, q)
+		rootResource(s.ns, s.own).write(ms, q)
 	case kindPrincipal:
-		principalResource().write(ms, q)
+		s.ns.principalResource().write(ms, q)
 	case kindHome:
 		// Even at Depth 0 the home set asks the service: while it has synced
 		// no calendar yet, the answer is 503, so Thunderbird's detection
@@ -282,10 +285,10 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 			unavailable(w)
 			return
 		}
-		homeResource().write(ms, q)
+		s.ns.homeResource().write(ms, q)
 		if depth == "1" {
 			for _, c := range synced {
-				calendarResource(c).write(ms, q)
+				s.ns.calendarResource(c).write(ms, q)
 			}
 		}
 	case kindCalendar:
@@ -293,7 +296,7 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 		if !ok {
 			return
 		}
-		calendarResource(c).write(ms, q)
+		s.ns.calendarResource(c).write(ms, q)
 		if depth == "1" && !s.listObjects(w, r, ms, c, q) {
 			return
 		}
@@ -302,7 +305,7 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 		if !ok {
 			return
 		}
-		objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
+		s.ns.objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
 	}
 	ms.send(w)
 }
@@ -318,7 +321,7 @@ func (s *server) listObjects(w http.ResponseWriter, r *http.Request, ms *multist
 	}
 	if !q.wants(caldav("calendar-data")) {
 		for _, o := range infos {
-			objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
+			s.ns.objectResource(c.ID, o.Name, o.ETag, nil, false).write(ms, q)
 		}
 		return true
 	}

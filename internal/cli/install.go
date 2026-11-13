@@ -328,8 +328,9 @@ func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 	return nil
 }
 
-// logoutHook revokes the session of the directories the plan resolved,
-// with the in-process service, never the caller's own (M5-P19).
+// logoutHook signs out every account of the directories the plan
+// resolved (design §4.6), with the in-process accounts, never the caller's
+// own (M5-P19). Each account is tried; the first failure is returned.
 func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error {
 	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
@@ -341,18 +342,21 @@ func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error
 			}
 			return a.Env(k)
 		}
-		svc, err := a.NewService(withLogger(ctx, newNoteLogger(a.Stderr)), env)
+		hub, err := a.OpenHub(withLogger(ctx, newNoteLogger(a.Stderr)), env)
 		if err != nil {
 			return err
 		}
-		defer a.closeService(svc)
-		res, err := svc.Logout(ctx, service.LogoutRequest{})
-		if err != nil {
-			return err
+		defer a.closeHub(hub)
+		var failure error
+		for _, info := range hub.Accounts() {
+			res, err := hub.SignOut(ctx, info.ID, service.LogoutRequest{})
+			if err == nil && res.WasLoggedIn && !res.Revoked {
+				err = errors.New("the Proton session of " + accountName(info) + " could not be revoked")
+			}
+			if err != nil && failure == nil {
+				failure = err
+			}
 		}
-		if res.WasLoggedIn && !res.Revoked {
-			return errors.New("the Proton session could not be revoked")
-		}
-		return nil
+		return failure
 	}
 }

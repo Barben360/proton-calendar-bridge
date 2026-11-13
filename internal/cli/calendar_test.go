@@ -56,10 +56,7 @@ func TestEndToEndCalendarList(t *testing.T) {
 		}
 	}
 
-	r.want(exitcode.OK, "status", "--json")
-	var st service.Status
-	mustUnmarshal(t, r.envelope().Data, &st)
-	if st.Phase != "ready" || st.Username != r.f.Username {
+	if st := loginStatus(t, r); st.Phase != "ready" || st.Username != r.f.Username {
 		t.Errorf("status = %+v", st)
 	}
 

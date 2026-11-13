@@ -48,6 +48,10 @@ func CheckUsageContract(t *testing.T, newRoot func() *cobra.Command) {
 			cases["unexpected operand"] = append(slices.Repeat([]string{"x"}, n), "nope")
 			cases["missing operand"] = nil
 		}
+		// One that may take none (cli.AtMostOneOperand) gets its most.
+		if n, _ := strconv.Atoi(find(newRoot(), path).Annotations[cli.MaxOperandsKey]); n > 0 {
+			cases["unexpected operand"] = append(slices.Repeat([]string{"x"}, n), "nope")
+		}
 		if len(path) == 0 || cli.IsGroup(find(newRoot(), path)) {
 			cases["no subcommand"] = nil
 		}

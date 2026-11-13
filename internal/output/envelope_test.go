@@ -25,7 +25,7 @@ func TestJSONEnvelopeOnSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := decode(t, buf.Bytes())
-	if m["schema_version"] != float64(1) || m["command"] != "version" || m["ok"] != true {
+	if m["schema_version"] != float64(2) || m["command"] != "version" || m["ok"] != true {
 		t.Fatalf("bad envelope: %v", m)
 	}
 	if m["data"].(map[string]any)["version"] != "dev" {

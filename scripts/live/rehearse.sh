@@ -152,8 +152,10 @@ export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 mkdir -p "$HOME"
 (umask 077 && mkdir -p "$PCB_CONFIG_DIR" "$PCB_STATE_DIR")
 [ ${#PCB_STATE_DIR} -lt 90 ] || fail "run root too long for the control socket: set TMPDIR to a short path"
-run 0 "$PCB" status --json
-KEY_FILE=$(jq -r .data.key_file "$RUN/out")
+# With no account yet, pcb status names no key file: pcb doctor's key file
+# check does (its message starts with the path).
+run 0 "$PCB" doctor --json
+KEY_FILE=$(jq -r '.data.results[] | select(.name == "key file") | .message | split(" ")[0]' "$RUN/out")
 case $KEY_FILE in
 "$RUN"/*) say "pcb resolves its files under $RUN" ;;
 *) fail "pcb's key file is $KEY_FILE, outside the run root" ;;
@@ -195,7 +197,7 @@ PORT=$(free_port)
 )
 has "$PCB_CONFIG_DIR/config.toml" "base_url = \"http://127.0.0.1:" "config.toml points at loopback"
 run 0 "$PCB" status --json
-equal "$(jq -r .data.phase "$RUN/out")" logged-out "phase before login"
+equal "$(jq -c '[(.data.accounts | length), [.data.alerts[].code]]' "$RUN/out")" '[0,["needs-login"]]' "before login: no account, the process needs a login"
 URL=http://localhost:$PORT
 DAV=$URL/dav/calendars/me
 NETRC=$RUN/netrc
@@ -205,9 +207,11 @@ step 5 "pcb serve --wait-for-login: waiting, CalDAV refuses"
 "$PCB" serve --wait-for-login >"$RUN/serve.out" 2>"$RUN/serve.log" &
 SERVE_PID=$!
 until_true 30 "serve waiting for a login" grep -qF 'Waiting for a login: run pcb login' "$RUN/serve.out"
-has "$RUN/serve.out" "Thunderbird URL: $URL/" "serve's URL line"
+# No account yet: no account URL to print, the way to get one instead.
+has "$RUN/serve.out" "No CalDAV client yet: run pcb login (it creates the client default), then pcb client show for its password." "serve's intro without an account"
 run 0 "$PCB" status --daemon --json
-equal "$(jq -r .data.health.serve "$RUN/out")" waiting-for-login "daemon state"
+equal "$(jq -c '[(.data.accounts | length), [.data.alerts[].code]]' "$RUN/out")" '[0,["needs-login"]]' "daemon state: no account, waiting for a login"
+equal "$(jq -r .data.listener.url "$RUN/out")" "$URL" "the daemon's listener URL"
 PID=$(jq -r .data.daemon.pid "$RUN/out")
 equal "$PID" "$SERVE_PID" "daemon pid"
 curl -sS -o /dev/null -D "$RUN/h" -X PROPFIND "$URL/" || fail "PROPFIND without credentials"
@@ -222,7 +226,8 @@ has "$RUN/err" "PCB_TOTP=<code> pcb login resume --totp before " "held login hin
 has "$RUN/err" "(the daemon holds the login)" "held login hint"
 lacks "$RUN/err" "$FAKE_PASS" "the password is never printed"
 run 0 "$PCB" status --json
-equal "$(jq -r .data.phase "$RUN/out")" needs-totp "phase while the daemon holds the login"
+equal "$(jq -r '.data.accounts | length' "$RUN/out")" 1 "accounts while the daemon holds the login"
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/out")" needs-totp "phase while the daemon holds the login"
 run 0 "$PCB" status
 has "$RUN/out" "login_expires:" "status of a held login"
 
@@ -237,12 +242,18 @@ equal "$(fake_calls POST /auth/v4/2fa)" 1 "2FA calls the fake received"
 step 8 "the same daemon serves and has synced every calendar"
 synced() {
 	"$PCB" status --json >"$RUN/st.json" 2>/dev/null &&
-		jq -e '.data.health.serve == "serving" and (.data.health.calendars | length) == 4 and ([.data.health.calendars[] | select(.synced_at == null)] | length) == 0 and .data.health.last_pass.ok == true' "$RUN/st.json"
+		jq -e '.data.accounts[0].health as $h | $h.serve == "serving" and ($h.calendars | length) == 4 and ([$h.calendars[] | select(.synced_at == null)] | length) == 0 and $h.last_pass.ok == true' "$RUN/st.json"
 }
 until_true 60 "serving with 4 synced calendars" synced
 equal "$(jq -r .data.daemon.pid "$RUN/st.json")" "$PID" "daemon pid after the login (no restart)"
-equal "$(jq -r .data.phase "$RUN/st.json")" ready "phase"
-equal "$(jq -r .data.username "$RUN/st.json")" "$FAKE_USER" "username"
+equal "$(jq -r '.data.accounts | length' "$RUN/st.json")" 1 "accounts"
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/st.json")" ready "phase"
+equal "$(jq -r '.data.accounts[0].login.username' "$RUN/st.json")" "$FAKE_USER" "username"
+ACCOUNT=$(jq -r '.data.accounts[0].id' "$RUN/st.json")
+ADDRESS=$(jq -r '.data.accounts[0].address' "$RUN/st.json")
+{ [ -n "$ADDRESS" ] && [ "$ADDRESS" != null ]; } || fail "the account has no address"
+ACCOUNT_URL=$URL/dav/$ACCOUNT/
+equal "$(jq -r '.data.accounts[0].url' "$RUN/st.json")" "$ACCOUNT_URL" "the account's CalDAV URL"
 run 0 "$PCB" sync
 has "$RUN/out" "pcb serve is running and already syncs: see pcb status" "pcb sync while serving"
 run 0 "$PCB" calendar list --json
@@ -260,14 +271,14 @@ step 9 "pcb client show (--reveal)"
 run 0 "$PCB" client show --json
 equal "$(jq -r .data.password "$RUN/out")" null "password without --reveal"
 run 0 "$PCB" client show --json --reveal
-equal "$(jq -r .data.username "$RUN/out")" default "client username"
-equal "$(jq -r .data.url "$RUN/out")" "$URL/" "client URL"
+equal "$(jq -r .data.username "$RUN/out")" "$ADDRESS" "client username (the account's address)"
+equal "$(jq -r .data.url "$RUN/out")" "$ACCOUNT_URL" "client URL (the account's)"
 PASS1=$(jq -r .data.password "$RUN/out")
 { [ -n "$PASS1" ] && [ "$PASS1" != null ]; } || fail "no password with --reveal"
 run 0 "$PCB" client show
-has "$RUN/out" "Username: default" "client show text"
+has "$RUN/out" "Username: $ADDRESS" "client show text"
 has "$RUN/out" "Password: $PASS1" "client show text"
-(umask 077 && printf 'machine localhost login default password %s\n' "$PASS1" >"$NETRC")
+(umask 077 && printf 'machine localhost login %s password %s\n' "$ADDRESS" "$PASS1" >"$NETRC")
 
 # status METHOD URL [curl args]: the HTTP status, with the netrc.
 status() {
@@ -280,10 +291,16 @@ propfind0() { status PROPFIND "$1" -H 'Depth: 0'; }
 # --------------------------------------------------------------------------
 step 10 "CalDAV discovery: well-known, PROPFIND, calendar home, privileges"
 equal "$(status GET "$URL/.well-known/caldav")" 308 "GET /.well-known/caldav"
-grep -qi '^location: /dav/principals/me/' "$RUN/h" || fail "well-known Location"
+# M6: the well-known URL leads to the principal of the account the
+# password chose, on that account's own URLs.
+grep -qi "^location: /dav/$ACCOUNT/principals/me/" "$RUN/h" || fail "well-known Location: $(grep -i '^location:' "$RUN/h")"
 equal "$(propfind0 "$URL/")" 207 "PROPFIND /"
 equal "$(status PROPFIND "$DAV/" -H 'Depth: 1')" 207 "PROPFIND the calendar home"
 equal "$(grep -o '<C:calendar/>' "$RUN/body" | wc -l | tr -d ' ')" 4 "calendars in the home"
+# The account's own URLs (what pcb client show hands out) serve the same home.
+equal "$(propfind0 "$ACCOUNT_URL")" 207 "PROPFIND the account's URL"
+equal "$(status PROPFIND "${ACCOUNT_URL}calendars/me/" -H 'Depth: 1')" 207 "PROPFIND the account's calendar home"
+equal "$(grep -o '<C:calendar/>' "$RUN/body" | wc -l | tr -d ' ')" 4 "calendars in the account's home"
 calpath() { printf %s "$1" | sha256sum | cut -c1-16; }
 DEF_ID=$(jq -r '.[] | select(.default) | .id' "$RUN/calendars.json")
 SHARED_ID=$(jq -r '.[] | select(.read_only) | .id' "$RUN/calendars.json")
@@ -436,7 +453,7 @@ PASS2=$(jq -r .data.password "$RUN/out")
 { [ -n "$PASS2" ] && [ "$PASS2" != "$PASS1" ]; } || fail "no new password"
 has "$RUN/rotate.txt" "$PASS2" "rotate prints the new password"
 equal "$(propfind0 "$URL/")" 401 "the old password"
-(umask 077 && printf 'machine localhost login default password %s\n' "$PASS2" >"$NETRC")
+(umask 077 && printf 'machine localhost login %s password %s\n' "$ADDRESS" "$PASS2" >"$NETRC")
 equal "$(propfind0 "$URL/")" 207 "the new password"
 run 0 "$PCB" status --json
 equal "$(jq -r .data.daemon.pid "$RUN/out")" "$PID" "daemon pid after the rotate"
@@ -446,12 +463,12 @@ step 17 "the fake revokes the session: needs-login, CalDAV 503, no restart"
 curl -sS --fail -X POST "$CTL/revoke-sessions" >/dev/null || fail "control: revoke-sessions"
 propfind0 "$DAV/" >/dev/null || fail "the authenticated request before the revoke check" # one authenticated request, as the live step sends
 waiting() {
-	"$PCB" status --json >"$RUN/st.json" 2>/dev/null && jq -e '.data.health.serve == "waiting-for-login"' "$RUN/st.json"
+	"$PCB" status --json >"$RUN/st.json" 2>/dev/null && jq -e '.data.accounts[0].health.serve == "waiting-for-login"' "$RUN/st.json"
 }
 until_true 75 "the daemon notices the ended session" waiting
 equal "$(jq -r .data.daemon.pid "$RUN/st.json")" "$PID" "daemon pid after the revoke"
 run 0 "$PCB" status
-has "$RUN/out" "daemon: waiting for a login since" "status after the revoke"
+has "$RUN/out" "serve: waiting for a login since" "status after the revoke"
 has "$RUN/out" "alert: error needs-login: the Proton session has ended (fix: run pcb login)" "status after the revoke"
 equal "$(propfind0 "$DAV/")" 503 "authenticated PROPFIND of the calendar home"
 grep -qi '^retry-after: 30' "$RUN/h" || fail "503 without Retry-After: 30"
@@ -489,7 +506,7 @@ run 0 "$PCB" logout --json
 equal "$(jq -r .data.revoked "$RUN/out")" true "logout revoked"
 equal "$(fake_calls DELETE /auth/v4)" $((REVOKES0 + 1)) "session revocations the fake received"
 until_true 30 "waiting after the logout" waiting
-equal "$(jq -r .data.phase "$RUN/st.json")" logged-out "phase after the logout"
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/st.json")" logged-out "phase after the logout"
 equal "$(jq -r .data.daemon.pid "$RUN/st.json")" "$PID" "daemon pid after the logout"
 equal "$(propfind0 "$DAV/")" 503 "CalDAV after the logout"
 
