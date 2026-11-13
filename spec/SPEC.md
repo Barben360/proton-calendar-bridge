@@ -1349,8 +1349,12 @@ step 10, not run yet.
   `refused` with its `pcb:` reason [verified: `TestUpdateStaleETagIsConflict`, `TestUpdateEventStaleETagIsConflict`,
   `TestWriteToReadOnlyCalendarRefused`, `TestErrorClasses`].
 - **Delete confirmation.** When the client declares form elicitation (or elicitation with no mode), `event_delete`
-  checks everything first (a stale ETag is `conflict`, asked nothing), then asks `Delete «<summary>» on <date>?` (for the
-  whole series of a recurring event: `... and every occurrence of its series?`, ruling R16); only `accept` deletes,
+  checks everything first (a stale ETag is `conflict`, asked nothing), then asks `Delete the event on <date>: «<summary>»?`
+  (one occurrence: `Delete one occurrence, on <date>, of the series «<summary>»?`; the whole series of a recurring
+  event: `Delete the whole series (every occurrence, first on <date>): «<summary>»?`, ruling R16). What goes comes
+  first; the summary, a third party's text, comes last without control or format characters (bidirectional,
+  zero-width) and with `«»` replaced by `‹›`, so it cannot rewrite the question [verified:
+  `TestDeletePromptResistsSpoofing`]. Only `accept` deletes,
   `decline` or `cancel` is `refused` and nothing is deleted. A client that declares no form elicitation (none, or URL
   only) deletes with the `delete` grant alone [verified: `TestDeleteAsksWhenElicitationDeclared`,
   `TestDeleteWithoutElicitationNeedsDeleteCap`, `TestRelayCarriesAConfirmation`]. What real clients declare is
@@ -2051,7 +2055,7 @@ M8 delivered (2026-11-13, branch m8-mcp; the live checks of `spec/HUMAN-CHECKS.m
 | R13 | `free_busy` reports `skipped` with a note that those events' times are unknown, so unreadable events do not read as free; a create or update whose ETag cannot be read back is a success without `etag`, with a note to call `event_get` and not to write again |
 | R14 | under a grant that names calendars, an account whose calendars are not known yet (before its first sync) counts as holding none: it is hidden until it is known to hold one (fail closed) |
 | R15 | every tool taking an `event_id` hides an invisible account or calendar as missing (`no event X`, the same text as a malformed id), whatever the agenda would answer; one audit line per logical call, a run that only asks the person writes none |
-| R16 | the delete confirmation for a whole recurring series names it: `Delete «S» on D and every occurrence of its series?` |
+| R16 | the delete confirmation for a whole recurring series names it: `Delete the whole series (every occurrence, first on D): «S»?` (final review: the scope first, the title last and sanitised) |
 | R17 | remote sessions are forgotten after 1 h idle (the client initialises again; `TestRemoteMCPSessionEndsWhenIdle`); `Host` may also be the IP the request arrived on; a present `Origin` must equal `Host` exactly, `null` refused; `pcb status` shows the `mcp:` line only when a daemon answers |
 | R19 | `pcb mcp token add --allow delete` without `write` is refused at creation (exit 2), as the grant itself would refuse it |
 | R20 | `pcb mcp`'s sealer guard runs when the session daemon starts (exit 10 on a new state with `backend = auto` and no Secret Service), before it opens the state, not only in the `login` tool; the relay's own connections are not UID-checked beyond the probe (same-UID trust, a 0700 directory) |

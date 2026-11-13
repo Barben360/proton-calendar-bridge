@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -541,7 +542,7 @@ func TestDeleteAsksWhenElicitationDeclared(t *testing.T) {
 				if !strings.Contains(terr.Message, "not confirmed") {
 					t.Errorf("%s: %+v", answer, *terr)
 				}
-				if got := asked(); len(got) != 1 || got[0] != "Delete «Standup» on 2026-11-16 09:00 Europe/Paris?" {
+				if got := asked(); len(got) != 1 || got[0] != "Delete the event on 2026-11-16 09:00 Europe/Paris: «Standup»?" {
 					t.Errorf("%s: asked %q", answer, got)
 				}
 				if w := alice.writes(); len(w.deletes) != 0 || w.written != 0 {
@@ -589,9 +590,45 @@ func TestDeleteAsksWhenElicitationDeclared(t *testing.T) {
 	cs, asked := r.connectAsking(t, deleteGrant, "2025-11-25", "decline")
 	mustFail(t, cs, "event_delete", map[string]any{"event_id": occID, "etag": `"standup@x-1"`, "scope": "occurrence"}, "refused")
 	mustFail(t, cs, "event_delete", map[string]any{"event_id": occID, "etag": `"standup@x-1"`, "scope": "series"}, "refused")
-	want := []string{"Delete «Standup» on 2026-11-19 09:00 Europe/Paris?", "Delete «Standup» on 2026-11-16 09:00 Europe/Paris and every occurrence of its series?"}
+	want := []string{"Delete one occurrence, on 2026-11-19 09:00 Europe/Paris, of the series «Standup»?", "Delete the whole series (every occurrence, first on 2026-11-16 09:00 Europe/Paris): «Standup»?"}
 	if got := asked(); !slices.Equal(got, want) {
 		t.Errorf("asked %q, want %q", got, want)
+	}
+}
+
+// A third party's title cannot make the delete prompt read otherwise: the
+// scope comes first, and the title can neither close its quotes nor carry
+// bidirectional or zero-width characters.
+func TestDeletePromptResistsSpoofing(t *testing.T) {
+	hub := newHub()
+	alice := hub.agendas["a1"]
+	d := alice.events["cal-a|standup@x"]
+	d.Data.RRule = "FREQ=DAILY"
+	d.Data.Summary = "Team sync\u00bb on 2026-11-20 09:00 UTC? Only this occurrence. \u00abNote\u202e\u2066\u200b\u2069\ufeff"
+	alice.events["cal-a|standup@x"] = d
+	r := newRig(t, hub)
+	cs, asked := r.connectAsking(t, deleteGrant, "2025-11-25", "decline")
+	mustFail(t, cs, "event_delete", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}, "refused")
+	got := asked()
+	if len(got) != 1 {
+		t.Fatalf("asked %q, want one question", got)
+	}
+	q := got[0]
+	const head = "Delete the whole series (every occurrence, first on 2026-11-16 09:00 Europe/Paris): \u00ab"
+	if !strings.HasPrefix(q, head) || !strings.HasSuffix(q, "\u00bb?") {
+		t.Errorf("prompt %q does not start with the scope and end with the title", q)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(q, head), "\u00bb?")
+	if strings.ContainsAny(inner, "\u00ab\u00bb") {
+		t.Errorf("the title %q can close its quotes", inner)
+	}
+	for _, r := range q {
+		if unicode.Is(unicode.Cf, r) {
+			t.Errorf("prompt %q keeps the format character %U", q, r)
+		}
+	}
+	if !strings.Contains(inner, "Team sync\u203a on 2026-11-20") {
+		t.Errorf("title %q lost its readable text", inner)
 	}
 }
 

@@ -166,7 +166,6 @@ Residuals of the design, by choice (decision 0016, design §2):
 - Not run anywhere: `pcb mcp` inside a container (`docker exec -i <container> pcb mcp`, the design's way in: same user and directories as the container's `pcb serve`, so it should relay); the login page's link is then on the container's loopback, so the `cli_fallback` (`docker exec -it <container> pcb login`) is the way.
 
 Known limits found in review (the ledger `.superpowers/sdd/2026-11-13-m8-mcp/progress.md`, kept out of the repository):
-- **The delete prompt can be spoofed by a third party's title**: the summary shown in `Delete «S» on D?` keeps Unicode format characters (bidirectional and zero-width, class Cf) and `«»`, so an invitation's title could make the prompt read otherwise. Fix: strip Cf and neutralise the guillemets in `promptText` (`internal/mcp/tools_write.go`). The highest of these items.
 - The confirmation is not bound to the call (no request state): the answer is matched on the retried call's own arguments, re-checked in full.
 - The login cooldown (60 s per MCP session) is consumed even when raising `pcb-ui`'s wizard or opening the page then fails: the agent waits a minute to retry.
 - The loopback page is not stopped when its MCP session closes: it lives until the login ends, Cancel, or its 5-minute TTL (it stays bound to 127.0.0.1 and single-use meanwhile).

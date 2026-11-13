@@ -638,23 +638,37 @@ func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 	return deleteOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, Scope: string(scope), Deleted: true}, nil, nil
 }
 
-// deletePrompt is the question shown to the person: "Delete «summary» on
-// <date>?", saying when the whole of a recurring series goes.
+// deletePrompt is the question shown to the person. What goes (the event,
+// one occurrence, or a whole series) and when come first, from pcb; the
+// third party's summary comes last, inside quotes it cannot close.
 func deletePrompt(d service.EventData, ref service.EventRef, scope service.EditScope) string {
-	c, series := d, scope == service.ScopeSeries
-	if !series {
-		c = occurrenceOf(d, *ref.RecurrenceID)
+	title := "«" + promptText(d.Summary) + "»?"
+	switch {
+	case scope != service.ScopeSeries:
+		c := occurrenceOf(d, *ref.RecurrenceID)
+		return "Delete one occurrence, on " + when(c.Start) + ", of the series «" + promptText(c.Summary) + "»?"
+	case d.RRule != "":
+		return "Delete the whole series (every occurrence, first on " + when(d.Start) + "): " + title
 	}
-	msg := "Delete «" + promptText(c.Summary) + "» on " + when(c.Start)
-	if series && d.RRule != "" {
-		msg += " and every occurrence of its series"
-	}
-	return msg + "?"
+	return "Delete the event on " + when(d.Start) + ": " + title
 }
 
-// promptText is a third party's summary made fit for one line of a
-// dialog: no control characters, spaces folded, cut short.
+// promptText is a third party's text made fit for one line of a dialog
+// that it must not rewrite: no control or format characters (bidirectional
+// overrides and isolates, zero-width characters), the guillemets that quote
+// it replaced by single ones, spaces folded, cut short.
 func promptText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		case r == '«':
+			return '‹'
+		case r == '»':
+			return '›'
+		}
+		return r
+	}, s)
 	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
 	if s == "" {
 		return "(no title)"
