@@ -629,8 +629,9 @@ var (
 // 4999 weekly, 99 yearly; besides FREQ, INTERVAL, COUNT, UNTIL and WKST
 // (a weekday), only these parts (ruling M4-R10): WEEKLY BYDAY of plain
 // weekdays; MONTHLY one BYMONTHDAY, or one plain BYDAY weekday with one
-// BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY. A
-// malformed rule is BadData.
+// BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY; and
+// start, the master's DTSTART, one of the rule's occurrences (startOccurs).
+// A malformed rule is BadData.
 func checkRRule(rule string, start when) *Refusal {
 	parts := map[string]string{}
 	for kv := range strings.SplitSeq(rule, ";") {
@@ -711,7 +712,70 @@ func checkRRule(rule string, start when) *Refusal {
 			return refuse(UnsupportedRecurrence, "YEARLY RRULE other than none or one BYMONTH with one BYMONTHDAY")
 		}
 	}
+	if !startOccurs(freq, parts, start) {
+		return refuse(UnsupportedRecurrence, "DTSTART is not an occurrence of the RRULE")
+	}
 	return nil
+}
+
+// startOccurs reports whether start, a master's DTSTART, is itself an
+// occurrence of the rule (FREQ freq, parts as checkRRule accepted them), by
+// its BY* parts on start's own calendar day (its zone; a DATE as written).
+// Proton drops a DTSTART that is not and counts COUNT from the first match,
+// while Thunderbird shows it: one event, two sets of occurrences (live
+// 2026-11-13, HUMAN-CHECKS W8). INTERVAL never matters: DTSTART sets the
+// phase.
+func startOccurs(freq string, parts map[string]string, start when) bool {
+	day := start.t
+	if start.loc != nil {
+		day = day.In(start.loc)
+	}
+	weekday := strings.ToUpper(day.Weekday().String()[:2])
+	switch freq {
+	case "WEEKLY":
+		v, ok := parts["BYDAY"]
+		return !ok || slices.ContainsFunc(strings.Split(v, ","), func(d string) bool { return strings.EqualFold(d, weekday) })
+	case "MONTHLY":
+		if v, ok := parts["BYMONTHDAY"]; ok {
+			return isMonthDay(day, atoiSigned(v))
+		}
+		if v, ok := parts["BYDAY"]; ok {
+			return strings.EqualFold(v, weekday) && isSetPos(day, atoiSigned(parts["BYSETPOS"]))
+		}
+	case "YEARLY":
+		if v, ok := parts["BYMONTH"]; ok {
+			return int(day.Month()) == atoi(v) && isMonthDay(day, atoiSigned(parts["BYMONTHDAY"]))
+		}
+	}
+	return true
+}
+
+// isMonthDay: day is the month's n-th day, counted from the end when n < 0.
+func isMonthDay(day time.Time, n int) bool {
+	if n < 0 {
+		n += daysIn(day) + 1
+	}
+	return day.Day() == n
+}
+
+// isSetPos: day is the n-th of its weekday in its month (n in 1..4), or the
+// last when n is -1.
+func isSetPos(day time.Time, n int) bool {
+	if n < 0 {
+		return day.Day()+7 > daysIn(day)
+	}
+	return (day.Day()-1)/7+1 == n
+}
+
+func daysIn(day time.Time) int {
+	return time.Date(day.Year(), day.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func atoiSigned(s string) int {
+	if rest, neg := strings.CutPrefix(s, "-"); neg {
+		return -atoi(rest)
+	}
+	return atoi(strings.TrimPrefix(s, "+"))
 }
 
 // allowedParts are the RRULE parts Proton supports per FREQ (ruling

@@ -95,6 +95,8 @@ Accepted, per FREQ (anything else → `pcb:unsupported-recurrence`; a malformed 
 
 Every FREQ: `COUNT` at most 49; `UNTIL` on or before 2037-12-31 (the date in DTSTART's zone); not both COUNT and UNTIL. HOURLY, MINUTELY, SECONDLY: refused.
 
+A master's DTSTART must be an occurrence of its rule: its calendar day, in DTSTART's zone (a DATE as written), matches the rule's `BYDAY`, `BYMONTHDAY`, `BYDAY` + `BYSETPOS` or `BYMONTH` + `BYMONTHDAY` (INTERVAL does not matter: DTSTART sets the phase); otherwise `pcb:unsupported-recurrence`, reason `DTSTART is not an occurrence of the RRULE`. Proton drops such a DTSTART and counts COUNT from the first match while Thunderbird shows it [verified: live 2026-11-13, `spec/HUMAN-CHECKS.md` W8]. The rule is checked after the rewrites below, which keep its meaning. A rule without a BY part always holds its DTSTART. Exceptions carry no rule. Reads are not checked: such an event already in Proton is served as it is, and only its rewrite is refused.
+
 Transformed (same meaning, Proton's form):
 
 | Client form | Written | Ruling |

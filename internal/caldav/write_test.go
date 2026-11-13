@@ -445,6 +445,34 @@ func TestAnAliasIsWrittenAndDeletedThere(t *testing.T) {
 	}
 }
 
+// HUMAN-CHECKS W8 pcb-m4-notfirst: a series whose DTSTART (a Wednesday) is
+// not an occurrence of its RRULE (Mondays) is refused before anything
+// reaches Proton, 403 pcb:unsupported-recurrence with the reason: Proton
+// would drop that Wednesday and Thunderbird show it (live 2026-11-13). The
+// same series from a Monday is created.
+func TestADTSTARTOffItsRuleIsRefusedBeforeProton(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	series := func(uid, day string) string {
+		return strings.Join([]string{"BEGIN:VCALENDAR", "PRODID:-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN", "VERSION:2.0",
+			"BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20270101T090000Z", "SUMMARY:pcb-m4 notfirst",
+			"DTSTART;TZID=Europe/Paris:" + day + "T120000", "DTEND;TZID=Europe/Paris:" + day + "T130000",
+			"RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "END:VEVENT", "END:VCALENDAR"}, "\r\n") + "\r\n"
+	}
+	rec := r.put(calPath(cal)+"pcb-m4-notfirst.ics", series("pcb-m4-notfirst", "20270106"), "If-None-Match", "*")
+	if got := precondition403(t, rec); got != "unsupported-recurrence" {
+		t.Fatalf("pcb precondition %q, want unsupported-recurrence", got)
+	}
+	if !strings.Contains(rec.Body.String(), "DTSTART is not an occurrence of the RRULE") {
+		t.Errorf("403 body without the reason: %s", rec.Body)
+	}
+	if n := r.sent(); n != 0 {
+		t.Fatalf("%d requests reached Proton's write endpoint, want none", n)
+	}
+	wantStatus(t, r.put(calPath(cal)+"pcb-m4-monday.ics", series("pcb-m4-monday", "20270104"), "If-None-Match", "*"), http.StatusCreated)
+}
+
 // HUMAN-CHECKS W10 as Thunderbird meets it: a new event whose UID holds an
 // escaped comma (`UID:pcb-m4-a\,b`, which Proton stores as pcb-m4-a,b) is
 // created (201, confirmed by the read-back), served at the client's name

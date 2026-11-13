@@ -2266,6 +2266,27 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	s.stop(t)
 }
 
+// Reads are never refused: an event Proton already holds whose DTSTART (a
+// Friday) is not an occurrence of its RRULE (Mondays) is served unchanged.
+// Its edit, a write like any other, is refused before anything is sent
+// (403 pcb:unsupported-recurrence, HUMAN-CHECKS W8).
+func TestAStoredDTSTARTOffItsRuleIsServedButNotRewritten(t *testing.T) {
+	t.Parallel()
+	const rule = "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "off@x", Start: base, End: base + 3600, Color: green, RRule: "FREQ=WEEKLY;BYDAY=MO;COUNT=3",
+			Card: card("off@x", "Off", base, rule)})
+	}).start(t)
+	obj := r.object(t, "off@x")
+	contains(t, "the object", obj.Data, rule+"\r\n")
+	contains(t, "the object", obj.Data, "DTSTART:"+stamp(base)+"\r\n")
+	_, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Off", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
+	wantRefused(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
+	if n := r.sendCalls(); n != 0 {
+		t.Errorf("%d requests reached the sync endpoint, want none", n)
+	}
+}
+
 // A UID with a TEXT escape is the event's unescaped value (RFC 5545
 // §3.3.11), which is what Proton stores (`pcb-m4-a,b` for
 // `UID:pcb-m4-a\,b`, HUMAN-CHECKS W10, live 2026-11-13): its create is
