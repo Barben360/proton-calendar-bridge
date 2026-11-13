@@ -15,7 +15,7 @@ type Notification struct{ Account, Title, Body string }
 // severity (a stalled sync is a warning): the ones a person must look at.
 var notified = map[string]bool{
 	ctl.CodeNeedsLogin: true, ctl.CodeNeedsCaptcha: true, ctl.CodeHumanVerification: true,
-	ctl.CodeSyncStalled: true, ctl.CodeKeyringLocked: true,
+	ctl.CodeSyncStalled: true, ctl.CodeKeyringLocked: true, ctl.CodeKeyringUnavailable: true,
 }
 
 // Notifier decides which alerts of a View are new.

@@ -211,3 +211,23 @@ func TestDoctorQuietWithOnlyOne(t *testing.T) {
 		}
 	}
 }
+
+// Ruling R15: no Secret Service answers on a keyring state (pcb over SSH):
+// pcb sync exits 20 naming the keyring, and pcb status says
+// keyring-unavailable, never needs-login.
+func TestNoKeyringServiceIsNotANeedsLogin(t *testing.T) {
+	t.Parallel()
+	r := keyringRig(t)
+	r.keyring.mu.Lock()
+	r.keyring.absent = true
+	r.keyring.mu.Unlock()
+	r.want(exitcode.Blocked, "sync", "--json")
+	if e := r.envelope().Error; e == nil || e.Message != "the desktop keyring is not available" || !strings.Contains(e.Hint, "desktop session") {
+		t.Errorf("pcb sync error = %+v, want the keyring named and the desktop session hint", e)
+	}
+	r.run("status", "--json")
+	out := r.out.String()
+	if !strings.Contains(out, `"secrets": "keyring-unavailable"`) || strings.Contains(out, "needs-login") {
+		t.Errorf("pcb status = %s, want secrets keyring-unavailable and no needs-login", out)
+	}
+}

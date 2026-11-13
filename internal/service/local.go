@@ -476,6 +476,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 			s.Secrets, s.Phase, s.Reason = SecretsUnsupported, string(store.PhaseNeedsLogin), ue.Explain()
 		case errors.Is(err, seal.ErrLocked):
 			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
+		case errors.Is(err, seal.ErrNoService):
+			s.Secrets = SecretsKeyringUnavailable // no keyring answers here: nothing is lost either (R15)
 		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:

@@ -172,6 +172,8 @@ func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) strin
 		return "stopped: " + as.Stopped.Message
 	case as.Login.Secrets == "locked":
 		return "keyring locked"
+	case as.Login.Secrets == service.SecretsKeyringUnavailable:
+		return "keyring unavailable"
 	}
 	switch as.Phase {
 	case "needs-login", "logged-out":

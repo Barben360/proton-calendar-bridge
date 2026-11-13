@@ -95,6 +95,17 @@ func keyringLockedError() *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "the desktop keyring is locked", locked: true}, Hint: KeyringFix}
 }
 
+// KeyringUnavailableFix is what a person does when no desktop keyring
+// answers for a state sealed with it; the alert's fix says the same.
+const KeyringUnavailableFix = "run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state"
+
+// keyringUnavailableError is the Blocked error of a secret-service state
+// whose keyring does not answer (seal.ErrNoService, ruling R15): the
+// sealed session is intact, so it never suggests a logout.
+func keyringUnavailableError() *exitcode.Error {
+	return blocked("the desktop keyring is not available", KeyringUnavailableFix)
+}
+
 // keyringLocked reports whether err is keyringLockedError's, by type.
 func keyringLocked(err error) bool {
 	var d *detail
@@ -246,6 +257,8 @@ func mapError(err error, keyFile string) error {
 		return unsupportedStore(use)
 	case errors.Is(err, seal.ErrLocked):
 		return keyringLockedError()
+	case errors.Is(err, seal.ErrNoService):
+		return keyringUnavailableError()
 	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
 		return mustAct("the sealing key is not in the desktop keyring", "pcb logout then pcb login")
 	case errors.Is(err, seal.ErrCorrupt) && keyFile == keyringRef:
@@ -376,7 +389,7 @@ const keyringFailFix = "check that the desktop keyring is running and unlocked (
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, store.ErrRolledBack) ||
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
 		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}

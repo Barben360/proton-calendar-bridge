@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -639,5 +640,48 @@ func TestSecretServiceStateWordsNameTheKeyring(t *testing.T) {
 		t.Errorf("ShowClient (key gone) = %v, hint %q", err, exitcode.HintOf(err))
 	} else {
 		noKeyFile("show, key gone", err)
+	}
+}
+
+// Ruling R15: on a keyring state where no Secret Service answers (an SSH
+// session, a service outside the desktop session), the error names the
+// keyring (exit 20) and never sends the person to pcb logout; Status keeps
+// the phase and says keyring-unavailable, with its own alert and no
+// needs-login (a logout would discard a good session).
+func TestKeyringUnavailableIsNotANeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr.mu.Lock()
+	kr.absent = true
+	kr.mu.Unlock()
+
+	_, err = api.Sync(t.Context(), service.SyncRequest{})
+	if got := exitcode.From(err); got != exitcode.Blocked || err.Error() != "the desktop keyring is not available" {
+		t.Errorf("Sync = %v (exit %d), want exit 20 %q", err, got, "the desktop keyring is not available")
+	}
+	hint := exitcode.HintOf(err)
+	if !strings.Contains(hint, "desktop session") || strings.Contains(hint, "logout") || strings.Contains(hint, "permissions") {
+		t.Errorf("hint = %q, want it to send the person into the desktop session, never to logout or permissions", hint)
+	}
+
+	st := accountStatus(t, h, a)
+	if st.Secrets != "keyring-unavailable" || st.Phase != "ready" {
+		t.Errorf("Status = secrets %q phase %q, want keyring-unavailable and the phase kept (ready)", st.Secrets, st.Phase)
+	}
+	var codes []string
+	for _, al := range ctl.Alerts(ctl.AlertInput{Account: a, Login: st, Now: e.clk.Now()}) {
+		codes = append(codes, al.Code)
+	}
+	if !slices.Contains(codes, ctl.CodeKeyringUnavailable) || slices.Contains(codes, ctl.CodeNeedsLogin) {
+		t.Errorf("alerts = %v, want %s and no %s", codes, ctl.CodeKeyringUnavailable, ctl.CodeNeedsLogin)
 	}
 }

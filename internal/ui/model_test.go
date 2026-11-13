@@ -118,6 +118,7 @@ func TestShortTexts(t *testing.T) {
 			a.Stopped = &service.StopInfo{Message: "the session was revoked"}
 		}), "stopped: the session was revoked"},
 		{"keyring locked", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.Login.Secrets = "locked" }), "keyring locked"},
+		{"keyring unavailable", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.Login.Secrets = service.SecretsKeyringUnavailable }), "keyring unavailable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -218,7 +219,7 @@ func TestNotifyTitleAndBody(t *testing.T) {
 func TestNotifyCodes(t *testing.T) {
 	for code, want := range map[string]bool{
 		ctl.CodeNeedsLogin: true, ctl.CodeNeedsCaptcha: true, ctl.CodeHumanVerification: true,
-		ctl.CodeKeyringLocked:  true,
+		ctl.CodeKeyringLocked: true, ctl.CodeKeyringUnavailable: true,
 		ctl.CodeAccountStopped: false, ctl.CodeTLSExpired: false, ctl.CodeClientsUnreadable: false,
 	} {
 		var n ui.Notifier
