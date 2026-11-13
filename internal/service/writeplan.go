@@ -352,7 +352,7 @@ func PlanDelete(current Group) (WritePlan, error) {
 // D7). A master stored without one gets SEQUENCE:0 with any write to its
 // series (an exception created, updated or deleted), first in the call, its
 // body otherwise unchanged; a body that changes nothing still plans nothing. Notifications follow the tri-state
-// (research D). An update re-sends the row's Color (null when it has none),
+// (research D; never absent on an update, Proton would reset the row to null). An update re-sends the row's Color (null when it has none),
 // Attendees and IsOrganizer, reuses the row's session keys only when
 // SessionKeys trusts both, and carries no key packet; a create mints its
 // keys and sends Color null (an exception the master's Color). A row whose
@@ -817,8 +817,11 @@ func (pl *planner) alarms(we ical.WriteEvent) []ical.Notification {
 // serve them and the body's alarms map to device notifications alone. When
 // these mean the device part of r's set (the calendar's defaults when r's
 // Notifications are null, the row's list, the parts' VALARMs when the row
-// has none), r's value is kept as it is (kept: null stays null, absent
-// stays absent). Otherwise the new list is the body's notifications
+// has none), r's value is kept as it is (kept: null stays null, a list stays
+// that list). A row stored without the field is kept by sending its
+// effective set as a list: Proton turns Notifications absent into null on an
+// update [verified: live 2026-11-13, L.4 #10], so pcb never sends it absent.
+// Otherwise the new list is the body's notifications
 // followed by the email ones of r's set, unchanged (none for the parts'
 // VALARMs), within Proton's limit: a null row's email default is not lost.
 func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Optional[events.NotificationList], bool, error) {
@@ -831,10 +834,13 @@ func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Opti
 func (pl *planner) notificationsAfter(r *row, list []ical.Notification) (events.Optional[events.NotificationList], bool, error) {
 	raw := strings.TrimSpace(string(r.Event.Notifications))
 	var effective []ical.Notification
-	keep := events.Optional[events.NotificationList]{} // absent: the row keeps its own
+	var keep events.Optional[events.NotificationList]
 	switch raw {
 	case "":
+		// Never absent: Proton would reset the row to null. Send the parts'
+		// VALARMs as the list they mean ([] when none).
 		effective, _ = ical.NotificationsFromAlarms(r.stored.Subs("VALARM"), r.FullDay)
+		keep = events.Value(wireNotifications(effective))
 	case "null":
 		effective, keep = pl.d.notifications(r.FullDay), events.Null[events.NotificationList]()
 	default:

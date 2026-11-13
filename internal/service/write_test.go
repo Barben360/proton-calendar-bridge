@@ -2610,6 +2610,29 @@ func TestThunderbirdKeepsProtonEmailReminders(t *testing.T) {
 	}
 }
 
+// The live L.4 #10 finding (write matrix, 2026-11-13): Proton turns an
+// update without Notifications into null, the calendar's defaults, so a row
+// served without the field must not be updated with it left out. The row is
+// served without the field (as one stored without it would be) and holds no
+// VALARM in its parts: pcb sends [], what the row means, and a title edit
+// leaves it so, not on the calendar's defaults. The fake follows Proton
+// (absent is null). The planner test covers a VALARM in the parts.
+func TestUpdateOfARowServedWithoutNotificationsKeepsItsReminders(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "n@x", Start: base, End: base + 3600, Card: card("n@x", "Bare", base),
+			Notifications: []protontest.Notification{}})
+	}).start(t)
+	r.rewriteRefresh(t, func(row map[string]any) { delete(row, "Notifications") })
+	obj := r.object(t, "n@x")
+	if _, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Bare", "SUMMARY:Renamed"), service.Precondition{}); err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	if n := r.storedNotifications(t, "n@x"); n != "[]" {
+		t.Errorf("after a title edit: Notifications = %s, want [] (a field left out would be null)", n)
+	}
+}
+
 // dropEmailAlarms is data without its EMAIL VALARMs, as Thunderbird's
 // edit dialog saves an event (it shows one reminder).
 func dropEmailAlarms(data []byte) []byte {

@@ -580,18 +580,33 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 		}
 	})
 	t.Run("a row without Notifications", func(t *testing.T) {
-		// The render serves the parts' VALARMs (none here) and the update
-		// leaves the field out, so the row keeps its own (review M3).
+		// Proton turns a field left out of an update into null (live L.4
+		// #10), so pcb never leaves it out: a row stored without it is
+		// kept by sending its effective reminders, the parts' VALARMs.
 		bare := seed{id: "row-n", parts: masterParts(), fields: map[string]any{"Notifications": nil}}.row(t)
 		gn := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
 		if p := plan(t, gn, cal(noAlarm)); len(p.Ops) != 0 {
 			t.Errorf("unchanged body: ops = %s, want none", describe(p))
 		}
-		if got := open(t, onlyUpdate(t, plan(t, gn, cal(with(t, noAlarm, title))), "row-n"), &bare); got.field("Notifications") != "<absent>" {
-			t.Errorf("title edit: Notifications = %s, want it left out", got.field("Notifications"))
+		if got := open(t, onlyUpdate(t, plan(t, gn, cal(with(t, noAlarm, title))), "row-n"), &bare); got.field("Notifications") != "[]" {
+			t.Errorf("title edit, no VALARM in the parts: Notifications = %s, want [] sent (never left out)", got.field("Notifications"))
 		}
 		if got := open(t, onlyUpdate(t, plan(t, gn, cal(masterBody())), "row-n"), &bare); got.field("Notifications") != `[{"Type":1,"Trigger":"-PT15M"}]` {
 			t.Errorf("an alarm added: Notifications = %s", got.field("Notifications"))
+		}
+	})
+	t.Run("a row without Notifications and a VALARM in its parts", func(t *testing.T) {
+		// The live case: the row keeps its reminder through a title edit,
+		// as a list sent, not as the field left out (which resets it).
+		parts := masterParts()
+		parts[ical.SharedEncrypted] = frag(append([]string{"UID:" + planUID, stamp, "DESCRIPTION:Daily sync", "SUMMARY:Standup", "X-MOZ-GENERATION:3"}, alarm15...)...)
+		bare := seed{id: "row-v", parts: parts, fields: map[string]any{"Notifications": nil}}.row(t)
+		gv := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
+		if p := plan(t, gv, cal(masterBody())); len(p.Ops) != 0 {
+			t.Errorf("unchanged body: ops = %s, want none", describe(p))
+		}
+		if got := open(t, onlyUpdate(t, plan(t, gv, cal(with(t, masterBody(), title))), "row-v"), &bare); got.field("Notifications") != `[{"Type":1,"Trigger":"-PT15M"}]` {
+			t.Errorf("title edit: Notifications = %s, want the parts' reminder sent", got.field("Notifications"))
 		}
 	})
 	t.Run("a custom list read back is kept as stored", func(t *testing.T) {

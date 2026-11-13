@@ -134,6 +134,7 @@ Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (typ
 | create of a new exception of a stored master (Thunderbird moving one occurrence) | as an update against the master's set: the master's value when the set equals its device part (`null` stays `null`), else the set then the master's email entries (a `null` master's: the defaults'), so the occurrence keeps the series' email reminder [verified: `TestEmailNotificationsStayProtonSide`] |
 | update, the set equals the device part of the one pcb served from (the defaults when the row has `null`, the row's list, the parts' VALARMs when the row has none) | the row's own value, unchanged (`null` stays `null`) |
 | update, otherwise | the set, then the email entries of that one unchanged (a `null` row's: the defaults'), within 10 |
+| update of a row stored without the field (never seen live: every cached row has `null` or a list) | as above, but "the row's own value" is the parts' VALARMs as a list (`[]` when none): pcb never sends `Notifications` absent, because Proton turns it into `null` on an update, the calendar's defaults, not the row's own [verified: live 2026-11-13, L.4 #10, `TestUpdateOfARowServedWithoutNotificationsKeepsItsReminders`] |
 
 Other row fields:
 
