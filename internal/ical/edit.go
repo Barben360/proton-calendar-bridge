@@ -843,7 +843,9 @@ func sameRule(a, b string) bool {
 // minute value gets a DISPLAY alarm in the wording ical.Alarms renders.
 // Other VALARMs stay. Alarms Proton would drop (NotificationsFromAlarms:
 // more than ten, after a timed event's start, a day or more after an
-// all-day one's) are refused.
+// all-day one's) are refused; an e-mail alarm kept is left out of that
+// check: e-mail notifications are Proton-side (Notification), so a write
+// drops it from the device list and the row keeps its own.
 func replaceAlarms(ev *Component, minutes []int) *Refusal {
 	sp, _ := ev.Get("DTSTART")
 	allDay := strings.EqualFold(firstParam(sp, "VALUE"), "DATE")
@@ -879,8 +881,12 @@ func replaceAlarms(ev *Component, minutes []int) *Refusal {
 		a.add(Property{Name: "DESCRIPTION", Value: text})
 		alarms[i] = a
 	}
-	if _, dropped := NotificationsFromAlarms(alarms, allDay); dropped > 0 {
-		return refuse(BadData, fmt.Sprintf("an alarm Proton cannot keep: at most %d, none after a timed event's start or a day after an all-day one's", maxNotifications))
+	device := slices.DeleteFunc(slices.Clone(alarms), func(c Component) bool {
+		a, _ := alarmOf(c)
+		return strings.TrimSpace(a.Action) == "EMAIL"
+	})
+	if _, dropped := NotificationsFromAlarms(device, allDay); dropped > 0 {
+		return refuse(BadData, fmt.Sprintf("an alarm Proton cannot keep: at most %d, none after a timed event's start or a day after an all-day one's", MaxNotifications))
 	}
 	kept := ev.Items[:0:0]
 	for _, it := range ev.Items {

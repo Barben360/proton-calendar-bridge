@@ -1354,3 +1354,76 @@ func TestServeWaitForLoginParksAnUnreadableAccount(t *testing.T) {
 		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
 	}
 }
+
+// HUMAN-CHECKS 7.3.4 (live 2026-11-13): when Proton refuses the refresh and
+// the session ends, the "sync pass failed" line pcb serve logs for the
+// account carries the HTTP status and the Proton code of the refusal, so a
+// live run can confirm the signal. The message and hint stay the generic
+// ones; nothing else of Proton's answer (its text, the tokens) is logged.
+// pcb serve runs the real Hub on the fake (the rig's default), as main runs
+// it: one loop per account, the pass lines through daemon.LogPass.
+func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no control socket off Unix")
+	}
+	for _, tc := range []struct {
+		name       string
+		end        func(*protontest.Fake)
+		wantStatus string
+		wantCode   string
+		text       string // what the fake's answer says; it must never reach the logs
+	}{
+		{"revoked session", func(f *protontest.Fake) { f.RevokeSessions() }, "proton_status=422", "proton_code=10013", "Invalid refresh token"},
+		{"refresh refused with another status and code", func(f *protontest.Fake) {
+			f.ExpireAccessTokens()
+			f.FailNext("POST", "/auth/v4/refresh", http.StatusUnauthorized, 4242, 0)
+		}, "proton_status=401", "proton_code=4242", "injected failure"},
+		{"401 after a successful refresh", func(f *protontest.Fake) {
+			f.FailNext("GET", "/calendar/v1", http.StatusUnauthorized, 4343, 0)
+			f.FailNext("GET", "/calendar/v1", http.StatusUnauthorized, 4343, 0)
+		}, "proton_status=401", "proton_code=4343", "injected failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{})
+			r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+			r.want(exitcode.OK, "login", "--non-interactive", "--json")
+			id := accountID(t, r, r.f.Username)
+			tc.end(r.f)
+			s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+			var line string
+			for deadline := time.Now().Add(30 * time.Second); line == ""; {
+				for _, l := range strings.Split(s.errb.String(), "\n") {
+					if strings.Contains(l, `msg="sync pass failed"`) {
+						line = l
+						break
+					}
+				}
+				if line == "" {
+					if time.Now().After(deadline) {
+						t.Fatalf("no sync pass failed line:\n%s", s.errb.String())
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+			for _, want := range []string{tc.wantStatus, tc.wantCode, "account=" + id, "the Proton session has ended", "hint=\"run pcb login\""} {
+				if !strings.Contains(line, want) {
+					t.Errorf("log line lacks %q:\n%s", want, line)
+				}
+			}
+			// Proton's text, and every token the fake handed out (the
+			// login's and each refresh's, access and refresh).
+			secrets := append([]string{tc.text}, r.f.AccessTokens()...)
+			secrets = append(secrets, r.f.RefreshTokens()...)
+			if len(secrets) < 3 {
+				t.Fatalf("the fake handed out no tokens to look for: %q", secrets)
+			}
+			for _, secret := range secrets {
+				if secret != "" && strings.Contains(s.errb.String(), secret) {
+					t.Errorf("logs carry %q:\n%s", secret, s.errb.String())
+				}
+			}
+		})
+	}
+}

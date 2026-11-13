@@ -525,6 +525,23 @@ run 0 "$PCB" status --json
 equal "$(jq -r .data.daemon.pid "$RUN/out")" "$PID" "daemon pid after the rotate"
 
 # --------------------------------------------------------------------------
+step 16b "two access-token expiries in a row: each refreshed, the session stays"
+# Proton refuses a refreshed pair's refresh token unless the refresh carries
+# that pair's access token (E01, live 2026-11-12), and so does the fake: the
+# second refresh is the one a client without it loses.
+for n in 1 2; do
+	before=$(fake_calls POST /auth/v4/refresh)
+	curl -sS --fail -X POST "$CTL/expire-access-tokens" >/dev/null || fail "control: expire-access-tokens"
+	run 0 "$PCB" calendar list --json
+	equal "$(jq '.data.calendars | length' "$RUN/out")" 4 "calendars listed after expiry $n"
+	after=$(fake_calls POST /auth/v4/refresh)
+	[ "$after" -gt "$before" ] || fail "expiry $n: no refresh reached the fake ($before, then $after)"
+done
+run 0 "$PCB" status --json
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/out")" ready "phase after two refreshes"
+equal "$(jq -r .data.daemon.pid "$RUN/out")" "$PID" "daemon pid after two refreshes"
+
+# --------------------------------------------------------------------------
 step 17 "the fake revokes the session: needs-login, CalDAV 503, no restart"
 curl -sS --fail -X POST "$CTL/revoke-sessions" >/dev/null || fail "control: revoke-sessions"
 propfind0 "$DAV/" >/dev/null || fail "the authenticated request before the revoke check" # one authenticated request, as the live step sends

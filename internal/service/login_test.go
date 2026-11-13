@@ -1577,6 +1577,33 @@ func TestSignInRunsAllThatFollowsSRP(t *testing.T) {
 	}
 }
 
+// KeyFileAbsent means no file there, nothing else: a key file the caller
+// cannot stat (its directory unreadable, as /etc/pcb is to a non-root user
+// on a system install) is not reported absent.
+func TestStatusKeyFileUnreadableIsNotAbsent(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 || os.Geteuid() == -1 {
+		t.Skip("needs a non-root user on a POSIX system: root stats through any mode")
+	}
+	e := newEnv(t, protontest.Options{})
+	e.signIn(t)
+	dir := filepath.Dir(e.cfg.Secrets.KeyFile)
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, err := os.Stat(e.cfg.Secrets.KeyFile); err == nil || os.IsNotExist(err) {
+		t.Fatalf("precondition: stat of the key file = %v, want a permission error", err)
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.KeyFileAbsent {
+		t.Error("KeyFileAbsent with the key file present but not stat-able, want false")
+	}
+}
+
 // otherAccount opens a second account on its own directory, sharing the guard
 // directory of the first env's service when guard is set.
 func (e *env) otherAccount(t *testing.T, guard string, lim *access.Limiter) (*service.Local, paths.Dirs) {

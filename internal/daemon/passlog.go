@@ -80,6 +80,11 @@ func LogPass(log *slog.Logger, p service.WatchPass) {
 		if h := exitcode.HintOf(p.Err); h != "" {
 			attrs = append(attrs, "hint", h)
 		}
+		if status, code, ok := service.ProtonRefusal(p.Err); ok {
+			// What Proton answered when it ended the session: two numbers,
+			// never its text (HUMAN-CHECKS 7.3.4).
+			attrs = append(attrs, "proton_status", status, "proton_code", code)
+		}
 		log.Warn("sync pass failed", attrs...)
 		return
 	}

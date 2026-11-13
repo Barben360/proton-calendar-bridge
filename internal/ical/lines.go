@@ -28,9 +28,9 @@ func (p Property) Line() string { return p.Name + p.Params + ":" + p.Value }
 
 // UnescapeText is a TEXT value unescaped (RFC 5545 §3.3.11): "\\", "\;",
 // "\," and "\n" or "\N" (a newline) become what they stand for; any other
-// backslash is kept as written. Values are otherwise kept escaped, as
-// written; this is for comparing a value with its unescaped form (a UID
-// as Proton's column may hold it, SPEC §5.3).
+// backslash is kept as written (ParseWrite refuses a UID holding one).
+// Values are otherwise kept escaped, as written; this is for a UID, which
+// Proton stores unescaped (SPEC §5.3).
 func UnescapeText(v string) string {
 	if !strings.Contains(v, `\`) {
 		return v
@@ -51,6 +51,29 @@ func UnescapeText(v string) string {
 			continue
 		}
 		i++
+	}
+	return b.String()
+}
+
+// EscapeText writes v as a TEXT value (RFC 5545 §3.3.11): a backslash,
+// ";", "," and a newline are escaped; UnescapeText undoes it. pcb uses it
+// to serve Proton's unescaped UID column where no part carries the UID
+// line (a placeholder).
+func EscapeText(v string) string {
+	if !strings.ContainsAny(v, "\\;,\n") {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case '\\', ';', ',':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteByte(c)
+		}
 	}
 	return b.String()
 }

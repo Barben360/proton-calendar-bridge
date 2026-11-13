@@ -279,6 +279,9 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
   none; a login 429 names the wait ("retry in 2m0s") instead of "a few minutes"
   [verified: `TestParseRetryAfter`, `TestRetryAfterDateHonoured`,
   `TestBeginKeepsRetryAfter`, `TestLoginRateLimitedNamesRetryAfter`].
+  Each retry wait is logged at debug level ("retrying a Proton request": method, path without its query, status, 0 when
+  nothing answered, and wait), never a token, the session UID, a body, a query or a header (observation O1)
+  [verified: `TestARetryIsLoggedAtDebugWithoutSecrets`, `TestARetriedRequestIsLoggedAtDebug`].
 
 ### 5.2 Authentication
 State machine (persisted in C2):
@@ -295,13 +298,22 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
   login retried with it [verified: interactive login 2026-11-10]. Whether the
   solved token survives across processes and for how long [assumed → E02];
-  the design relies on it for `pcb login resume --captcha-token`. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session").
+  the design relies on it for `pcb login resume --captcha-token`. After "Press Enter once solved" an interactive login
+  prints "Checking the CAPTCHA with Proton…" while Proton checks the token (seconds, observation O1; never with
+  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session") is written up: it ran on 2026-11-13, its results are not written up yet.
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies
   (whoever unseals the store owns the account).
 - Session lifetime and refresh-token rotation rules [assumed → E01]: decide
   how often the daemon refreshes and when it must relogin. M1 refreshes on demand, once across processes; the Proton answers it classifies as "session ended" or "credentials refused" are all `[assumed]` until the live session lists them (`HUMAN-CHECKS.md`, "signals to confirm").
+- Refresh request: `POST /auth/v4/refresh` with `UID`, `RefreshToken`,
+  `ResponseType: token`, `GrantType: refresh_token`, `RedirectURI`, a random
+  `State` and the `AccessToken` of the pair being refreshed. Proton refuses a
+  refresh token issued by a refresh without that access token (400, code
+  10013); only the first refresh after a login works without it
+  [verified: live 2026-11-12, E01]. pcb (`auth.Refresh`) and pcb-lab always
+  send it, and the shared fake enforces the rule.
 - Locked ("password") scope for salts and calendar deletion via SRP to
   `/core/v4/users/unlock` [verified: proton-cal docs/overview.md].
 - Control channel [call]: the CLI talks to the daemon over a unix socket
@@ -470,9 +482,9 @@ untitled event), a calendar encrypted part holding only lines routed
 elsewhere, a fragment carrying a VCALENDAR-level line other than VERSION,
 PRODID or CALSCALE, a misrouted line stored in a signed part, a change that
 needs a session key the row lacks (a first COMMENT on a row without a
-calendar part, 403 `pcb:unsupported-change`, M4-R13), and (to be confirmed
-live, `HUMAN-CHECKS.md` §6 W10) a UID containing `,`, `;` or `\` if Proton's
-column holds it unescaped: the write path then compares UIDs unescaped, so such an
+calendar part, 403 `pcb:unsupported-change`, M4-R13), a row whose UID
+column holds an escaped form (`a\,b`, another client's data: Proton itself
+stores the unescaped value, below) of the UID its body carries: such an
 event's own edit is 503 `the event's UID is stored by Proton in another form than its
 text` (never a 409 naming itself), and the same UID at another name is a 409
 [verified: `TestAnEscapedUIDIsNeverItsOwnConflict`]; and a row that holds a personal part
@@ -481,10 +493,39 @@ text` (never a 409 naming itself), and the same UID at another name is a 409
 an omitted one is live check L.4 #10; a DELETE is unaffected [verified:
 `TestARowWithAPersonalPartIsNotUpdated`].
 
-The full fix (`OPEN.md`): fresh session keys and their key packets on every
-update, once live check L.4 #3 (research L.4) shows Proton accepts new key
-packets on an update. That removes the reuse, so residuals 1 to 5 go, and
-pinning with residuals 6 to 8 can go with it.
+The full fix (`OPEN.md`) would be fresh session keys and their key packets on
+every update, but live check L.4 #3 found that Proton refuses new key packets
+on an update (2000 "SharedKeyPacket is not allowed", the row keeps its packet
+[verified: live 2026-11-13, `spec/experiments/raw/L4/write-matrix.json`]), so
+the reuse and pinning stay until another way to rotate a row's keys is found.
+
+UID escaping: Proton stores a UID by its TEXT value, unescaped (RFC 5545
+§3.3.11: `\\`, `\;`, `\,`, `\n`): a create whose parts carry
+`UID:pcb-m4-a\,b` is the row `pcb-m4-a,b` [verified: live 2026-11-13,
+`HUMAN-CHECKS.md` W10]. pcb identifies an event by that value everywhere:
+`ical.ParseWrite` unescapes the body's UID (its VEVENTs keep the line as
+written, so the parts and what pcb serves carry `UID:pcb-m4-a\,b`), and the
+`?UID=` lookup, the read-back, the planner's row check, the conflict checks
+and the cache use the value; `ical.ProvesKey` compares the parts' UID by its
+value with the column [verified: `TestAnEscapedUIDIsCreatedConfirmedAndEdited`,
+`TestAnEscapedUIDIsCreatedAndEditedAtItsName`]. Such an event is served at the
+client's name when it was created there, else at the canonical name of the
+value (`~` + base64url of `pcb-m4-a,b`, §9): the name an event synced from
+Proton gets, so an href does not depend on which client wrote the event. A
+placeholder (an event that does not decrypt) serves the column escaped
+again (`ical.EscapeText`), as the parts would. Only `\,` was measured live;
+`\;`, `\\` and `\n` are taken to follow the same RFC rule. A body's UID
+holding an escape RFC 5545 does not define (`\x`, a trailing backslash) or a
+control character in its value (a newline included) is refused, 403
+`bad-data` with the reason: what Proton stores for it is not known, and a
+guess would leave the write unconfirmed; no client pcb targets writes one
+[verified: `TestParseWriteRefusesAUIDItCannotName`]. A row whose column
+holds an escaped form (`pcb-c\,d`, which Proton never writes; another
+client's data could) is never rewritten through pcb: any edit at its name,
+even one whose body repeats the column's exact text, is 503
+`ErrUIDStoredOtherwise`, because pcb names the event by the body's value
+(`pcb-c,d`), which is not the column, so neither the `?UID=` read-back nor
+the key proof would find it; a DELETE is unaffected.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
@@ -502,7 +543,17 @@ pinning with residuals 6 to 8 can go with it.
   | {ID, Event} | {ID}]}` (create, update, delete). One call per CalDAV write,
   never sent twice (a 401 answered before processing is the one resend,
   M4-R23). Per-entry codes in a 1001 envelope; the client reads 2000
-  (STATUS), 2001 (signature or exception SEQUENCE, not told apart, M4-R24),
+  (STATUS), 2001 (causes not told apart, M4-R24). 2001 measured [verified:
+  live 2026-11-13]: an exception of a master without SEQUENCE, so every
+  master pcb writes carries one (`spec/mapping.md` §6; `HUMAN-CHECKS.md`
+  6.3 D7, the create and its bisection); an RRULE with `COUNT=50`, `UNTIL`
+  in 2038, `FREQ=HOURLY` or a daily `INTERVAL=1000`, a floating time, a
+  non-IANA TZID (6.7 write matrix, `spec/experiments/raw/L4/write-matrix.json`;
+  pcb refuses all of them before sending). 2001
+  assumed: a part signed with another address's key and an exception
+  SEQUENCE below its master's [claim: research A.4]; an exception update
+  or delete under a master without SEQUENCE [assumed from the create's,
+  `OPEN.md` N2];
   2011 (unsupported content), 2061 (unknown ID), 2501 (gone); a delete answers
   `Responses: []` [claim: research A.3, A.4; the fake implements them]. The
   `Event` body: the card parts, key packets on a create only, `Permissions`
@@ -522,7 +573,7 @@ pinning with residuals 6 to 8 can go with it.
 Goal: incremental sync without re-listing. Source-based so far (third-party
 clients, nothing Proton-documented; `spec/experiments/E04-calendar-feed.md`,
 `E05-core-events.md`, evidence in `spec/experiments/raw/m2-feed-research.md`);
-the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
+the live run (`spec/HUMAN-CHECKS.md`, "M2 live session") ran on 2026-11-13; its results are not written up yet, and the markers stay `[assumed]` until then.
 - Calendar model events (M2 uses this): `GET /calendar/v1/{cal}/modelevents/latest`
   gives `{CalendarModelEventID}`; `GET /calendar/v1/{cal}/modelevents/{cursor}`
   gives `{CalendarModelEventID, More, Refresh, CalendarEvents:[{ID, Action, Event?}]}`.
@@ -582,7 +633,9 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
   property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte
   [claim: `internal/ical` has round-trip and fuzz tests, not re-listed here; the merge rules come from proton-cal and are live-verified only by its author [claim]].
   Row-level data joins in: `Color` to `COLOR`, `Notifications` to VALARMs (a `null`
-  list means the calendar's default notifications), attendee `Status` to `PARTSTAT`
+  list means the calendar's default notifications; email notifications are
+  Proton-side, not served and kept by an update: `spec/mapping.md` §5
+  [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4]), attendee `Status` to `PARTSTAT`
   [claim: `internal/service` render tests, names not re-checked].
 - One CalDAV object per UID: master first, then exceptions by RecurrenceID; duplicate
   masters resolved to the most recently edited one, the others left out and counted
@@ -849,7 +902,7 @@ M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAnd
 `TestEditedVersionFieldDoesNotDowngrade`, `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`,
 `TestRolledBackSecretsNeedALogin`, `TestLogoutWipesRolledBackSecrets`]. On a rollback the session pcb holds in memory
 is revoked best effort before it is dropped (M5-R3). Inside a systemd service and a container: the smoke tests never log in,
-so no sealed session was exercised there; that is the live step 7 (`spec/experiments/E15-secret-sealing.md`) [assumed → step 7].
+so no sealed session was exercised there; the live step 7 did: a sealed session survived in a systemd user service (the VM ran with a key file, `secrets: sealed with a key file (headless fallback)`, and came back after a reboot with no login) and in a container (the compose secret `/run/secrets/pcb_key`, no same-volume warning) [verified: live 2026-11-13, spec/experiments/M5-live.md].
 
 ## 8. C3/C4 — Service and sync
 
@@ -874,7 +927,18 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
   long) and when it retries (M2-R11). All requests go through the one per-account client and its
-  limiter. Tuning after E06 stays open; the daemon's idle slow-down is below.
+  limiter. After a request that gets no answer (its timeout, a reset connection), the client's next
+  request first closes its idle connections, so a retry or the next pass dials anew: an HTTP/2
+  connection that stopped answering otherwise stays in the pool and takes every later request, as live
+  after a login (`[verified: live 2026-11-13]`, HUMAN-CHECKS 7.1.5). The refresh does the same on the
+  login manager's connections. Both transports also run the HTTP/2 health check (a PING after 15 s
+  without a frame, the connection closed when it is not answered within 15 s); the login calls other
+  than the refresh (SRP, the 2FA code, an unattended relogin) rely on it alone. Since M6 every account's loop is its own `Local.Serve`
+  under the Hub, so this holds per account; the API clients of all accounts share one transport (one pool in the process), so a
+  request without an answer in one account drops the pool's idle connections for all (they dial anew; nothing in flight is cut),
+  while each account's login manager keeps its own transport [verified: `TestHubServeAfterALoginLeavesAConnectionThatStoppedAnswering`
+  (the login that adds the account to a `pcb serve --wait-for-login`, and the login that wakes a signed-out account's waiting loop),
+  `TestServeAfterALoginLeavesAConnectionThatStoppedAnswering`]. Tuning after E06 stays open; the daemon's idle slow-down is below.
   `--full` lists every calendar again (with `--watch`, until one pass gets
   through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).
@@ -884,11 +948,11 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   A refused password is no activity. The first authenticated request while idle starts a pass at once; a wake never
   shortens a back-off or a `Retry-After` wait. Back-off is unchanged (x2 up to 10 min, +-10 %). A partial pass counts
   as a success for the cadence (M5-R1): only a pass in which no calendar synced backs off, and the failing calendars
-  show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the rule [verified:
+  show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the back-off rule (it raises no alert: `sync-stalled` is a `pcb serve` health alert) [verified:
   `TestIdleServeSlowsToFiveMinutes`, `TestAuthenticatedRequestWakesAnIdleLoop`, `TestRefusedPasswordIsNotActivity`,
   `TestWakeCutsOnlyASuccessSleep`, `TestWakeDuringBackOffDoesNotShortenIt`, `TestPartialPassKeepsTheCadence`,
-  `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: that Thunderbird at its
-  default settings keeps the active cadence and that reopening it brings a pass within seconds [assumed → step 7.4].
+  `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: the idle cadence (300 s after 35 minutes without a request) and the wake (an authenticated request brings a pass within about a second, cadence back to 30 s) [verified: live 2026-11-13, spec/experiments/M5-live.md], driven by curl. That Thunderbird at its
+  default settings keeps the active cadence was **not** verified live (7.4.4 skipped; E08 §3.7 stays the expectation) [assumed → step 7.4.4].
   The standby idea is caloxide's (README, Credits).
 - Waiting for a login (M5, `pcb serve --wait-for-login`, the default of the units and the image; M5-Rpre3, R8, R9,
   R10, P8, P9, P22): CTL and the CalDAV listener bind at once, and while there is no usable session every
@@ -935,9 +999,10 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
      are stored (`ApplyWrite`: the change counter moves, the feed cursor does
      not).
   5. Conflicts and the precondition, on that fresh state: the UID served at
-     another name, or the name serving another live UID → 409 (UIDs compared
-     unescaped: the same event at its own name is never a 409 against itself, it is
-     503 `ErrUIDStoredOtherwise`, §5.3); `If-Match` (`*`, or a comma-separated
+     another name, or the name serving another live UID → 409 (UIDs by their
+     unescaped value, §5.3; a row whose column holds an escaped form of the
+     body's UID is never a 409 against itself at its own name, it is
+     503 `ErrUIDStoredOtherwise`); `If-Match` (`*`, or a comma-separated
      list, several headers being one list, compared strongly: a weak `W/` tag never
      matches; present but blank → 412 before the service is asked) and
      `If-None-Match` (`*`, or ETags compared weakly) on the fresh object ETag → 412
@@ -1029,7 +1094,8 @@ bridge's own, never Proton's text). The rule [call, research J]: accept and
 normalise where nothing the user sees is lost; refuse where writing would
 lose or corrupt data or reach the Proton web app in a form it cannot show.
 Accepted and normalised: `STATUS:TENTATIVE` dropped (Proton refuses it),
-unsupported VALARMs dropped, the client's `COLOR` ignored, `DURATION` made
+unsupported VALARMs dropped (`ACTION:EMAIL` among them: email
+notifications are Proton-side, `spec/mapping.md` §5), the client's `COLOR` ignored, `DURATION` made
 `DTEND`, Mozilla TZIDs mapped, two RRULE forms rewritten (M4-R5, M4-R12),
 missing `DTSTAMP`/`DTEND` defaulted (M4-R8), attendee parameter edits
 ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
@@ -1037,6 +1103,16 @@ ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
 - an RRULE outside Proton's supported set (`spec/mapping.md` §4; whether
   Proton alters the accepted ones [assumed → E12,
   `spec/experiments/E12-recurrence-forms.md`]);
+- a write that introduces a master DTSTART not an occurrence of its RRULE
+  (by the rule's BY parts, on DTSTART's day: its TZID's zone, a UTC time's
+  UTC day): a create, or an update changing the stored DTSTART or RRULE;
+  Proton drops that start while Thunderbird shows it [verified: live
+  2026-11-13, `HUMAN-CHECKS.md` W8], so `pcb:unsupported-recurrence`,
+  `DTSTART is not an occurrence of the RRULE`, before any write; an update
+  keeping both passes, and reads are not checked (`spec/mapping.md` §4)
+  [verified: `TestRRuleStartMustBeAnOccurrence`,
+  `TestADTSTARTOffItsRuleIsRefusedBeforeProton`,
+  `TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt`];
 - floating date-times, TZIDs Go's zone database cannot resolve;
 - adding or removing attendees, any attendee on a new event, a new
   occurrence whose attendees differ from its series' (invitations are not
@@ -1345,8 +1421,9 @@ step 10, not run yet.
   given [verified: `TestUpdateChangesNullClears`, `TestUpdateDryRunShowsBeforeAfter`, `TestUpdateEventDryRunWritesNothing`,
   `TestUpdateTimesKeepTheEventZone`]. Edits patch the stored iCalendar, so what the call did not touch (alarms,
   exceptions, unknown properties) stays [verified: `TestApplyEditKeepsUntouchedLines`]; `alarms` given keeps an existing
-  alarm at the same minutes as it is (an e-mail notification stays an e-mail), and only a new minute value becomes a
-  device (DISPLAY) alarm [verified: `TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain`]; one occurrence becomes an
+  alarm at the same minutes as it is (an `ACTION:EMAIL` alarm keeps its lines and is not refused; the write leaves e-mail
+  notifications to Proton, `spec/mapping.md` §5), and only a new minute value becomes a device (DISPLAY) alarm
+  [verified: `TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain`]; one occurrence becomes an
   override, deleting one adds an EXDATE [verified: `TestApplyEditOccurrenceCreatesOverride`, `TestDeleteOccurrenceAddsExdate`,
   `TestDeleteOneOccurrence`]. A series that only moves in time takes its EXDATEs, its overrides' RECURRENCE-IDs and its
   UNTIL along; a change that would leave an exception, or the start, off the rule kept is refused (`refused`,
@@ -1534,6 +1611,14 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
   base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
+  Since M6 the logout step signs out every account of the state. After the steps it says what each account's logout got,
+  in the first line of `pcb logout`'s words ("Logged out.", "Logged out locally; Proton could not be told: …", "Not logged
+  in."), one line per account, prefixed `<address> (<local-id>): ` when there are several, also when a later step fails
+  (exit 40); `--json` carries a list `logout`, one `{account, address, was_logged_in, revoked, sync_running}` per account
+  that answered. An account whose logout got no answer has no outcome: the step's note says `logout failed (…)`, the error
+  named after its account when there are several [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`,
+  `TestUninstallPartialFailureKeepsTheLogoutOutcome`, `TestUninstallLogoutWithoutAnAnswerIsTheStepsNote`,
+  `TestUninstallSignsOutEveryAccount`, `TestUninstallReportsEachAccountsOutcome`].
   With no unit installed and no `--user`/`--system`, applying exits 10 ("nothing to uninstall"), while `--plan`
   exits 0 with "Nothing to remove" and no step (M5-R16) [verified: `TestUninstallPlanWithNothingInstalled`].
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
@@ -1560,7 +1645,7 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
 `TestClientShowNamesRotateForAnUnrecoverablePassword`; `make systemd-smoke` (a Debian container with systemd as
 PID 1, both scopes, install, active, 503 with a client, uninstall) and `make container-smoke` passed locally on
 commit e5faeb8; the CI jobs have not run until the branch is pushed. Real systemd on a real host, linger across a
-reboot and a real login are [assumed → step 7].]
+reboot and a real login are [verified: live 2026-11-13, spec/experiments/M5-live.md] (7.1.3, 7.1.8, 7.1.5).]
 
 M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`, `internal/doctor`; rulings in §18):
 - Selector: `A` is the account's address (case-insensitive) or its local ID (`pcb account list`), pending adds included; empty, it is the only account
@@ -1795,9 +1880,9 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   Ctrl-C at the 2FA prompt leaves the held login until it expires or is replaced (at most 5 minutes) [source: ruling
   M5-R12 (4); no test].
 - `pcb status` since M6 (schema 2): `daemon` (null offline), `listener` (the base URL, TLS, fingerprint, certificate end), `alerts` (the process's) and `accounts[]`, each with its
-  `AccountInfo` (`id`, `address`, `phase`, `pending`, `caldav`, `stopped`) flat, `login` (`service.Status`'s fields, which M5-P4 kept flat at the top level), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
+  `AccountInfo` (`id`, `address`, `phase`, `pending`, `caldav`, `stopped`) flat, `login` (`service.Status`'s fields, which M5-P4 kept flat at the top level), `health` (serve state, `interval_seconds` (the next wait, which backs off), `cadence_seconds` (the wait after a good pass), `idle`, `last_pass`, per-calendar sync and write gate
   with its reason, render counters, human verification), `url` (its CalDAV URL while a listener is bound) and its own `alerts` [verified: `TestStatusListsEveryAccount`, `TestOneFailingAccountDoesNotFailTheStatus`, `TestVanishedAccountIsSkipped`].
-  Text lines, once for the process then per account (the block starts at `account: <address> (<local-id>)`, marks `pending`, `CalDAV off`, `stopped`): first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
+  Text lines, once for the process then per account (the block starts at `account: <address> (<local-id>)`, marks `pending`, `CalDAV off`, `stopped`): first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:` (the configured path, followed by `(absent)` when no file is there, as after `pcb uninstall --delete-data`; never on a keyring state, whose `key_file` is empty; `--json`: `key_file_absent`), `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
   (offline: `daemon: not running (offline view)`), `listener:`, `url:`, one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
   the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the
@@ -1820,9 +1905,14 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   `account-unreadable` (error, M6: the account's login state or store cannot be read, with that error's message and fix; the other accounts still answer) [verified: `TestOneFailingAccountDoesNotFailTheStatus`, `TestStatusShowsEveryAccount`],
   `needs-login` (error; also a process alert, message `not logged in to Proton`, when no account exists, ruling R44: an existing account carries its own) [verified: `TestProcessNeedsLoginWithNoAccount`, `TestStatusOfNoAccountNeedsALogin`], `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
-  Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
+  Serve's start is more than 5 cadence intervals, `health.cadence_seconds`: the wait after a good pass, 30 s active or 300 s idle,
+  never the back-off or `Retry-After` wait that `interval_seconds` reports; an unreported cadence counts as the active 30 s, or the idle 300 s when `idle`; per account, from that account's loop), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
   and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error; these two are the process's alone, `ProcessAlerts`)
-  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestProcessAlerts`, `TestCertificateAlertIsTheProcesss`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestProcessAlerts`, `TestCertificateAlertIsTheProcesss`, `TestSyncStalledIgnoresTheBackOffWait`, `TestHealthCadenceIgnoresTheBackOff`,
+  `TestHubSyncStalledFollowsEachAccountsCadence`, `TestStatusNamesAClientsFileThatCannotBeLoaded`]. [verified: live 2026-11-13] build bc0f196 (M5) measured the bug: with outgoing
+  443 rejected (cadence 30 s, back-off waits 31 s, 56 s, 2m6s) `pcb status` showed no alert after 3m41s without a sync, because the
+  threshold was 5 × `interval_seconds`, the back-off wait, so a longer outage delayed the warning; fixed by measuring against
+  `cadence_seconds`; the second cut on build ede976e showed `sync-stalled` once five cadences passed (`[verified: live 2026-11-13]`, `spec/experiments/M5-live.md` 7.5).
 - `keyring-locked` (M7; error, per account): the desktop keyring that seals the account is locked; message `the desktop keyring is locked`, fix `unlock it (log in to the desktop session), pcb retries every 30 s`; it clears by itself once the
   keyring unlocks (§7.3) [verified: `TestKeyringLockedAlert`].
 - `keyring-unavailable` (M7; error, per account): no Secret Service answers for a keyring state (ruling R15); message `the desktop keyring is not available`, fix `run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state`;
@@ -1932,7 +2022,7 @@ Status at the close of M0 (2026-11-11):
 - Live runs, in order: `spec/HUMAN-CHECKS.md`.
 
 Status at the close of M2 (2026-11-11):
-- E04, E05, E07: source-based write-ups (`E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md`; evidence `raw/m2-feed-research.md`), every marker stays `[assumed]`; the live run is deferred ("M2 live session" in `spec/HUMAN-CHECKS.md`, recorded with `pcb-lab probe feed`).
+- E04, E05, E07: source-based write-ups (`E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md`; evidence `raw/m2-feed-research.md`), every marker stays `[assumed]`; the live run ("M2 live session" in `spec/HUMAN-CHECKS.md`, recorded with `pcb-lab probe feed`) ran on 2026-11-13, its results are not written up yet, so the markers stay `[assumed]` until then.
 - E09: moved to M3 with event decryption (M2-R1); the M2 cache stores ciphertext only.
 - E06 (rate limits): not started; M2 relies on the client's limiter and on honouring `Retry-After`.
 
@@ -1966,7 +2056,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M5 Daemon and ops (built, live session pending) | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only: smoke-tested in CI (a Debian container with systemd as PID 1, the image); the live run is `spec/HUMAN-CHECKS.md` step 7 |
 
 | M6 Several accounts per process (built 2026-11-12, live session pending) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run is `spec/HUMAN-CHECKS.md` step 8, on the one test account |
-| M7 `pcb-ui` desktop app (built 2026-11-13, live session pending) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard, notifications, autostart; the Secret Service sealer (§7.3); `pcb-ui` log file; `make ui` and `make install-ui` | the UI logic and the keyring sealer are tested against the fake Proton, a fake Secret Service and Fyne's headless driver; the GUI itself is `spec/HUMAN-CHECKS.md` step 9, in the step 8 throwaway VM with a GNOME session, the test account only (decision 0015) |
+| M7 `pcb-ui` desktop app (built 2026-11-13, live session pending) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard, notifications, autostart; the Secret Service sealer (§7.3); `pcb-ui` log file; `make ui` and `make install-ui` | the UI logic and the keyring sealer are tested against the fake Proton, a fake Secret Service and Fyne's headless driver; the GUI itself is `spec/HUMAN-CHECKS.md` step 9, on a throwaway desktop VM (a GNOME session) fenced like step 7 with its own login ledger, the test account only (decision 0015) |
 | M8 MCP adapter (built 2026-11-13, live session pending) | E16, E19; the structured event layer (`ical.Expand`, `DecodeEvent`, `ApplyEdit`, `service.Agenda`); the per-account MCP switch; `internal/mcp` (tokens, grants, the eleven tools, untrusted marking, audit); remote `/mcp`; `/mcp` on the control socket; `pcb mcp` (relay or session daemon); `login` and `logout` (`pcb-ui` wizard or loopback page) | every tool tested through the SDK's client against the fake Proton, a secrets scan over a whole session, and `make rehearse` driving `pcb mcp` against `pcb-fake`; Claude Code over stdio and remote, the loopback login and one create/update/delete seen in the Proton web app are `spec/HUMAN-CHECKS.md` step 10, the test account only (decision 0016) |
 
 Nothing else is planned [decided 0007; MCP by 0016].

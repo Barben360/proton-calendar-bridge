@@ -46,7 +46,7 @@ Request envelope [claim: proton-cal live] (`proton-cal/docs/api.md:171-187`; `pr
 | `CalendarEventContent` | same shape | same | a part with only UID+DTSTAMP is omitted by carbonate (`ARCHITECTURE.md:475-477`) and caloxide; proton-cal always sends both (with an empty `COMMENT:`) (`proton-cal/pkg/ical/ical.go:231-237`) — both accepted [claim: both live] |
 | `AttendeesEventContent` | `[]` or `[{Type:3,…}]` (shared session key) | resealed verbatim | `cal-gateway/internal/proton/write.go:413-422` |
 | `Attendees` | `[]` | **re-send** `[{Token,Status,Comment}]` from the row | omitting it wipes RSVP rows [claim: proton-cal live] (`api.md:237-248`; `proton-cal/pkg/event/write.go:251-262`) |
-| `Notifications` | `null` (calendar defaults) / `[]` / array | **always re-send** (tri-state) | omitted on update = unchanged [claim: carbonate live] (`ARCHITECTURE.md:487-489`); wrong value wipes reminders [claim: proton-cal live] (`api.md:237-248`). §D |
+| `Notifications` | `null` (calendar defaults) / `[]` / array | **always re-send** (tri-state) | omitted on update = unchanged [claim: carbonate live; **contradicted: an absent `Notifications` on update is reset to null, [verified: live 2026-11-13, L.4 #10]**] (`ARCHITECTURE.md:487-489`); wrong value wipes reminders [claim: proton-cal live] (`api.md:237-248`). §D |
 | `Color` | `null` or palette hex | re-send the row's | off-palette: code 2011; `null` on update is ignored (colour sticks) [claim: proton-cal live] (`api.md:217-221,246-248`) |
 | `AddedProtonAttendees`, `RemovedAttendeeAddresses` | invitations only | | [claim: carbonate live] (`ARCHITECTURE.md:513-536`); out of scope |
 | `PersonalEventContent` | — | — | **no bridge sends it**; field name unverified [inferred] |
@@ -124,7 +124,7 @@ Same table in four independent places (proton-cal and carbonate/caloxide trace i
 - `SEQUENCE` bare integer (A.4).
 
 ### B.5 Updates: full replace, session keys reused, patch in place
-- A sync update **replaces the whole event**: anything omitted or `null`/`[]` is reset (except `Color: null`, ignored, and an absent `Notifications`, kept) [claim: proton-cal live] (`api.md:225-248`); [claim: carbonate live] (`ARCHITECTURE.md:487-489`).
+- A sync update **replaces the whole event**: anything omitted or `null`/`[]` is reset (except `Color: null`, ignored, and an absent `Notifications`, kept: **wrong for `Notifications`, which an update without it resets to null, [verified: live 2026-11-13, L.4 #10]**) [claim: proton-cal live] (`api.md:225-248`); [claim: carbonate live] (`ARCHITECTURE.md:487-489`).
 - Reuse the session keys of the row: decrypt `SharedKeyPacket` / `CalendarKeyPacket` with the calendar key, re-encrypt the new plaintext under the **same** keys, send no key packets [claim: proton-cal live] (`api.md:257-267`; `proton-cal/pkg/event/write.go:166-237`); minting fresh keys without key packets makes everything undecryptable [claim: cal-gateway] (`update.go:24-31`). Whether the server accepts **new** key packets on an update is unverified (carbonate/caloxide send one only when the row had none) [unknown].
 - Patch in place, never rebuild from a model: proton-cal and cal-gateway decrypt the current parts and change only the edited properties, keeping every other line byte for byte (ORGANIZER, X-*, conferencing, COMMENT) (`proton-cal/docs/api.md:231-236`; `cal-gateway/internal/proton/update.go:33-45`; `FEATURE-MATRIX.md:186-189`). Both refuse to reseal an event any part of which did not decrypt (`proton-cal/pkg/event/write.go:138-140`; `cal-gateway/.../update.go:45-47,66-70` → 403).
 - carbonate and caloxide rebuild all parts from the client's VEVENT through go-ical (re-encoded, not byte-exact) (`carbonate/.../write.go:406-487`; `caloxide/.../calendar.go:722-745,965-1160`).
@@ -264,15 +264,15 @@ After the write:
 
 ### L.4 Facts that need a live account (HUMAN-CHECKS, after the CAPTCHA)
 1. Create/update/delete round trip seen correctly in the Proton web app (and our reader), with binary-mode signatures and PKESK to the primary calendar key only.
-2. SEQUENCE: text-only edit without bump — kept or silently dropped? Time edit without bump?
-3. New key packets on an update: accepted, ignored or refused?
+2. SEQUENCE: text-only edit without bump — kept or silently dropped? Time edit without bump? Time edit answered (case `unbumped-time-edit`): refused, code 2000 "Cannot update time data without also incrementing Sequence", `StartTime` unchanged [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`]; the text-only edit is 6.2 W4's.
+3. New key packets on an update: accepted, ignored or refused? Answered (case `key-packets-on-update`): refused, code 2000 "SharedKeyPacket is not allowed"; the row keeps the old key packet [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`].
 4. Mixed create/update/delete entries in one batch; per-entry vs all-or-nothing.
-5. Second master with an existing UID: refused (which code) or stored?
-6. RRULE limits enforced by the server or not (COUNT 50, UNTIL 2038, BYSETPOS 5, FREQ=HOURLY, INTERVAL bounds) — E12.
+5. Second master with an existing UID: refused (which code) or stored? Answered (case `second-master`): refused, code 2500 "UID already exists"; 1 row, the first create's [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`].
+6. RRULE limits enforced by the server or not (COUNT 50, UNTIL 2038, BYSETPOS 5, FREQ=HOURLY, INTERVAL bounds) — E12. Answered (creates): `FREQ=WEEKLY;COUNT=50` 2001 "RRule.COUNT is too large"; `FREQ=WEEKLY;UNTIL=20380106T090000Z` 2001 "RRule.UNTIL is too large"; `FREQ=HOURLY;COUNT=3` 2001 "RRule.FREQ=hourly is not allowed"; `FREQ=DAILY;INTERVAL=1000;COUNT=2` 2001 "RRule.INTERVAL is too large"; each stored nothing. `FREQ=MONTHLY;BYDAY=MO;BYSETPOS=5;COUNT=3` accepted (1000), RRULE column and parts as sent (pcb refuses it: conservative) [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`]. Other FREQs' INTERVAL bounds are not measured.
 7. Unknown properties (X-MOZ-*, CLASS, CATEGORIES, URL, ATTACH) kept in the shared encrypted part, and after an edit in the web app — E13.
-8. STATUS TENTATIVE code 2000; floating time; non-IANA TZID; DURATION instead of DTEND.
+8. STATUS TENTATIVE code 2000; floating time; non-IANA TZID; DURATION instead of DTEND. Answered (creates): STATUS:TENTATIVE 2000 "Unknown EventStatus: TENTATIVE"; floating time 2001 "Date-time must be localized"; TZID `Mars/Olympus` 2001 "Invalid timezone"; DURATION without DTEND 2011 "These properties are not supported"; each stored nothing [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`].
 9. Member `Permissions` value on an owned calendar and on view/edit shares — E14; passphrase `Signature` verifies with our address key — E10/R17.
-10. What happens to `PersonalEvents` of a row on a sync update; whether `Notifications` absent on update keeps the old value.
+10. What happens to `PersonalEvents` of a row on a sync update; whether `Notifications` absent on update keeps the old value. Answered live 2026-11-13: no, it resets to null (the calendar's defaults), on update as on create [verified: live 2026-11-13]; the personal-part half is still open: a create carrying `PersonalEventContent` answered 1000 but stored no personal part (the field name is unverified), so the update leaving it out was not sent [verified: live 2026-11-13, HUMAN-CHECKS 6.7, `L4/write-matrix.json`].
 11. Delay between a write and its feed entry; whether the echoed row equals a later GET (ETag stability).
 12. Thunderbird: dismissed alarm does not re-fire after the PUT round trip (VEVENT-level LASTACK only); PUT at a `_`-sanitised name; "this and future" request shape; 409 no-uid-conflict recovery.
 

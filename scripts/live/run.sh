@@ -20,10 +20,11 @@
 #                  this login beyond the main or global budget; printed loudly and
 #                  recorded with the reason R in both ledgers; the 60 s spacing
 #                  still holds; refused (exit 2) without a non-empty reason
-#   --vm           step 7 only, on its throwaway VM: pcb runs with the host's
+#   --vm           steps 7 to 9, on their throwaway VMs: pcb runs with the host's
 #                  default dirs there (that is what `pcb install` tests), so the dir
 #                  guard cannot apply and PCB_*_DIR are removed from the command's
-#                  environment; instead it requires the marker /etc/pcb-live-vm
+#                  environment (the banner says so, not the guard's dir list);
+#                  instead it requires the marker /etc/pcb-live-vm
 #                  ("throwaway", created by the author on the VM) and a VM or
 #                  container per systemd-detect-virt, refuses your workstation
 #                  and your production server by host name, and the ledger
@@ -81,8 +82,17 @@ export PROTON_CAL_CONFIG_DIR=$R/seed
 (( proton )) && export PCB_GUARD_PROTON_CAL=1
 unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
 
+# Banners go to stderr: stdout is the command's alone. The guard's banner
+# lists the dirs it checked; --vm unsets them before the command, so it
+# prints what is in force instead.
+(( vm )) && live_guard_quiet=1
 # shellcheck source=guard.sh
 . "$here/guard.sh" || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
+unset live_guard_quiet
+if (( vm )); then
+  printf 'live --vm, run root %s (its bin and login ledger)\n' "$PCB_LIVE_RUN" >&2
+  printf "  PCB_CONFIG_DIR, PCB_STATE_DIR, PCB_LAB_DIR, PROTON_CAL_CONFIG_DIR unset: pcb's default directories on this host\n" >&2
+fi
 
 # --proton-cal: the proton-cal the command runs is the run root's build.
 if (( proton )) && [[ ! -x $PCB_LIVE_RUN/bin/proton-cal ]]; then

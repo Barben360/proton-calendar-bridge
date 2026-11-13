@@ -30,9 +30,7 @@ against a fake Proton only, and M5 adds the daemon around them: a control
 socket behind a live `pcb status` and `pcb doctor`, `pcb serve --wait-for-login`,
 `pcb install`, `uninstall` and `service` (systemd, user or system), a container image,
 and CalDAV passwords you can show again (`pcb client show`). Both smoke tests (the image,
-and a Debian container with systemd as PID 1) passed locally, and CI publishes the image from main (below). The live sessions against the test account (M1, M2 for the change feed, step 6
-for Thunderbird and the M4 writes, then step 7 for the M5 daemon, service and container) are deferred until the author can solve a
-CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", steps 6 and 7); until then the cache, sync, write and daemon rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before steps 6 and 7 have run. M6 is tested against the fake Proton only, with two or more accounts: there is no second Proton test account, so the live check of the migration, one account and Thunderbird on its per-account URL is `spec/HUMAN-CHECKS.md` step 8, not run yet. **No downgrade after M6**: the first M6 command moves an M5 state into `accounts/<id>/` (session, cache and CalDAV passwords come across); an M5 binary then sees no account, and if it logs in anyway M6 refuses to start (exit 10) and names the files (`account files of an older pcb are beside the per-account layout`, hint `remove them or move the state directory aside: this pcb version cannot be downgraded`). Keep a copy of the state directory before upgrading if you may go back. The design is in
+and a Debian container with systemd as PID 1) passed locally, and CI publishes the image from main (below). The live sessions against a test account ran on 2026-11-13 on the M5 build, before M6 and M7 (M1, M2 for the change feed, step 6 for Thunderbird and the M4 writes, step 7 for the M5 daemon, service and container; `spec/HUMAN-CHECKS.md`), and the fixes they called for are in. The step 7 results are in `spec/experiments/M5-live.md`; the other write-ups are still to come. M6 is tested against the fake Proton only, with two or more accounts: there is no second Proton test account, so the live check of the migration, one account and Thunderbird on its per-account URL is `spec/HUMAN-CHECKS.md` step 8, not run yet. **No downgrade after M6**: the first M6 command moves an M5 state into `accounts/<id>/` (session, cache and CalDAV passwords come across); an M5 binary then sees no account, and if it logs in anyway M6 refuses to start (exit 10) and names the files (`account files of an older pcb are beside the per-account layout`, hint `remove them or move the state directory aside: this pcb version cannot be downgraded`). Keep a copy of the state directory before upgrading if you may go back. This is still an early version: do not point pcb at an account you care about yet. The design is in
 `spec/SPEC.md` and `spec/decisions/0014-several-accounts-per-process.md`.
 
 Milestone M7 adds the Linux desktop app `pcb-ui` (below) and a sealer that keeps the sealing key in the desktop keyring (Secret Service). Both are tested against the fake Proton, a fake Secret Service and Fyne's headless test driver; the GUI itself (tray, notifications, the real keyring) is `spec/HUMAN-CHECKS.md` step 9, in a throwaway VM with a GNOME session and the test account, not run yet. See `spec/decisions/0015-pcb-ui.md`.
@@ -98,7 +96,7 @@ pcb client show              # in another terminal: URL, username, password and,
 ```
 
 In Thunderbird: New Calendar > On the Network, format CalDAV, the URL of `pcb client show` as Location (`/dav/<local-id>/`: one per account), its username (the account's address; any username is accepted) and its
-password (the live session against the bridge is `spec/HUMAN-CHECKS.md` step 6, not run yet). `pcb serve` keeps the cache in sync (a pass every 30 s, every 5 min once nobody has used the bridge for 35 minutes, and at once when a client asks again) and serves it, with writes, until Ctrl-C
+password (the live session against the bridge, `spec/HUMAN-CHECKS.md` step 6, ran on 2026-11-13 on the M5 build; its write-up is still to come). `pcb serve` keeps the cache in sync (a pass every 30 s, every 5 min once nobody has used the bridge for 35 minutes, and at once when a client asks again) and serves it, with writes, until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0; a second signal exits 20). Plain `pcb serve` refuses to start logged out (exit 10, `pcb login`),
 while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb is already serving (pid N)`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
 listening instead: with no account it waits for the first login (no CalDAV client exists before one, so CalDAV answers 401), and an account waiting for a login, from any process, has its CalDAV answer 503 with `Retry-After: 30` until it completes (again whenever Proton ends the session), with no restart.
@@ -139,7 +137,7 @@ CLI as that user, as `pcb install` prints it: `sudo -u pcb env PCB_CONFIG_DIR=/e
 `pcb uninstall` stops the service and removes the unit, keeping your data. `pcb uninstall --delete-data` (it asks, or `--yes`) first
 logs out, which revokes the Proton session, then deletes the config and state directories (and with `--system` the `pcb` user); it
 removes only a directory named `pcb`, and keeps and names a key file kept elsewhere. A state sealed with the desktop keyring also loses its `pcb sealing key` item ("The desktop keyring" below). It leaves `/usr/local/bin/pcb` and prints the `rm` line.
-`--plan` shows the steps without running them. The live run on a fresh host is `spec/HUMAN-CHECKS.md` step 7.1, not run yet.
+`--plan` shows the steps without running them. The live run on a fresh host is `spec/HUMAN-CHECKS.md` step 7.1, run on 2026-11-13 on the M5 build (`spec/experiments/M5-live.md`).
 
 ## Desktop app (pcb-ui, Linux)
 
@@ -287,7 +285,7 @@ docker exec pcb pcb status        # live state; docker exec pcb pcb doctor for t
 `pcb client show` prints the URL with the first of `hostnames` and the fingerprint to compare in Thunderbird's certificate exception
 dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no account, 401 over TLS with or without
 credentials, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
-container are `spec/HUMAN-CHECKS.md` step 7.2, not run yet. Five wrong passwords from one IP in a minute lock that IP for the minute:
+container are `spec/HUMAN-CHECKS.md` step 7.2, run on 2026-11-13 on the M5 build (`spec/experiments/M5-live.md`; Thunderbird was not part of it). Five wrong passwords from one IP in a minute lock that IP for the minute:
 Docker's port publishing keeps the client's source IP, but with the userland proxy (rootless Docker, some setups) every client shares
 one IP, so one device's typos lock them all for that minute (`spec/OPEN.md`).
 
@@ -315,7 +313,7 @@ docker compose up -d
 
 Creating, editing, moving and deleting events, single occurrences included, go to Proton while `pcb serve` runs: each change is one Proton write call, read back before Thunderbird gets its answer, and never retried once it may have reached Proton (the one exception: it is resent once when Proton answers 401 for an expired token before processing it, which refreshes the session, M4-R23). Thunderbird shows what Proton stored, which can differ from what it sent (the full table: `spec/mapping.md`):
 
-- alarms become Proton notifications (email or device, before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost;
+- alarms become Proton device notifications (before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost. Email notifications stay Proton-side: Proton sends them, pcb does not show them to the client, and your edits keep them (set them in the Proton web app);
 - `STATUS:TENTATIVE` is dropped (Proton refuses it), your colour choice is ignored (Proton's colour stays), `DURATION` becomes an end time, a "monthly on the 2nd Tuesday" or "every weekday" rule is written in Proton's equivalent form;
 - unknown properties (Thunderbird's `X-MOZ-*` and others) are kept, encrypted;
 - changes to an existing attendee's `ROLE`, `CN`, `PARTSTAT` or `RSVP` are ignored and still answered as saved (204): Proton keeps the attendee's stored line, so a participation status you change in Thunderbird shows its old value again at the next read; change it in the Proton web app.
@@ -325,6 +323,7 @@ Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely. F
 - calendars you may not write: holidays and subscribed calendars, calendars where your member lacks write permission, calendars whose key signature does not check out (`pcb calendar list` shows them `read_only`);
 - adding or removing attendees, or an attendee on a new event: invitations are not supported, and **pcb never notifies attendees** in v1 (moving an occurrence of a meeting keeps its attendees but sends them nothing);
 - recurrence rules Proton cannot hold: hourly or finer, a count above 49, an end after 2037-12-31, `RDATE`, `EXRULE`, "this and all future occurrences" sent as one change, and the other forms in `spec/mapping.md` §4;
+- a series whose start is not one of its own occurrences (Proton would drop that start, Thunderbird show it): refused when a write creates one or changes the start or rule of an existing one (other edits pass), so put the start on one of the rule's days in that same edit, or delete the series and create it again;
 - floating times (no time zone) and time zones Go's database does not know;
 - events pcb cannot rewrite safely: one it cannot decrypt or verify, one written by another person, someone else's invitation, one whose key material changed since pcb first saw it;
 - edits of an event that holds per-user data pcb cannot rewrite yet (`pcb:personal-part`: typically alarms stored by older Proton clients; edit it in the Proton web app); deleting it works.

@@ -843,8 +843,9 @@ func TestOccurrenceAfterUntilIsRefused(t *testing.T) {
 }
 
 // Review A finding 2: setting alarms by minutes keeps an existing alarm at
-// those minutes as it is (an e-mail notification stays one); only a new
-// minute value gets a DISPLAY alarm.
+// those minutes as it is (an e-mail alarm keeps its lines); only a new
+// minute value gets a DISPLAY alarm. An e-mail alarm is Proton-side (#16,
+// Fix 4): it is not refused as one Proton cannot keep.
 func TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain(t *testing.T) {
 	obj := calendar("BEGIN:VEVENT", "UID:a@x", "DTSTAMP:20260101T000000Z", "SUMMARY:Review",
 		"DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",

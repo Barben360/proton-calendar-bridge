@@ -522,14 +522,23 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys, lenient b
 		}
 	}
 	if cols.RecurrenceID != nil {
-		if m := tx.master(cols.UID); m != nil && cols.Sequence < m.cols.Sequence {
+		m := tx.master(cols.UID)
+		switch {
+		case m != nil && !m.cols.HasSequence:
+			// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): the create of an
+			// exception of a master whose signed part has no SEQUENCE;
+			// the message is the fake's (pcb logged the code alone). The
+			// same refusal of an exception update is [assumed, not
+			// measured live].
+			return nil, failed(codeInvalid, "fake: the main event has no SEQUENCE")
+		case m != nil && cols.Sequence < m.cols.Sequence:
 			return nil, failed(codeInvalid, "Single edits should have a Sequence greater or equal to main event")
 		}
 	}
 	if cols.Color, err = colorOf(ev.Color, old); err != nil {
 		return nil, failed(codeNotAllowed, "Not a valid Proton color")
 	}
-	if cols.Notifications, err = notificationsOf(ev.Notifications, old); err != nil {
+	if cols.Notifications, err = notificationsOf(ev.Notifications); err != nil {
 		return nil, failed(codeInvalid, "fake: Notifications: %v", err)
 	}
 	cols.Permissions, cols.IsOrganizer = *ev.Permissions, 1
@@ -837,6 +846,30 @@ func partProperties(s slot, text string, lenient bool) ([]property, error) {
 	return props, nil
 }
 
+// unescapeText is a TEXT value unescaped (RFC 5545 §3.3.11): "\\", "\;",
+// "\," and "\n" or "\N" stand for what they escape; any other backslash
+// is kept. Proton stores a UID so: the row of `UID:a\,b` is `a,b` (measured
+// live 2026-11-13, HUMAN-CHECKS W10).
+func unescapeText(v string) string {
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] == '\\' && i+1 < len(v) {
+			switch c := v[i+1]; c {
+			case '\\', ';', ',':
+				b.WriteByte(c)
+				i++
+				continue
+			case 'n', 'N':
+				b.WriteByte('\n')
+				i++
+				continue
+			}
+		}
+		b.WriteByte(v[i])
+	}
+	return b.String()
+}
+
 // propValues are the values of the properties named name, in order.
 func propValues(props []property, name string) []string {
 	var out []string
@@ -860,7 +893,7 @@ func parseColumns(props []property, lenient bool) (columns, error) {
 		var err error
 		switch p.name {
 		case "UID":
-			c.UID = p.value
+			c.UID = unescapeText(p.value)
 		case "DTSTART":
 			var t time.Time
 			t, c.FullDay, c.StartTZ, err = instantOf(p, lenient)
@@ -885,6 +918,7 @@ func parseColumns(props []property, lenient bool) (columns, error) {
 				return columns{}, errors.New("SEQUENCE with parameters")
 			}
 			c.Sequence, err = strconv.Atoi(p.value)
+			c.HasSequence = true
 		}
 		if err != nil {
 			return columns{}, fmt.Errorf("%s: %w", p.name, err)
@@ -932,15 +966,12 @@ func colorOf(raw json.RawMessage, old *eventRec) (string, error) {
 	return c, nil
 }
 
-// notificationsOf reads an entry's Notifications (research D): absent keeps
-// the row's on update and is null on create; null is null (the calendar's
-// defaults), [] none, a list is checked (Type 0 email or 1 device, Trigger a
-// duration).
-func notificationsOf(raw json.RawMessage, old *eventRec) ([]Notification, error) {
-	switch s := string(bytes.TrimSpace(raw)); {
-	case s == "" && old != nil:
-		return old.cols.Notifications, nil
-	case s == "" || s == "null":
+// notificationsOf reads an entry's Notifications (research D): absent is
+// null (the calendar's defaults) on an update as on create, never the
+// row's own [verified: live 2026-11-13, L.4 #10]; null is null, [] none, a
+// list is checked (Type 0 email or 1 device, Trigger a duration).
+func notificationsOf(raw json.RawMessage) ([]Notification, error) {
+	if s := string(bytes.TrimSpace(raw)); s == "" || s == "null" {
 		return nil, nil
 	}
 	var list []Notification

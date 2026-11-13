@@ -198,3 +198,22 @@ func TestUnescapeText(t *testing.T) {
 		}
 	}
 }
+
+// EscapeText writes a TEXT value (RFC 5545 §3.3.11), UnescapeText's
+// inverse on any value: a UID served from Proton's unescaped column.
+func TestEscapeText(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain@x":    "plain@x",
+		"pcb-a,b":    `pcb-a\,b`,
+		`a;b\c`:      `a\;b\\c`,
+		"line\nnext": `line\nnext`,
+	} {
+		got := EscapeText(in)
+		if got != want {
+			t.Errorf("EscapeText(%q) = %q, want %q", in, got, want)
+		}
+		if back := UnescapeText(got); back != in {
+			t.Errorf("UnescapeText(EscapeText(%q)) = %q", in, back)
+		}
+	}
+}

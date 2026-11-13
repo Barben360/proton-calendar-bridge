@@ -207,3 +207,25 @@ const KeyringRetry = keyringRetry
 // SetRenderBudget sets how many objects one agenda call may render (set it
 // before the call).
 func (l *Local) SetRenderBudget(n int) { l.agendaBudget = n }
+
+// AlsoOnOpen makes f run on every Local the Hub holds now and opens later,
+// after the hook SkipSRP set (call it after SkipSRP: SkipSRP replaces the
+// hook).
+func (h *Hub) AlsoOnOpen(f func(l *Local)) {
+	h.mu.Lock()
+	prev := h.onOpen
+	h.onOpen = func(l *Local) {
+		if prev != nil {
+			prev(l)
+		}
+		f(l)
+	}
+	locals := make([]*Local, 0, len(h.accounts))
+	for _, a := range h.accounts {
+		locals = append(locals, a.local)
+	}
+	h.mu.Unlock()
+	for _, l := range locals {
+		f(l)
+	}
+}

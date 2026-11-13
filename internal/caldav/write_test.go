@@ -286,6 +286,8 @@ func TestRefusedWritesNeverReachProton(t *testing.T) {
 		{"RDATE", r.put(calPath(work)+"rd@x.ics", thunderbird("rd@x", "Odd", "RDATE:20270120T080000Z")), http.StatusForbidden, "rdate"},
 		{"two UIDs", r.put(calPath(work)+"two@x.ics", strings.Replace(ok, "END:VCALENDAR", "BEGIN:VEVENT\r\nUID:other@x\r\nDTSTAMP:20270101T090000Z\r\nDTSTART:20270101T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR", 1)), http.StatusForbidden, "not-one-uid"},
 		{"not iCalendar", r.put(calPath(work)+"junk.ics", "hello"), http.StatusForbidden, "bad-data"},
+		{"a UID holding a newline", r.put(calPath(work)+"nl.ics", thunderbird(`nl\nx@x`, "Newline")), http.StatusForbidden, "bad-data"},
+		{"a UID with an unknown escape", r.put(calPath(work)+"esc.ics", thunderbird(`esc\x@x`, "Escape")), http.StatusForbidden, "bad-data"},
 		{"floating time", r.put(calPath(work)+"fl@x.ics", strings.ReplaceAll(thunderbird("fl@x", "Floating"), "00Z\r\n", "00\r\n")), http.StatusForbidden, "floating-time"},
 		{"PUT on the calendar", r.put(calPath(work), ok), http.StatusMethodNotAllowed, ""},
 		{"DELETE the calendar", r.do(http.MethodDelete, calPath(work), ""), http.StatusMethodNotAllowed, ""},
@@ -440,6 +442,60 @@ func TestAnAliasIsWrittenAndDeletedThere(t *testing.T) {
 	wantStatus(t, r.do(http.MethodHead, alias, ""), http.StatusNotFound)
 	if n := r.sent(); n != 3 {
 		t.Errorf("%d requests reached Proton's write endpoint, want 3", n)
+	}
+}
+
+// HUMAN-CHECKS W8 pcb-m4-notfirst: a series whose DTSTART (a Wednesday) is
+// not an occurrence of its RRULE (Mondays) is refused before any write
+// reaches Proton, 403 pcb:unsupported-recurrence with the reason: Proton
+// would drop that Wednesday and Thunderbird show it (live 2026-11-13). The
+// same series from a Monday is created.
+func TestADTSTARTOffItsRuleIsRefusedBeforeProton(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	series := func(uid, day string) string {
+		return strings.Join([]string{"BEGIN:VCALENDAR", "PRODID:-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN", "VERSION:2.0",
+			"BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20270101T090000Z", "SUMMARY:pcb-m4 notfirst",
+			"DTSTART;TZID=Europe/Paris:" + day + "T120000", "DTEND;TZID=Europe/Paris:" + day + "T130000",
+			"RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "END:VEVENT", "END:VCALENDAR"}, "\r\n") + "\r\n"
+	}
+	rec := r.put(calPath(cal)+"pcb-m4-notfirst.ics", series("pcb-m4-notfirst", "20270106"), "If-None-Match", "*")
+	if got := precondition403(t, rec); got != "unsupported-recurrence" {
+		t.Fatalf("pcb precondition %q, want unsupported-recurrence", got)
+	}
+	if !strings.Contains(rec.Body.String(), "DTSTART is not an occurrence of the RRULE") {
+		t.Errorf("403 body without the reason: %s", rec.Body)
+	}
+	if n := r.sent(); n != 0 {
+		t.Fatalf("%d requests reached Proton's write endpoint, want none", n)
+	}
+	wantStatus(t, r.put(calPath(cal)+"pcb-m4-monday.ics", series("pcb-m4-monday", "20270104"), "If-None-Match", "*"), http.StatusCreated)
+}
+
+// HUMAN-CHECKS W10 as Thunderbird meets it: a new event whose UID holds an
+// escaped comma (`UID:pcb-m4-a\,b`, which Proton stores as pcb-m4-a,b) is
+// created (201, confirmed by the read-back), served at the client's name
+// with the UID as written, edited there (204), and a pass later is still
+// served there. The same UID at another name is a 409.
+func TestAnEscapedUIDIsCreatedAndEditedAtItsName(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	const uid = `pcb-m4-a\,b`
+	name := calPath(cal) + "pcb-m4-escaped.ics"
+	wantStatus(t, r.put(name, thunderbird(uid, "Escaped"), "If-None-Match", "*"), http.StatusCreated)
+	if b := r.body(t, name); !strings.Contains(b, "UID:"+uid+"\r\n") || !strings.Contains(b, "SUMMARY:Escaped\r\n") {
+		t.Fatalf("GET after the create:\n%s", b)
+	}
+	wantStatus(t, r.put(name, thunderbird(uid, "Edited"), "If-Match", r.etag(t, name)), http.StatusNoContent)
+	r.next(t)
+	if b := r.body(t, name); !strings.Contains(b, "UID:"+uid+"\r\n") || !strings.Contains(b, "SUMMARY:Edited\r\n") {
+		t.Errorf("GET after the edit and a pass:\n%s", b)
+	}
+	wantStatus(t, r.put(calPath(cal)+"elsewhere.ics", thunderbird(uid, "Again"), "If-None-Match", "*"), http.StatusConflict)
+	if n := r.sent(); n != 2 {
+		t.Errorf("%d requests reached Proton's write endpoint, want 2", n)
 	}
 }
 

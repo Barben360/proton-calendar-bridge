@@ -137,9 +137,9 @@ func parseNotifications(raw json.RawMessage, dropped *int) (list []notification,
 
 // Alarms renders a row's notifications as VALARMs. Tri-state: null (or absent)
 // means the calendar's default list (defaults, which the caller picks as the
-// part-day or full-day one), [] means none, an array is custom. Type 0 is an
-// EMAIL alarm, anything else DISPLAY; both carry a DESCRIPTION, EMAIL also a
-// SUMMARY. allDay only selects the wording.
+// part-day or full-day one), [] means none, an array is custom. Type 0, an
+// email, is not rendered (Proton sends it; Fix 4, choice A); anything else
+// is a DISPLAY alarm with a DESCRIPTION. allDay only selects the wording.
 func Alarms(notifications, defaults json.RawMessage, allDay bool) ([]Component, error) {
 	out, err := alarms(notifications, defaults, allDay, nil)
 	return out, err
@@ -163,17 +163,13 @@ func alarms(notifications, defaults json.RawMessage, allDay bool, dropped *int) 
 	}
 	out := make([]Component, 0, len(list))
 	for _, n := range list {
-		action := "DISPLAY"
 		if *n.Type == 0 {
-			action = "EMAIL"
+			continue // an email: Proton-side
 		}
 		a := Component{Name: "VALARM"}
-		a.add(Property{Name: "ACTION", Value: action})
+		a.add(Property{Name: "ACTION", Value: "DISPLAY"})
 		a.add(Property{Name: "TRIGGER", Value: n.Trigger})
 		a.add(Property{Name: "DESCRIPTION", Value: text})
-		if action == "EMAIL" {
-			a.add(Property{Name: "SUMMARY", Value: text})
-		}
 		out = append(out, a)
 	}
 	return out, nil

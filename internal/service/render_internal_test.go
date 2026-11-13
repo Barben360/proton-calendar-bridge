@@ -106,6 +106,24 @@ func TestPlaceholderRRuleIsOneValue(t *testing.T) {
 	}
 }
 
+// A placeholder's UID is Proton's column, the unescaped value: it is served
+// escaped (RFC 5545 TEXT), as a real event's parts carry it; a newline is
+// written `\n`, any other control dropped.
+func TestPlaceholderServesTheUIDEscaped(t *testing.T) {
+	for uid, want := range map[string]string{
+		"u@x":        "UID:u@x\r\n",
+		"pcb-a,b":    "UID:pcb-a\\,b\r\n",
+		`a;b\c`:      `UID:a\;b\\c` + "\r\n",
+		"line\nnext": "UID:line\\nnext\r\n",
+		"bell\ahere": "UID:bellhere\r\n",
+	} {
+		r := &cache.StoredRow{ID: "r", UID: uid, Start: 1793955600, End: 1793959200, Raw: json.RawMessage(`{}`)}
+		if got := string(ical.Object(new(placeholder(r)), nil)); !strings.Contains(got, want) {
+			t.Errorf("UID %q: want %q in\n%s", uid, want, got)
+		}
+	}
+}
+
 // A recurring timed placeholder keeps the row's local time across a DST
 // change, in the row's tzdata zone; any other row stays in UTC (audit
 // read-M3).

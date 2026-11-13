@@ -32,8 +32,8 @@ type Calendar struct {
 	// retired key primary too (anomalies a client must fail closed on).
 	NoPrimaryKey, TwoPrimaryKeys bool
 	// The calendar's default reminders, as its bootstrap serves them; nil:
-	// one DISPLAY reminder, -PT1H for part-day events and -PT15H for full-day
-	// ones (see SetDefaultNotifications).
+	// an email and a DISPLAY reminder, -PT1H for part-day events and -PT15H
+	// for full-day ones (see SetDefaultNotifications).
 	PartDayNotifications, FullDayNotifications []Notification
 }
 
@@ -600,11 +600,12 @@ func (c *calendarRec) bootstrap() map[string]any {
 	}
 }
 
-// notifications serves a default reminder list; nil is one DISPLAY reminder
-// at trigger.
+// notifications serves a default reminder list; nil is an email and a
+// DISPLAY reminder at trigger, as a new Proton calendar holds (live
+// 2026-11-13, HUMAN-CHECKS 6.3 D4).
 func notifications(list []Notification, trigger string) []any {
 	if list == nil {
-		return []any{map[string]any{"Type": 1, "Trigger": trigger}}
+		return []any{map[string]any{"Type": 0, "Trigger": trigger}, map[string]any{"Type": 1, "Trigger": trigger}}
 	}
 	out := make([]any, 0, len(list))
 	for _, n := range list {

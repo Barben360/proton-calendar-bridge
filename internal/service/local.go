@@ -284,6 +284,7 @@ func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.T
 		HTTP:       l.o.HTTP,
 		Sleep:      l.o.Sleep,
 		Refresh:    refresh,
+		Logger:     l.log(),
 	})
 }
 
@@ -450,6 +451,10 @@ func (l *Local) Status(context.Context) (Status, error) {
 	}
 	if s.Sealer == SealerKeyFile {
 		s.KeyFile = l.o.Config.Secrets.KeyFile
+		// The keyring's sealer has no file to be absent.
+		if _, err := os.Stat(s.KeyFile); errors.Is(err, os.ErrNotExist) {
+			s.KeyFileAbsent = true
+		}
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL

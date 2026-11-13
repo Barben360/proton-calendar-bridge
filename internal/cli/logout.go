@@ -26,21 +26,27 @@ func (a *app) newLogout() *cobra.Command {
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			text := "Logged out."
-			switch {
-			case !res.WasLoggedIn:
-				text = "Not logged in."
-			case !res.Revoked:
-				text = "Logged out locally; Proton could not be told: end the session in " + service.SessionsPage + "."
-			}
-			if res.SyncRunning {
-				text += "\nAnother pcb process is syncing (pcb sync or pcb serve): once it stops, run pcb logout again so it leaves no event cache."
-			}
-			return Finish(cmd, res, text, nil)
+			return Finish(cmd, res, logoutText(res), nil)
 		},
 	})
 	c.Flags().BoolVar(&yes, "yes", false, "discard a stored session this pcb cannot read without asking (it cannot be revoked)")
 	return c
+}
+
+// logoutText is what pcb logout says of res; pcb uninstall --delete-data
+// says the same of its logout step.
+func logoutText(res service.LogoutResult) string {
+	text := "Logged out."
+	switch {
+	case !res.WasLoggedIn:
+		text = "Not logged in."
+	case !res.Revoked:
+		text = "Logged out locally; Proton could not be told: end the session in " + service.SessionsPage + "."
+	}
+	if res.SyncRunning {
+		text += "\nAnother pcb process is syncing (pcb sync or pcb serve): once it stops, run pcb logout again so it leaves no event cache."
+	}
+	return text
 }
 
 // logout signs the selected account out through the daemon when one runs

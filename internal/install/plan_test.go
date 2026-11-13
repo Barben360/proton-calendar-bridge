@@ -272,7 +272,7 @@ func TestApplyLogoutFailureIsANoteAndGoesOn(t *testing.T) {
 			note = st.Note
 		}
 	}
-	if !strings.Contains(note, "proton unreachable") || !strings.Contains(note, "revoke the session") {
+	if !strings.Contains(note, "proton unreachable") || !strings.Contains(note, "end the session in the Proton web app") {
 		t.Fatalf("logout note = %q", note)
 	}
 	if _, err := os.Stat(filepath.Join(s.root, "home/alice/.local/state/pcb")); !errors.Is(err, os.ErrNotExist) {

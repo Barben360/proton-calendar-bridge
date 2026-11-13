@@ -96,12 +96,13 @@ var (
 	// in the Proton web app (ruling M4-R44). Unavailable (CalDAV: 503),
 	// never a refusal.
 	ErrHumanVerification = errors.New("a human verification is needed before Proton accepts writes")
-	// ErrUIDStoredOtherwise: the PUT's UID is, once unescaped (RFC 5545
-	// TEXT), the UID of the object at the requested name, which Proton
-	// stores in another form than the text of its parts (the parked
-	// UID-escaping item, SPEC §5.3, OPEN.md): the same object, which pcb
-	// cannot rewrite while the forms diverge. Unavailable (CalDAV: 503),
-	// never a 409 naming the object itself.
+	// ErrUIDStoredOtherwise: the PUT's UID (its TEXT value) is the cached
+	// UID of the object at the requested name once that one is unescaped
+	// too: a row whose column holds an escaped form, which Proton never
+	// writes itself (it stores a UID unescaped, SPEC §5.3) but another
+	// client's parts may disagree with. The same object, which pcb cannot
+	// rewrite while the forms diverge. Unavailable (CalDAV: 503), never a
+	// 409 naming the object itself.
 	ErrUIDStoredOtherwise = errors.New("the event's UID is stored by Proton in another form than its text, so pcb cannot rewrite it yet")
 )
 
@@ -869,8 +870,8 @@ func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in i
 	if href := st.hrefOf(in.UID); st.live && href != name {
 		return objectState{}, planned{}, uidConflict(href)
 	}
-	if err := l.unescapedConflict(pre, w, in.UID, name, st); err != nil {
-		return objectState{}, planned{}, err
+	if storedOtherwise(in.UID, name, st) {
+		return objectState{}, planned{}, uidStoredOtherwise()
 	}
 	if st.nameUID != "" && st.nameUID != in.UID && st.nameLive && st.hrefOf(st.nameUID) == name {
 		return objectState{}, planned{}, uidConflict(name)
@@ -922,33 +923,17 @@ func (l *Local) preparePut(ctx, pre context.Context, w *write, name string, in i
 	return st, p, nil
 }
 
-// unescapedConflict compares the PUT's UID with the cached ones unescaped
-// (RFC 5545 TEXT; write-I2, the parked UID-escaping item of SPEC §5.3):
-// Proton's column may hold `a,b` for `UID:a\,b`, which ListByUID and the
-// exact checks do not match. The object at name whose UID is the PUT's
-// once both are unescaped is the same object, never a conflict with
-// itself: pcb cannot rewrite it while its forms diverge
-// (ErrUIDStoredOtherwise, 503). The unescaped UID live at another name is
-// a conflict naming that name, as for any UID.
-func (l *Local) unescapedConflict(ctx context.Context, w *write, uid, name string, st objectState) error {
-	if st.nameUID != "" && st.nameUID != uid && st.nameLive && st.hrefOf(st.nameUID) == name &&
-		ical.UnescapeText(st.nameUID) == ical.UnescapeText(uid) {
-		return uidStoredOtherwise()
-	}
-	plain := ical.UnescapeText(uid)
-	if plain == uid || st.live {
-		return nil
-	}
-	other, err := l.read(ctx, w, plain, name)
-	switch {
-	case err != nil:
-		return err
-	case !other.live:
-		return nil
-	case other.hrefOf(plain) == name:
-		return uidStoredOtherwise()
-	}
-	return uidConflict(other.hrefOf(plain))
+// storedOtherwise reports the object at name whose cached UID, read as
+// TEXT and unescaped, is the PUT's uid (itself unescaped, ical.Incoming)
+// while the column differs: a row whose column holds an escaped form
+// (`a\,b`, from a client whose parts do not unescape to Proton's column).
+// It is the same object, never a conflict with itself, and pcb cannot
+// rewrite it while its forms diverge (ErrUIDStoredOtherwise, 503). Proton
+// itself stores a UID unescaped (live 2026-11-13, SPEC §5.3), so pcb's own
+// writes never meet it.
+func storedOtherwise(uid, name string, st objectState) bool {
+	return st.nameUID != "" && st.nameUID != uid && st.nameLive && st.hrefOf(st.nameUID) == name &&
+		ical.UnescapeText(st.nameUID) == uid
 }
 
 // DeleteObject implements API.

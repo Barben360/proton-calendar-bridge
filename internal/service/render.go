@@ -585,7 +585,9 @@ func placeholder(row *cache.StoredRow) ical.Component {
 		return ical.Property{Name: name, Value: t.Format("20060102T150405Z")}
 	}
 	props := []ical.Property{
-		{Name: "UID", Value: textOnly(row.UID)},
+		// The column is the unescaped value (SPEC §5.3): served as TEXT,
+		// as a real event's parts carry it; a newline becomes `\n`.
+		{Name: "UID", Value: textOnly(ical.EscapeText(row.UID))},
 		{Name: "DTSTAMP", Value: time.Unix(row.LastEdit, 0).UTC().Format("20060102T150405Z")},
 		at("DTSTART", row.Start),
 	}

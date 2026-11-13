@@ -16,7 +16,7 @@ func ptr[T any](v T) *T { return &v }
 // serving is a Health of a Serve that began serving an hour ago, with a
 // 30 s interval and cal as its one calendar.
 func serving(cal service.CalendarHealth) *service.Health {
-	return &service.Health{Serve: service.ServeServing, Since: ptr(now.Add(-time.Hour)), IntervalSeconds: 30,
+	return &service.Health{Serve: service.ServeServing, Since: ptr(now.Add(-time.Hour)), IntervalSeconds: 30, CadenceSeconds: 30,
 		Calendars: []service.CalendarHealth{cal}}
 }
 
@@ -67,7 +67,7 @@ func TestAlerts(t *testing.T) {
 				Message: "Proton asks for a CAPTCHA: solve it at https://verify.proton.me/?token=x",
 				Fix:     "pcb login resume --captcha-token TOKEN (the token parameter of that URL)"}}},
 		{"human verification", ctl.AlertInput{Login: ready, Health: &service.Health{Serve: service.ServeServing, Since: ptr(now),
-			IntervalSeconds: 30, HumanVerification: []service.HumanVerification{
+			IntervalSeconds: 30, CadenceSeconds: 30, HumanVerification: []service.HumanVerification{
 				{Source: "write", Since: now.Add(-time.Minute)}, {Source: "sync", Since: now.Add(-2 * time.Minute)}}}},
 			[]ctl.Alert{{Code: "human-verification", Severity: "error",
 				Message: "Proton asks for a human verification (code 9001) since 2026-11-12T11:58:00Z (write, sync): writes answer 503",
@@ -83,7 +83,7 @@ func TestAlerts(t *testing.T) {
 			[]ctl.Alert{{Code: "sync-stalled", Severity: "warning", Message: "no successful sync of Work for 1h0m0s",
 				Fix: "see last_pass and the logs (pcb service logs)", Calendar: "cal-1"}}},
 		{"serving since is later than the last sync", ctl.AlertInput{Login: ready, Health: &service.Health{
-			Serve: service.ServeServing, Since: ptr(now.Add(-time.Minute)), IntervalSeconds: 30,
+			Serve: service.ServeServing, Since: ptr(now.Add(-time.Minute)), IntervalSeconds: 30, CadenceSeconds: 30,
 			Calendars: []service.CalendarHealth{cal(func(c *service.CalendarHealth) { c.SyncedAt = ptr(now.Add(-48 * time.Hour)) })}}}, nil},
 		{"stopped is never stalled", ctl.AlertInput{Login: ready, Health: &service.Health{Serve: service.ServeStopped,
 			Calendars: []service.CalendarHealth{cal(func(c *service.CalendarHealth) { c.SyncedAt = nil })}}}, nil},
@@ -121,10 +121,71 @@ func TestAlerts(t *testing.T) {
 	}
 }
 
+// Live finding 2026-11-13 (build bc0f196): with Proton unreachable the
+// threshold followed the back-off wait and no alert showed after 3m41s. The
+// threshold is 5 × the cadence, whatever the next wait is.
+func TestSyncStalledIgnoresTheBackOffWait(t *testing.T) {
+	t.Parallel()
+	ready := service.Status{Phase: "ready"}
+	health := func(cadence, next int, since time.Duration) *service.Health {
+		h := serving(cal(func(c *service.CalendarHealth) { c.SyncedAt = ptr(now.Add(-since)) }))
+		h.CadenceSeconds, h.IntervalSeconds = cadence, next
+		return h
+	}
+	stalled := func(h *service.Health) bool {
+		for _, a := range ctl.Alerts(ctl.AlertInput{Login: ready, Health: h, Now: now}) {
+			if a.Code == "sync-stalled" {
+				return true
+			}
+		}
+		return false
+	}
+	// The measured sequence: next waits 31 s, 56 s, 2m6s after failed passes.
+	for _, next := range []int{31, 56, 126, 600} {
+		if !stalled(health(30, next, 3*time.Minute+41*time.Second)) {
+			t.Errorf("no sync-stalled 3m41s after the last good sync with a %d s back-off wait, cadence 30 s", next)
+		}
+		if stalled(health(30, next, 150*time.Second)) {
+			t.Errorf("sync-stalled at exactly 5 cadence intervals with a %d s back-off wait", next)
+		}
+	}
+	if stalled(health(300, 300, 24*time.Minute)) || !stalled(health(300, 300, 25*time.Minute+time.Second)) {
+		t.Error("an idle cadence (300 s) must keep a 5 × 300 s threshold")
+	}
+	if stalled(health(300, 600, 25*time.Minute)) {
+		t.Error("a back-off wait moved an idle threshold")
+	}
+	if stalled(health(30, 126, time.Minute)) {
+		t.Error("a good pass a minute ago is stalled")
+	}
+	// A wake: the loop is active again (not idle), the last good sync is 290 s
+	// old, and the cadence still reported is the idle one until the woken pass ends.
+	woken := health(300, 30, 290*time.Second)
+	woken.Idle = false
+	if stalled(woken) {
+		t.Error("a wake alone raised sync-stalled")
+	}
+	// An older daemon reports no cadence: its idle loop keeps 5 × 300 s.
+	idleOld := health(0, 300, 24*time.Minute)
+	idleOld.Idle = true
+	if stalled(idleOld) {
+		t.Error("an idle daemon without cadence_seconds is stalled before 5 × 300 s")
+	}
+	idleOld = health(0, 300, 25*time.Minute+time.Second)
+	idleOld.Idle = true
+	if !stalled(idleOld) {
+		t.Error("an idle daemon without cadence_seconds is not stalled past 5 × 300 s")
+	}
+	// A health without a cadence (older daemon) falls back to the active one.
+	if !stalled(health(0, 126, 3*time.Minute+41*time.Second)) {
+		t.Error("no cadence: want the active 30 s, not the back-off wait")
+	}
+}
+
 // Errors first, then by code, then by calendar ID.
 func TestAlertsAreOrdered(t *testing.T) {
 	t.Parallel()
-	h := &service.Health{Serve: service.ServeServing, Since: ptr(now.Add(-time.Hour)), IntervalSeconds: 30,
+	h := &service.Health{Serve: service.ServeServing, Since: ptr(now.Add(-time.Hour)), IntervalSeconds: 30, CadenceSeconds: 30,
 		HumanVerification: []service.HumanVerification{{Source: "sync", Since: now}},
 		Calendars: []service.CalendarHealth{
 			{ID: "cal-b", Name: "B", Gate: "undecided", GateReason: "r", KeysError: "k"},

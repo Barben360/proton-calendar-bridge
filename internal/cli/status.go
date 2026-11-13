@@ -299,7 +299,11 @@ func loginText(s service.Status) string {
 	optional("username", s.Username)
 	optional("account_id", s.AccountID)
 	line("secrets", s.Secrets)
-	line("key_file", s.KeyFile)
+	if s.KeyFileAbsent {
+		line("key_file", s.KeyFile+" (absent)")
+	} else {
+		line("key_file", s.KeyFile)
+	}
 	line("unattended", fmt.Sprint(s.Unattended))
 	optional("captcha_url", s.CaptchaURL)
 	optional("login_expires", at(s.LoginExpires))

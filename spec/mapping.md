@@ -95,6 +95,8 @@ Accepted, per FREQ (anything else → `pcb:unsupported-recurrence`; a malformed 
 
 Every FREQ: `COUNT` at most 49; `UNTIL` on or before 2037-12-31 (the date in DTSTART's zone); not both COUNT and UNTIL. HOURLY, MINUTELY, SECONDLY: refused.
 
+A write must not introduce a master DTSTART that is not an occurrence of its rule: one whose calendar day (in its TZID's zone; a UTC `Z` time on its UTC day; a DATE as written) does not match the rule's `BYDAY`, `BYMONTHDAY`, `BYDAY` + `BYSETPOS` or `BYMONTH` + `BYMONTHDAY` (INTERVAL does not matter: DTSTART sets the phase). Refused, `pcb:unsupported-recurrence` with reason `DTSTART is not an occurrence of the RRULE`, before any write: a create of such a master, and an update whose master DTSTART or RRULE differs from the stored row's (the same instant, DATE or not and zone; the RRULE compared as normalised, parts in any order). An update that keeps both passes even when the stored series is off its rule (a re-PUT after an alarm is dismissed, a title edit). The comparison is conservative: the same instant re-sent in another zone notation (`Z` for a stored `TZID=UTC`, an alias such as `Asia/Calcutta` for `Asia/Kolkata`, or another zone of the same offset) counts as a change, so such an update of an off-rule stored series is refused; a client re-sending the zone it was served is not affected [assumed: Thunderbird keeps the TZID of an event it did not move]. Why: Proton drops such a DTSTART and counts COUNT from the first match while Thunderbird shows it [verified: live 2026-11-13, `spec/HUMAN-CHECKS.md` W8]. The rule is checked after the rewrites below, which keep its meaning; a rule without a BY part always holds its DTSTART; exceptions carry no rule; reads are not checked [verified: `TestRRuleStartMustBeAnOccurrence`, `TestSameRecurrence`, `TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt`, `TestAnExceptionMovedOffTheRuleIsPlanned`].
+
 Transformed (same meaning, Proton's form):
 
 | Client form | Written | Ruling |
@@ -106,11 +108,13 @@ Not checked by the bridge: that DTSTART is the rule's first occurrence (research
 
 ## 5. VALARM → `Notifications`, and the other row fields
 
-Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}]`), never in a card part (research D). Rules ported, as rules, from cal-gateway (README credits).
+Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}]`), never in a card part (research D). Rules ported, as rules, from cal-gateway (README credits), except for email.
+
+Email notifications (`Type` 0) are Proton-side (Fix 4, the author's choice A): Proton's servers send them and a CalDAV client cannot act on them. pcb does not serve them as VALARMs, from a row's list or from the calendar defaults a `null` row follows, and never writes one from CalDAV; an update keeps the row's. One exception to "not served": a row without a `Notifications` field (older clients kept alarms in the card) is served with its card's VALARMs as stored, an `ACTION:EMAIL` one included; a write ignores that EMAIL alarm on both sides of the comparison, so it changes nothing. Why: a new Proton calendar's defaults are an email and a device notification; pcb served both, Thunderbird's edit dialog showed one reminder and saved the DISPLAY one alone, and the update turned the row's `null` into that one entry, losing the email reminder [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4; `TestThunderbirdKeepsProtonEmailReminders`, `TestEmailNotificationsStayProtonSide`].
 
 | VALARM | Outcome |
 |---|---|
-| `ACTION:EMAIL` | `Type` 0 |
+| `ACTION:EMAIL` | dropped (email notifications are Proton-side) |
 | `ACTION:DISPLAY` or `AUDIO` | `Type` 1 |
 | other ACTION, no or several ACTION or TRIGGER | dropped |
 | TRIGGER `VALUE=DATE-TIME` (absolute) or `RELATED=END` | dropped |
@@ -120,16 +124,17 @@ Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}
 | more than 10 kept | the first 10 kept, the rest dropped |
 | `DESCRIPTION`, `SUMMARY`, `REPEAT`, `DURATION`, `ATTACH`, `X-MOZ-LASTACK` and every other VALARM-level property | lost: Proton has nowhere to keep them (research F). The VEVENT-level `X-MOZ-LASTACK` and `X-MOZ-SNOOZE-TIME*` survive in SE; whether Thunderbird needs the VALARM-level one is a live check (`HUMAN-CHECKS.md` §6) |
 
-Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (type and signed offset, any order or spelling: `-P1D` is `-PT24H`):
+Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (type and signed offset, any order or spelling: `-P1D` is `-PT24H`); "the set" is the client's device notifications:
 
 | Case | `Notifications` sent |
 |---|---|
 | create, no VALARM | `[]`, or `null` when the calendar's default set is empty too |
-| create, the set equals the calendar's defaults (part-day or full-day) | `null` (follows later changes of the defaults) |
+| create, the set equals the calendar's whole default set (part-day or full-day) | `null` (follows later changes of the defaults); never when the defaults hold an email notification |
 | create, otherwise | the array |
-| update, the set equals the one pcb served (the defaults when the row has `null`) | the row's own value, unchanged (`null` stays `null`) |
-| update, no VALARM | `[]` |
-| update, otherwise | the new array |
+| create of a new exception of a stored master (Thunderbird moving one occurrence) | as an update against the master's set: the master's value when the set equals its device part (`null` stays `null`), else the set then the master's email entries (a `null` master's: the defaults'), so the occurrence keeps the series' email reminder [verified: `TestEmailNotificationsStayProtonSide`] |
+| update, the set equals the device part of the one pcb served from (the defaults when the row has `null`, the row's list, the parts' VALARMs when the row has none) | the row's own value, unchanged (`null` stays `null`) |
+| update, otherwise | the set, then the email entries of that one unchanged (a `null` row's: the defaults'), within 10 |
+| update of a row stored without the field (never seen live: every cached row has `null` or a list) | as above, but "the row's own value" is the parts' VALARMs as a list (`[]` when none): pcb never sends `Notifications` absent, because Proton turns it into `null` on an update, the calendar's defaults, not the row's own [verified: live 2026-11-13, L.4 #10, `TestUpdateOfARowServedWithoutNotificationsKeepsItsReminders`] |
 
 Other row fields:
 
@@ -149,6 +154,7 @@ Other row fields:
 - It becomes stored + 1 when the shared signed content changes (DTSTART, DTEND, RRULE, EXDATE or RECURRENCE-ID, compared by meaning: instants and zones, EXDATE as a set, RRULE parts in any order, `INTERVAL=1` as absent) and the client did not bump it.
 - No bump on text-only or alarm-only edits.
 - An exception's SEQUENCE is at least its master's (Proton refuses less with 2001, research A.4).
+- Every master pcb writes carries a SEQUENCE: the value above, `0` when neither the client nor the stored row has one. Why: Proton refuses (2001) an exception of a master whose shared signed part has no SEQUENCE, whatever the exception's; Thunderbird creates series without one [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D7; `TestAMovedOccurrenceOfASeriesWithoutSequenceIsWritten`, `TestEveryWrittenMasterCarriesASequence`]. A master stored without one (another client's) gets `SEQUENCE:0` when it is written anyway, and with any write to its series (an exception created, updated or deleted), first in the same call, its body otherwise unchanged; an unchanged body still sends nothing [verified: `TestASeriesWriteGivesAMasterWithoutSequenceItsSequence`, `TestAnExceptionEditUnderAMasterWithoutSequenceIsWritten`; Proton's refusal of an exception update or delete under such a master is assumed from the create's, not seen live]. The fake refuses an exception create and an exception update under such a master (2001); the update's refusal is [assumed, not measured live]. A client re-sending the master without its served `SEQUENCE:0` changes nothing (the stored value is kept). An exception keeps the rules above (written when the client or the row has one, or when its master's is above 0): Proton takes an exception without SEQUENCE once its master has one [assumed: the live bisection sent exceptions with `SEQUENCE:0` only; the next live D7 check measures it].
 - If Proton drops an unbumped text edit (research A.4 [conflict]), the read-back does not show it and the PUT answers 503, never 2xx (`TestDroppedEditIsNeverASuccess`); live check in `HUMAN-CHECKS.md` §6.
 
 ## 7. Series and attendees (rulings M4-R9, M4-R27, M4-R28, M4-R29)

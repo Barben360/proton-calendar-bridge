@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -511,4 +512,53 @@ func TestStatusAndDoctorNameTheDaemonsKind(t *testing.T) {
 			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
 		}
 	}
+}
+
+// pcb status says when the configured key file is not there (after pcb
+// uninstall --delete-data deleted it; before the first login there is no
+// account to show): the path stays as configured, "(absent)" follows it,
+// and --json carries the account's login.key_file_absent.
+func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	key := config.Defaults(r.dirs).Secrets.KeyFile
+	check := func(when string, absent bool) {
+		t.Helper()
+		want := "key_file: " + key + "\n"
+		if absent {
+			want = "key_file: " + key + " (absent)\n"
+		}
+		r.want(exitcode.OK, "status")
+		if got := r.out.String(); !strings.Contains(got, want) {
+			t.Errorf("%s: status lacks %q:\n%s", when, want, got)
+		}
+		r.want(exitcode.OK, "status", "--json")
+		var data struct {
+			Accounts []struct {
+				Login struct {
+					KeyFile       string `json:"key_file"`
+					KeyFileAbsent *bool  `json:"key_file_absent"`
+				} `json:"login"`
+			} `json:"accounts"`
+		}
+		mustUnmarshal(t, r.envelope().Data, &data)
+		if len(data.Accounts) != 1 {
+			t.Fatalf("%s: %d accounts, want 1", when, len(data.Accounts))
+		}
+		st := data.Accounts[0].Login
+		switch {
+		case st.KeyFile != key:
+			t.Errorf("%s: --json key_file %q, want %q", when, st.KeyFile, key)
+		case st.KeyFileAbsent == nil:
+			t.Errorf("%s: --json has no key_file_absent", when)
+		case *st.KeyFileAbsent != absent:
+			t.Errorf("%s: --json key_file_absent %v, want %v", when, *st.KeyFileAbsent, absent)
+		}
+	}
+	r.want(exitcode.OK, "login", "--non-interactive")
+	check("logged in", false)
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	check("the key file deleted", true)
 }

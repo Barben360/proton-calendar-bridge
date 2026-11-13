@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -579,18 +580,60 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 		}
 	})
 	t.Run("a row without Notifications", func(t *testing.T) {
-		// The render serves the parts' VALARMs (none here) and the update
-		// leaves the field out, so the row keeps its own (review M3).
+		// Proton turns a field left out of an update into null (live L.4
+		// #10), so pcb never leaves it out: a row stored without it is
+		// kept by sending its effective reminders, the parts' VALARMs.
 		bare := seed{id: "row-n", parts: masterParts(), fields: map[string]any{"Notifications": nil}}.row(t)
 		gn := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
 		if p := plan(t, gn, cal(noAlarm)); len(p.Ops) != 0 {
 			t.Errorf("unchanged body: ops = %s, want none", describe(p))
 		}
-		if got := open(t, onlyUpdate(t, plan(t, gn, cal(with(t, noAlarm, title))), "row-n"), &bare); got.field("Notifications") != "<absent>" {
-			t.Errorf("title edit: Notifications = %s, want it left out", got.field("Notifications"))
+		if got := open(t, onlyUpdate(t, plan(t, gn, cal(with(t, noAlarm, title))), "row-n"), &bare); got.field("Notifications") != "[]" {
+			t.Errorf("title edit, no VALARM in the parts: Notifications = %s, want [] sent (never left out)", got.field("Notifications"))
 		}
 		if got := open(t, onlyUpdate(t, plan(t, gn, cal(masterBody())), "row-n"), &bare); got.field("Notifications") != `[{"Type":1,"Trigger":"-PT15M"}]` {
 			t.Errorf("an alarm added: Notifications = %s", got.field("Notifications"))
+		}
+	})
+	t.Run("a row without Notifications and a VALARM in its parts", func(t *testing.T) {
+		// The live case: the row keeps its reminder through a title edit,
+		// as a list sent, not as the field left out (which resets it).
+		parts := masterParts()
+		parts[ical.SharedEncrypted] = frag(append([]string{"UID:" + planUID, stamp, "DESCRIPTION:Daily sync", "SUMMARY:Standup", "X-MOZ-GENERATION:3"}, alarm15...)...)
+		bare := seed{id: "row-v", parts: parts, fields: map[string]any{"Notifications": nil}}.row(t)
+		gv := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
+		if p := plan(t, gv, cal(masterBody())); len(p.Ops) != 0 {
+			t.Errorf("unchanged body: ops = %s, want none", describe(p))
+		}
+		if got := open(t, onlyUpdate(t, plan(t, gv, cal(with(t, masterBody(), title))), "row-v"), &bare); got.field("Notifications") != `[{"Type":1,"Trigger":"-PT15M"}]` {
+			t.Errorf("title edit: Notifications = %s, want the parts' reminder sent", got.field("Notifications"))
+		}
+	})
+	t.Run("a row without Notifications whose VALARM is changed", func(t *testing.T) {
+		// The parts hold -PT30M. A changed alarm is sent as an explicit
+		// list, also when it equals the calendar's defaults (-PT15M):
+		// null would follow later changes of the defaults.
+		alarm30 := with(t, alarm15, map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"})
+		parts := masterParts()
+		parts[ical.SharedEncrypted] = frag(append([]string{"UID:" + planUID, stamp, "DESCRIPTION:Daily sync", "SUMMARY:Standup", "X-MOZ-GENERATION:3"}, alarm30...)...)
+		bare := seed{id: "row-w", parts: parts, fields: map[string]any{"Notifications": nil}}.row(t)
+		gw := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{bare}}, groupKeys(t))
+		served := with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"})
+		if p := plan(t, gw, cal(served)); len(p.Ops) != 0 {
+			t.Errorf("unchanged body: ops = %s, want none", describe(p))
+		}
+		for _, c := range []struct{ trigger, want string }{
+			{"-PT1H", `[{"Type":1,"Trigger":"-PT1H"}]`},
+			{"-PT15M", `[{"Type":1,"Trigger":"-PT15M"}]`},
+		} {
+			p := plan(t, gw, cal(with(t, served, map[string]string{"TRIGGER:-PT30M": "TRIGGER:" + c.trigger})))
+			if len(p.Ops) != 1 || p.Ops[0].Update == nil {
+				t.Errorf("the alarm changed to %s: ops = %s, want one update", c.trigger, describe(p))
+				continue
+			}
+			if got := open(t, p.Ops[0], &bare).field("Notifications"); got != c.want {
+				t.Errorf("the alarm changed to %s: Notifications = %s, want %s sent", c.trigger, got, c.want)
+			}
 		}
 	})
 	t.Run("a custom list read back is kept as stored", func(t *testing.T) {
@@ -619,6 +662,180 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Email reminders are Proton-side (Fix 4, choice A; live 2026-11-13,
+// HUMAN-CHECKS 6.3 D4): with the calendar defaults of a new Proton
+// calendar, an email and a display reminder, Thunderbird sends back the
+// DISPLAY alarm only. The update maps the client's display alarms alone:
+// a null row stays null while they are the defaults' display part, and
+// otherwise gets them plus the defaults' email part; an explicit row
+// keeps its email entries. An incoming EMAIL VALARM is ignored.
+func TestEmailNotificationsStayProtonSide(t *testing.T) {
+	d := planDefaults(t)
+	d.PartDay = []ical.Notification{{Type: 0, Trigger: "-PT15M"}, {Type: 1, Trigger: "-PT15M"}}
+	planD := func(t *testing.T, g Group, body []string) WritePlan {
+		t.Helper()
+		p, err := Plan(g, parse(t, cal(body)), d)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return p
+	}
+	planDs := func(t *testing.T, g Group, bodies ...[]string) WritePlan {
+		t.Helper()
+		p, err := Plan(g, parse(t, cal(bodies...)), d)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return p
+	}
+	email := func(trigger string) []string {
+		return []string{"BEGIN:VALARM", "ACTION:EMAIL", "TRIGGER:" + trigger, "DESCRIPTION:Reminder", "SUMMARY:Reminder", "ATTENDEE:mailto:" + meEmail, "END:VALARM"}
+	}
+	title := map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}
+	noAlarm := with(t, masterBody(), map[string]string{
+		"BEGIN:VALARM": "", "ACTION:DISPLAY": "", "TRIGGER:-PT15M": "", "DESCRIPTION:Reminder": "", "END:VALARM": "",
+	})
+	stored := seed{id: "row-m", parts: masterParts()}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	t.Run("a null row", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"a title edit with the display default", with(t, masterBody(), title), "null"},
+			{"the display default spelt otherwise", with(t, masterBody(), map[string]string{"SUMMARY:Standup": "SUMMARY:Planning", "TRIGGER:-PT15M": "TRIGGER:-P0DT0H15M0S"}), "null"},
+			{"the display default and an EMAIL alarm", with(t, masterBody(), title, email("-PT2H")...), "null"},
+			{"another display alarm", with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"}), `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT15M"}]`},
+			{"no alarm", with(t, noAlarm, title), `[{"Type":0,"Trigger":"-PT15M"}]`},
+		} {
+			got := open(t, onlyUpdate(t, planD(t, g, c.body), "row-m"), &stored)
+			if n := got.field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+		if p := planD(t, g, masterBody()); len(p.Ops) != 0 {
+			t.Errorf("the object re-sent as served (display alarm only): ops = %s, want none", describe(p))
+		}
+	})
+	t.Run("an explicit list with an email entry", func(t *testing.T) {
+		const list = `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`
+		custom := seed{id: "row-c", parts: masterParts(), notifications: list}.row(t)
+		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
+		if p := planD(t, gc, masterBody()); len(p.Ops) != 0 {
+			t.Errorf("the object re-sent as served: ops = %s, want none", describe(p))
+		}
+		if p := planD(t, gc, with(t, masterBody(), nil, email("-PT3H")...)); len(p.Ops) != 0 {
+			t.Errorf("an EMAIL alarm added: ops = %s, want none (ignored)", describe(p))
+		}
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"a title edit", with(t, masterBody(), title), list},
+			{"another display alarm", with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT45M"}), `[{"Type":1,"Trigger":"-PT45M"},{"Type":0,"Trigger":"-PT1H"}]`},
+			{"no alarm", with(t, noAlarm, title), `[{"Type":0,"Trigger":"-PT1H"}]`},
+		} {
+			got := open(t, onlyUpdate(t, planD(t, gc, c.body), "row-c"), &custom)
+			if n := got.field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+	t.Run("the kept email entries count in Proton's limit of 10", func(t *testing.T) {
+		custom := seed{id: "row-c", parts: masterParts(), notifications: `[{"Type":0,"Trigger":"-PT1H"}]`}.row(t)
+		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
+		var ten []string
+		want := make([]string, 0, 10)
+		for i := 1; i <= 10; i++ {
+			ten = append(ten, "BEGIN:VALARM", "ACTION:DISPLAY", fmt.Sprintf("TRIGGER:-PT%dM", i), "END:VALARM")
+			if i < 10 {
+				want = append(want, fmt.Sprintf(`{"Type":1,"Trigger":"-PT%dM"}`, i))
+			}
+		}
+		p := planD(t, gc, append(slices.Clone(noAlarm), ten...))
+		got := open(t, onlyUpdate(t, p, "row-c"), &custom)
+		if n, w := got.field("Notifications"), "["+strings.Join(want, ",")+`,{"Type":0,"Trigger":"-PT1H"}]`; n != w {
+			t.Errorf("ten display alarms: Notifications = %s, want the first nine and the email entry", n)
+		}
+		if !slices.Contains(p.Notes, noteAlarms) {
+			t.Errorf("notes %v lack %q", p.Notes, noteAlarms)
+		}
+	})
+	t.Run("a new exception follows its master", func(t *testing.T) {
+		// Thunderbird moves one occurrence and sends the DISPLAY alarm
+		// alone: the new row keeps the master's reminders, email included.
+		for _, c := range []struct {
+			name, master, trigger, want string
+		}{
+			{"null master, the display default", "", "-PT15M", "null"},
+			{"null master, another display alarm", "", "-PT30M", `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT15M"}]`},
+			{"explicit master, its display alarm", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`, "-PT15M", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`},
+			{"explicit master, another display alarm", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`, "-PT30M", `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT1H"}]`},
+		} {
+			m := seed{id: "row-m", parts: seriesParts("SEQUENCE:1"), notifications: c.master}.row(t)
+			gs := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{m}}, groupKeys(t))
+			master := seriesBody("SEQUENCE:1")
+			exc := with(t, exceptionBody(22, "SEQUENCE:1"), map[string]string{"TRIGGER:-PT15M": "TRIGGER:" + c.trigger})
+			p := planD(t, gs, master)
+			if len(p.Ops) != 0 {
+				t.Fatalf("%s: the series as served plans %s", c.name, describe(p))
+			}
+			p = planDs(t, gs, master, exc)
+			i := slices.IndexFunc(p.Ops, func(op events.Op) bool { return op.Create != nil })
+			if i < 0 {
+				t.Fatalf("%s: ops = %s, want the exception's create", c.name, describe(p))
+			}
+			if n := open(t, p.Ops[i], nil).field("Notifications"); n != c.want {
+				t.Errorf("%s: the new exception's Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+	t.Run("an all-day null row with the full-day defaults", func(t *testing.T) {
+		dd := d
+		dd.FullDay = []ical.Notification{{Type: 0, Trigger: "-PT15H"}, {Type: 1, Trigger: "-PT15H"}}
+		parts := masterParts()
+		parts[ical.SharedSigned] = frag("UID:"+planUID, stamp, "SEQUENCE:2", "DTSTART;VALUE=DATE:20261115", "DTEND;VALUE=DATE:20261116")
+		allDay := seed{id: "row-a", fullDay: true, parts: parts}.row(t)
+		ga := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{allDay}}, groupKeys(t))
+		body := with(t, masterBody(), map[string]string{
+			"DTSTART;TZID=Europe/Paris:20261115T100000": "DTSTART;VALUE=DATE:20261115",
+			"DTEND;TZID=Europe/Paris:20261115T110000":   "DTEND;VALUE=DATE:20261116",
+			"TRIGGER:-PT15M": "TRIGGER:-PT15H",
+		})
+		for _, c := range []struct{ name, trigger, want string }{
+			{"the display default", "-PT15H", "null"},
+			{"the display default spelt otherwise", "-P0DT15H0M0S", "null"},
+			{"another display alarm", "-PT14H", `[{"Type":1,"Trigger":"-PT14H"},{"Type":0,"Trigger":"-PT15H"}]`},
+		} {
+			edited := with(t, body, map[string]string{"SUMMARY:Standup": "SUMMARY:Planning", "TRIGGER:-PT15H": "TRIGGER:" + c.trigger})
+			p, err := Plan(ga, parse(t, cal(edited)), dd)
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			if n := open(t, onlyUpdate(t, p, "row-a"), &allDay).field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+	t.Run("a create", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"the display default", masterBody(), `[{"Type":1,"Trigger":"-PT15M"}]`},
+			{"the display default and an EMAIL alarm", with(t, masterBody(), nil, email("-PT15M")...), `[{"Type":1,"Trigger":"-PT15M"}]`},
+			{"an EMAIL alarm only", with(t, noAlarm, nil, email("-PT15M")...), "[]"},
+		} {
+			if n := open(t, onlyCreate(t, planD(t, Group{UID: planUID}, c.body)), nil).field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
 }
 
 // Ruling M4-R4: SEQUENCE is max(incoming, stored), stored+1 when the times
@@ -1509,4 +1726,164 @@ func TestSeriesEdgeCases(t *testing.T) {
 			t.Error("the edit is not written")
 		}
 	})
+}
+
+// Fix 3: only a master's DTSTART must be an occurrence of its RRULE. An
+// exception moved to a day off the rule (here a Wednesday of a Mondays
+// series) carries no rule and is planned, with the series and against a
+// stored master alike; the same day as the master's start is refused.
+func TestAnExceptionMovedOffTheRuleIsPlanned(t *testing.T) {
+	master := []string{"UID:" + planUID, stamp, "DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",
+		"RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "SUMMARY:Standup"}
+	exception := []string{"UID:" + planUID, stamp, "RECURRENCE-ID;TZID=Europe/Paris:20261123T100000",
+		"DTSTART;TZID=Europe/Paris:20261125T100000", "DTEND;TZID=Europe/Paris:20261125T110000", "SUMMARY:Standup moved"}
+	p := plan(t, Group{UID: planUID}, cal(master, exception))
+	if len(p.Ops) != 2 || p.Ops[0].Create == nil || p.Ops[1].Create == nil {
+		t.Errorf("the series with its exception: ops = %s, want two creates", describe(p))
+	}
+
+	stored := seed{id: "row-m", parts: map[ical.PartKind]string{
+		ical.SharedSigned:    frag("UID:"+planUID, stamp, "DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"),
+		ical.SharedEncrypted: frag("UID:"+planUID, stamp, "SUMMARY:Standup"),
+	}}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	if p := plan(t, g, cal(master, exception)); !slices.ContainsFunc(p.Ops, func(op events.Op) bool { return op.Create != nil }) {
+		t.Errorf("an exception added to the stored series: ops = %s, want its create", describe(p))
+	}
+
+	offMaster := with(t, master, map[string]string{
+		"DTSTART;TZID=Europe/Paris:20261116T100000": "DTSTART;TZID=Europe/Paris:20261125T100000",
+		"DTEND;TZID=Europe/Paris:20261116T110000":   "DTEND;TZID=Europe/Paris:20261125T110000",
+	})
+	_, err := Plan(Group{UID: planUID}, parse(t, cal(offMaster)), planDefaults(t))
+	refusedWith(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
+}
+
+// Fix 5 (live 2026-11-13, HUMAN-CHECKS 6.3 D7): Proton refuses an
+// exception of a master whose signed part has no SEQUENCE, so every master
+// pcb writes carries one: the client's, or 0. A master stored without one
+// gets SEQUENCE:0 when it is written anyway, and when an exception is
+// created beside it; an unchanged body still plans nothing.
+func TestEveryWrittenMasterCarriesASequence(t *testing.T) {
+	seqOf := func(t *testing.T, o opened) string {
+		t.Helper()
+		var lines []string
+		for _, text := range o.parts {
+			for l := range strings.SplitSeq(text, "\r\n") {
+				if strings.HasPrefix(l, "SEQUENCE") {
+					lines = append(lines, l)
+				}
+			}
+		}
+		return strings.Join(lines, " ")
+	}
+	noSeq := with(t, masterBody(), map[string]string{"SEQUENCE:2": ""})
+	t.Run("a create", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body string
+			want string
+		}{
+			{"a single event without SEQUENCE", cal(noSeq), "SEQUENCE:0"},
+			{"a series without SEQUENCE", cal(with(t, noSeq, nil, "RRULE:FREQ=DAILY;COUNT=5")), "SEQUENCE:0"},
+			{"the client's SEQUENCE", cal(masterBody()), "SEQUENCE:2"},
+		} {
+			if got := seqOf(t, open(t, onlyCreate(t, plan(t, Group{UID: planUID}, c.body)), nil)); got != c.want {
+				t.Errorf("%s: %q, want %q", c.name, got, c.want)
+			}
+		}
+	})
+	parts := masterParts()
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "SEQUENCE:2\r\n", "", 1)
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "DTEND;TZID=Europe/Paris:20261115T110000", "DTEND;TZID=Europe/Paris:20261115T110000\r\nRRULE:FREQ=DAILY;COUNT=5", 1)
+	stored := seed{id: "row-m", parts: parts}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	series := with(t, noSeq, map[string]string{"DTEND;TZID=Europe/Paris:20261115T110000": "DTEND;TZID=Europe/Paris:20261115T110000\r\nRRULE:FREQ=DAILY;COUNT=5"})
+	series = strings.Split(strings.Join(series, "\r\n"), "\r\n")
+	if p := plan(t, g, cal(series)); len(p.Ops) != 0 {
+		t.Errorf("the stored series re-sent unchanged, no SEQUENCE: ops = %s, want none", describe(p))
+	}
+	if got := seqOf(t, open(t, onlyUpdate(t, plan(t, g, cal(with(t, series, map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}))), "row-m"), &stored)); got != "SEQUENCE:0" {
+		t.Errorf("a title edit of the series stored without SEQUENCE: %q, want SEQUENCE:0", got)
+	}
+	exception := []string{"UID:" + planUID, stamp, "RECURRENCE-ID;TZID=Europe/Paris:20261116T100000",
+		"DTSTART;TZID=Europe/Paris:20261116T120000", "DTEND;TZID=Europe/Paris:20261116T130000", "SEQUENCE:1", "SUMMARY:Standup moved"}
+	p := plan(t, g, cal(series, exception))
+	if len(p.Ops) != 2 || p.Ops[0].Update == nil || p.Ops[0].Update.ID != "row-m" || p.Ops[1].Create == nil {
+		t.Fatalf("an exception beside the unchanged series: ops = %s, want the master's update, then the create", describe(p))
+	}
+	if got := seqOf(t, open(t, p.Ops[0], &stored)); got != "SEQUENCE:0" {
+		t.Errorf("the master beside the new exception: %q, want SEQUENCE:0", got)
+	}
+	if got := seqOf(t, open(t, p.Ops[1], nil)); got != "SEQUENCE:1" {
+		t.Errorf("the new exception: %q, want its SEQUENCE:1", got)
+	}
+	// An exception keeps the earlier rules: none sent, none stored, and its
+	// master's 0: no SEQUENCE written (Proton taking it is assumed: the
+	// live D7 bisection sent exceptions with SEQUENCE:0 only).
+	p = plan(t, g, cal(series, with(t, exception, map[string]string{"SEQUENCE:1": ""})))
+	if len(p.Ops) != 2 || p.Ops[1].Create == nil {
+		t.Fatalf("an exception without SEQUENCE: ops = %s, want the master's update, then the create", describe(p))
+	}
+	if got := seqOf(t, open(t, p.Ops[1], nil)); got != "" {
+		t.Errorf("the new exception without SEQUENCE: %q, want none written", got)
+	}
+}
+
+// Fix 5 round 1 (ruling): any write touching a series whose stored master
+// has no SEQUENCE (an exception updated, created or deleted) also writes
+// SEQUENCE:0 on the master in the same call, its body otherwise
+// unchanged; a body that changes nothing still plans nothing.
+func TestASeriesWriteGivesAMasterWithoutSequenceItsSequence(t *testing.T) {
+	parts := seriesParts("SEQUENCE:0")
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "\r\nSEQUENCE:0", "", 1)
+	m := seed{id: "row-m", parts: parts}.row(t)
+	x := seed{id: "row-x22", rid: rid(22), parts: exceptionParts(22, "SEQUENCE:1")}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{m, x}}, groupKeys(t))
+	master := with(t, seriesBody("SEQUENCE:0"), map[string]string{"SEQUENCE:0": ""})
+	exc := exceptionBody(22, "SEQUENCE:1")
+	if p := plan(t, g, cal(master, exc)); len(p.Ops) != 0 {
+		t.Errorf("the series as served: ops = %s, want none", describe(p))
+	}
+	seqOf := func(o opened) string {
+		for l := range strings.SplitSeq(o.parts[ical.SharedSigned], "\r\n") {
+			if strings.HasPrefix(l, "SEQUENCE") {
+				return l
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct {
+		name   string
+		bodies [][]string
+		want   string
+	}{
+		{"an exception edited", [][]string{master, with(t, exc, map[string]string{"SUMMARY:Standup moved": "SUMMARY:Standup moved again"})}, "[update:row-m update:row-x22]"},
+		{"an exception deleted", [][]string{master}, "[update:row-m delete:row-x22]"},
+		{"an exception created", [][]string{master, exc, exceptionBody(29, "SEQUENCE:1")}, "[update:row-m create]"},
+	} {
+		p := plan(t, g, cal(c.bodies...))
+		if got := describe(p); got != c.want {
+			t.Errorf("%s: ops = %s, want %s", c.name, got, c.want)
+			continue
+		}
+		got := open(t, p.Ops[0], &m)
+		if s := seqOf(got); s != "SEQUENCE:0" {
+			t.Errorf("%s: the master's %q, want SEQUENCE:0", c.name, s)
+		}
+		// Only SEQUENCE is added: every other line of the master, in
+		// every part, comes back as stored.
+		if len(got.parts) != len(parts) {
+			t.Errorf("%s: the master has %d part kinds, want %d", c.name, len(got.parts), len(parts))
+		}
+		for k, text := range parts {
+			have := got.parts[k]
+			if k == ical.SharedSigned {
+				have = strings.Replace(have, "\r\nSEQUENCE:0", "", 1)
+			}
+			if have != text {
+				t.Errorf("%s: the master's %s, SEQUENCE:0 aside =\n%q\nwant as stored\n%q", c.name, k, have, text)
+			}
+		}
+	}
 }

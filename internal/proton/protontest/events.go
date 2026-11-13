@@ -83,6 +83,7 @@ type columns struct {
 	RecurrenceID             *int64
 	Exdates                  []int64
 	Sequence                 int    // the card's SEQUENCE (not served)
+	HasSequence              bool   // the card holds a SEQUENCE
 	Color                    string // "" serves null
 	Notifications            []Notification
 	IsOrganizer, Permissions int
@@ -110,6 +111,7 @@ func seedColumns(e Event) columns {
 			}
 		case "SEQUENCE":
 			c.Sequence, _ = strconv.Atoi(p.value)
+			c.HasSequence = true
 		}
 	}
 	return c

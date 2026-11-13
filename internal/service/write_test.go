@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/cards"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -699,7 +701,7 @@ func TestEntryRefusalIsReadBack(t *testing.T) {
 		body := edit(t, obj.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(exception, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
 		// The web app bumps the master's SEQUENCE in the window (through the
 		// write endpoint: its key packets stay).
-		bumped := edit(t, obj.Data, "RRULE:FREQ=DAILY", "RRULE:FREQ=DAILY\r\nSEQUENCE:5")
+		bumped := edit(t, obj.Data, "SEQUENCE:0\r\n", "SEQUENCE:5\r\n") // pcb wrote the master's SEQUENCE:0
 		once(func() { r.webPut(t, "pcbseries@x", bumped) })
 		defer r.tr.set(nil)
 		calls := len(r.f.SyncCalls())
@@ -2266,14 +2268,145 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	s.stop(t)
 }
 
-// UIDs are compared unescaped (write-I2; SPEC §5.3, the parked
-// UID-escaping item): an event whose UID column holds its text unescaped
-// (`pcb-a,b` for `UID:pcb-a\,b`) is the same object as a body carrying the
-// text, never a 409 naming its own name. pcb cannot rewrite it while the
-// two forms diverge, so its edit is unavailable (503), nothing sent; the
-// same UID at another name is a 409 naming the object's name, as for any
-// UID. The other direction too (ruling A9): a column holding the escaped
-// text (`pcb-c\,d`) and a client sending the UID unescaped (`UID:pcb-c,d`).
+// Only a write that introduces a DTSTART off its RRULE is refused (403
+// pcb:unsupported-recurrence, HUMAN-CHECKS W8): a create, or an update that
+// changes the master's DTSTART or RRULE. An event Proton already holds with
+// such a start (a Friday, Mondays only) is served unchanged, re-PUT as it
+// is and edited otherwise (a title) as before; moving its start onto an
+// occurrence repairs it. A changing write is refused before anything is
+// sent.
+func TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt(t *testing.T) {
+	t.Parallel()
+	const rule = "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "off@x", Start: base, End: base + 3600, Color: green, RRule: "FREQ=WEEKLY;BYDAY=MO;COUNT=3",
+			Card: card("off@x", "Off", base, rule)})
+	}).start(t)
+	obj := r.object(t, "off@x")
+	contains(t, "the object", obj.Data, rule+"\r\n")
+	contains(t, "the object", obj.Data, "DTSTART:"+stamp(base)+"\r\n")
+
+	if res, err := r.put(t, obj.Name, obj.Data, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the unchanged re-PUT = %+v, %v; want it accepted", res, err)
+	}
+	obj = r.object(t, "off@x")
+	if res, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Off", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the title edit = %+v, %v; want it accepted", res, err)
+	}
+	obj = r.object(t, "off@x")
+	contains(t, "the edited object", obj.Data, "SUMMARY:Edited")
+	contains(t, "the edited object", obj.Data, rule+"\r\n")
+	sent := r.sendCalls()
+
+	friday := time.Unix(base, 0).UTC()
+	saturday := edit(t, edit(t, obj.Data, "DTSTART:"+stamp(base)+"\r\n", "DTSTART:"+stamp(base+86400)+"\r\n"), "DTEND:"+stamp(base+3600)+"\r\n", "DTEND:"+stamp(base+86400+3600)+"\r\n")
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"another off-rule start", saturday},
+		{"another rule the start is still off", edit(t, obj.Data, rule+"\r\n", "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3\r\n")},
+	} {
+		_, err := r.put(t, obj.Name, c.body, service.Precondition{IfMatch: obj.ETag})
+		wantRefused(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
+		if n := r.sendCalls(); n != sent {
+			t.Errorf("%s: %d more requests reached the sync endpoint, want none", c.name, n-sent)
+		}
+	}
+	if friday.Weekday() != time.Friday {
+		t.Fatalf("test bug: base is a %s", friday.Weekday())
+	}
+	monday := base + 3*86400 // the next Monday: the start moved onto an occurrence
+	moved := edit(t, edit(t, obj.Data, "DTSTART:"+stamp(base)+"\r\n", "DTSTART:"+stamp(monday)+"\r\n"), "DTEND:"+stamp(base+3600)+"\r\n", "DTEND:"+stamp(monday+3600)+"\r\n")
+	if res, err := r.put(t, obj.Name, moved, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("moving the start onto a Monday = %+v, %v; want it accepted", res, err)
+	}
+	contains(t, "the repaired object", r.object(t, "off@x").Data, "DTSTART:"+stamp(monday)+"\r\n")
+}
+
+// A UID with a TEXT escape is the event's unescaped value (RFC 5545
+// §3.3.11), which is what Proton stores (`pcb-m4-a,b` for
+// `UID:pcb-m4-a\,b`, HUMAN-CHECKS W10, live 2026-11-13): its create is
+// confirmed by the rows read back (201), served with the UID as written,
+// then edited at its served name (204) with read-back; the same UID at
+// another name is a 409 naming the object. A create at the UID's canonical
+// name is served there.
+func TestAnEscapedUIDIsCreatedConfirmedAndEdited(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	for _, c := range []struct{ text, value, name string }{
+		{`pcb-m4-a\,b`, "pcb-m4-a,b", "pcb-m4-escaped.ics"},
+		{`pcb-m4-c\;d\\e`, `pcb-m4-c;d\e`, service.ObjectName(`pcb-m4-c;d\e`)},
+	} {
+		res, err := r.put(t, c.name, newEvent(c.text, "Escaped"), service.Precondition{IfNoneMatchAny: true})
+		if err != nil || !res.Created {
+			t.Fatalf("%s: create = %+v, %v; want created", c.text, res, err)
+		}
+		rows := r.proton(t, c.value)
+		if len(rows) != 1 || rows[0].UID != c.value {
+			t.Fatalf("%s: Proton holds %d rows of %q", c.text, len(rows), c.value)
+		}
+		obj := r.object(t, c.value)
+		if obj.Name != c.name {
+			t.Errorf("%s: served at %q, want %q", c.text, obj.Name, c.name)
+		}
+		contains(t, c.text+": the object", obj.Data, "UID:"+c.text+"\r\n")
+
+		res, err = r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
+		if err != nil || res.Created {
+			t.Fatalf("%s: edit at %q = %+v, %v; want updated", c.text, obj.Name, res, err)
+		}
+		edited := r.object(t, c.value)
+		contains(t, c.text+": the edited object", edited.Data, "SUMMARY:Edited")
+		contains(t, c.text+": the edited object", edited.Data, "UID:"+c.text+"\r\n")
+		if rows := r.proton(t, c.value); len(rows) != 1 {
+			t.Errorf("%s: Proton holds %d rows after the edit, want 1", c.text, len(rows))
+		}
+
+		_, err = r.put(t, "elsewhere.ics", edited.Data, service.Precondition{IfNoneMatchAny: true})
+		_ = wantExit(t, err, exitcode.Usage)
+		var ce *service.UIDConflictError
+		if !errors.As(err, &ce) || ce.Href != obj.Name {
+			t.Errorf("%s at another name: %v, want a UID conflict naming %q", c.text, err, obj.Name)
+		}
+	}
+	if n := r.sendCalls(); n != 4 {
+		t.Errorf("%d sync calls, want 4 (two creates, two edits)", n)
+	}
+
+	// A client spelling the comma bare (`UID:pcb-m4-a,b`, invalid TEXT but
+	// the same value) reaches the same event.
+	obj := r.object(t, "pcb-m4-a,b")
+	bare := edit(t, edit(t, obj.Data, `UID:pcb-m4-a\,b`, "UID:pcb-m4-a,b"), "SUMMARY:Edited", "SUMMARY:Bare")
+	if res, err := r.put(t, obj.Name, bare, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the bare-comma edit = %+v, %v; want the event updated", res, err)
+	}
+	if rows := r.proton(t, "pcb-m4-a,b"); len(rows) != 1 {
+		t.Fatalf("Proton holds %d rows of pcb-m4-a,b after the bare-comma edit, want 1", len(rows))
+	}
+	contains(t, "the object after the bare-comma edit", r.object(t, "pcb-m4-a,b").Data, "SUMMARY:Bare")
+
+	// The DELETE at its served name removes it from Proton and the cache.
+	obj = r.object(t, "pcb-m4-a,b")
+	if err := r.svc.DeleteObject(t.Context(), r.cal, obj.Name, service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("DELETE at %q: %v", obj.Name, err)
+	}
+	if rows := r.proton(t, "pcb-m4-a,b"); len(rows) != 0 {
+		t.Errorf("Proton holds %d rows after the DELETE, want none", len(rows))
+	}
+	if got := r.object(t, "pcb-m4-a,b"); !got.Missing {
+		t.Errorf("the deleted object is still served at %q", got.Name)
+	}
+}
+
+// An event Proton holds under its unescaped UID (`pcb-a,b`, its parts
+// carrying `UID:pcb-a\,b`, as Proton stores any UID, SPEC §5.3) is edited at
+// its own name like any other; the same UID at another name is a 409 naming
+// it. A row whose column holds an escaped form (`pcb-c\,d`, which Proton
+// itself never writes) while the body's UID is that form's value
+// (`UID:pcb-c,d`) is the same object at its own name: never a 409 naming
+// itself, and not rewritten while the forms diverge (503), nothing sent
+// (write-I2).
 func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
 	t.Parallel()
 	const column, text = "pcb-a,b", `pcb-a\,b`
@@ -2286,37 +2419,37 @@ func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
 		obj := r.object(t, escapedColumn)
 		body := edit(t, edit(t, obj.Data, "UID:"+escapedColumn+"\r\n", "UID:pcb-c,d\r\n"), "SUMMARY:Kept", "SUMMARY:Edited")
 		_, err := r.put(t, service.ObjectName(escapedColumn), body, service.Precondition{IfMatch: obj.ETag})
-		_ = wantExit(t, err, exitcode.Blocked)
+		e := wantExit(t, err, exitcode.Blocked)
 		wantIs(t, err, service.ErrUIDStoredOtherwise)
+		if got, want := e.Hint, "edit the event in the Proton web app"; got != want {
+			t.Errorf("hint %q, want %q", got, want)
+		}
+		var ce *service.UIDConflictError
+		if errors.As(err, &ce) {
+			t.Errorf("the object's own edit is a UID conflict naming %q", ce.Href)
+		}
 		contains(t, "the object after the refusal", r.object(t, escapedColumn).Data, "SUMMARY:Kept")
+		if n := r.sendCalls(); n != 0 {
+			t.Errorf("%d requests reached the sync endpoint, want none", n)
+		}
 	})
 	obj := r.object(t, column)
 	name := service.ObjectName(column)
+	if obj.Name != name {
+		t.Fatalf("served at %q, want %q", obj.Name, name)
+	}
 	contains(t, "the object", obj.Data, "UID:"+text+"\r\n")
 
-	_, err := r.put(t, name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
-	e := wantExit(t, err, exitcode.Blocked)
-	wantIs(t, err, service.ErrUIDStoredOtherwise)
-	if got, want := e.Err.Error(), "the event's UID is stored by Proton in another form than its text, so pcb cannot rewrite it yet"; got != want {
-		t.Errorf("error %q, want %q", got, want)
-	}
-	if got, want := e.Hint, "edit the event in the Proton web app"; got != want {
-		t.Errorf("hint %q, want %q", got, want)
-	}
-	var ce *service.UIDConflictError
-	if errors.As(err, &ce) {
-		t.Errorf("the object's own edit is a UID conflict naming %q", ce.Href)
-	}
-
-	_, err = r.put(t, "elsewhere.ics", obj.Data, service.Precondition{IfNoneMatchAny: true})
+	_, err := r.put(t, "elsewhere.ics", obj.Data, service.Precondition{IfNoneMatchAny: true})
 	_ = wantExit(t, err, exitcode.Usage)
+	var ce *service.UIDConflictError
 	if !errors.As(err, &ce) || ce.Href != name {
 		t.Errorf("the same UID at another name: %v, want a UID conflict naming %q", err, name)
 	}
-	if n := r.sendCalls(); n != 0 {
-		t.Errorf("%d requests reached the sync endpoint, want none", n)
+	if res, err := r.put(t, name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the edit at its own name = %+v, %v; want updated", res, err)
 	}
-	contains(t, "the object after the refusals", r.object(t, column).Data, "SUMMARY:Escaped")
+	contains(t, "the edited object", r.object(t, column).Data, "SUMMARY:Edited")
 }
 
 // A row holding a personal part (alarms from before they moved to
@@ -2404,4 +2537,224 @@ func TestIfMatchListsCompareStrongly(t *testing.T) {
 		}
 	}
 	contains(t, "the object", r.object(t, "a@x").Data, "SUMMARY:"+summary+"\r\n")
+}
+
+// storedNotifications is the Notifications field of uid's only row in
+// Proton, as raw JSON.
+func (r *rig) storedNotifications(t *testing.T, uid string) string {
+	t.Helper()
+	rows := r.proton(t, uid)
+	if len(rows) != 1 {
+		t.Fatalf("Proton holds %d rows of %s, want 1", len(rows), uid)
+	}
+	var row struct{ Notifications json.RawMessage }
+	if err := json.Unmarshal(rows[0].Raw, &row); err != nil {
+		t.Fatal(err)
+	}
+	return string(row.Notifications)
+}
+
+// The live D4 regression (HUMAN-CHECKS 6.3 D4, 2026-11-13): a calendar's
+// defaults hold an email and a display reminder (the fake's, as live) and
+// Thunderbird's edit dialog sends back the DISPLAY alarm only. Email
+// reminders are Proton-side (Fix 4, choice A): not served, never written
+// from CalDAV, kept across an update; a null row stays null while the
+// client's display alarms are the defaults' display part.
+func TestThunderbirdKeepsProtonEmailReminders(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "d@x", Start: base, End: base + 3600, Card: card("d@x", "Defaults", base)})
+		f.AddEvent(cal, protontest.Event{UID: "l@x", Start: base, End: base + 3600, Card: card("l@x", "List", base),
+			Notifications: []protontest.Notification{{Type: 1, Trigger: "-PT15M"}, {Type: 0, Trigger: "-PT2H"}}})
+	}).start(t)
+	put := func(name string, data []byte, pre service.Precondition) {
+		t.Helper()
+		if _, err := r.put(t, name, data, pre); err != nil {
+			t.Fatalf("PUT %s: %v", name, err)
+		}
+	}
+
+	d := r.object(t, "d@x")
+	lacks(t, "the object of a null row", d.Data, "ACTION:EMAIL")
+	contains(t, "the object of a null row", d.Data, "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT1H\r\n")
+	put(d.Name, edit(t, dropEmailAlarms(d.Data), "SUMMARY:Defaults", "SUMMARY:Renamed"), service.Precondition{IfMatch: d.ETag})
+	if n := r.storedNotifications(t, "d@x"); n != "null" {
+		t.Errorf("after a title edit keeping the display default: Notifications = %s, want null", n)
+	}
+	// Now written by pcb (a seeded row's parts carry VERSION and PRODID,
+	// which a write drops): the object re-sent as served changes nothing.
+	d = r.object(t, "d@x")
+	sent := len(r.f.SyncCalls())
+	put(d.Name, d.Data, service.Precondition{IfMatch: d.ETag})
+	if n := len(r.f.SyncCalls()) - sent; n != 0 {
+		t.Errorf("the object re-sent as served made %d sync calls, want none", n)
+	}
+	put(d.Name, edit(t, dropEmailAlarms(d.Data), "TRIGGER:-PT1H", "TRIGGER:-PT30M"), service.Precondition{IfMatch: d.ETag})
+	if n := r.storedNotifications(t, "d@x"); n != `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT1H"}]` {
+		t.Errorf("after the display alarm changed: Notifications = %s, want it plus the default email", n)
+	}
+
+	l := r.object(t, "l@x")
+	lacks(t, "the object of an explicit list", l.Data, "ACTION:EMAIL")
+	contains(t, "the object of an explicit list", l.Data, "TRIGGER:-PT15M\r\n")
+	put(l.Name, edit(t, dropEmailAlarms(l.Data), "TRIGGER:-PT15M", "TRIGGER:-PT45M"), service.Precondition{IfMatch: l.ETag})
+	if n := r.storedNotifications(t, "l@x"); n != `[{"Type":1,"Trigger":"-PT45M"},{"Type":0,"Trigger":"-PT2H"}]` {
+		t.Errorf("after the display alarm changed: Notifications = %s, want the email entry kept", n)
+	}
+
+	emailToo := edit(t, newEvent("c@x", "Created"), "END:VEVENT", "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT1H\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\n"+
+		"BEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-PT1H\r\nDESCRIPTION:Reminder\r\nSUMMARY:Reminder\r\nATTENDEE:mailto:me@x\r\nEND:VALARM\r\nEND:VEVENT")
+	put("c@x.ics", emailToo, service.Precondition{IfNoneMatchAny: true})
+	if n := r.storedNotifications(t, "c@x"); n != `[{"Type":1,"Trigger":"-PT1H"}]` {
+		t.Errorf("a create with the defaults' display and email alarms: Notifications = %s, want the display one alone", n)
+	}
+}
+
+// The live L.4 #10 finding (write matrix, 2026-11-13): Proton turns an
+// update without Notifications into null, the calendar's defaults, so a row
+// served without the field must not be updated with it left out. The row is
+// served without the field (as one stored without it would be) and holds no
+// VALARM in its parts: pcb sends [], what the row means, and a title edit
+// leaves it so, not on the calendar's defaults. The fake follows Proton
+// (absent is null). The planner test covers a VALARM in the parts.
+func TestUpdateOfARowServedWithoutNotificationsKeepsItsReminders(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "n@x", Start: base, End: base + 3600, Card: card("n@x", "Bare", base),
+			Notifications: []protontest.Notification{}})
+	}).start(t)
+	r.rewriteRefresh(t, func(row map[string]any) { delete(row, "Notifications") })
+	obj := r.object(t, "n@x")
+	if _, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Bare", "SUMMARY:Renamed"), service.Precondition{}); err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	if n := r.storedNotifications(t, "n@x"); n != "[]" {
+		t.Errorf("after a title edit: Notifications = %s, want [] (a field left out would be null)", n)
+	}
+}
+
+// dropEmailAlarms is data without its EMAIL VALARMs, as Thunderbird's
+// edit dialog saves an event (it shows one reminder).
+func dropEmailAlarms(data []byte) []byte {
+	return emailAlarm.ReplaceAll(data, nil)
+}
+
+var emailAlarm = regexp.MustCompile(`(?s)BEGIN:VALARM\r\nACTION:EMAIL\r\n.*?END:VALARM\r\n`)
+
+// The live D7 regression (HUMAN-CHECKS 6.3 D7, 2026-11-13): Thunderbird
+// creates a series with no SEQUENCE on its master, then moves one
+// occurrence: it PUTs the master (still no SEQUENCE) and an exception with
+// SEQUENCE:1. Proton refuses (2001) an exception of a master whose signed
+// part has no SEQUENCE (the fake models it), so pcb writes SEQUENCE on
+// every master: the client's, or 0. The object re-sent as served, with or
+// without the master's SEQUENCE:0, changes nothing.
+func TestAMovedOccurrenceOfASeriesWithoutSequenceIsWritten(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "legacy@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY;COUNT=5",
+			Card: card("legacy@x", "Legacy", base, "RRULE:FREQ=DAILY;COUNT=5")})
+	}).start(t)
+	master := []string{"UID:tbweekdays@x", "DTSTAMP:20270101T000000Z", "DTSTART;TZID=Europe/Paris:20270201T090000",
+		"DTEND;TZID=Europe/Paris:20270201T100000", "RRULE:FREQ=WEEKLY;COUNT=10;BYDAY=MO,TU,WE,TH,FR;WKST=SU",
+		"SUMMARY:pcb-m4 tb weekdays", "X-MOZ-GENERATION:1"}
+	if _, err := r.put(t, "tbweekdays.ics", vcal(master), service.Precondition{IfNoneMatchAny: true}); err != nil {
+		t.Fatalf("the series' create: %v", err)
+	}
+	obj := r.object(t, "tbweekdays@x")
+	contains(t, "the created series", obj.Data, "SEQUENCE:0\r\n")
+
+	exception := []string{"UID:tbweekdays@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID;TZID=Europe/Paris:20270203T090000",
+		"DTSTART;TZID=Europe/Paris:20270203T110000", "DTEND;TZID=Europe/Paris:20270203T120000", "SEQUENCE:1",
+		"SUMMARY:pcb-m4 tb weekdays", "X-MOZ-GENERATION:2"}
+	body := vcal(append(slices.Clone(master[:len(master)-1]), "X-MOZ-GENERATION:2"), exception)
+	if res, err := r.put(t, obj.Name, body, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the moved occurrence = %+v, %v; want it written", res, err)
+	}
+	if n := len(r.proton(t, "tbweekdays@x")); n != 2 {
+		t.Errorf("Proton holds %d rows of the series, want the master and the exception", n)
+	}
+	obj = r.object(t, "tbweekdays@x")
+	contains(t, "the series", obj.Data, "RECURRENCE-ID;TZID=Europe/Paris:20270203T090000\r\n")
+	sent := len(r.f.SyncCalls())
+	if _, err := r.put(t, obj.Name, obj.Data, service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the object re-sent as served: %v", err)
+	}
+	if _, err := r.put(t, obj.Name, dropFirst(t, obj.Data, "SEQUENCE:0\r\n"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the object re-sent without the master's SEQUENCE: %v", err)
+	}
+	if n := len(r.f.SyncCalls()) - sent; n != 0 {
+		t.Errorf("re-sending the object, with or without the master's SEQUENCE:0, made %d sync calls, want none", n)
+	}
+
+	// A series stored without SEQUENCE (written by another client) takes an
+	// exception: the master gets SEQUENCE:0 in the same call.
+	legacy := r.object(t, "legacy@x")
+	lacks(t, "the stored series", legacy.Data, "SEQUENCE")
+	moved := []string{"UID:legacy@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID:" + stamp(base+86400),
+		"DTSTART:" + stamp(base+86400+1800), "DTEND:" + stamp(base+86400+5400), "SEQUENCE:1", "SUMMARY:Legacy moved"}
+	withException := edit(t, legacy.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(moved, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
+	if _, err := r.put(t, legacy.Name, withException, service.Precondition{IfMatch: legacy.ETag}); err != nil {
+		t.Fatalf("an exception of a series stored without SEQUENCE: %v", err)
+	}
+	if n := len(r.proton(t, "legacy@x")); n != 2 {
+		t.Errorf("Proton holds %d rows of legacy@x, want 2", n)
+	}
+	contains(t, "the legacy series", r.object(t, "legacy@x").Data, "SEQUENCE:0\r\n")
+}
+
+// dropFirst is data without its first old, which it must hold.
+func dropFirst(t *testing.T, data []byte, old string) []byte {
+	t.Helper()
+	return edit(t, data, old, "")
+}
+
+// rawCreate stores body's master as another client would, through the
+// write endpoint without pcb's planner: its parts exactly as sent (no
+// SEQUENCE added), Notifications and Color null.
+func (r *rig) rawCreate(t *testing.T, body []byte) {
+	t.Helper()
+	in, err := ical.ParseWrite(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, _, err := ical.Patch(nil, in.Master.Comp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := cards.Seal(parts, cards.SealKeys{Signer: r.f.AddressKeyRing(), CalendarPrimary: r.f.CalendarKeyRing(r.cal)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := events.Op{Create: &events.Body{WireEvent: sealed, Notifications: events.Null[events.NotificationList](), Color: events.Null[string]()}}
+	res, err := events.Sync(context.Background(), r.pc, r.cal, r.f.MemberID(r.cal), []events.Op{op})
+	if err != nil || events.FirstError(res) != nil {
+		t.Fatalf("raw create: %v, %v", err, events.FirstError(res))
+	}
+}
+
+// Fix 5 round 1: an exception update under a master stored without
+// SEQUENCE (another client's series) writes the master's SEQUENCE:0 in the
+// same call, its body otherwise unchanged; the fake refuses the exception
+// otherwise (2001), as Proton refuses its create (live D7).
+func TestAnExceptionEditUnderAMasterWithoutSequenceIsWritten(t *testing.T) {
+	t.Parallel()
+	rid := base + day
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	r.rawCreate(t, vcal([]string{"UID:other@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600),
+		"RRULE:FREQ=DAILY;COUNT=5", "SUMMARY:Other"}))
+	r.f.AddEvent(r.cal, protontest.Event{UID: "other@x", Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
+		Card: card("other@x", "Moved", rid+1800, "RECURRENCE-ID:"+stamp(rid))})
+	r.s.next(t, false)
+	obj := r.object(t, "other@x")
+	lacks(t, "the series", obj.Data, "SEQUENCE")
+	contains(t, "the series", obj.Data, "SUMMARY:Moved\r\n")
+	calls := len(r.f.SyncCalls())
+	if _, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Moved", "SUMMARY:Moved again"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the exception's edit: %v", err)
+	}
+	if got := r.f.SyncCalls()[calls:]; len(got) != 1 || len(got[0].Body.Events) != 2 {
+		t.Errorf("sync calls %+v, want one with the master's update and the exception's", got)
+	}
+	data := r.object(t, "other@x").Data
+	contains(t, "the series", data, "SUMMARY:Moved again\r\n", "SEQUENCE:0\r\n")
 }

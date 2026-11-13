@@ -252,6 +252,9 @@ type Status struct {
 	AccountID string `json:"account_id,omitempty"`
 	Secrets   string `json:"secrets"`
 	KeyFile   string `json:"key_file"`
+	// KeyFileAbsent: no file at KeyFile (before the first login, or once
+	// deleted); another stat failure is not absence.
+	KeyFileAbsent bool `json:"key_file_absent"`
 	// Sealer is what seals the secrets: "keyfile" or "secret-service".
 	Sealer      string     `json:"sealer"`
 	Unattended  bool       `json:"unattended"`
