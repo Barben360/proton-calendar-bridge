@@ -14,6 +14,11 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
+// UnattendedKeyringWarning is the line pcb doctor prints for unattended
+// relogin on a state sealed with the desktop keyring, and the one the
+// desktop app's add-account wizard shows next to its checkbox.
+const UnattendedKeyringWarning = "unattended relogin is on: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account"
+
 // SecretsCheck reports how the secrets are protected. A 0600 key file stops
 // other local users and casual disclosure, not root or the user's own
 // processes, and a backup of one volume holding both key and data exposes
@@ -104,7 +109,7 @@ func (c SecretsCheck) Run(context.Context) Result {
 		if keyFile {
 			msgs = append(msgs, "unattended relogin is on: whoever can read "+c.KeyFile+" and "+sealed+" owns the Proton account")
 		} else {
-			msgs = append(msgs, "unattended relogin is on: whoever can use this desktop session's keyring and read "+sealed+" owns the Proton account")
+			msgs = append(msgs, UnattendedKeyringWarning)
 		}
 	}
 	if len(msgs) > 0 {
