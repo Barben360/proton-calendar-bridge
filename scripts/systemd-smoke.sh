@@ -70,7 +70,8 @@ wait_state() {
 }
 
 # wait_status runs a pcb status --json --daemon command line until a daemon
-# answers (up to 30 s), then checks it needs a login.
+# answers (up to 30 s), then checks it needs a login: a fresh install has no
+# account, so the process says it (ruling R44).
 wait_status() {
 	local out err deadline=$((SECONDS + 30)) errfile
 	errfile=$(mktemp)
@@ -80,7 +81,7 @@ wait_status() {
 		sleep 1
 	done
 	rm -f "$errfile"
-	jq -e '.ok == true and any(.data.alerts[]; .code == "needs-login")' <<<"$out" >/dev/null ||
+	jq -e '.ok == true and .data.accounts == [] and any(.data.alerts[]; .code == "needs-login")' <<<"$out" >/dev/null ||
 		fail "unexpected status: $out"
 }
 
@@ -142,18 +143,22 @@ out=$(as_tester "$pcb" doctor) || fail "pcb doctor failed ($?) on a fresh instal
 grep -q '^!  alert needs-login: not logged in to Proton$' <<<"$out" || fail "doctor's needs-login line: $out"
 grep -q '^✓  service: user: active$' <<<"$out" || fail "doctor's service line: $out"
 
-step "u5c. pcb sync while logged out: exit 10, run pcb login (ux-I1)"
+step "u5c. pcb sync with no account: exit 10, add one with pcb login (ux-I1)"
 code=0
 out=$(as_tester "$pcb" sync 2>&1) || code=$?
-[ "$code" = 10 ] && grep -q '^Hint: run pcb login$' <<<"$out" || fail "pcb sync: exit $code: $out"
+[ "$code" = 10 ] && grep -q '^Hint: add one with pcb login$' <<<"$out" || fail "pcb sync: exit $code: $out"
 
-step "u6. CalDAV with a client: 503"
-pw=$(as_tester "$pcb" client add smoke --json | jq -r '.data.password // empty')
-[ -n "$pw" ] || fail "pcb client add smoke --json gave no password"
+step "u6. no CalDAV client before a login (exit 10); CalDAV: 401"
+# M6: clients belong to an account, and a fresh install has none.
+code=0
+out=$(as_tester "$pcb" client add smoke --json) || code=$?
+[ "$code" = 10 ] && jq -e '.error.message == "no account" and .error.hint == "add one with pcb login"' <<<"$out" >/dev/null ||
+	fail "pcb client add with no account: exit $code: $out"
 # The password goes through stdin, never an argv.
+pw=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
 got=$(printf 'user = "smoke:%s"\n' "$pw" | docker exec -i "$container" \
 	curl -s -K - -X PROPFIND -H 'Depth: 0' -o /dev/null -w '%{http_code}' http://127.0.0.1:1080/dav/calendars/me/) || true
-[ "$got" = 503 ] || fail "want 503 with a client, got '$got'"
+[ "$got" = 401 ] || fail "want 401 with credentials no account holds, got '$got'"
 
 step "u7. systemd-analyze --user verify"
 verify as_tester systemd-analyze --user verify "$user_unit"
@@ -171,18 +176,20 @@ printf '[caldav]\nlisten = "0.0.0.0:1080"\n' | docker exec -i "$container" \
 as_tester systemctl --user restart pcb
 wait_state active as_tester systemctl --user is-active pcb
 wait_status as_tester "$pcb" status --json --daemon
+# M6: the listener's URL is the base, with no trailing slash.
 url=$(as_tester "$pcb" status --json --daemon | jq -r '.data.listener.url // empty')
 case $url in
 https://localhost:* | "") fail "want an https URL on an interface address, got '$url'" ;;
-https://*:1080/) ;;
+https://*:1080) ;;
 *) fail "unexpected listener URL '$url'" ;;
 esac
-# curl checks the certificate against itself: it passes only if the
-# certificate names the interface address of the URL.
+# curl checks the certificate against itself: it gets an HTTP answer (401:
+# no account holds the credentials) only if the certificate names the
+# interface address of the URL; a failed check is 000.
 got=$(printf 'user = "smoke:%s"\n' "$pw" | docker exec -i "$container" \
 	curl -s -K - --cacert /home/tester/.local/state/pcb/tls/cert.pem -X PROPFIND -H 'Depth: 0' \
-	-o /dev/null -w '%{http_code}' "${url}dav/calendars/me/") || true
-[ "$got" = 503 ] || fail "want 503 over TLS at $url, got '$got'"
+	-o /dev/null -w '%{http_code}' "${url}/dav/calendars/me/") || true
+[ "$got" = 401 ] || fail "want 401 over TLS at $url, got '$got'"
 restarts=$(as_tester systemctl --user show -p NRestarts --value pcb)
 [ "$restarts" = 0 ] || fail "the unit restarted $restarts times while serving on 0.0.0.0"
 

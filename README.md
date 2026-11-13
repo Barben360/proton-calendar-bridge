@@ -92,8 +92,8 @@ pcb client show              # in another terminal: URL, username, password and,
 In Thunderbird: New Calendar > On the Network, format CalDAV, the URL of `pcb client show` as Location (`/dav/<local-id>/`: one per account), its username (the account's address; any username is accepted) and its
 password (the live session against the bridge is `spec/HUMAN-CHECKS.md` step 6, not run yet). `pcb serve` keeps the cache in sync (a pass every 30 s, every 5 min once nobody has used the bridge for 35 minutes, and at once when a client asks again) and serves it, with writes, until Ctrl-C
 (SIGINT or SIGTERM: requests in flight get 5 s, exit 0; a second signal exits 20). Plain `pcb serve` refuses to start logged out (exit 10, `pcb login`),
-while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb serve is already running`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
-listening instead: CalDAV answers 503 with `Retry-After: 30` until a login completes, from any process, and again whenever Proton ends the session, with no restart.
+while `pcb sync` runs or while another `pcb serve` runs (exit 20; the second says `pcb is already serving (pid N)`), and stops when Proton needs you again (exit 10). With `--wait-for-login` (what the service and the image run) it keeps
+listening instead: with no account it waits for the first login (no CalDAV client exists before one, so CalDAV answers 401), and an account waiting for a login, from any process, has its CalDAV answer 503 with `Retry-After: 30` until it completes (again whenever Proton ends the session), with no restart.
 Logs go to stderr, IDs only; `--log-level debug` (or `[log] level`) adds what a write normalised.
 After each sync pass, while an event is served as a placeholder (it could not be decrypted) or marked
 `X-PCB-INTEGRITY:unverified` (a signature did not verify), a duplicate
@@ -119,7 +119,7 @@ pcb service status           # also: start, stop, restart, logs -f
 pcb doctor                   # service, daemon, listener, certificate, clients, with the fix for each failure; exit 0 while the service waits for your login (needs-login shows as "!")
 ```
 
-The unit runs `pcb serve --wait-for-login`: until you log in, CalDAV answers 503; after a reboot or a restart it
+The unit runs `pcb serve --wait-for-login`: it waits for your first login, and answers 503 while an account needs a login again; after a reboot or a restart it
 serves again by itself. `pcb install` is idempotent (a second run keeps every file, and never replaces an edited `config.toml`);
 edit `[caldav]` (`listen`, `hostnames`) in `~/.config/pcb/config.toml`, then `pcb service restart`.
 
@@ -136,7 +136,7 @@ removes only a directory named `pcb`, and keeps and names a key file kept elsewh
 ## Run in a container
 
 The image (distroless, no shell, UID 65532, one volume `/data`) runs `pcb serve --wait-for-login --listen 0.0.0.0:1080`: it serves
-**self-signed TLS** on 1080, comes up healthy with no login, and CalDAV answers 503 until you log in. Its health check is
+**self-signed TLS** on 1080, comes up healthy with no login and waits for one (CalDAV answers 401 until a login creates the first client). Its health check is
 `pcb status --json --daemon`. The image is published at `ghcr.io/barben360/proton-calendar-bridge` (tags `:main` and `:sha-<12 hex>`; CI pushes it only from main) as a **private** package:
 pulling it needs `docker login ghcr.io` with a token that can read packages. Everyone else builds it with `make image` (tag `pcb:local`).
 
@@ -193,8 +193,8 @@ docker exec pcb pcb status        # live state; docker exec pcb pcb doctor for t
 ```
 
 `pcb client show` prints the URL with the first of `hostnames` and the fingerprint to compare in Thunderbird's certificate exception
-dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no login, 401 and 503
-over TLS, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
+dialog (it shows it once and you confirm only an equal one). The image is smoke-tested (`make container-smoke`: healthy with no account, 401 over TLS with or without
+credentials, UID 65532, healthy after `docker kill`); the compose file above, the compose secret and `config` mount, and a login in the
 container are `spec/HUMAN-CHECKS.md` step 7.2, not run yet. Five wrong passwords from one IP in a minute lock that IP for the minute:
 Docker's port publishing keeps the client's source IP, but with the userland proxy (rootless Docker, some setups) every client shares
 one IP, so one device's typos lock them all for that minute (`spec/OPEN.md`).
