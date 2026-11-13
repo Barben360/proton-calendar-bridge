@@ -1763,8 +1763,8 @@ M7 delivered (2026-11-13, branch m7-pcb-ui; the live checks of `spec/HUMAN-CHECK
 | R5 | a daemon without `ui/show` answers the existing `no such control endpoint: <path>` 404, not a new `unknown endpoint` |
 | R6 | a daemon that ends by itself after Ready pokes `Changes`, and the next Restart starts a new one (the tray must not show a dead bridge as alive); the pass lines and warnings `pcb serve` logs also go to `pcb-ui.log` (`daemon.LogPass`, `RenderLog`) |
 | R7 | the view carries `Bridge` (`bridge stopped: <err>`, tray `attention`) and the actions refuse while the bridge is not running |
-| R8 | the one-line state precedence is: stopped, keyring locked, login phase, CalDAV off, syncing, synced; a loop that reports no interval is shown against the 5 min idle cadence |
-| R9 | the notifier notifies the five listed codes whatever their severity, so the `sync-stalled` warning notifies (the plan's "error-severity alerts" would have skipped it) |
+| R8 | the one-line state precedence is: stopped, keyring locked, keyring unavailable (R15), login phase, CalDAV off, syncing, synced; a loop that reports no interval is shown against the 5 min idle cadence |
+| R9 | the notifier notifies the listed codes (six since R15: `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked`, `keyring-unavailable`) whatever their severity, so the `sync-stalled` warning notifies (the plan's "error-severity alerts" would have skipped it) |
 | R10 | the unattended-relogin warning is a format function, `doctor.UnattendedKeyringWarning(sealedPath)`, not one shared constant, so `pcb doctor` keeps the full path |
 | R11 | the plan's manual run of `pcb-ui` against `pcb-fake` is not done by the agent (no display; a real run would open a window on the author's desktop and could probe the author's real keyring): `--version`, a no-display start and CI under `xvfb-run` instead, and the GUI session is step 9 |
 | R12 | `spec/HUMAN-CHECKS.md` step 9 runs in the throwaway VM with a GNOME session, not on the author's workstation |
