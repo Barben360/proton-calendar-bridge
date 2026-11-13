@@ -1634,6 +1634,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
 | E18 | (dropped: no REST API planned) | – | – |
+| E19 | MCP Go SDK: version, names, CGO-freeness, Host/Origin checks, which agent clients declare elicitation | A4 (M8) | done (M8): `modelcontextprotocol/go-sdk` v1.8.0 pinned, pure Go (Go ≥ 1.25), stateful streamable HTTP, elicitation through `InputRequests`, the SDK checks loopback `Host` but never `Origin`; client declarations from Claude Code's docs, live check in HUMAN-CHECKS 10; `E19-mcp-go-sdk.md` |
 
 Status at the close of M0 (2026-11-11):
 - E03: gate passed on the fork's evidence (R13); scope list and other candidates pending the live run.
