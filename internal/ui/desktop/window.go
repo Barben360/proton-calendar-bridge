@@ -97,6 +97,10 @@ type Window struct {
 	wizard   WizardModel // the flow in progress, nil when none
 	settings *settingsPane
 
+	// quitOnClose, when set (no tray host: Attach), is what closing the
+	// window runs instead of hiding it.
+	quitOnClose func()
+
 	wg sync.WaitGroup // goroutines in flight (tests wait on it)
 	// dispatch runs a function on the main goroutine: fyne.Do. Tests
 	// replace it by a queue they drain themselves (fyne's test driver runs
@@ -388,8 +392,13 @@ func (w *Window) Show(account string) {
 }
 
 // onClose is what closing the window does: it hides (the app keeps running
-// in the tray).
-func (w *Window) onClose() { w.Hide() }
+// in the tray), or quits when there is no tray to come back from (R14).
+func (w *Window) onClose() {
+	w.Hide() // at once: the quit's drain may take a few seconds
+	if w.quitOnClose != nil {
+		w.quitOnClose()
+	}
+}
 
 // Hide hides the window: a shown password hides and a wizard in progress is
 // cancelled (nothing lingers in a window nobody sees).

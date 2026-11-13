@@ -95,3 +95,23 @@ func (w *Window) HintNoTray() bool {
 	w.notice.Show()
 	return true
 }
+
+// Attach sets up how the window comes back and how the app quits. With a
+// tray host (ta non-nil) the tray holds Quit, closing the window hides it,
+// and the window opens unless background. With none (ta nil) the window
+// opens even with background, says once that there is no tray, and closing
+// it runs quit (ruling R14: a hidden window with no tray could never be
+// quit, and its bridge would hold serve.lock unseen). Main goroutine.
+func Attach(ta TrayApp, w *Window, quit func(), background bool) *Tray {
+	if ta == nil {
+		w.quitOnClose = quit
+		w.HintNoTray()
+		w.Show("")
+		return nil
+	}
+	t := NewTray(ta, w, quit)
+	if !background {
+		w.Show("")
+	}
+	return t
+}

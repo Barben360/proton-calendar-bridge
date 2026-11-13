@@ -88,18 +88,13 @@ func run(args []string) int {
 			}()
 		})
 	}
-	var tray *desktop.Tray
+	// No tray to come back from: the window opens even with --background,
+	// says so once, and closing it quits (R14).
+	var ta desktop.TrayApp
 	if da, ok := a.(fdesktop.App); ok && desktop.TrayHost("") {
-		tray = desktop.NewTray(da, win, quit)
-	} else {
-		// No tray to come back from: the window opens even with --background,
-		// and says so once.
-		win.HintNoTray()
-		win.Show("")
+		ta = da
 	}
-	if tray != nil && !opts.background {
-		win.Show("")
-	}
+	tray := desktop.Attach(ta, win, quit, opts.background)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

@@ -148,3 +148,45 @@ func TestNoTrayLineShownOnce(t *testing.T) {
 		t.Fatal("second window shows the line")
 	}
 }
+
+// Ruling R14: with a tray host, closing the window hides it (Quit is in the
+// tray menu); with none, closing it quits (the tray Quit's drain), since a
+// hidden window with no tray could never be quit.
+func TestCloseQuitsOnlyWithoutATray(t *testing.T) {
+	t.Run("tray host", func(t *testing.T) {
+		f := newFixture(t)
+		quits := 0
+		fa := &fakeTrayApp{}
+		if tr := Attach(fa, f.w, func() { quits++ }, false); tr == nil || fa.menu == nil {
+			t.Fatal("Attach with a tray host set up no tray")
+		}
+		if !f.w.visible {
+			t.Fatal("the window is not shown without --background")
+		}
+		f.w.onClose()
+		if quits != 0 || f.w.visible {
+			t.Errorf("closing with a tray: quits = %d, visible = %v; want it hidden, not quit", quits, f.w.visible)
+		}
+	})
+	t.Run("tray host, background", func(t *testing.T) {
+		f := newFixture(t)
+		Attach(&fakeTrayApp{}, f.w, func() {}, true)
+		if f.w.visible {
+			t.Error("--background with a tray host showed the window")
+		}
+	})
+	t.Run("no tray host", func(t *testing.T) {
+		f := newFixture(t)
+		quits := 0
+		if tr := Attach(nil, f.w, func() { quits++ }, true); tr != nil {
+			t.Fatal("Attach without a tray host returned a tray")
+		}
+		if !f.w.visible || !f.has(NoTrayLine) {
+			t.Fatalf("without a tray the window must open (even --background) with the no-tray line: visible %v, %v", f.w.visible, f.texts())
+		}
+		f.w.onClose()
+		if quits != 1 {
+			t.Errorf("closing without a tray quit %d times, want once", quits)
+		}
+	})
+}
