@@ -174,6 +174,20 @@ func (c *Client) Restart(ctx context.Context, accountID string) (service.Account
 	return res, err
 }
 
+// ShowUI asks the desktop app that holds the socket to show its window, on
+// the account's pane when account is not empty. A pcb serve has no window:
+// it answers an unknown endpoint.
+func (c *Client) ShowUI(ctx context.Context, account string) error {
+	var res ShowUI
+	if err := c.post(ctx, "/v2/ui/show", ShowUIRequest{Account: account}, &res); err != nil {
+		return err
+	}
+	if !res.Shown {
+		return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the daemon did not show its window"), Hint: "use the pcb of the same version as the daemon"}
+	}
+	return nil
+}
+
 // accountRoute is the path of an account's action; the selector (an
 // address holds characters a path does not) is escaped.
 func accountRoute(selector, action string) string {

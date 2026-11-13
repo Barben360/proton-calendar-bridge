@@ -1152,3 +1152,95 @@ func TestRedialChecksTheServersUID(t *testing.T) {
 
 // The real Hub is what the socket serves.
 var _ ctl.Hub = (*service.Hub)(nil)
+
+// The handler answers what BuildStatus builds in-process: one implementation
+// (the desktop app reads its status through BuildStatus, not the socket).
+func TestStatusIsBuildStatus(t *testing.T) {
+	t.Parallel()
+	hub := newHub(service.Status{Phase: "ready", Username: "alice", Secrets: "sealed"})
+	hub.infos = append(hub.infos, service.AccountInfo{ID: idB, Address: addrB, Phase: "needs-login"})
+	hub.status[idB] = service.Status{Phase: "needs-login", Username: "bob"}
+	hub.health[idA] = *serving(cal(func(c *service.CalendarHealth) { c.Gate, c.GateReason = "undecided", "not loaded" }))
+	ln := &ctl.Listener{Addr: "127.0.0.1:1080", URL: "http://localhost:1080/"}
+	d := daemon()
+	d.Kind = "ui"
+	s := serve(t, &ctl.Server{Hub: hub, Daemon: d, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return now }})
+
+	want := ctl.BuildStatus(t.Context(), hub, d, ln, now)
+	if len(want.Accounts) != 2 || want.Accounts[0].URL != "http://localhost:1080/dav/"+idA+"/" || want.Daemon == nil || want.Daemon.Kind != "ui" {
+		t.Fatalf("BuildStatus = %+v; want two accounts with their URLs and the daemon", want)
+	}
+	if len(want.Accounts[0].Alerts) == 0 || len(want.Accounts[1].Alerts) == 0 {
+		t.Fatalf("BuildStatus alerts = %+v / %+v; the comparison would be too weak", want.Accounts[0].Alerts, want.Accounts[1].Alerts)
+	}
+	_, env := raw(t, s.path, http.MethodGet, "/v2/status", nil)
+	// Both through a generic value: the handler's data is decoded, whose maps marshal sorted.
+	var exp any
+	b, _ := json.Marshal(want)
+	if err := json.Unmarshal(b, &exp); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(env["data"])
+	exps, _ := json.Marshal(exp)
+	if string(got) != string(exps) {
+		t.Errorf("handler data = %s\nBuildStatus = %s", got, exps)
+	}
+}
+
+func TestShowUIRoute(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var got []string
+	var fail error
+	show := func(account string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, account)
+		return fail
+	}
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon(), ShowUI: show})
+	c := dial(t, s.path)
+	if err := c.ShowUI(t.Context(), idA); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ShowUI(t.Context(), ""); err != nil {
+		t.Fatal(err)
+	}
+	resp, env := raw(t, s.path, http.MethodPost, "/v2/ui/show", strings.NewReader(`{"account":"`+idB+`"}`))
+	if resp.StatusCode != http.StatusOK || env["ok"] != true || env["command"] != "ui show" ||
+		fmt.Sprint(env["data"]) != "map[shown:true]" {
+		t.Errorf("HTTP %d, envelope %v; want 200, shown true", resp.StatusCode, env)
+	}
+	mu.Lock()
+	if !slices.Equal(got, []string{idA, "", idB}) {
+		t.Errorf("ShowUI got %q, want the accounts passed through", got)
+	}
+	fail = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no window"), Hint: "retry"}
+	mu.Unlock()
+	if err := c.ShowUI(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "no window") {
+		t.Errorf("ShowUI error = %v, want the callback's", err)
+	}
+	resp, _ = raw(t, s.path, http.MethodGet, "/v2/ui/show", nil)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /v2/ui/show = %d, want 405", resp.StatusCode)
+	}
+	resp, _ = raw(t, s.path, http.MethodPost, "/v2/ui/show", strings.NewReader(`{bad`))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad body = %d, want 400", resp.StatusCode)
+	}
+}
+
+// Without a ShowUI (pcb serve), the route does not exist: its 404 is the
+// one an unknown path gets.
+func TestShowUIWithoutCallbackIsAnUnknownEndpoint(t *testing.T) {
+	t.Parallel()
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon()})
+	resp, env := raw(t, s.path, http.MethodPost, "/v2/ui/show", strings.NewReader(`{}`))
+	e, _ := env["error"].(map[string]any)
+	if resp.StatusCode != http.StatusNotFound || env["ok"] != false || e == nil || e["message"] != "no such control endpoint: /v2/ui/show" {
+		t.Errorf("HTTP %d, envelope %v; want 404 with the unknown-endpoint message", resp.StatusCode, env)
+	}
+	if err := dial(t, s.path).ShowUI(t.Context(), ""); err == nil {
+		t.Error("ShowUI against a server without it succeeded")
+	}
+}

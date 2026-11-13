@@ -97,6 +97,9 @@ type Options struct {
 	// Ready is called once the control socket and the CalDAV listener are
 	// bound, before the listener accepts.
 	Ready func(Info)
+	// ShowUI raises the desktop app's window for POST /v2/ui/show (nil: the
+	// route does not exist, as in pcb serve).
+	ShowUI func(account string) error
 }
 
 // Info describes the CalDAV listener.
@@ -107,6 +110,11 @@ type Info struct {
 	TLS          bool
 	Fingerprint  string
 	CertNotAfter *time.Time
+}
+
+// CTL is the listener as the control socket publishes it.
+func (i Info) CTL() *ctl.Listener {
+	return &ctl.Listener{Addr: i.Addr, URL: i.Base, TLS: i.TLS, Fingerprint: i.Fingerprint, CertNotAfter: i.CertNotAfter}
 }
 
 // AccountURL is the URL to enter in a CalDAV client for the account localID.
@@ -172,7 +180,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 
 	var published atomic.Pointer[ctl.Listener]
-	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load)
+	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI)
 	if err != nil {
 		return finish(err)
 	}
@@ -200,7 +208,7 @@ func Run(ctx context.Context, o Options) error {
 		log.Warn("cannot list the network interfaces: the printed URL says localhost", "error", err.Error())
 	}
 	info := Info{Addr: ln.Addr().String(), Base: base, TLS: tlsConf != nil, Fingerprint: fingerprint, CertNotAfter: certNotAfter(tlsConf)}
-	published.Store(&ctl.Listener{Addr: info.Addr, URL: info.Base, TLS: info.TLS, Fingerprint: info.Fingerprint, CertNotAfter: info.CertNotAfter})
+	published.Store(info.CTL())
 	if o.Ready != nil {
 		o.Ready(info)
 	}
@@ -288,7 +296,7 @@ func (w *wrapped) Unwrap() error { return w.err }
 // returns what stops it: it closes the socket, which removes it. Off Unix
 // there is no control socket (ruling M5-P3); any other failure to open it
 // is exit 20 with a hint for its cause.
-func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener) (stop func(), err error) {
+func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
 	switch {
 	case errors.Is(err, ctl.ErrUnsupported):
@@ -298,7 +306,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
 	}
-	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log}
+	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
