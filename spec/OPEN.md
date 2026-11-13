@@ -208,6 +208,10 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 - Control socket: `statusWriter` has no `Flush` of its own, reached through `http.ResponseController` (`internal/ctl/server.go:207`); a 1xx `WriteHeader` is logged as the final status (`:213`); `lockServe` reads `serve.lock` uncapped (`internal/service/hub_serve.go:179`).
 - `pcb-ui`: an account with CalDAV off and MCP on shows `CalDAV off` and no freshness in its one-line state (`internal/ui/model.go:191`); the comment at `internal/daemon/daemon.go:77` lists `SetCalDAV` without `SetMCP`.
 - E19: its wording, and the legacy double run of an elicitation verified in a scratch test only (`spec/experiments/E19-mcp-go-sdk.md`).
+- Login: a ready account whose relogin hits a CAPTCHA and is then cancelled stays `needs-captcha` instead of returning to `ready` (`internal/loginflow/flow.go` `Cancel`); `pcb login` or `pcb-ui` clears it.
+- `pcb mcp`: the user unit's state is read once before the 30 s wait, so a `pcb service stop` during that wait ends in exit 20 instead of serving the session (`internal/cli/mcp_stdio.go`); run `pcb mcp` again.
+- `pcb mcp`: the `systemctl show` probe of the user unit has no timeout of its own (`internal/cli/mcp_stdio.go`).
+- Edits: an alarm kept by its minutes whose ACTION is neither DISPLAY nor EMAIL (e.g. AUDIO, which Proton drops) now makes the edit refused instead of silently changed (`internal/ical/edit.go` `replaceAlarms`).
 
 ## Parked by the initial-version audit (2026-11-12)
 
