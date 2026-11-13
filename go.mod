@@ -10,6 +10,7 @@ require (
 	github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6
 	github.com/emersion/go-webdav v0.7.0
 	github.com/goccy/go-yaml v1.19.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
