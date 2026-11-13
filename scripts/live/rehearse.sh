@@ -4,7 +4,9 @@
 # seeded with the test data set. Nothing leaves the loopback interface:
 # config.toml points pcb at the fake before any login, and a proxy fence
 # makes any other HTTP request fail. Every pcb directory (and HOME) is in a
-# temporary run root, removed at the end.
+# temporary run root, removed at the end. Steps 19 and 22 drive pcb mcp
+# as an agent would, over stdin and stdout (spec/HUMAN-CHECKS.md step 10):
+# relayed to pcb serve, then serving the session itself.
 #
 # Each step prints "--- step N: ..." and stops the run at its first
 # mismatch (exit 1); the last line is PASS. A red rehearsal stops the live
@@ -23,6 +25,7 @@ chmod 700 "$RUN"
 STEP=0
 FAKE_PID=
 SERVE_PID=
+MCP_PID=
 
 say() { printf '    %s\n' "$*"; }
 fail() {
@@ -51,10 +54,11 @@ stop_pid() { # PID: TERM, then wait for it
 
 cleanup() {
 	local rc=$?
+	stop_pid "${MCP_PID:-}"
 	stop_pid "$SERVE_PID"
 	stop_pid "$FAKE_PID"
 	if [ "$rc" -ne 0 ]; then
-		for f in serve.log fake.err; do
+		for f in serve.log fake.err mcp.err; do
 			if [ -s "$RUN/$f" ]; then
 				printf '\n=== last lines of %s ===\n' "$f" >&2
 				tail -n 25 "$RUN/$f" >&2
@@ -120,6 +124,66 @@ free_port() {
 		fi
 	done
 	fail "no free port on 127.0.0.1"
+}
+
+# The agent's side of a stdio MCP session: pcb mcp runs as a coprocess,
+# one JSON-RPC message per line each way. Every line pcb mcp writes goes to
+# $RUN/mcp.log, its stderr to $RUN/mcp.err; it is never given a secret.
+MCP_ID=0
+MCP_IN=
+MCP_OUT=
+
+# mcp_open ARGS...: starts pcb mcp ARGS and initializes the session (a
+# client that declares no capability: no elicitation).
+mcp_open() {
+	coproc MCP { exec "$PCB" mcp "$@" 2>>"$RUN/mcp.err"; }
+	MCP_IN=${MCP[1]}
+	MCP_OUT=${MCP[0]}
+	mcp_rpc initialize '{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"pcb-rehearse","version":"1"}}'
+	equal "$(jq -r .result.serverInfo.name "$RUN/mcp.json")" pcb "MCP server name"
+	printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}' >&"$MCP_IN"
+}
+
+# mcp_rpc METHOD PARAMS: one request; its response in $RUN/mcp.json.
+# Notifications and other lines are skipped; a JSON-RPC error fails.
+mcp_rpc() {
+	local line
+	MCP_ID=$((MCP_ID + 1))
+	jq -cn --argjson id "$MCP_ID" --arg m "$1" --argjson p "$2" '{jsonrpc: "2.0", id: $id, method: $m, params: $p}' >&"$MCP_IN"
+	while IFS= read -r -t 60 line <&"$MCP_OUT"; do
+		printf '%s\n' "$line" >>"$RUN/mcp.log"
+		if jq -e --argjson id "$MCP_ID" '.id == $id and (has("method") | not)' <<<"$line" >/dev/null 2>&1; then
+			printf '%s\n' "$line" >"$RUN/mcp.json"
+			jq -e 'has("result")' "$RUN/mcp.json" >/dev/null || fail "$1: $line"
+			return 0
+		fi
+	done
+	fail "$1: no answer from pcb mcp within 60s"
+}
+
+# mcp_tool NAME ARGS: a tool call that must succeed; its structured
+# result in $RUN/tool.json.
+mcp_tool() {
+	mcp_rpc tools/call "$(jq -cn --arg n "$1" --argjson a "$2" '{name: $n, arguments: $a}')"
+	jq -e '.result.isError | not' "$RUN/mcp.json" >/dev/null || fail "$1: tool error $(jq -c .result.content "$RUN/mcp.json")"
+	jq '.result.structuredContent' "$RUN/mcp.json" >"$RUN/tool.json"
+}
+
+# mcp_tool_fails NAME ARGS CLASS: a tool call that must fail with CLASS.
+mcp_tool_fails() {
+	mcp_rpc tools/call "$(jq -cn --arg n "$1" --argjson a "$2" '{name: $n, arguments: $a}')"
+	jq -e '.result.isError' "$RUN/mcp.json" >/dev/null || fail "$1 succeeded, want a $3 error"
+	equal "$(jq -r '.result.content[0].text | fromjson | .error.class' "$RUN/mcp.json")" "$3" "$1's error class"
+}
+
+# mcp_close: ends the session as an agent does (stdin closed); pcb mcp
+# must exit 0.
+mcp_close() {
+	local pid=$MCP_PID rc=0
+	exec {MCP_IN}>&-
+	wait "$pid" || rc=$?
+	MCP_PID=
+	equal "$rc" 0 "pcb mcp exit code at the end of the session"
 }
 
 # --------------------------------------------------------------------------
@@ -502,7 +566,76 @@ run 0 "$PCB" client show --json --reveal
 equal "$(jq -r .data.password "$RUN/out")" "$PASS2" "default client's password after the re-login"
 
 # --------------------------------------------------------------------------
-step 19 "pcb logout revokes the session; the daemon waits again"
+step 19 "pcb mcp relayed to pcb serve: list, create, update, delete"
+mcp_open --profile full
+equal "$(jq -c '.result.capabilities.tools != null' "$RUN/mcp.json")" true "the server offers tools"
+mcp_rpc tools/list '{}'
+equal "$(jq -c '[.result.tools[].name] | sort' "$RUN/mcp.json")" \
+	'["calendars_list","event_create","event_delete","event_get","event_update","events_list","events_search","free_busy","login","logout","status"]' \
+	"tools of the full profile over stdio"
+run 0 "$PCB" status --json
+equal "$(jq -c '[.data.daemon.kind, .data.daemon.pid, .data.mcp.sessions.relay]' "$RUN/out")" "[\"serve\",$PID,1]" "the daemon serves the relayed session"
+mcp_tool status '{}'
+equal "$(jq -c '[.accounts[] | [.account, .phase]]' "$RUN/tool.json")" "[[\"$ADDRESS\",\"ready\"]]" "status tool"
+mcp_tool calendars_list '{}'
+equal "$(jq -r '.calendars | length' "$RUN/tool.json")" 4 "calendars_list"
+equal "$(jq -r '[.calendars[] | select(.default) | .id] | join(",")' "$RUN/tool.json")" "$DEF_ID" "calendars_list: the default calendar"
+equal "$(jq -r '.calendars[] | select(.id == "'"$SHARED_ID"'") | .read_only' "$RUN/tool.json")" true "calendars_list: the shared calendar is read-only"
+# The seeded series of step 12, expanded: its edited occurrence of 30
+# September, its deleted one of 14 October absent.
+mcp_tool events_list "{\"from\":\"2025-09-29\",\"to\":\"2025-11-01\",\"tz\":\"Europe/Paris\",\"calendars\":[\"$DEF_ID\"],\"limit\":500}"
+jq '[.events[] | select(.untrusted.summary | startswith("pcb-seed s343")) | [.start.at, .untrusted.summary, .recurring]]' "$RUN/tool.json" >"$RUN/s343.json"
+has "$RUN/s343.json" '"pcb-seed s343.e Every two weeks (edited)"' "events_list: the edited occurrence"
+lacks "$RUN/s343.json" '"2025-10-14T' "events_list: the deleted occurrence"
+equal "$(jq -r 'map(select(.[2])) | length' "$RUN/s343.json")" "$(jq -r length "$RUN/s343.json")" "events_list: occurrences of a series are recurring"
+equal "$(jq -r .skipped "$RUN/tool.json")" 0 "events_list: no unreadable event"
+
+WRITES0=$(fake_calls PUT "$SYNC_PATH")
+mcp_tool event_create "{\"account\":\"$ADDRESS\",\"calendar\":\"$DEF_ID\",\"summary\":\"pcb-rehearsal mcp created\",\"start\":\"2027-02-10T10:00\",\"end\":\"2027-02-10T11:00\",\"tz\":\"Europe/Paris\",\"location\":\"Room 2\",\"alarms\":[10]}"
+equal "$(fake_calls PUT "$SYNC_PATH")" $((WRITES0 + 1)) "writes the fake received (create)"
+EVENT_ID=$(jq -r .event_id "$RUN/tool.json")
+ETAG1=$(jq -r .etag "$RUN/tool.json")
+{ [ -n "$EVENT_ID" ] && [ "$EVENT_ID" != null ] && [ -n "$ETAG1" ] && [ "$ETAG1" != null ]; } || fail "event_create: $(cat "$RUN/tool.json")"
+# edit_args ETAG SUMMARY: event_update's arguments renaming the event.
+edit_args() { jq -cn --arg id "$EVENT_ID" --arg etag "$1" --arg s "$2" '{event_id: $id, etag: $etag, scope: "series", changes: {summary: $s}}'; }
+mcp_tool event_get "{\"event_id\":\"$EVENT_ID\"}"
+equal "$(jq -c '[.event.start.at, .event.start.tzid, .event.untrusted.summary, .event.untrusted.location, [.event.alarms[].minutes_before]]' "$RUN/tool.json")" \
+	'["2027-02-10T10:00:00+01:00","Europe/Paris","pcb-rehearsal mcp created","Room 2",[10]]' "event_get after the create"
+equal "$(jq -r .etag "$RUN/tool.json")" "$ETAG1" "event_get's etag after the create"
+mcp_tool events_search '{"text":"PCB-REHEARSAL MCP","from":"2027-02-01","to":"2027-03-01","tz":"Europe/Paris"}'
+equal "$(jq -c '[.events[].event_id]' "$RUN/tool.json")" "[\"$EVENT_ID\"]" "events_search finds the new event"
+
+mcp_tool event_update "$(edit_args "$ETAG1" "pcb-rehearsal mcp renamed")"
+equal "$(fake_calls PUT "$SYNC_PATH")" $((WRITES0 + 2)) "writes the fake received (update)"
+ETAG2=$(jq -r .etag "$RUN/tool.json")
+{ [ -n "$ETAG2" ] && [ "$ETAG2" != null ] && [ "$ETAG2" != "$ETAG1" ]; } || fail "etag after the update: '$ETAG2' (before '$ETAG1')"
+mcp_tool event_get "{\"event_id\":\"$EVENT_ID\"}"
+# Only the summary changed: the location and the alarm are kept.
+equal "$(jq -c '[.event.untrusted.summary, .event.untrusted.location, [.event.alarms[].minutes_before]]' "$RUN/tool.json")" \
+	'["pcb-rehearsal mcp renamed","Room 2",[10]]' "event_get after the update"
+equal "$(jq -r .etag "$RUN/tool.json")" "$ETAG2" "event_get's etag after the update"
+mcp_tool_fails event_update "$(edit_args "$ETAG1" stale)" conflict
+equal "$(fake_calls PUT "$SYNC_PATH")" $((WRITES0 + 2)) "a stale etag writes nothing"
+
+mcp_tool event_delete "$(jq -cn --arg id "$EVENT_ID" --arg etag "$ETAG2" '{event_id: $id, etag: $etag, scope: "series"}')"
+equal "$(jq -r .deleted "$RUN/tool.json")" true "event_delete"
+equal "$(fake_calls PUT "$SYNC_PATH")" $((WRITES0 + 3)) "writes the fake received (delete)"
+mcp_tool_fails event_get "{\"event_id\":\"$EVENT_ID\"}" not-found
+mcp_close
+# One audit line per call in the daemon's log, entry relay, never content.
+has "$RUN/serve.log" 'msg="mcp call" tool=event_delete entry=relay grant=stdio:full' "the audit of the delete"
+lacks "$RUN/serve.log" "pcb-rehearsal mcp" "the audit holds no event text"
+lacks "$RUN/mcp.log" "$FAKE_PASS" "the MCP session never holds the account password"
+lacks "$RUN/mcp.err" "$FAKE_PASS" "pcb mcp's stderr never holds the account password"
+relay_ended() {
+	"$PCB" status --json >"$RUN/st.json" 2>/dev/null &&
+		jq -e --argjson pid "$PID" '.data.daemon.pid == $pid and (.data.mcp.sessions.relay // 0) == 0' "$RUN/st.json"
+}
+until_true 10 "the relayed session ended, the daemon serves on" relay_ended
+write_log_clean "serve.log after the MCP session"
+
+# --------------------------------------------------------------------------
+step 20 "pcb logout revokes the session; the daemon waits again"
 REVOKES0=$(fake_calls DELETE /auth/v4)
 run 0 "$PCB" logout --json
 equal "$(jq -r .data.revoked "$RUN/out")" true "logout revoked"
@@ -513,7 +646,7 @@ equal "$(jq -r .data.daemon.pid "$RUN/st.json")" "$PID" "daemon pid after the lo
 equal "$(propfind0 "$DAV/")" 503 "CalDAV after the logout"
 
 # --------------------------------------------------------------------------
-step 20 "SIGTERM stops pcb serve with exit 0"
+step 21 "SIGTERM stops pcb serve with exit 0"
 kill -TERM "$SERVE_PID"
 rc=0
 wait "$SERVE_PID" || rc=$?
@@ -522,5 +655,27 @@ equal "$rc" 0 "pcb serve exit code"
 lacks "$RUN/serve.log" "level=ERROR" "serve.log"
 lacks "$RUN/serve.log" "$FAKE_PASS" "serve.log never holds the account password"
 lacks "$RUN/serve.log" "$PASS2" "serve.log never holds the CalDAV password"
+
+# --------------------------------------------------------------------------
+step 22 "pcb mcp with no daemon serves the session itself (kind mcp, no listener)"
+mcp_open
+mcp_rpc tools/list '{}'
+equal "$(jq -c '[.result.tools[].name] | sort' "$RUN/mcp.json")" \
+	'["calendars_list","event_get","events_list","events_search","free_busy","login","status"]' \
+	"tools of the read-only profile (the default)"
+run 0 "$PCB" status --json
+equal "$(jq -c '[.data.daemon.kind, .data.listener, .data.mcp.sessions.stdio]' "$RUN/out")" '["mcp",null,1]' "the session daemon"
+MCP_DAEMON=$(jq -r .data.daemon.pid "$RUN/out")
+equal "$MCP_DAEMON" "$MCP_PID" "the session daemon is pcb mcp"
+run 20 "$PCB" serve
+has "$RUN/err" "kind mcp" "pcb serve while an agent session serves"
+has "$RUN/err" "end the agent session (pcb mcp), then try again" "pcb serve while an agent session serves"
+# Logged out at step 20: an account a person must log in again is not
+# shown to agents.
+mcp_tool status '{}'
+equal "$(jq -c .accounts "$RUN/tool.json")" '[]' "status tool after the logout"
+mcp_close
+lacks "$RUN/mcp.err" "level=ERROR" "pcb mcp's log"
+lacks "$RUN/mcp.err" "$FAKE_PASS" "pcb mcp's log never holds the account password"
 
 printf 'PASS: the live session rehearsed against pcb-fake (%s steps)\n' "$STEP"
