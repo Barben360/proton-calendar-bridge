@@ -396,10 +396,16 @@ the key proof would find it; a DELETE is unaffected.
   | {ID, Event} | {ID}]}` (create, update, delete). One call per CalDAV write,
   never sent twice (a 401 answered before processing is the one resend,
   M4-R23). Per-entry codes in a 1001 envelope; the client reads 2000
-  (STATUS), 2001 (signature or exception SEQUENCE, not told apart, M4-R24;
-  also an exception of a master without SEQUENCE, so every master pcb writes
-  carries one, `spec/mapping.md` §6 [verified: live 2026-11-13,
-  `HUMAN-CHECKS.md` 6.3 D7]),
+  (STATUS), 2001 (causes not told apart, M4-R24). 2001 measured [verified:
+  live 2026-11-13]: an exception of a master without SEQUENCE, so every
+  master pcb writes carries one (`spec/mapping.md` §6; `HUMAN-CHECKS.md`
+  6.3 D7, the create and its bisection); an RRULE with `COUNT=50`, `UNTIL`
+  in 2038, `FREQ=HOURLY` or `INTERVAL=1000`, a floating time, a non-IANA
+  TZID (6.7 write matrix; pcb refuses all of them before sending). 2001
+  assumed: a part signed with another address's key and an exception
+  SEQUENCE below its master's [claim: research A.4]; an exception update
+  or delete under a master without SEQUENCE [assumed from the create's,
+  `OPEN.md` N2];
   2011 (unsupported content), 2061 (unknown ID), 2501 (gone); a delete answers
   `Responses: []` [claim: research A.3, A.4; the fake implements them]. The
   `Event` body: the card parts, key packets on a create only, `Permissions`

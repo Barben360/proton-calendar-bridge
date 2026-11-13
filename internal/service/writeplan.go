@@ -344,19 +344,21 @@ func PlanDelete(current Group) (WritePlan, error) {
 // (DTSTAMP the write time, DTEND from DTSTART); an attendee added or removed
 // is refused, edits of an existing attendee's parameters are ignored (ruling
 // M4-R9), a new exception takes its master's attendees when it has the same
-// set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming, stored), stored+1 when the shared signed
-// content changes and the client did not bump it, and an exception's is at
-// least its master's (ruling M4-R4). Every master written carries a SEQUENCE,
-// 0 when neither the client nor the row has one: Proton refuses an exception
-// of a master whose signed part has none (live 2026-11-13, HUMAN-CHECKS 6.3
-// D7). A master stored without one gets SEQUENCE:0 with any write to its
-// series (an exception created, updated or deleted), first in the call, its
-// body otherwise unchanged; a body that changes nothing still plans nothing. Notifications follow the tri-state
-// (research D; never absent on an update, Proton would reset the row to null). An update re-sends the row's Color (null when it has none),
-// Attendees and IsOrganizer, reuses the row's session keys only when
-// SessionKeys trusts both, and carries no key packet; a create mints its
-// keys and sends Color null (an exception the master's Color). A row whose
-// parts and notifications do not change gets no operation.
+// set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming,
+// stored), stored+1 when the shared signed content changes and the client
+// did not bump it, and an exception's is at least its master's (ruling
+// M4-R4). Every master written carries a SEQUENCE, 0 when neither the client
+// nor the row has one: Proton refuses an exception of a master whose signed
+// part has none (live 2026-11-13, HUMAN-CHECKS 6.3 D7). A master stored
+// without one gets SEQUENCE:0 with any write to its series (an exception
+// created, updated or deleted), first in the call, its body otherwise
+// unchanged; a body that changes nothing still plans nothing. Notifications
+// follow the tri-state (research D; never absent on an update, Proton would
+// reset the row to null). An update re-sends the row's Color (null when it
+// has none), Attendees and IsOrganizer, reuses the row's session keys only
+// when SessionKeys trusts both, and carries no key packet; a create mints
+// its keys and sends Color null (an exception the master's Color). A row
+// whose parts and notifications do not change gets no operation.
 func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	if in.UID == "" || in.UID != current.UID {
 		return WritePlan{}, errors.New("planning a write: the body's UID is not the event's")

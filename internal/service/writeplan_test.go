@@ -1792,7 +1792,8 @@ func TestEveryWrittenMasterCarriesASequence(t *testing.T) {
 		t.Errorf("the new exception: %q, want its SEQUENCE:1", got)
 	}
 	// An exception keeps the earlier rules: none sent, none stored, and its
-	// master's 0: no SEQUENCE written (Proton takes it, live D7 bisection).
+	// master's 0: no SEQUENCE written (Proton taking it is assumed: the
+	// live D7 bisection sent exceptions with SEQUENCE:0 only).
 	p = plan(t, g, cal(series, with(t, exception, map[string]string{"SEQUENCE:1": ""})))
 	if len(p.Ops) != 2 || p.Ops[1].Create == nil {
 		t.Fatalf("an exception without SEQUENCE: ops = %s, want the master's update, then the create", describe(p))
