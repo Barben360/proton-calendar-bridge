@@ -82,7 +82,8 @@ func (TOTPRequest) LogValue() slog.Value { return slog.StringValue(redactedTOTP)
 
 // Daemon is the pcb serve process that answers on the socket.
 type Daemon struct {
-	// Kind is "serve" (pcb serve) or "ui" (the desktop app pcb-ui).
+	// Kind is "serve" (pcb serve), "ui" (the desktop app pcb-ui) or "mcp"
+	// (the session daemon of pcb mcp, an agent session).
 	Kind      string    `json:"kind"`
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
@@ -91,7 +92,7 @@ type Daemon struct {
 	Socket    string    `json:"socket"`
 }
 
-// NewDaemon describes this process, of kind "serve" or "ui": its PID and
+// NewDaemon describes this process, of kind "serve", "ui" or "mcp": its PID and
 // build version.
 func NewDaemon(kind, socket, logLevel string, startedAt time.Time) Daemon {
 	return Daemon{Kind: kind, PID: os.Getpid(), Version: buildinfo.Version, StartedAt: startedAt, LogLevel: logLevel, Socket: socket}

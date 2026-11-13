@@ -62,9 +62,14 @@ type Server struct {
 	// unknown endpoint. It runs on the HTTP handler goroutine and must
 	// return quickly, for example by posting to the UI loop.
 	ShowUI func(account string) error
-	// MCP describes the process's MCP adapter for GET /v2/status (nil:
-	// the status has no mcp).
-	MCP func() *MCP
+	// MCPStatus describes the process's MCP adapter for GET /v2/status
+	// (nil: the status has no mcp).
+	MCPStatus func() *MCP
+	// MCP serves /mcp, every method, for the relays of pcb mcp (decision
+	// 0016: an agent reaches the control socket only through this route).
+	// It runs behind the peer-UID check like every route, and its answers
+	// are its own, not envelopes. nil: /mcp is an unknown endpoint.
+	MCP http.Handler
 
 	once, initOnce sync.Once
 	srv            *http.Server
@@ -177,6 +182,13 @@ func (s *Server) init() {
 	for _, rt := range routes {
 		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
 	}
+	if s.MCP != nil {
+		s.mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
+			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+			s.MCP.ServeHTTP(sw, r)
+			record(r, outcome{status: sw.status})
+		})
+	}
 	if s.ShowUI != nil {
 		rt := route{"/v2/ui/show", http.MethodPost, "ui show", (*Server).showUI}
 		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
@@ -185,6 +197,32 @@ func (s *Server) init() {
 		record(r, transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon"))
 	})
 }
+
+// mcpPath is the route of Server.MCP.
+const mcpPath = "/mcp"
+
+// statusWriter keeps the status an MCP answer was sent with, for its log
+// line. Unwrap lets http.ResponseController reach the connection's writer
+// (the SDK flushes its streams and lifts the write deadline through it).
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.status, w.wroteHeader = code, true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func record(r *http.Request, o outcome) {
 	if out, ok := r.Context().Value(outcomeKey{}).(*outcome); ok {
@@ -281,8 +319,8 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 		now = s.Now
 	}
 	st := BuildStatus(ctx, s.Hub, s.Daemon, ln, now())
-	if s.MCP != nil {
-		st.MCP = s.MCP()
+	if s.MCPStatus != nil {
+		st.MCP = s.MCPStatus()
 	}
 	return st, nil
 }

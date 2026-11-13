@@ -82,7 +82,7 @@ type Options struct {
 	// returns (Run closes nothing it did not open).
 	Hub Hub
 	// Kind is what the control socket reports as the daemon's kind
-	// ("serve", "ui").
+	// ("serve", "ui", "mcp"), and what serve.lock records.
 	Kind     string
 	LogLevel string
 	Logger   *slog.Logger // nil: no logs
@@ -92,16 +92,24 @@ type Options struct {
 	Listen func(network, addr string) (net.Listener, error)
 	// WaitForLogin is Hub.Serve's process exit rule.
 	WaitForLogin bool
+	// NoListener runs without the CalDAV listener, and so without the
+	// remote /mcp whatever [mcp] remote says: the session daemon of pcb
+	// mcp opens no network port (design §5.3). The control socket, its
+	// /mcp included, still opens; Ready gets a zero Info.
+	NoListener bool
 	// Cut closing while Run stops ends the stop at once with ErrCut.
 	Cut     <-chan struct{}
 	OnState func(accountID string, s service.ServeState)
 	OnPass  func(accountID string, p service.WatchPass)
 	// Ready is called once the control socket and the CalDAV listener are
-	// bound, before the listener accepts.
+	// bound, before the listener accepts (NoListener: once the control
+	// socket is, with a zero Info).
 	Ready func(Info)
-	// MCP is the MCP adapter. With [mcp] remote on, the listener serves it
-	// on /mcp to the holders of a token (<state>/mcp-tokens.json); the
-	// control socket reports its sessions. nil: no MCP in this process.
+	// MCP is the MCP adapter. The control socket serves it on /mcp to the
+	// relays of pcb mcp (mcp.RelayAuth: the grant they send) and reports
+	// its sessions. With [mcp] remote on, the listener also serves it on
+	// /mcp to the holders of a token (<state>/mcp-tokens.json). nil: no MCP
+	// in this process.
 	MCP *mcp.Server
 	// ShowUI raises the desktop app's window for POST /v2/ui/show (nil: the
 	// route does not exist, as in pcb serve). It runs on the control
@@ -131,8 +139,9 @@ func (i Info) AccountURL(localID string) string { return i.Base + service.Accoun
 // Run serves the accounts of o.Hub until ctx ends: Hub.Serve, then, once it
 // holds its locks and found a login to serve (with WaitForLogin: its locks
 // only), the control socket then the CalDAV listener (a refused start binds
-// neither). The end of ctx drains the listener for up to 5 s, stops the
-// control socket then Hub.Serve and returns nil. Hub.Serve ending on its
+// neither; NoListener: the control socket only). The end of ctx drains the
+// listener for up to 5 s, stops the control socket then Hub.Serve and
+// returns nil. Hub.Serve ending on its
 // own ends Run the same way, with its error; so does a failed listener
 // (Blocked), unless Hub.Serve's error is one a person must act on. Closing
 // o.Cut meanwhile makes Run return at once with ErrCut. The control socket
@@ -166,6 +175,7 @@ func Run(ctx context.Context, o Options) error {
 			},
 			OnState: o.OnState,
 			OnPass:  o.OnPass,
+			Kind:    o.Kind,
 		})
 	}()
 	// finish stops Hub.Serve and returns its error over err: a person is
@@ -187,13 +197,20 @@ func Run(ctx context.Context, o Options) error {
 		return finish(nil)
 	}
 
-	remoteMCP := o.Config.MCP.Remote && o.MCP != nil
-	if o.Config.MCP.Remote && o.MCP == nil {
+	remoteMCP := o.Config.MCP.Remote && o.MCP != nil && !o.NoListener
+	switch {
+	case o.Config.MCP.Remote && o.NoListener:
+		log.Info("[mcp] remote is on, but this process opens no listener: /mcp is served on the control socket only")
+	case o.Config.MCP.Remote && o.MCP == nil:
 		log.Warn("[mcp] remote is on, but this process has no MCP server: /mcp is not served")
+	}
+	var relay http.Handler
+	if o.MCP != nil {
+		relay = o.MCP.HTTPHandler(mcp.RelayAuth)
 	}
 	var published atomic.Pointer[ctl.Listener]
 	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI,
-		mcpStatus(o.MCP, remoteMCP))
+		mcpStatus(o.MCP, remoteMCP), relay)
 	if err != nil {
 		return finish(err)
 	}
@@ -203,6 +220,20 @@ func Run(ctx context.Context, o Options) error {
 			return err
 		}
 		return syncFinish(err)
+	}
+
+	if o.NoListener {
+		if o.Ready != nil {
+			o.Ready(Info{})
+		}
+		log.Info("serving without a listener: the control socket only")
+		var result error
+		select {
+		case <-ctx.Done():
+		case result = <-synced:
+			synced <- result // finish waits on a Serve that already returned
+		}
+		return finish(result)
 	}
 
 	ln, err := listen(listenNetwork(cc.Listen), cc.Listen)
@@ -317,7 +348,7 @@ func (w *wrapped) Unwrap() error { return w.err }
 // there is no control socket (ruling M5-P3); any other failure to open it
 // is exit 20 with a hint for its cause.
 func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error,
-	mcpStatus func() *ctl.MCP) (stop func(), err error) {
+	mcpStatus func() *ctl.MCP, relay http.Handler) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
 	switch {
 	case errors.Is(err, ctl.ErrUnsupported):
@@ -327,7 +358,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
 	}
-	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCP: mcpStatus}
+	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -1087,3 +1087,73 @@ func TestHeldSyncLockIsRetriedNotParked(t *testing.T) {
 		t.Errorf("a.Stopped = %+v once served, want nil", info.Stopped)
 	}
 }
+
+// serve.lock records the holder's kind beside its PID; a second Serve names
+// both, and for an agent session (kind mcp) says to end it.
+func TestServeLockNamesTheKind(t *testing.T) {
+	t.Parallel()
+	pid := strconv.Itoa(os.Getpid())
+	for _, tc := range []struct{ kind, hint string }{
+		{"mcp", "end the agent session (pcb mcp), then try again"},
+		{"serve", "stop it first, or use pcb status"},
+	} {
+		e := newServeEnv(t)
+		h := e.open(t)
+		ready := make(chan struct{})
+		o := newServeRig(h).options(true)
+		o.Kind, o.Ready = tc.kind, func() { close(ready) }
+		_, stop := newServeRig(h).serve(t, o)
+		select {
+		case <-ready:
+		case <-time.After(waitLimit):
+			t.Fatalf("kind %s: Hub.Serve never got ready", tc.kind)
+		}
+		raw, err := os.ReadFile(filepath.Join(e.dirs.State, "serve.lock"))
+		if want := pid + " " + tc.kind + "\n"; err != nil || string(raw) != want {
+			t.Errorf("serve.lock = %q, %v, want %q", raw, err, want)
+		}
+		h2 := e.open(t)
+		o2 := newServeRig(h2).options(true)
+		o2.Kind = "ui"
+		ee := wantExit(t, h2.Serve(t.Context(), o2), exitcode.Blocked)
+		if want := "pcb is already serving (pid " + pid + ", kind " + tc.kind + ")"; ee.Error() != want || ee.Hint != tc.hint {
+			t.Errorf("second Serve = %q (hint %q), want %q (hint %q)", ee.Error(), ee.Hint, want, tc.hint)
+		}
+		if err := stop(); err != nil {
+			t.Fatalf("Serve = %v", err)
+		}
+	}
+}
+
+// A serve.lock of an older pcb holds the PID alone: it is still named,
+// with no kind. A kind that is not a plain word is not repeated.
+func TestServeLockReadsTheOldFormat(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ content, want string }{
+		{"4242\n", "pcb is already serving (pid 4242)"},
+		{"4242 \x1b[31mred\n", "pcb is already serving (pid 4242)"},
+		{"4242 mcp extra\n", "pcb is already serving (pid 4242)"},
+		{"", "pcb is already serving"},
+	} {
+		e := newServeEnv(t)
+		path := filepath.Join(e.dirs.State, "serve.lock")
+		if err := os.MkdirAll(e.dirs.State, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unlock, ok, err := filelock.TryLock(path)
+		if err != nil || !ok {
+			t.Fatalf("cannot take serve.lock: %v %v", ok, err)
+		}
+		if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := e.open(t)
+		o := newServeRig(h).options(true)
+		o.Kind = "serve"
+		ee := wantExit(t, h.Serve(t.Context(), o), exitcode.Blocked)
+		if ee.Error() != tc.want || ee.Hint != "stop it first, or use pcb status" {
+			t.Errorf("%q: Serve = %q (hint %q), want %q", tc.content, ee.Error(), ee.Hint, tc.want)
+		}
+		unlock()
+	}
+}

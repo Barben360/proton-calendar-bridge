@@ -1268,3 +1268,112 @@ func TestShowUIWithoutCallbackIsAnUnknownEndpoint(t *testing.T) {
 		t.Error("ShowUI against a server without it succeeded")
 	}
 }
+
+// mcpStub is the /mcp handler the daemon mounts: it records what reaches
+// it and answers a streamed body, flushed through the server's writer.
+type mcpStub struct {
+	mu    sync.Mutex
+	calls []string // "METHOD path header body"
+}
+
+func (m *mcpStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	m.mu.Lock()
+	m.calls = append(m.calls, r.Method+" "+r.URL.Path+" "+r.Header.Get("X-Pcb-Mcp-Grant")+" "+string(body))
+	m.mu.Unlock()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = io.WriteString(w, "event: message\n")
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_, _ = io.WriteString(w, "flush: "+err.Error()+"\n")
+	}
+	_, _ = io.WriteString(w, "data: {}\n\n")
+}
+
+func (m *mcpStub) seen() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.calls)
+}
+
+// rawMCP sends one request to the socket's /mcp and returns its response
+// and body as they are (no envelope).
+func rawMCP(t *testing.T, path, method, body string) (*http.Response, string) {
+	t.Helper()
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", path)
+	}}}
+	defer hc.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), method, "http://pcb/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Pcb-Mcp-Grant", `{"Name":"read-only"}`)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, string(b)
+}
+
+// The control socket hands /mcp, every method, to its MCP handler as is:
+// headers and body in, status and a flushed stream out, never an envelope.
+// Without a handler /mcp is an unknown endpoint; /v2 routes are unchanged.
+func TestControlSocketServesMCP(t *testing.T) {
+	t.Parallel()
+	stub := &mcpStub{}
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{Phase: "ready", Username: "alice"}), Daemon: daemon(), MCP: stub})
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		resp, body := rawMCP(t, s.path, method, `{"jsonrpc":"2.0"}`)
+		if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Content-Type") != "text/event-stream" ||
+			body != "event: message\ndata: {}\n\n" {
+			t.Errorf("%s /mcp: HTTP %d %q, body %q; want the handler's 202 stream", method, resp.StatusCode, resp.Header.Get("Content-Type"), body)
+		}
+	}
+	want := []string{
+		`POST /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+		`GET /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+		`DELETE /mcp {"Name":"read-only"} {"jsonrpc":"2.0"}`,
+	}
+	if got := stub.seen(); !slices.Equal(got, want) {
+		t.Errorf("the handler saw %q, want %q", got, want)
+	}
+	if logs := s.logs.String(); !strings.Contains(logs, "path=/mcp status=202") {
+		t.Errorf("the request log lacks /mcp's status:\n%s", logs)
+	}
+	// Only /mcp itself: a path below it is an unknown endpoint.
+	if resp, env := raw(t, s.path, http.MethodPost, "/mcp/x", nil); resp.StatusCode != http.StatusNotFound || env["ok"] != false {
+		t.Errorf("/mcp/x: HTTP %d %v, want 404", resp.StatusCode, env)
+	}
+	if resp, env := raw(t, s.path, http.MethodGet, "/v2/status", nil); resp.StatusCode != http.StatusOK || env["ok"] != true {
+		t.Errorf("/v2/status beside /mcp: HTTP %d %v", resp.StatusCode, env)
+	}
+
+	plain := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon()})
+	if resp, env := raw(t, plain.path, http.MethodPost, "/mcp", strings.NewReader("{}")); resp.StatusCode != http.StatusNotFound || env["ok"] != false {
+		t.Errorf("/mcp without a handler: HTTP %d %v, want the 404 envelope", resp.StatusCode, env)
+	}
+}
+
+// The peer-UID check covers /mcp: a peer of another UID gets 403 and the
+// handler never runs.
+func TestControlSocketMCPRefusesOtherUID(t *testing.T) {
+	t.Parallel()
+	stub := &mcpStub{}
+	s := serve(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon(), MCP: stub,
+		PeerUID: func(net.Conn) (int, bool) { return os.Geteuid() + 1, true }})
+	resp, body := rawMCP(t, s.path, http.MethodPost, `{"jsonrpc":"2.0"}`)
+	var env map[string]any
+	if err := json.Unmarshal([]byte(body), &env); err != nil || resp.StatusCode != http.StatusForbidden || env["ok"] != false {
+		t.Errorf("/mcp from another UID: HTTP %d %s, want the 403 envelope", resp.StatusCode, body)
+	}
+	if got := stub.seen(); len(got) != 0 {
+		t.Errorf("the MCP handler ran for another UID: %q", got)
+	}
+}

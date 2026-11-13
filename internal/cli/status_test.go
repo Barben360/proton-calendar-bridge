@@ -473,7 +473,7 @@ func TestStatusShowsRemoteMCP(t *testing.T) {
 	} {
 		r := stubRig(t, &stubAPI{statusPhase: "ready"})
 		startDaemonWith(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "ready"}}), nil, func(s *ctl.Server) {
-			s.MCP = func() *ctl.MCP { m := c.mcp; return &m }
+			s.MCPStatus = func() *ctl.MCP { m := c.mcp; return &m }
 		})
 		r.want(exitcode.OK, "status")
 		if got := r.out.String(); !strings.Contains(got, c.want) || strings.Index(got, "mcp:") > strings.Index(got, "account:") {

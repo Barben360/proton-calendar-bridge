@@ -110,7 +110,7 @@ func run(args []string) int {
 }
 
 // probe runs the single-instance check: a running pcb-ui is shown (exit 0),
-// a running pcb serve is a dialog and exit 20.
+// a running pcb serve or agent session (pcb mcp) is a dialog and exit 20.
 func probe(a fyne.App) (code int, failed bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

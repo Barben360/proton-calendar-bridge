@@ -17,7 +17,8 @@ import (
 )
 
 // serveLockName is the root's lock of the serving process (design §4.1):
-// it holds the PID as decimal text and a newline (ruling R20).
+// it holds the PID as decimal text and a newline (ruling R20), the PID
+// followed by a space and the process's kind since M8 (lockServe).
 const serveLockName = "serve.lock"
 
 // HubServeOptions tune Hub.Serve: the ServeOptions of every account's loop
@@ -37,6 +38,10 @@ type HubServeOptions struct {
 	ServeOptions
 	OnState func(accountID string, s ServeState)
 	OnPass  func(accountID string, p WatchPass)
+	// Kind is the serving process's kind ("serve", "ui", "mcp"), recorded
+	// in serve.lock beside its PID so a second start can say who serves.
+	// "": none recorded.
+	Kind string
 }
 
 // hubServe is one run of Hub.Serve.
@@ -103,7 +108,7 @@ func (h *Hub) Serve(ctx context.Context, o HubServeOptions) error {
 	if _, err := watchInterval(o.Interval); err != nil {
 		return err
 	}
-	unlockServe, err := lockServe(h.root)
+	unlockServe, err := lockServe(h.root, o.Kind)
 	if err != nil {
 		return err
 	}
@@ -167,9 +172,11 @@ func (h *Hub) supervise(sv *hubServe) error {
 }
 
 // lockServe takes root's serve.lock without waiting and writes this
-// process's PID in it; the release empties it. Held, it is Blocked naming
-// the PID its holder wrote. Off Unix there is no lock to take.
-func lockServe(root string) (func(), error) {
+// process's PID and kind in it ("<pid> <kind>\n"; "<pid>\n" without a
+// kind); the release empties it. Held, it is Blocked naming the PID and
+// kind its holder wrote, with a hint for an agent session (kind mcp).
+// Off Unix there is no lock to take.
+func lockServe(root, kind string) (func(), error) {
 	path := filepath.Join(root, serveLockName)
 	unlock, ok, err := filelock.TryLock(path)
 	switch {
@@ -178,16 +185,15 @@ func lockServe(root string) (func(), error) {
 	case err != nil:
 		return nil, blocked("cannot take "+serveLockName+" in "+root, "make sure "+root+" is writable by this user")
 	case !ok:
-		msg := "pcb is already serving"
-		if raw, err := os.ReadFile(path); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
-				msg += " (pid " + strconv.Itoa(pid) + ")"
-			}
-		}
-		return nil, blocked(msg, "stop it first, or use pcb status")
+		raw, _ := os.ReadFile(path)
+		return nil, servingError(string(raw))
+	}
+	line := strconv.Itoa(os.Getpid())
+	if kind != "" {
+		line += " " + kind
 	}
 	// Written in place: the lock is on this file, a rename would drop it.
-	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
 		unlock()
 		return nil, blocked("cannot write "+path, "make sure "+root+" is writable by this user")
 	}
@@ -195,6 +201,48 @@ func lockServe(root string) (func(), error) {
 		_ = os.Truncate(path, 0)
 		unlock()
 	}, nil
+}
+
+// servingError is the refusal of a start while another process holds
+// serve.lock, whose content is raw: "<pid> <kind>\n", or "<pid>\n" as an
+// older pcb wrote it. What cannot be read is left out of the message: a
+// PID that is not a positive number, a kind that is not a lower-case word.
+func servingError(raw string) error {
+	msg := "pcb is already serving"
+	fields := strings.Fields(raw)
+	pid, kind := "", ""
+	if len(fields) >= 1 {
+		if n, err := strconv.Atoi(fields[0]); err == nil && n > 0 {
+			pid = strconv.Itoa(n)
+		}
+	}
+	if pid != "" && len(fields) == 2 && plainWord(fields[1]) {
+		kind = fields[1]
+	}
+	switch {
+	case kind != "":
+		msg += " (pid " + pid + ", kind " + kind + ")"
+	case pid != "":
+		msg += " (pid " + pid + ")"
+	}
+	hint := "stop it first, or use pcb status"
+	if kind == "mcp" {
+		hint = "end the agent session (pcb mcp), then try again"
+	}
+	return blocked(msg, hint)
+}
+
+// plainWord: s is 1 to 16 lower-case ASCII letters.
+func plainWord(s string) bool {
+	if s == "" || len(s) > 16 {
+		return false
+	}
+	for _, r := range s {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // anyLoggedIn is nil when an account that is not pending holds a ready

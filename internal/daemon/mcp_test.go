@@ -1,11 +1,15 @@
 package daemon_test
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -147,4 +151,134 @@ func (b bearerRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("Authorization", "Bearer "+b.secret)
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+// relayRT sends every request over the control socket with the relay's
+// grant header, as pcb mcp does.
+type relayRT struct {
+	socket, grant string
+}
+
+func (r relayRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set(mcp.RelayGrantHeader, r.grant)
+	return (&http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", r.socket)
+	}}).RoundTrip(req)
+}
+
+// relayClient is an MCP session over the control socket's /mcp with grant g.
+func relayClient(t *testing.T, socket string, g mcp.Grant) (*sdkmcp.ClientSession, error) {
+	t.Helper()
+	b, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: relayRT{socket: socket, grant: string(b)}}
+	return sdkmcp.NewClient(&sdkmcp.Implementation{Name: "relay", Version: "0"}, nil).
+		Connect(t.Context(), &sdkmcp.StreamableClientTransport{Endpoint: "http://pcb/mcp", HTTPClient: hc, MaxRetries: -1}, nil)
+}
+
+func toolNames(t *testing.T, cs *sdkmcp.ClientSession) []string {
+	t.Helper()
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+// The session daemon of pcb mcp (NoListener): no port is opened, not even
+// for [mcp] remote, Ready gets a zero Info, and the control socket still
+// answers, /mcp included, to a relay with its grant.
+func TestRunWithoutListenerOpensNoPort(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.login(t)
+	e.cfg.MCP.Remote = true
+	var listens atomic.Int32
+	r := e.start(t, e.hub, func(o *daemon.Options) {
+		o.Kind, o.NoListener = "mcp", true
+		o.MCP = mcp.NewServer(mcp.Options{Hub: e.hub})
+		o.Listen = func(string, string) (net.Listener, error) {
+			listens.Add(1)
+			return nil, errors.New("no listener for a session daemon")
+		}
+	})
+	if r.info != (daemon.Info{}) {
+		t.Errorf("Ready got %+v, want a zero Info", r.info)
+	}
+	if n := listens.Load(); n != 0 {
+		t.Errorf("Listen was called %d times", n)
+	}
+	st := daemonStatus(t, e)
+	if st.Daemon == nil || st.Daemon.Kind != "mcp" || st.Listener != nil {
+		t.Errorf("status daemon %+v, listener %+v; want kind mcp and no listener", st.Daemon, st.Listener)
+	}
+	if st.MCP == nil || st.MCP.Remote {
+		t.Errorf("status mcp = %+v, want remote off without a listener", st.MCP)
+	}
+
+	g, err := mcp.Profile("read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := relayClient(t, e.dirs.Socket(), g)
+	if err != nil {
+		t.Fatalf("a relay over the control socket: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+	if names := toolNames(t, cs); !slices.Contains(names, "events_list") || slices.Contains(names, "event_create") {
+		t.Errorf("relay read-only tools = %v", names)
+	}
+	if st := daemonStatus(t, e); st.MCP == nil || st.MCP.Sessions["relay"] != 1 {
+		t.Errorf("status mcp = %+v, want one relay session", st.MCP)
+	}
+	select {
+	case <-r.fin:
+		t.Fatalf("Run ended on its own: %v", r.err)
+	default:
+	}
+}
+
+// Every daemon kind serves /mcp on its control socket (pcb serve here,
+// with its CalDAV listener): a relay's session gets its grant's tools.
+func TestControlSocketMCPInServe(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.login(t)
+	e.start(t, e.hub, func(o *daemon.Options) {
+		o.Kind = "serve"
+		o.MCP = mcp.NewServer(mcp.Options{Hub: e.hub})
+	})
+	g, _ := mcp.Profile("full")
+	cs, err := relayClient(t, e.dirs.Socket(), g)
+	if err != nil {
+		t.Fatalf("a relay over the control socket: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+	if names := toolNames(t, cs); !slices.Contains(names, "event_create") || !slices.Contains(names, "event_delete") {
+		t.Errorf("relay full tools = %v", names)
+	}
+	// Without the grant header the relay is refused.
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", e.dirs.Socket())
+	}}}
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://pcb/mcp", strings.NewReader(mcpInitialize))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	res, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("/mcp without a grant: %d, want 400", res.StatusCode)
+	}
 }
