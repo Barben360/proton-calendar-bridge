@@ -1385,12 +1385,17 @@ func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
 		end        func(*protontest.Fake)
 		wantStatus string
 		wantCode   string
+		text       string // what the fake's answer says; it must never reach the logs
 	}{
-		{"revoked session", func(f *protontest.Fake) { f.RevokeSessions() }, "proton_status=422", "proton_code=10013"},
+		{"revoked session", func(f *protontest.Fake) { f.RevokeSessions() }, "proton_status=422", "proton_code=10013", "Invalid refresh token"},
 		{"refresh refused with another status and code", func(f *protontest.Fake) {
 			f.ExpireAccessTokens()
 			f.FailNext("POST", "/auth/v4/refresh", http.StatusUnauthorized, 4242, 0)
-		}, "proton_status=401", "proton_code=4242"},
+		}, "proton_status=401", "proton_code=4242", "injected failure"},
+		{"401 after a successful refresh", func(f *protontest.Fake) {
+			f.FailNext("GET", "/calendar/v1", http.StatusUnauthorized, 4343, 0)
+			f.FailNext("GET", "/calendar/v1", http.StatusUnauthorized, 4343, 0)
+		}, "proton_status=401", "proton_code=4343", "injected failure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1432,7 +1437,7 @@ func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
 					t.Errorf("log line lacks %q:\n%s", want, line)
 				}
 			}
-			for _, secret := range []string{"Invalid refresh token", "fakeacc", "fakeref"} {
+			for _, secret := range []string{tc.text, "fakeacc", "fakeref"} {
 				if strings.Contains(s.errb.String(), secret) {
 					t.Errorf("logs carry %q:\n%s", secret, s.errb.String())
 				}
