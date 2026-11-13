@@ -153,6 +153,11 @@ out=$(runsh "$here/run.sh" --run t3 -- env /home/x/.local/bin/pcb-lab login 2>&1
 check "run.sh refuses a wrapped absolute pcb-lab elsewhere" "$rc" 1
 out=$(runsh "$here/run.sh" --run t3 -- env pcb-lab login 2>&1); rc=$?
 check "run.sh refuses a wrapped pcb-lab missing from the run root" "$rc" 1
+# M7: pcb-ui is one of our tools too: only the run root's build runs.
+out=$(runsh "$here/run.sh" --run t3 -- /home/x/.local/bin/pcb-ui 2>&1); rc=$?
+check "run.sh refuses an absolute pcb-ui elsewhere" "$rc $(grep -c 'not the run root' <<<"$out")" "1 1"
+out=$(runsh "$here/run.sh" --run t3 -- env pcb-ui 2>&1); rc=$?
+check "run.sh refuses a wrapped pcb-ui missing from the run root" "$rc $(grep -c 'is missing' <<<"$out")" "1 1"
 
 runsh PCB_LIVE_NOW=2000 "$here/run.sh" --run t3 --login 2a 'first' -- pcb status >/dev/null 2>&1
 out=$(runsh PCB_LIVE_NOW=2010 "$here/run.sh" --run t3 --login 2b 'too soon' -- pcb status 2>&1); rc=$?
