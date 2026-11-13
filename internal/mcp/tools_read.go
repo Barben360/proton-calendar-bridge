@@ -110,6 +110,9 @@ func addStatus(ss *session) {
 		}
 		rec := auditOf(ctx)
 		for _, a := range ss.visible() {
+			if !ss.holdsGrantedCalendar(ctx, a.ID) {
+				continue
+			}
 			rec.account(a.ID)
 			out.Accounts = append(out.Accounts, ss.accountStatus(ctx, a, now))
 		}
@@ -214,6 +217,9 @@ func addCalendarsList(ss *session) {
 		var f failures
 		rec := auditOf(ctx)
 		for _, t := range ts {
+			if !ss.holdsGrantedCalendar(ctx, t.info.ID) {
+				continue
+			}
 			rec.account(t.info.ID)
 			api, info, err := ss.srv.o.Hub.Account(t.info.ID)
 			if errors.Is(err, service.ErrNoAccount) || (err == nil && !ss.grant.seesAccount(info)) {
@@ -708,7 +714,7 @@ func addEventGet(ss *session) {
 		if err != nil {
 			return eventOut{}, "", err
 		}
-		external := d.Data.Organizer != nil && !strings.EqualFold(d.Data.Organizer.Email, info.Address)
+		external := d.ExternalOrganizer // the service's judgement, as the lists'
 		out := eventOut{
 			EventID: in.EventID, Account: info.Address, CalendarID: ref.CalendarID, CalendarType: d.CalendarType,
 			ReadOnly: d.ReadOnly, ETag: d.ETag, ExternalOrganizer: external, ThirdParty: external || d.CalendarType != "normal",

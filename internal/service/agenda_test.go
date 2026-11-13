@@ -407,6 +407,7 @@ func TestOccurrencesFlagExternalOrganizer(t *testing.T) {
 	var me string
 	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
 		f.AddEvent(cal, protontest.Event{UID: "plain@x", Start: base, End: base + 3600, Card: card("plain@x", "Plain", base)})
+		f.AddAddress(f.Username, "alias@proton.local")
 	})
 	r.signIn(t)
 	me = r.loadState(t).Address
@@ -417,13 +418,25 @@ func TestOccurrencesFlagExternalOrganizer(t *testing.T) {
 		Card: card("mine@x", "Mine", base+3600, "ORGANIZER;CN=Me:mailto:"+strings.ToUpper(me))})
 	r.f.AddEvent(r.cal, protontest.Event{UID: "theirs@x", Start: base + 7200, End: base + 10800,
 		Card: card("theirs@x", "Theirs", base+7200, "ORGANIZER;CN=Them:mailto:them@example.org")})
+	r.f.AddEvent(r.cal, protontest.Event{UID: "alias@x", Start: base + 10800, End: base + 14400,
+		Card: card("alias@x", "Alias", base+10800, "ORGANIZER;CN=Me too:mailto:Alias@proton.local")})
 	r.sync(t, false)
-	got := map[string]bool{}
+	got, detail := map[string]bool{}, map[string]bool{}
 	for _, o := range occurrences(t, r.svc, service.OccurrencesRequest{From: at(base - day), To: at(base + day)}).Items {
 		got[o.Summary] = o.ExternalOrganizer
+		d, err := r.svc.Event(t.Context(), o.Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		detail[o.Summary] = d.ExternalOrganizer
 	}
-	if want := map[string]bool{"Plain": false, "Mine": false, "Theirs": true}; fmt.Sprint(got) != fmt.Sprint(want) {
+	want := map[string]bool{"Plain": false, "Mine": false, "Theirs": true, "Alias": false}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("external organizer %v, want %v", got, want)
+	}
+	// Event judges as the list does: an alias of the account is its own.
+	if fmt.Sprint(detail) != fmt.Sprint(want) {
+		t.Errorf("Event's external organizer %v, want %v", detail, want)
 	}
 }
 

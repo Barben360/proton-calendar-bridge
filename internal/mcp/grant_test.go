@@ -282,3 +282,32 @@ func TestSessionReusesServerPerGrantAndEntry(t *testing.T) {
 		t.Error("two token names share one SDK server (the audit line names the grant)")
 	}
 }
+
+// A grant naming calendars only shows the accounts holding one of them:
+// status and calendars_list agree with the range tools.
+func TestCalendarGrantHidesAccountsWithoutThem(t *testing.T) {
+	hub := newHub()
+	r := newRig(t, hub)
+	g := readGrant
+	g.Calendars = []string{"cal-a"}
+	cs := r.connect(t, g, mcp.EntryRemote)
+	// Were bob asked for his calendars, his failure would name him.
+	hub.calErr = map[string]error{"b2": errWaiting}
+	for _, tool := range []string{"status", "calendars_list", "free_busy", "events_list"} {
+		out := mustCall(t, cs, tool, argsFor(tool, monday()))
+		walkStrings(out, "", func(path, s string) {
+			if strings.Contains(s, "bob") || s == "b2" {
+				t.Errorf("%s names bob at %s: %q", tool, path, s)
+			}
+		})
+	}
+	if got := accountsOf(mustCall(t, cs, "status", nil)); !slices.Equal(got, []string{"alice@example.com"}) {
+		t.Errorf("status accounts %v, want alice only", got)
+	}
+	// An account whose calendars are unknown (its Serve does not serve) is
+	// kept: its agenda answers for the calendar, as the range tools do.
+	hub.health["b2"] = service.Health{Serve: service.ServeStopped}
+	if got := accountsOf(mustCall(t, cs, "status", nil)); !slices.Equal(got, []string{"alice@example.com", "bob@example.com"}) {
+		t.Errorf("status accounts %v with bob's calendars unknown, want both", got)
+	}
+}

@@ -29,6 +29,7 @@ type stubHub struct {
 	agendas  map[string]*stubAgenda
 	cals     map[string][]service.Calendar
 	health   map[string]service.Health
+	calErr   map[string]error // Calendars fails for these accounts
 }
 
 func noAccount(sel string) error {
@@ -63,16 +64,17 @@ func (h *stubHub) Agenda(sel string) (service.Agenda, service.AccountInfo, error
 type stubAPI struct {
 	service.API
 	cals []service.Calendar
+	err  error
 }
 
-func (s stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return s.cals, nil }
+func (s stubAPI) Calendars(context.Context) ([]service.Calendar, error) { return s.cals, s.err }
 
 func (h *stubHub) Account(sel string) (service.API, service.AccountInfo, error) {
 	a, ok := h.pick(sel)
 	if !ok {
 		return nil, service.AccountInfo{}, noAccount(sel)
 	}
-	return stubAPI{cals: h.cals[a.ID]}, a, nil
+	return stubAPI{cals: h.cals[a.ID], err: h.calErr[a.ID]}, a, nil
 }
 
 func (h *stubHub) Health(_ context.Context, sel string) (service.Health, error) {
@@ -455,6 +457,8 @@ func with(args map[string]any, kv ...any) map[string]any {
 func argsFor(tool string, args map[string]any) map[string]any {
 	out := with(args)
 	switch tool {
+	case "status":
+		return map[string]any{}
 	case "events_search":
 		if _, ok := out["text"]; !ok {
 			out["text"] = "x"

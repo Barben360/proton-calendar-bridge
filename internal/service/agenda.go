@@ -112,12 +112,15 @@ type OccurrencePage struct {
 
 // EventDetail is one event in full: Data is the whole object (master and
 // overrides). ReadOnly follows the calendar's write gate.
+// ExternalOrganizer: its ORGANIZER is not one of the account's addresses,
+// judged as AgendaOccurrence's.
 type EventDetail struct {
-	Ref          EventRef
-	ETag         string
-	CalendarType string
-	ReadOnly     bool
-	Data         EventData
+	Ref               EventRef
+	ETag              string
+	CalendarType      string
+	ReadOnly          bool
+	ExternalOrganizer bool
+	Data              EventData
 }
 
 // UpdateResult is an update's outcome: the new ETag, or with a dry run the
@@ -684,7 +687,8 @@ func (l *Local) Event(ctx context.Context, ref EventRef) (EventDetail, error) {
 	if err != nil {
 		return EventDetail{}, unreadable(err)
 	}
-	d := EventDetail{Ref: ref, ETag: obj.ETag, ReadOnly: true, Data: data}
+	d := EventDetail{Ref: ref, ETag: obj.ETag, ReadOnly: true, Data: data,
+		ExternalOrganizer: data.Organizer != nil && !l.ownAddresses()(data.Organizer.Email)}
 	err = l.withCache(func(db *cache.Cache) error {
 		c, err := l.syncedCalendar(ctx, db, ref.CalendarID)
 		d.CalendarType = c.Type

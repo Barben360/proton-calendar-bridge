@@ -374,3 +374,26 @@ func TestOneAccountFailingDoesNotHideTheOthers(t *testing.T) {
 	}
 	mustFail(t, cs, "events_list", with(monday(), "accounts", []string{"b2"}), "retry")
 }
+
+// event_get judges the organizer as the list does (the service's view of
+// the account's addresses, aliases included), never against the login
+// address alone.
+func TestEventGetAgreesWithTheListOnTheOrganizer(t *testing.T) {
+	hub := newHub()
+	a := hub.agendas["a1"]
+	d := a.events["cal-a|standup@x"]
+	d.Data.Organizer = &service.EventPerson{Name: "Alice", Email: "alias@example.com"}
+	for _, external := range []bool{false, true} {
+		a.occ[0].ExternalOrganizer = external
+		d.ExternalOrganizer = external
+		a.events["cal-a|standup@x"] = d
+		cs := newRig(t, hub).connect(t, readGrant, mcp.EntryStdio)
+		listed := mustCall(t, cs, "events_list", with(monday(), "accounts", []string{"a1"}))
+		got := mustCall(t, cs, "event_get", map[string]any{"event_id": field(listed, "events.0.event_id")})
+		if field(listed, "events.0.external_organizer") != external || got["external_organizer"] != external ||
+			field(listed, "events.0.third_party") != external || got["third_party"] != external {
+			t.Errorf("external %t: list %v / %v, event_get %v / %v", external, field(listed, "events.0.external_organizer"),
+				field(listed, "events.0.third_party"), got["external_organizer"], got["third_party"])
+		}
+	}
+}

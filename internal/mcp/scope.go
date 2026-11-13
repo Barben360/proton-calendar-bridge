@@ -90,6 +90,18 @@ func (ss *session) calendarIDs(ctx context.Context, id string) (ids []string, ok
 	return ids, true
 }
 
+// holdsGrantedCalendar: the grant names no calendar, or the account holds
+// one of them, or its calendars are unknown (its agenda answers for them,
+// as withCalendars passes them on). An account it is false for is outside
+// the scope: status and calendars_list leave it out as the range tools do.
+func (ss *session) holdsGrantedCalendar(ctx context.Context, id string) bool {
+	if len(ss.grant.Calendars) == 0 {
+		return true
+	}
+	owned, known := ss.calendarIDs(ctx, id)
+	return !known || slices.ContainsFunc(owned, ss.grant.seesCalendar)
+}
+
 // withCalendars chooses each target's calendars: those asked (each
 // visible to the grant), else the grant's, else every calendar (nil). A
 // target with none of them is dropped; an asked calendar no account holds
