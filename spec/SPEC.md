@@ -685,7 +685,7 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   A refused password is no activity. The first authenticated request while idle starts a pass at once; a wake never
   shortens a back-off or a `Retry-After` wait. Back-off is unchanged (x2 up to 10 min, +-10 %). A partial pass counts
   as a success for the cadence (M5-R1): only a pass in which no calendar synced backs off, and the failing calendars
-  show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the rule [verified:
+  show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the back-off rule (it raises no alert: `sync-stalled` is a `pcb serve` health alert) [verified:
   `TestIdleServeSlowsToFiveMinutes`, `TestAuthenticatedRequestWakesAnIdleLoop`, `TestRefusedPasswordIsNotActivity`,
   `TestWakeCutsOnlyASuccessSleep`, `TestWakeDuringBackOffDoesNotShortenIt`, `TestPartialPassKeepsTheCadence`,
   `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: that Thunderbird at its
@@ -1262,7 +1262,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   Ctrl-C at the 2FA prompt leaves the held login until it expires or is replaced (at most 5 minutes) [source: ruling
   M5-R12 (4); no test].
 - `pcb status` keeps `service.Status`'s fields flat at the top level of its JSON (M5-P4) and adds `daemon` (null
-  offline), `health` (serve state, cadence `interval_seconds`, `idle`, `last_pass`, per-calendar sync and write gate
+  offline), `health` (serve state, `interval_seconds` (the next wait, which backs off), `cadence_seconds` (the wait after a good pass), `idle`, `last_pass`, per-calendar sync and write gate
   with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
   Text lines: first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
   (offline: `daemon: not running (offline view)`), `listener:`, one `calendar:` line
@@ -1285,9 +1285,14 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - Alerts: `{code, severity: error|warning, message, fix, calendar?}`, errors first, then code, then calendar ID. Codes
   (stable): `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
-  Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
+  Serve's start is more than 5 cadence intervals, `health.cadence_seconds`: the wait after a good pass, 30 s active or 300 s idle,
+  never the back-off or `Retry-After` wait that `interval_seconds` reports; an unreported cadence counts as the active 30 s), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
   and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error)
-  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
+  [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestSyncStalledIgnoresTheBackOffWait`, `TestHealthCadenceIgnoresTheBackOff`,
+  `TestStatusNamesAClientsFileThatCannotBeLoaded`]. [verified: live 2026-11-13] build bc0f196 measured the bug: with outgoing
+  443 rejected (cadence 30 s, back-off waits 31 s, 56 s, 2m6s) `pcb status` showed no alert after 3m41s without a sync, because the
+  threshold was 5 × `interval_seconds`, the back-off wait, so a longer outage delayed the warning; fixed by measuring against
+  `cadence_seconds`. Re-record with the fixed build in HUMAN-CHECKS 7.5.
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. Testing

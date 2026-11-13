@@ -69,6 +69,10 @@ type Health struct {
 	Since *time.Time `json:"since,omitempty"`
 	// IntervalSeconds is the wait the loop last chose before its next pass.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
+	// CadenceSeconds is the wait after a pass that got through: the active
+	// or the idle interval, never a back-off or Retry-After wait. The
+	// sync-stalled threshold is a multiple of it.
+	CadenceSeconds int `json:"cadence_seconds,omitempty"`
 	// Idle: no client was authenticated for IdleAfter (see ActiveInterval).
 	Idle     bool        `json:"idle"`
 	LastPass *PassHealth `json:"last_pass,omitempty"`
@@ -334,7 +338,12 @@ func (l *Local) Health(ctx context.Context) (Health, error) {
 	now := l.o.Now()
 	v.mu.Lock()
 	since := v.since
-	h := Health{Serve: ServeServing, Since: &since, IntervalSeconds: int(v.interval / time.Second), Idle: v.idleAt(now), Calendars: []CalendarHealth{}}
+	cadence := v.active
+	if v.idleAt(now) {
+		cadence = v.idleIv
+	}
+	h := Health{Serve: ServeServing, Since: &since, IntervalSeconds: int(v.interval / time.Second), CadenceSeconds: int(cadence / time.Second),
+		Idle: v.idleAt(now), Calendars: []CalendarHealth{}}
 	if v.last != nil {
 		last := *v.last
 		h.LastPass = &last

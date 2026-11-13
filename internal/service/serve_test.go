@@ -224,8 +224,8 @@ func TestIdleServeSlowsToFiveMinutes(t *testing.T) {
 	if p3.At.Sub(start) != service.IdleAfter || p3.Next != service.IdleInterval {
 		t.Fatalf("pass at %v waits %v, want %v from %v on", p3.At.Sub(start), p3.Next, service.IdleInterval, service.IdleAfter)
 	}
-	if h, err := r.svc.Health(t.Context()); err != nil || !h.Idle || h.IntervalSeconds != 300 {
-		t.Errorf("Health: %+v, %v; want idle at 300 s", h, err)
+	if h, err := r.svc.Health(t.Context()); err != nil || !h.Idle || h.IntervalSeconds != 300 || h.CadenceSeconds != 300 {
+		t.Errorf("Health: %+v, %v; want idle at 300 s, cadence 300 s", h, err)
 	}
 	r.resume <- struct{}{}
 	r.waitIdle(t)
@@ -246,8 +246,8 @@ func TestAuthenticatedRequestWakesAnIdleLoop(t *testing.T) {
 	if p.Err != nil || p.Next != service.ActiveInterval {
 		t.Errorf("pass after the wake: err %v, next %v; want a good pass and %v", p.Err, p.Next, service.ActiveInterval)
 	}
-	if h, err := r.svc.Health(t.Context()); err != nil || h.Idle || h.IntervalSeconds != 30 {
-		t.Errorf("Health after the wake: %+v, %v; want active at 30 s", h, err)
+	if h, err := r.svc.Health(t.Context()); err != nil || h.Idle || h.IntervalSeconds != 30 || h.CadenceSeconds != 30 {
+		t.Errorf("Health after the wake: %+v, %v; want active at 30 s, cadence 30 s", h, err)
 	}
 	// Active again: a second request wakes nothing.
 	if ok, _ := r.svc.CheckClient(t.Context(), r.pw, "192.0.2.1:1001"); !ok {
@@ -403,6 +403,29 @@ func TestWakeDuringBackOffDoesNotShortenIt(t *testing.T) {
 	}
 	if p3 := r.waitPass(t); p3.Next < 108*time.Second || p3.Next > 132*time.Second {
 		t.Errorf("pass 3 waits %v, want the back-off to go on doubling (120 s ±10%%)", p3.Next)
+	}
+}
+
+// interval_seconds is the next wait (it backs off); cadence_seconds stays what
+// the loop uses after a good pass, the base of the sync-stalled threshold.
+func TestHealthCadenceIgnoresTheBackOff(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	r.failEvents(r.work, 30)
+	stop := r.serve(t, service.ServeOptions{})
+	defer stop()
+	r.waitPass(t)
+	r.resume <- struct{}{}
+	p2 := r.waitPass(t)
+	h, err := r.svc.Health(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.IntervalSeconds != int(p2.Next/time.Second) || h.IntervalSeconds < 54 {
+		t.Errorf("interval_seconds %d, want the back-off wait %v", h.IntervalSeconds, p2.Next)
+	}
+	if h.CadenceSeconds != 30 {
+		t.Errorf("cadence_seconds %d during a back-off, want 30", h.CadenceSeconds)
 	}
 }
 
