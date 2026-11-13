@@ -111,8 +111,8 @@ func editCases() []editCase {
 				Summary:     new("Yoga; then lunch, maybe"),
 				Description: new("Bring the mat\nand water"),
 				Location:    new("Studio 2"),
-				Start:       &Time{Date: "2026-11-21"},
-				End:         &Time{Date: "2026-11-22"},
+				Start:       &Time{Date: "2026-11-14"}, // the second Saturday
+				End:         &Time{Date: "2026-11-15"},
 				RRule:       new("FREQ=MONTHLY;BYDAY=2SA"),
 				Alarms:      &[]int{-540, 1440},
 				Busy:        new(false),
@@ -194,6 +194,37 @@ func editCases() []editCase {
 			}
 			return out
 		}},
+		{"until-utc-shift", func(t *testing.T) []byte {
+			out, err := ApplyEdit(untilSeries("UNTIL=20261207T090000Z"), ScopeSeries, nil, Fields{
+				Start: new(paris(t, "20261116T110000")),
+				End:   new(paris(t, "20261116T120000")),
+			}, editNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}},
+		{"until-date-shift", func(t *testing.T) []byte {
+			out, err := ApplyEdit(untilSeries("UNTIL=20261207"), ScopeSeries, nil, Fields{
+				Start: new(paris(t, "20261117T100000")),
+				End:   new(paris(t, "20261117T110000")),
+			}, editNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}},
+		{"shift-with-its-rule", func(t *testing.T) []byte {
+			out, err := ApplyEdit(editFixture(t, "plain-series.ics"), ScopeSeries, nil, Fields{
+				Start: new(paris(t, "20261117T100000")),
+				End:   new(paris(t, "20261117T110000")),
+				RRule: new("FREQ=WEEKLY;BYDAY=TU;COUNT=10"),
+			}, editNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}},
 		{"delete-adds-exdate", func(t *testing.T) []byte {
 			out, err := DeleteOccurrence(editFixture(t, "series.ics"), paris(t, "20261207T100000"), editNow)
 			if err != nil {
@@ -248,7 +279,7 @@ func TestNewEventFull(t *testing.T) {
 	if d.Summary != "Yoga; then lunch, maybe" || d.Description != "Bring the mat\nand water" || d.Location != "Studio 2" {
 		t.Errorf("text = %q, %q, %q", d.Summary, d.Description, d.Location)
 	}
-	if d.Start.Date != "2026-11-21" || d.End.Date != "2026-11-22" {
+	if d.Start.Date != "2026-11-14" || d.End.Date != "2026-11-15" {
 		t.Errorf("dates = %+v, %+v", d.Start, d.End)
 	}
 	// Proton's form of the monthly ordinal, as ParseWrite would write it.
@@ -403,6 +434,9 @@ func TestApplyEditOccurrenceRefusals(t *testing.T) {
 		{"an rrule", "series.ics", new(paris(t, "20261207T100000")), Fields{RRule: new("FREQ=DAILY")}, UnsupportedRecurrence},
 		{"a deleted occurrence", "series.ics", new(paris(t, "20261123T100000")), Fields{Summary: new("x")}, BadData},
 		{"a date for a timed series", "series.ics", &Time{Date: "2026-12-07"}, Fields{Summary: new("x")}, BadData},
+		{"a day off the rule", "series.ics", new(paris(t, "20261208T100000")), Fields{Summary: new("x")}, BadData},
+		{"a time off the rule", "series.ics", new(paris(t, "20261207T103000")), Fields{Summary: new("x")}, BadData},
+		{"after COUNT", "series.ics", new(paris(t, "20270125T100000")), Fields{Summary: new("x")}, BadData},
 		{"before the series", "series.ics", new(paris(t, "20261109T100000")), Fields{Summary: new("x")}, BadData},
 	}
 	for _, c := range cases {
@@ -619,6 +653,9 @@ func TestDeleteOccurrenceRefusals(t *testing.T) {
 		{"not recurring", single, paris(t, "20261116T100000")},
 		{"already deleted", editFixture(t, "series.ics"), paris(t, "20261123T100000")},
 		{"a date for a timed series", editFixture(t, "series.ics"), Time{Date: "2026-12-07"}},
+		{"a day off the rule", editFixture(t, "series.ics"), paris(t, "20261208T100000")},
+		{"a time off the rule", editFixture(t, "series.ics"), paris(t, "20261207T103000")},
+		{"after COUNT", editFixture(t, "series.ics"), paris(t, "20270125T100000")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -640,5 +677,122 @@ func TestApplyEditResultPassesParseWrite(t *testing.T) {
 				t.Error("no master")
 			}
 		})
+	}
+}
+
+// untilSeries is a weekly Paris series from Monday 2026-11-16 10:00 to the
+// UNTIL part given: four occurrences, the last on 2026-12-07. A DATE UNTIL
+// comes without BYDAY (the start's weekday), so a +1 day shift stays on
+// the rule.
+func untilSeries(until string) []byte {
+	byday := ";BYDAY=MO"
+	if len(until) == len("UNTIL=20261207") {
+		byday = ""
+	}
+	return calendar("BEGIN:VEVENT", "UID:until@pcb", "DTSTAMP:20261101T090000Z",
+		"DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",
+		"RRULE:FREQ=WEEKLY"+byday+";"+until, "SEQUENCE:0", "SUMMARY:x", "END:VEVENT")
+}
+
+// occurrenceCount is how many occurrences vcal's series has in 2026-2027.
+func occurrenceCount(t *testing.T, vcal []byte) int {
+	t.Helper()
+	cal, err := parseStored(vcal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	occ, _, err := Expand(*storedMaster(cal), nil, utc("2026-01-01T00:00:00Z"), utc("2028-01-01T00:00:00Z"), time.UTC, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(occ)
+}
+
+func TestApplyEditShiftMovesUntil(t *testing.T) {
+	cases := []struct {
+		name, before, until string
+	}{
+		{"until-utc-shift", "UNTIL=20261207T090000Z", "UNTIL=20261207T100000Z"},
+		{"until-date-shift", "UNTIL=20261207", "UNTIL=20261208"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if n := occurrenceCount(t, untilSeries(c.before)); n != 4 {
+				t.Fatalf("the fixture has %d occurrences, want 4", n)
+			}
+			out := runEditCase(t, c.name)
+			d := decoded(t, out)
+			if !strings.HasSuffix(d.RRule, ";"+c.until) {
+				t.Errorf("RRULE = %q, want it to end with %s", d.RRule, c.until)
+			}
+			if n := occurrenceCount(t, out); n != 4 {
+				t.Errorf("%d occurrences after the shift, want the 4 kept", n)
+			}
+		})
+	}
+}
+
+func TestApplyEditRuleChangedWithTheStart(t *testing.T) {
+	d := decoded(t, runEditCase(t, "shift-with-its-rule"))
+	if d.RRule != "FREQ=WEEKLY;BYDAY=TU;COUNT=10" || !sameInstant(d.Start, paris(t, "20261117T100000")) {
+		t.Errorf("series = %q from %+v", d.RRule, d.Start)
+	}
+}
+
+// A shift that changes the date under a rule with BYDAY, BYMONTHDAY or
+// BYMONTH leaves the moved exceptions, or the start itself, off the rule:
+// refused, the exceptions first.
+func TestApplyEditShiftOffTheRuleIsRefused(t *testing.T) {
+	monthly := calendar("BEGIN:VEVENT", "UID:m@pcb", "DTSTAMP:20261101T090000Z",
+		"DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",
+		"RRULE:FREQ=MONTHLY;BYMONTHDAY=16;COUNT=6", "EXDATE;TZID=Europe/Paris:20261216T100000", "SUMMARY:x", "END:VEVENT")
+	yearly := calendar("BEGIN:VEVENT", "UID:y@pcb", "DTSTAMP:20261101T090000Z",
+		"DTSTART;VALUE=DATE:20261116", "DTEND;VALUE=DATE:20261117",
+		"RRULE:FREQ=YEARLY;BYMONTH=11;BYMONTHDAY=16", "SUMMARY:x", "END:VEVENT")
+	shiftDay := Fields{Start: new(paris(t, "20261117T100000")), End: new(paris(t, "20261117T110000"))}
+	cases := []struct {
+		name string
+		vcal []byte
+		f    Fields
+		code RefusalCode
+	}{
+		{"weekly BYDAY with exceptions", editFixture(t, "series.ics"), shiftDay, SeriesHasExceptions},
+		{"monthly BYMONTHDAY with an EXDATE", monthly, shiftDay, SeriesHasExceptions},
+		{"weekly BYDAY, no exception", editFixture(t, "plain-series.ics"), shiftDay, BadData},
+		{"yearly BYMONTH BYMONTHDAY, no exception", yearly,
+			Fields{Start: &Time{Date: "2026-11-17"}, End: &Time{Date: "2026-11-18"}}, BadData},
+		{"rule changed off the start", editFixture(t, "plain-series.ics"), Fields{RRule: new("FREQ=WEEKLY;BYDAY=WE")}, BadData},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			keep := bytes.Clone(c.vcal)
+			out, err := ApplyEdit(c.vcal, ScopeSeries, nil, c.f, editNow)
+			refusalReason(t, err, c.code)
+			if out != nil || !bytes.Equal(c.vcal, keep) {
+				t.Error("output with a refusal, or the input modified")
+			}
+		})
+	}
+}
+
+func TestNewEventStartOffItsRuleIsRefused(t *testing.T) {
+	_, err := NewEvent("u", Fields{
+		Summary: new("x"),
+		Start:   new(paris(t, "20261117T100000")), // a Tuesday
+		End:     new(paris(t, "20261117T110000")),
+		RRule:   new("FREQ=WEEKLY;BYDAY=MO"),
+	}, editNow)
+	refusalReason(t, err, BadData)
+}
+
+func TestOccurrenceAfterUntilIsRefused(t *testing.T) {
+	vcal := untilSeries("UNTIL=20261207T090000Z")
+	rid := paris(t, "20261214T100000")
+	_, err := DeleteOccurrence(vcal, rid, editNow)
+	refusalReason(t, err, BadData)
+	_, err = ApplyEdit(vcal, ScopeOccurrence, &rid, Fields{Summary: new("x")}, editNow)
+	refusalReason(t, err, BadData)
+	if _, err := DeleteOccurrence(vcal, paris(t, "20261207T100000"), editNow); err != nil {
+		t.Errorf("the last occurrence: %v", err)
 	}
 }

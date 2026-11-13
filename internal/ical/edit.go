@@ -57,6 +57,9 @@ func NewEvent(uid string, f Fields, now time.Time) ([]byte, error) {
 	if r := applyFields(&ev, f, true); r != nil {
 		return nil, r
 	}
+	if r := checkStartOnRule(ev); r != nil {
+		return nil, r
+	}
 	cal := Component{Name: "VCALENDAR"}
 	cal.add(Property{Name: "VERSION", Value: "2.0"})
 	cal.add(Property{Name: "PRODID", Value: prodID})
@@ -73,16 +76,22 @@ func NewEvent(uid string, f Fields, now time.Time) ([]byte, error) {
 // ScopeSeries edits the master (recurrenceID is ignored: an occurrence's
 // id may name its series). A change that moves Start and End by the same
 // wall-clock delta in their zone moves every EXDATE and override
-// RECURRENCE-ID by that delta, the overrides' own times staying; a change
-// of End alone moves nothing. Any other change of a series with
-// exceptions that could leave one off the new rule (an RRULE change or
-// removal, a Start moved without End or by another delta, a change of
-// zone or between date and time) is refused, a *Refusal SeriesHasExceptions
-// naming how many there are.
+// RECURRENCE-ID by that delta, the overrides' own times staying, and the
+// kept RRULE's UNTIL with them; a change of End alone moves nothing. Any
+// other change of a series with exceptions that could leave one off the
+// new rule (an RRULE change or removal, a Start moved without End or by
+// another delta, a change of zone or between date and time, a shift that
+// puts a moved exception on a day the rule's BYDAY, BYMONTHDAY or BYMONTH
+// no longer yields) is refused, a *Refusal SeriesHasExceptions naming how
+// many there are. A start its own rule does not yield (BYDAY=MO kept with
+// a start moved to a Tuesday) is refused BadData: the rule must change
+// with the start; BYDAY is never rewritten.
 //
 // ScopeOccurrence edits the override at recurrenceID, or makes it from the
 // master (its lines without RRULE and EXDATE, alarms included, at that
-// occurrence's start and with the series' duration); an RRULE is refused.
+// occurrence's start and with the series' duration) when the rule yields
+// an occurrence starting exactly there (BadData otherwise); an RRULE is
+// refused.
 //
 // Every VEVENT changed gets DTSTAMP now and its SEQUENCE bumped. The input
 // is not modified. Errors are *Refusal, except a stored object that does
@@ -101,11 +110,20 @@ func ApplyEdit(vcal []byte, scope Scope, recurrenceID *Time, f Fields, now time.
 		if master == nil {
 			return nil, refuse(BadData, "the object holds one occurrence and no series: edit the occurrence")
 		}
-		if r := moveExceptions(cal, master, f, now); r != nil {
+		moved, r := moveSeries(cal, master, f, now)
+		if r != nil {
 			return nil, r
 		}
 		if r := applyFields(master, f, true); r != nil {
 			return nil, r
+		}
+		if r := checkMoved(cal, master, moved); r != nil {
+			return nil, r
+		}
+		if f.Start != nil || f.RRule != nil {
+			if r := checkStartOnRule(*master); r != nil {
+				return nil, r
+			}
 		}
 		touchEdited(master, now)
 	case ScopeOccurrence:
@@ -130,8 +148,9 @@ func ApplyEdit(vcal []byte, scope Scope, recurrenceID *Time, f Fields, now time.
 // recurrenceID, in the form of the master's DTSTART, and the override at
 // that RECURRENCE-ID if there is one. The master gets DTSTAMP now and its
 // SEQUENCE bumped. An event that does not recur, an occurrence already
-// deleted, before the series or of another value type than the series'
-// start is refused (*Refusal BadData).
+// deleted, a time the rule does not yield (off its days or time, after
+// COUNT or UNTIL, before the series) or of another value type than the
+// series' start is refused (*Refusal BadData): never a dead EXDATE.
 func DeleteOccurrence(vcal []byte, recurrenceID Time, now time.Time) ([]byte, error) {
 	cal, err := parseStored(vcal)
 	if err != nil {
@@ -275,7 +294,74 @@ func seriesStart(master Component, rid Time) (Time, *Refusal) {
 	if startsBefore(rid, start) {
 		return Time{}, refuse(BadData, "a RECURRENCE-ID before the series' start")
 	}
+	on, r := onRule(master, rid)
+	if r != nil {
+		return Time{}, r
+	}
+	if !on {
+		return Time{}, refuse(BadData, "no occurrence of the series starts at this RECURRENCE-ID")
+	}
 	return start, nil
+}
+
+// onRule: the master's rule yields an occurrence starting at t (DTSTART
+// counts, RFC 5545 §3.8.5.3), whatever its EXDATEs and overrides: Expand
+// over the second at t, the EXDATEs removed and no override given.
+func onRule(master Component, t Time) (bool, *Refusal) {
+	probe := master.Clone()
+	probe.removeProps(func(p Property) bool { return strings.EqualFold(p.Name, "EXDATE") })
+	from := t.At
+	if t.Date != "" {
+		from, _ = time.Parse(time.DateOnly, t.Date)
+	}
+	occ, _, err := Expand(probe, nil, from, from.Add(time.Second), time.UTC, 1000)
+	if err != nil {
+		var r *Refusal
+		if errors.As(err, &r) {
+			return false, r
+		}
+		return false, refuse(BadData, "the stored series cannot be expanded")
+	}
+	return slices.ContainsFunc(occ, func(o Occurrence) bool {
+		if t.Date != "" {
+			return o.AllDay && o.StartDate == t.Date
+		}
+		return !o.AllDay && o.Start.Equal(t.At)
+	}), nil
+}
+
+// startOnRule: the master's DTSTART is one its RRULE yields (true for an
+// event that does not recur). RFC 5545 counts a DTSTART off the rule as the
+// first occurrence, but every later one follows the rule: a start moved to
+// a Tuesday under BYDAY=MO would recur on Mondays.
+func startOnRule(master Component) (bool, *Refusal) {
+	p, ok := master.Get("RRULE")
+	if !ok {
+		return true, nil
+	}
+	tm, r := readTiming(master, time.UTC)
+	if r != nil {
+		return false, r
+	}
+	ru, r := parseRule(p.Value, tm.start)
+	if r != nil {
+		return false, r
+	}
+	_, dates, _ := ru.period(tm.start.wall, 0, nil)
+	return slices.ContainsFunc(dates, tm.start.wall.Equal), nil
+}
+
+// checkStartOnRule refuses a series whose DTSTART its own rule does not
+// yield.
+func checkStartOnRule(master Component) *Refusal {
+	on, r := startOnRule(master)
+	switch {
+	case r != nil:
+		return r
+	case !on:
+		return refuse(BadData, "the start is not a day the RRULE yields: change the RRULE with the start")
+	}
+	return nil
 }
 
 // overrideAt is the override at rid: the stored one, or a new one made
@@ -337,60 +423,79 @@ func overrideAt(cal *Component, rid Time) (*Component, *Refusal) {
 	return &ov, nil
 }
 
-// moveExceptions applies design §5.6's rule for a series edit: with no
-// exception, or a change that cannot orphan one, nothing to do; a shift
-// of Start and End by one wall-clock delta moves them; anything else is
-// refused.
-func moveExceptions(cal *Component, master *Component, f Fields, now time.Time) *Refusal {
-	overrides := storedOverrides(cal)
-	n := len(overrides)
+// exceptionCount is how many EXDATE values and overrides the series has.
+func exceptionCount(cal *Component, master *Component) int {
+	n := len(storedOverrides(cal))
 	for _, p := range master.Props() {
 		if strings.EqualFold(p.Name, "EXDATE") {
 			n += strings.Count(p.Value, ",") + 1
 		}
 	}
-	if n == 0 {
-		return nil
-	}
-	refusal := refuse(SeriesHasExceptions, fmt.Sprintf(
-		"the series has %d exceptions (deleted or changed occurrences) this change would leave off its occurrences: edit them first, or change only its times by one shift", n))
-	if f.RRule != nil {
-		stored, _ := master.Get("RRULE")
-		if !sameRule(stored.Value, *f.RRule) {
-			return refusal
-		}
+	return n
+}
+
+func seriesHasExceptions(n int) *Refusal {
+	return refuse(SeriesHasExceptions, fmt.Sprintf(
+		"the series has %d exceptions (deleted or changed occurrences) this change would leave off its occurrences: edit them first, or change only its times by one shift that keeps them on its rule", n))
+}
+
+// moveSeries applies design §5.6's rule for a series edit, before f is
+// applied to the master. A change that cannot orphan an exception (none,
+// End alone, the same rule) moves nothing. A shift of Start (and End, by
+// the same wall-clock delta) moves the RRULE's UNTIL when the rule is kept,
+// and every EXDATE and override RECURRENCE-ID; it returns those moved
+// values, which checkMoved then holds against the new master. Anything
+// else that could orphan an exception is refused.
+func moveSeries(cal *Component, master *Component, f Fields, now time.Time) ([]Time, *Refusal) {
+	n := exceptionCount(cal, master)
+	stored, hasRule := master.Get("RRULE")
+	keepsRule := f.RRule == nil || hasRule && sameRule(stored.Value, *f.RRule)
+	if n > 0 && !keepsRule {
+		return nil, seriesHasExceptions(n)
 	}
 	if f.Start == nil {
-		return nil // occurrences start where they did
+		return nil, nil // occurrences start where they did
 	}
 	d, err := decodeVEvent(*master)
 	if err != nil {
-		return refuse(BadData, "the stored series is malformed")
+		return nil, refuse(BadData, "the stored series is malformed")
 	}
 	if !sameForm(d.Start, *f.Start) {
-		return refusal
+		if n > 0 {
+			return nil, seriesHasExceptions(n)
+		}
+		return nil, nil
 	}
 	delta := shiftOf(d.Start, *f.Start)
 	if delta == 0 {
-		return nil
+		return nil, nil
 	}
-	_, hasDTEnd := master.Get("DTEND")
-	switch {
-	case f.End == nil && hasDTEnd: // the start moves alone
-		return refusal
-	case f.End != nil && (!sameForm(d.End, *f.End) || shiftOf(d.End, *f.End) != delta):
-		return refusal
+	if n > 0 {
+		_, hasDTEnd := master.Get("DTEND")
+		switch {
+		case f.End == nil && hasDTEnd: // the start moves alone
+			return nil, seriesHasExceptions(n)
+		case f.End != nil && (!sameForm(d.End, *f.End) || shiftOf(d.End, *f.End) != delta):
+			return nil, seriesHasExceptions(n)
+		}
 	}
+	if hasRule && keepsRule {
+		if r := shiftUntil(master, d.Start, *f.Start, delta); r != nil {
+			return nil, r
+		}
+	}
+	var moved []Time
 	shift := func(p Property, v string) (string, bool) {
 		t, err := decodeTime(p, v)
 		if err != nil {
 			return "", false
 		}
-		moved, ok := shiftException(t, d.Start, delta)
+		to, ok := shiftException(t, d.Start, delta)
 		if !ok {
 			return "", false
 		}
-		_, value := encodeLike(moved, t)
+		moved = append(moved, to)
+		_, value := encodeLike(to, t)
 		return value, true
 	}
 	for i, it := range master.Items {
@@ -401,21 +506,87 @@ func moveExceptions(cal *Component, master *Component, f Fields, now time.Time) 
 		for j, v := range values {
 			var ok bool
 			if values[j], ok = shift(it.Prop, v); !ok {
-				return refusal
+				return nil, seriesHasExceptions(n)
 			}
 		}
 		master.Items[i].Prop.Value = strings.Join(values, ",")
 	}
-	for _, ov := range overrides {
+	for _, ov := range storedOverrides(cal) {
 		i := indexOf(*ov, "RECURRENCE-ID")
 		v, ok := shift(ov.Items[i].Prop, ov.Items[i].Prop.Value)
 		if !ok {
-			return refusal
+			return nil, seriesHasExceptions(n)
 		}
 		ov.Items[i].Prop.Value = v
 		touchEdited(ov, now)
 	}
+	return moved, nil
+}
+
+// checkMoved refuses a shift that left a moved exception off the new
+// master's rule (a weekday or day of the month its BYDAY, BYMONTHDAY,
+// BYMONTH or BYSETPOS no longer yields, or past its end): the EXDATE would
+// delete nothing, the override would replace nothing.
+func checkMoved(cal *Component, master *Component, moved []Time) *Refusal {
+	for _, t := range moved {
+		on, r := onRule(*master, t)
+		if r != nil {
+			return r
+		}
+		if !on {
+			return seriesHasExceptions(exceptionCount(cal, master))
+		}
+	}
 	return nil
+}
+
+// shiftUntil moves the master's RRULE UNTIL with its start, so the series
+// keeps its last occurrence: a UTC or local UNTIL by the wall-clock delta
+// (on the start's wall clock), a DATE UNTIL by the days the start's date
+// moved. The other parts keep their bytes.
+func shiftUntil(master *Component, from, to Time, delta time.Duration) *Refusal {
+	i := indexOf(*master, "RRULE")
+	parts := strings.Split(master.Items[i].Prop.Value, ";")
+	for j, kv := range parts {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !strings.EqualFold(k, "UNTIL") {
+			continue
+		}
+		utc := len(v) == 16 && v[15] == 'Z'
+		switch {
+		case len(v) == 8:
+			day, err := time.Parse(dateLayout, v)
+			if err != nil {
+				return refuse(BadData, "the stored RRULE UNTIL is malformed")
+			}
+			days := shiftOf(Time{Date: wallDate(from)}, Time{Date: wallDate(to)})
+			v = day.Add(days).Format(dateLayout)
+		case len(v) == 15 || utc:
+			w, err := time.Parse(localLayout, v[:15])
+			if err != nil {
+				return refuse(BadData, "the stored RRULE UNTIL is malformed")
+			}
+			if !utc {
+				v = w.Add(delta).Format(localLayout)
+				break
+			}
+			moved, _ := shiftException(Time{At: w}, Time{TZID: from.TZID}, delta)
+			v = moved.At.UTC().Format(localLayout) + "Z"
+		default:
+			return refuse(BadData, "the stored RRULE UNTIL is malformed")
+		}
+		parts[j] = k + "=" + v
+	}
+	master.Items[i].Prop.Value = strings.Join(parts, ";")
+	return nil
+}
+
+// wallDate is t's date (YYYY-MM-DD) on its own wall clock.
+func wallDate(t Time) string {
+	if t.Date != "" {
+		return t.Date
+	}
+	return wallAsUTC(t.At, wallZone(t)).Format(time.DateOnly)
 }
 
 // sameForm: both dates, or both times in the same zone (or both UTC).
