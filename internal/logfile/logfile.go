@@ -23,10 +23,12 @@ type File struct {
 	path string
 	max  int64
 
-	mu     sync.Mutex
-	f      *os.File // nil once closed
-	size   int64
-	closed bool
+	mu   sync.Mutex
+	f    *os.File // nil once closed
+	size int64
+	// holdUntil is the size below which a failed rename is not retried.
+	holdUntil int64
+	closed    bool
 }
 
 // Open opens (or creates) the log at path, appending to what it holds, with
@@ -74,7 +76,7 @@ func (f *File) Write(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
-	if f.size > 0 && f.size+int64(len(p)) > f.max {
+	if next := f.size + int64(len(p)); f.size > 0 && next > f.max && next > f.holdUntil {
 		if err := f.rotate(); err != nil {
 			return 0, err
 		}
@@ -84,19 +86,26 @@ func (f *File) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// rotate moves the file to path+".1" and opens a fresh one. mu is held.
+// rotate moves the file to path+".1" and opens a fresh one. mu is held. A
+// failed rename is not an error of the write: the log keeps going in the
+// same file, uncapped, and the rename is retried only once the file has
+// grown by another max. Only a failure to reopen the file is returned.
 func (f *File) rotate() error {
 	if err := f.f.Close(); err != nil {
 		return err
 	}
 	f.f = nil
 	renameErr := os.Rename(f.path, f.path+".1")
-	// Reopen even when the rename failed: the log keeps going, uncapped.
 	if err := f.open(); err != nil {
 		f.closed = true
 		return err
 	}
-	return renameErr
+	if renameErr != nil {
+		f.holdUntil = f.size + f.max
+	} else {
+		f.holdUntil = 0
+	}
+	return nil
 }
 
 // Close closes the file; a later Write fails, a later Close is a no-op.

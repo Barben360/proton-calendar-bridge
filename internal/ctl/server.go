@@ -58,7 +58,8 @@ type Server struct {
 	PeerUID  func(net.Conn) (uid int, ok bool)
 	// ShowUI raises the desktop app's window (on the account's pane when
 	// named). nil: this process has no window, and POST /v2/ui/show is an
-	// unknown endpoint.
+	// unknown endpoint. It runs on the HTTP handler goroutine and must
+	// return quickly, for example by posting to the UI loop.
 	ShowUI func(account string) error
 
 	once, initOnce sync.Once

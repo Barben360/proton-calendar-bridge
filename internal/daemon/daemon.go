@@ -98,7 +98,9 @@ type Options struct {
 	// bound, before the listener accepts.
 	Ready func(Info)
 	// ShowUI raises the desktop app's window for POST /v2/ui/show (nil: the
-	// route does not exist, as in pcb serve).
+	// route does not exist, as in pcb serve). It runs on the control
+	// socket's handler goroutine and must return quickly, for example by
+	// posting to the UI loop.
 	ShowUI func(account string) error
 }
 

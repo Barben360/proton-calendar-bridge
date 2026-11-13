@@ -226,3 +226,40 @@ func TestLogfileOpenRefusesBadArguments(t *testing.T) {
 		t.Error("Open on a directory succeeded")
 	}
 }
+
+// A rotation that cannot rename (here .1 is a directory) loses no line: the
+// log goes on in the same file, and the rename is retried only once it has
+// grown by another max, not on every write.
+func TestLogfileFailedRenameLosesNothing(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "ui.log")
+	if err := os.MkdirAll(filepath.Join(path+".1", "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := logfile.Open(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	write(t, f, "aaaaaa")
+	write(t, f, "bbbbbb") // would pass max: the rename fails, the line is kept
+	write(t, f, "cc")
+	if got := read(t, path); got != "aaaaaabbbbbbcc" {
+		t.Errorf("log = %q, want every write kept", got)
+	}
+	// The obstacle leaves; the file is at 14 bytes, held until it passes 6+10.
+	if err := os.RemoveAll(path + ".1"); err != nil {
+		t.Fatal(err)
+	}
+	write(t, f, "e")
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Errorf("the rename was retried on the next write: %v", err)
+	}
+	write(t, f, "ffffff") // passes the hold: rotates again
+	if got := read(t, path+".1"); got != "aaaaaabbbbbbcce" {
+		t.Errorf(".1 = %q, want everything before this write", got)
+	}
+	if got := read(t, path); got != "ffffff" {
+		t.Errorf("log = %q, want a fresh file", got)
+	}
+}
