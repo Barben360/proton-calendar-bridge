@@ -378,3 +378,23 @@ func TestDoctorNamesTheLayoutsState(t *testing.T) {
 		t.Errorf("newer layout: %s, fix %q", st, fix)
 	}
 }
+
+// pcb doctor runs the mcp tokens check of the config: remote MCP on every
+// interface with no token is a warning.
+func TestDoctorWarnsRemoteMCPWithoutToken(t *testing.T) {
+	cfg := isolate(t)
+	if err := os.MkdirAll(cfg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "[caldav]\nlisten = \"0.0.0.0:8443\"\n[mcp]\nremote = true\n"
+	if err := os.WriteFile(filepath.Join(cfg, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out, _ := run("doctor")
+	if want := "!  mcp remote: [mcp] remote serves /mcp on a non-loopback bind, but no token can use it\n"; !strings.Contains(out, want) {
+		t.Errorf("doctor lacks %q:\n%s", want, out)
+	}
+	if !strings.Contains(out, "✓  mcp tokens: no token\n") {
+		t.Errorf("doctor lacks the mcp tokens line:\n%s", out)
+	}
+}

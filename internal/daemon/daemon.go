@@ -23,11 +23,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
@@ -97,6 +99,10 @@ type Options struct {
 	// Ready is called once the control socket and the CalDAV listener are
 	// bound, before the listener accepts.
 	Ready func(Info)
+	// MCP is the MCP adapter. With [mcp] remote on, the listener serves it
+	// on /mcp to the holders of a token (<state>/mcp-tokens.json); the
+	// control socket reports its sessions. nil: no MCP in this process.
+	MCP *mcp.Server
 	// ShowUI raises the desktop app's window for POST /v2/ui/show (nil: the
 	// route does not exist, as in pcb serve). It runs on the control
 	// socket's handler goroutine and must return quickly, for example by
@@ -181,8 +187,13 @@ func Run(ctx context.Context, o Options) error {
 		return finish(nil)
 	}
 
+	remoteMCP := o.Config.MCP.Remote && o.MCP != nil
+	if o.Config.MCP.Remote && o.MCP == nil {
+		log.Warn("[mcp] remote is on, but this process has no MCP server: /mcp is not served")
+	}
 	var published atomic.Pointer[ctl.Listener]
-	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI)
+	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI,
+		mcpStatus(o.MCP, remoteMCP))
 	if err != nil {
 		return finish(err)
 	}
@@ -215,8 +226,15 @@ func Run(ctx context.Context, o Options) error {
 		o.Ready(info)
 	}
 
+	handler := caldav.Handler(o.Hub, caldav.Options{Logger: log})
+	if remoteMCP {
+		// Its own failure limiter: guesses at tokens and at CalDAV
+		// passwords are counted apart (design §5.2).
+		auth := mcp.TokenAuth(access.NewTokenStore(o.Dirs.State, nil), access.NewLimiter(nil), cc.Hostnames)
+		handler = withMCP(handler, o.MCP.HTTPHandler(auth))
+	}
 	srv := &http.Server{
-		Handler:           caldav.Handler(o.Hub, caldav.Options{Logger: log}),
+		Handler:           handler,
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -232,7 +250,7 @@ func Run(ctx context.Context, o Options) error {
 		}
 		served <- srv.Serve(ln)
 	}()
-	log.Info("listener started", "addr", info.Addr, "tls", info.TLS)
+	log.Info("listener started", "addr", info.Addr, "tls", info.TLS, "mcp", remoteMCP)
 
 	var result error
 	select {
@@ -298,7 +316,8 @@ func (w *wrapped) Unwrap() error { return w.err }
 // returns what stops it: it closes the socket, which removes it. Off Unix
 // there is no control socket (ruling M5-P3); any other failure to open it
 // is exit 20 with a hint for its cause.
-func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error) (stop func(), err error) {
+func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error,
+	mcpStatus func() *ctl.MCP) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
 	switch {
 	case errors.Is(err, ctl.ErrUnsupported):
@@ -308,7 +327,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
 	}
-	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI}
+	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCP: mcpStatus}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -327,6 +346,36 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			log.Info("control socket stopped")
 		})
 	}, nil
+}
+
+// mcpPath is where the listener serves MCP when [mcp] remote is on.
+const mcpPath = "/mcp"
+
+// withMCP sends the path /mcp to m and every other one to dav. Not a
+// ServeMux: its path cleaning and redirects would change what CalDAV
+// clients get.
+func withMCP(dav, m http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == mcpPath {
+			m.ServeHTTP(w, r)
+			return
+		}
+		dav.ServeHTTP(w, r)
+	})
+}
+
+// mcpStatus is the control socket's view of the MCP adapter: remote /mcp
+// on or off, and the live sessions per entry (all 0 without one).
+func mcpStatus(srv *mcp.Server, remote bool) func() *ctl.MCP {
+	return func() *ctl.MCP {
+		m := &ctl.MCP{Remote: remote, Sessions: map[string]int{}}
+		if srv != nil {
+			for e, n := range srv.LiveSessions() {
+				m.Sessions[string(e)] = n
+			}
+		}
+		return m
+	}
 }
 
 // controlHint is what to do about a control socket that cannot be opened.

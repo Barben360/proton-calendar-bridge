@@ -16,14 +16,23 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
-// Status is what GET /v2/status answers: the process (Daemon, Listener),
-// each account and the process-level Alerts (the TLS certificate's);
-// the alerts of an account are its own.
+// Status is what GET /v2/status answers: the process (Daemon, Listener,
+// MCP), each account and the process-level Alerts (the TLS
+// certificate's); the alerts of an account are its own.
 type Status struct {
 	Daemon   *Daemon         `json:"daemon"`
 	Listener *Listener       `json:"listener,omitempty"`
+	MCP      *MCP            `json:"mcp,omitempty"`
 	Accounts []AccountStatus `json:"accounts"`
 	Alerts   []Alert         `json:"alerts"`
+}
+
+// MCP is the process's MCP adapter (design §5.8): whether /mcp is served
+// on the listener ([mcp] remote), and the live sessions per entry
+// ("remote", "relay", "stdio").
+type MCP struct {
+	Remote   bool           `json:"remote"`
+	Sessions map[string]int `json:"sessions"`
 }
 
 // AccountStatus is one account of Status: its AccountInfo flat, its login,

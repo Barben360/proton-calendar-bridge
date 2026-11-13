@@ -14,10 +14,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -202,6 +204,7 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		defer cancel()
 		err := daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
+			MCP:    mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version}),
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI,
 			OnState: func(string, service.ServeState) { b.poke() },
 			// The same records as pcb serve's, for the same log file content.

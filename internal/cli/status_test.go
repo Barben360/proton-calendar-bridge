@@ -150,6 +150,12 @@ var daemonNow = time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 // pcb serve does, until the test ends.
 func startDaemon(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener) {
 	t.Helper()
+	startDaemonWith(t, r, hub, ln, nil)
+}
+
+// startDaemonWith is startDaemon, with mod changing the server first.
+func startDaemonWith(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener, mod func(*ctl.Server)) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("no control socket off Unix")
 	}
@@ -162,6 +168,9 @@ func startDaemon(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener) {
 	}
 	srv := &ctl.Server{Hub: hub, Listener: func() *ctl.Listener { return ln }, Now: func() time.Time { return daemonNow },
 		Daemon: ctl.Daemon{PID: 4242, Version: "v1.2.3", StartedAt: daemonNow.Add(-2 * time.Hour), LogLevel: "info", Socket: r.dirs.Socket()}}
+	if mod != nil {
+		mod(srv)
+	}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(sl) }()
 	t.Cleanup(func() {
@@ -448,5 +457,39 @@ func TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone(t *testing.T) {
 	}
 	if _, ok := got["00000001"]; !ok {
 		t.Errorf("the ready account is missing: %+v", data.Accounts)
+	}
+}
+
+// The daemon's MCP adapter shows under the process (design §5.8): remote
+// /mcp on or off, and the live sessions per entry.
+func TestStatusShowsRemoteMCP(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		mcp  ctl.MCP
+		want string
+	}{
+		{ctl.MCP{Remote: true, Sessions: map[string]int{"remote": 2, "relay": 1, "stdio": 0}}, "mcp: remote on; live sessions: remote 2, relay 1, stdio 0\n"},
+		{ctl.MCP{Remote: false, Sessions: map[string]int{"relay": 1}}, "mcp: remote off; live sessions: remote 0, relay 1, stdio 0\n"},
+	} {
+		r := stubRig(t, &stubAPI{statusPhase: "ready"})
+		startDaemonWith(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "ready"}}), nil, func(s *ctl.Server) {
+			s.MCP = func() *ctl.MCP { m := c.mcp; return &m }
+		})
+		r.want(exitcode.OK, "status")
+		if got := r.out.String(); !strings.Contains(got, c.want) || strings.Index(got, "mcp:") > strings.Index(got, "account:") {
+			t.Errorf("status lacks %q under the process:\n%s", c.want, got)
+		}
+		r.want(exitcode.OK, "status", "--json", "--daemon")
+		var st ctl.Status
+		mustUnmarshal(t, r.envelope().Data, &st)
+		if st.MCP == nil || st.MCP.Remote != c.mcp.Remote || st.MCP.Sessions["relay"] != 1 {
+			t.Errorf("status --json mcp = %+v, want %+v", st.MCP, c.mcp)
+		}
+	}
+	// No daemon: no MCP line (the offline view knows no session).
+	r := stubRig(t, &stubAPI{statusPhase: "ready"})
+	r.want(exitcode.OK, "status")
+	if strings.Contains(r.out.String(), "mcp:") {
+		t.Errorf("offline status shows an MCP line:\n%s", r.out.String())
 	}
 }

@@ -62,6 +62,9 @@ type Server struct {
 	// unknown endpoint. It runs on the HTTP handler goroutine and must
 	// return quickly, for example by posting to the UI loop.
 	ShowUI func(account string) error
+	// MCP describes the process's MCP adapter for GET /v2/status (nil:
+	// the status has no mcp).
+	MCP func() *MCP
 
 	once, initOnce sync.Once
 	srv            *http.Server
@@ -277,7 +280,11 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
-	return BuildStatus(ctx, s.Hub, s.Daemon, ln, now()), nil
+	st := BuildStatus(ctx, s.Hub, s.Daemon, ln, now())
+	if s.MCP != nil {
+		st.MCP = s.MCP()
+	}
+	return st, nil
 }
 
 // BuildStatus is what GET /v2/status answers, built in-process (the desktop

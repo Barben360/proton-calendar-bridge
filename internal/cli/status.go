@@ -169,6 +169,9 @@ func statusText(s ctl.Status) string {
 		}
 		line("listener: %s (%s)", l.URL, strings.Join(tls, ", "))
 	}
+	if m := s.MCP; m != nil {
+		line("mcp: %s", mcpText(*m))
+	}
 	alerts := func(list []ctl.Alert) {
 		for _, al := range list {
 			line("alert: %s %s: %s (fix: %s)", al.Severity, al.Code, al.Message, al.Fix)
@@ -197,6 +200,23 @@ func statusText(s ctl.Status) string {
 		alerts(as.Alerts)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// mcpEntries are the MCP entries, in the order status shows them.
+var mcpEntries = []string{"remote", "relay", "stdio"}
+
+// mcpText is the daemon's MCP line: remote /mcp on or off, then the live
+// sessions of every entry (none counts 0).
+func mcpText(m ctl.MCP) string {
+	remote := "off"
+	if m.Remote {
+		remote = "on"
+	}
+	counts := make([]string, len(mcpEntries))
+	for i, e := range mcpEntries {
+		counts[i] = fmt.Sprintf("%s %d", e, m.Sessions[e])
+	}
+	return "remote " + remote + "; live sessions: " + strings.Join(counts, ", ")
 }
 
 // accountMarks says, after an account's name, what sets it apart: a

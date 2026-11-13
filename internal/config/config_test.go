@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -292,6 +293,46 @@ func TestBadBackendIsRefused(t *testing.T) {
 	for _, bad := range []string{"tpm", "", "Auto", "secret_service"} {
 		if msg := refused(t, "[secrets]\nbackend = \""+bad+"\"\n"); msg != want {
 			t.Errorf("backend %q: message = %q", bad, msg)
+		}
+	}
+}
+
+// [mcp] (design §5.9): off and the process's zone by default; strict like
+// every section; a zone that is not an IANA name is refused without being
+// echoed.
+func TestMCPConfigStrict(t *testing.T) {
+	if got := config.Defaults(dirs).MCP; got != (config.MCP{}) {
+		t.Fatalf("default [mcp] = %+v, want remote off and no zone", got)
+	}
+	cfg, err := config.Load(write(t, "[mcp]\nremote = true\ntimezone = \"Europe/Paris\"\n"), dirs)
+	if err != nil || !cfg.MCP.Remote || cfg.MCP.Timezone != "Europe/Paris" {
+		t.Fatalf("[mcp] = %+v, %v", cfg.MCP, err)
+	}
+	if loc := cfg.MCP.Location(); loc.String() != "Europe/Paris" {
+		t.Errorf("Location() = %v, want Europe/Paris", loc)
+	}
+	if loc := config.Defaults(dirs).MCP.Location(); loc != time.Local {
+		t.Errorf("Location() of no zone = %v, want the process's zone", loc)
+	}
+	for body, key := range map[string]string{
+		"[mcp]\nport = 1\n":               "mcp.port",
+		"[mcp]\nremote = \"yes\"\n":       "remote",
+		"[mcp]\ntimezone = 1\n":           "timezone",
+		"[mcp]\ntimezone = \"\"\nx = 1\n": "mcp.x",
+	} {
+		if msg := refused(t, body); !strings.Contains(msg, key) {
+			t.Errorf("%q: error %q does not name %s", body, msg, key)
+		}
+	}
+	for _, bad := range []string{"Mars/Olympus_Mons", "Local", "../etc/passwd", "/etc/localtime", "Narnia "} {
+		msg := refused(t, "[mcp]\ntimezone = \""+bad+"\"\n")
+		if !strings.Contains(msg, "mcp.timezone must be an IANA zone name") || strings.Contains(msg, strings.TrimSpace(bad)) {
+			t.Errorf("timezone %q: message = %q", bad, msg)
+		}
+	}
+	for _, ok := range []string{"UTC", "America/New_York", "Asia/Kolkata"} {
+		if _, err := config.Load(write(t, "[mcp]\ntimezone = \""+ok+"\"\n"), dirs); err != nil {
+			t.Errorf("timezone %q refused: %v", ok, err)
 		}
 	}
 }
