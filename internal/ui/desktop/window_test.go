@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"unsafe"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
@@ -70,12 +69,16 @@ func (f *fakeActions) Doctor(context.Context) ([]doctor.Result, error) {
 type fakeSettings struct {
 	calls     []string
 	autostart bool
+	autoErr   error
 	level     slog.Level
 }
 
 func (s *fakeSettings) Autostart() bool { return s.autostart }
 func (s *fakeSettings) SetAutostart(on bool) error {
 	s.calls = append(s.calls, "autostart")
+	if s.autoErr != nil {
+		return s.autoErr
+	}
 	s.autostart = on
 	return nil
 }
@@ -525,12 +528,14 @@ func TestCloseHides(t *testing.T) {
 	if !f.w.visible {
 		t.Fatal("setup: not visible")
 	}
+	// Fyne's test window has no public way to trigger or read the intercept:
+	// reflection only checks that one is installed (no unsafe), and onClose
+	// is what it runs.
 	rv := reflect.ValueOf(f.w.win).Elem().FieldByName("onCloseIntercepted")
 	if !rv.IsValid() || rv.IsNil() {
 		t.Fatal("no close intercept registered on the window")
 	}
-	fn := reflect.NewAt(rv.Type(), unsafe.Pointer(rv.UnsafeAddr())).Elem().Interface().(func())
-	fn()
+	f.w.onClose()
 	if f.w.visible {
 		t.Error("closing left the window visible")
 	}
@@ -554,5 +559,40 @@ func TestBridgeStoppedBanner(t *testing.T) {
 	f.w.Update(ui.View{Tray: ui.TrayAttention, Bridge: "bridge stopped: port in use", Accounts: []ui.AccountView{}})
 	if !f.has("bridge stopped: port in use") {
 		t.Errorf("banner missing: %v", f.texts())
+	}
+}
+
+func TestCalDAVFailureRevertsOnlyTheSameAccount(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts()) // a1 has CalDAV on, b2 off
+	f.w.Show("a1")
+	f.act.err = errors.New("bridge busy")
+	f.act.block = make(chan struct{})
+	test.Tap(f.w.pane.caldav)
+	test.Tap(f.w.rows[1].btn) // the pane shows b2 while the call is out
+	close(f.act.block)
+	f.wait()
+	if f.w.pane.caldav.Checked {
+		t.Error("the revert of a1's switch landed on b2's pane")
+	}
+	test.Tap(f.w.rows[0].btn)
+	if !f.w.pane.caldav.Checked {
+		t.Error("a1's switch does not show its CalDAV state")
+	}
+}
+
+func TestAutostartFailureRevertsSwitch(t *testing.T) {
+	f := newFixture(t)
+	f.set.autoErr = errors.New("cannot write the autostart file")
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("Settings")
+	test.Tap(f.check("Start at login"))
+	f.wait()
+	if f.w.settings.autostart.Checked {
+		t.Error("the switch stayed on although SetAutostart failed")
+	}
+	if !f.has("cannot write the autostart file") {
+		t.Errorf("no error shown: %v", f.texts())
 	}
 }

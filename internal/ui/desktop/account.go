@@ -215,11 +215,13 @@ func (p *accountPane) setCalDAV(on bool) {
 	if p.silent {
 		return
 	}
-	id := p.av.ID
+	id, prev := p.av.ID, !on
 	p.w.run(p.b, "Working…", func(ctx context.Context) error { return p.w.act.SetCalDAV(ctx, id, on) }, func(err error) {
 		if err != nil {
 			p.w.showErr(err)
-			p.setChecked(p.av.CalDAV)
+			if p.av.ID == id { // the pane may show another account by now
+				p.setChecked(prev)
+			}
 		}
 	})
 }

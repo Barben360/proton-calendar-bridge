@@ -162,9 +162,15 @@ func (p *wizardPane) finish() {
 	p.set(container.NewVBox(title("Account added"), b.label))
 	var av ui.AccountView
 	p.w.async(func() { av, _ = m.Done() }, func() {
-		if p.w.wizard == m {
-			p.drawDone(m, av)
+		if p.w.wizard != m {
+			return
 		}
+		if e := m.Err(); e != nil {
+			p.w.showErr(e)
+			p.drawFailed(e)
+			return
+		}
+		p.drawDone(m, av)
 	})
 }
 
@@ -199,4 +205,13 @@ func (p *wizardPane) drawDone(m WizardModel, av ui.AccountView) {
 		container.NewHBox(widget.NewLabel("Username"), widget.NewLabel(av.Username)),
 		container.NewHBox(widget.NewLabel("Password"), pw.root),
 		closeBtn, b.label))
+}
+
+// drawFailed is the Done screen when the account's details could not be read.
+func (p *wizardPane) drawFailed(e error) {
+	closeBtn := widget.NewButton("Done", func() {
+		p.w.closeWizard()
+		p.w.showDefault()
+	})
+	p.set(container.NewVBox(title("Account added"), wrapped("The account is added, but its connection details could not be read: "+e.Error()), closeBtn))
 }

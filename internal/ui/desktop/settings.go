@@ -88,9 +88,12 @@ func (p *settingsPane) setAutostart(on bool) {
 	p.w.run(p.b, "Working…", func(context.Context) error { return p.w.set.SetAutostart(on) }, func(err error) {
 		if err != nil {
 			p.w.showErr(err)
-			p.silent = true
-			p.autostart.SetChecked(p.w.set.Autostart())
-			p.silent = false
+			var cur bool
+			p.w.async(func() { cur = p.w.set.Autostart() }, func() {
+				p.silent = true
+				p.autostart.SetChecked(cur)
+				p.silent = false
+			})
 		}
 	})
 }

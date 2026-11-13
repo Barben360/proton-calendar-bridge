@@ -25,6 +25,7 @@ type fakeWizard struct {
 	unatt    bool
 	script   map[string]ui.Step // call name -> step after
 	block    chan struct{}
+	doneErr  *exitcode.Error
 	canceled chan struct{}
 }
 
@@ -57,6 +58,9 @@ func (f *fakeWizard) Step() ui.Step {
 func (f *fakeWizard) Err() *exitcode.Error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.doneErr != nil {
+		return f.doneErr
+	}
 	return f.err
 }
 func (f *fakeWizard) CaptchaURL() string { return "https://verify.example/captcha?token=t" }
@@ -241,5 +245,46 @@ func TestWizardCancelRunsOffTheCallerGoroutine(t *testing.T) {
 	f.wait()
 	if got := f.wiz.got(); !slices.Equal(got, []string{"cancel"}) {
 		t.Errorf("calls = %v", got)
+	}
+}
+
+func TestAddAccountDuringWizardCancelsTheOldOne(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.step = ui.StepTOTP
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("+ Add account")
+	f.tap("+ Add account")
+	if got := f.wiz.got(); !slices.Equal(got, []string{"cancel"}) {
+		t.Errorf("calls = %v, want exactly one cancel of the first flow", got)
+	}
+}
+
+func TestAddAccountAfterDoneHidesThePassword(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.step = ui.StepDone
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("+ Add account")
+	f.tap("Show")
+	pb := f.w.wiz.done
+	if pb == nil || pb.label.Text != "wizard-pw" {
+		t.Fatal("setup: Done password not shown")
+	}
+	f.tap("+ Add account")
+	if pb.label.Text != mask {
+		t.Errorf("Done password still displayed after starting another wizard: %q", pb.label.Text)
+	}
+}
+
+func TestDoneErrorIsShown(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.step = ui.StepDone
+	f.wiz.doneErr = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("bridge stopped"), Hint: "restart it"}
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("+ Add account")
+	if !f.has("bridge stopped") || !f.has("restart it") {
+		t.Errorf("Done error not shown with its hint: %v", f.texts())
 	}
 }

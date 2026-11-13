@@ -125,7 +125,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	split.Offset = 0.3
 	w.win.SetContent(container.NewBorder(w.banner, nil, nil, nil, split))
 	w.win.Resize(fyne.NewSize(800, 550))
-	w.win.SetCloseIntercept(w.Hide)
+	w.win.SetCloseIntercept(w.onClose)
 	return w
 }
 
@@ -354,6 +354,7 @@ func (w *Window) openSettings() {
 
 func (w *Window) openWizard(address string) {
 	w.leave(paneWizard)
+	w.closeWizard() // a flow still in progress is cancelled, a shown password hides
 	w.mode = paneWizard
 	w.wizard = w.newWizard()
 	w.wiz.start(address)
@@ -372,6 +373,10 @@ func (w *Window) Show(account string) {
 	w.win.Show()
 	w.win.RequestFocus()
 }
+
+// onClose is what closing the window does: it hides (the app keeps running
+// in the tray).
+func (w *Window) onClose() { w.Hide() }
 
 // Hide hides the window: a shown password hides and a wizard in progress is
 // cancelled (nothing lingers in a window nobody sees).
