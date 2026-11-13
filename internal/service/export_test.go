@@ -199,3 +199,7 @@ func (h *Hub) OnPark(f func(id string)) {
 // SyncLockRetry is how long a loop waits before it takes a held sync.lock
 // again.
 const SyncLockRetry = syncLockRetry
+
+// KeyringRetry is how long a loop waits before it asks a locked desktop
+// keyring again.
+const KeyringRetry = keyringRetry

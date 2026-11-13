@@ -53,6 +53,9 @@ type hubEnv struct {
 	sessions map[string]api.Tokens
 	// http, when set before open, is the services' HTTP client.
 	http *http.Client
+	// keyring, when set before open, is the Hub's desktop keyring (else
+	// one with no Secret Service: a test never reaches the real one).
+	keyring service.Keyring
 }
 
 func newHubEnv(t *testing.T) *hubEnv {
@@ -91,9 +94,13 @@ func (e *hubEnv) options() service.HubOptions {
 	if e.sleep != nil {
 		sleep = e.sleep
 	}
+	kr := e.keyring
+	if kr == nil {
+		kr = &fakeKeyring{absent: true}
+	}
 	return service.HubOptions{Options: service.Options{
 		Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: sleep, AfterFunc: e.afterFunc, HTTP: e.http,
-	}}
+	}, Keyring: kr}
 }
 
 // open opens a Hub on the env's state, closed with the test.

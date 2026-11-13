@@ -229,6 +229,12 @@ func (l *Local) log() *slog.Logger {
 }
 
 // keyFile is the path named in store errors.
+// The sealers' names (seal.Sealer.Name, layout.json's "sealer").
+const (
+	keyFileSealer       = "keyfile"
+	secretServiceSealer = "secret-service"
+)
+
 func (l *Local) keyFile() string { return l.o.Config.Secrets.KeyFile }
 
 func (l *Local) fail(err error) error { return mapError(err, l.keyFile()) }
@@ -409,9 +415,12 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Reason:     st.Reason,
 		AccountID:  st.AccountID,
 		Secrets:    "none",
-		KeyFile:    l.keyFile(),
+		Sealer:     l.o.Sealer.Name(),
 		Unattended: st.Unattended,
 		Address:    st.Address,
+	}
+	if s.Sealer == keyFileSealer {
+		s.KeyFile = l.keyFile()
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL
@@ -433,6 +442,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
 		case errors.As(err, &ue):
 			s.Secrets, s.Phase, s.Reason = SecretsUnsupported, string(store.PhaseNeedsLogin), ue.Explain()
+		case errors.Is(err, seal.ErrLocked):
+			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
 		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
 		default:

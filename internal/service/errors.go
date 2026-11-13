@@ -43,6 +43,7 @@ type detail struct {
 	final      bool          // a retry cannot help: a person must change something
 	class      string        // the error class Health reports (errorClass), "" when the code says enough
 	login      bool          // a MustAct a login fixes (loginFixes)
+	locked     bool          // the desktop keyring is locked (keyringLocked)
 	switched   bool          // another account is logged in than Serve serves (accountSwitched)
 }
 
@@ -82,6 +83,22 @@ func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
 	}
 	d.login = true
 	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
+}
+
+// keyringFix is what a person does about a locked desktop keyring; the
+// alert's fix says the same.
+const keyringFix = "unlock it (log in to the desktop session), pcb retries every 30 s"
+
+// keyringLockedError is the Blocked error of a locked desktop keyring: no
+// retry of the same call fixes it, but the desktop session unlocking does.
+func keyringLockedError() *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "the desktop keyring is locked", locked: true}, Hint: keyringFix}
+}
+
+// keyringLocked reports whether err is keyringLockedError's, by type.
+func keyringLocked(err error) bool {
+	var d *detail
+	return errors.As(err, &d) && d.locked
 }
 
 // loginFixes reports whether err is a MustAct a login fixes: Serve with
@@ -222,6 +239,8 @@ func mapError(err error, keyFile string) error {
 		return rolledBack(rb)
 	case errors.As(err, &use):
 		return unsupportedStore(use)
+	case errors.Is(err, seal.ErrLocked):
+		return keyringLockedError()
 	case errors.Is(err, seal.ErrNoKey):
 		return mustAct("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):
@@ -345,7 +364,7 @@ const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes,
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, store.ErrRolledBack) ||
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, store.ErrRolledBack) ||
 		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}

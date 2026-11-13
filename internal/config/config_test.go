@@ -287,7 +287,7 @@ func TestBackendDefaultsToAuto(t *testing.T) {
 	}
 }
 
-func TestBadBackendIsUsage(t *testing.T) {
+func TestBadBackendIsRefused(t *testing.T) {
 	const want = "[secrets] backend must be auto, keyfile or secret-service"
 	for _, bad := range []string{"tpm", "", "Auto", "secret_service"} {
 		if msg := refused(t, "[secrets]\nbackend = \""+bad+"\"\n"); msg != want {
