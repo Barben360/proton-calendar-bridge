@@ -23,13 +23,26 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install test lint image container-smoke systemd-smoke live-preflight live-preflight-test shellcheck pcb-fake rehearse
+.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test shellcheck pcb-fake rehearse
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
 
 install: build
 	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
+
+# pcb-ui, the desktop app (M7): cgo and the GL/X development headers
+# (libgl1-mesa-dev xorg-dev on Debian), so it is not part of make build.
+UI_OUT ?= bin/pcb-ui
+
+ui:
+	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)" -o $(UI_OUT) ./cmd/pcb-ui
+
+# The icon is the window's app icon, installed as the desktop entry's Icon.
+install-ui: ui
+	install -D -m 0755 $(UI_OUT) $(DESTDIR)$(PREFIX)/bin/pcb-ui
+	install -D -m 0644 packaging/pcb-ui.desktop $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
+	install -D -m 0644 internal/ui/desktop/icons/app.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/pcb-ui.svg
 
 # The fake Proton for rehearsals (plan R2): developer only, never in the
 # image nor in make install.
