@@ -41,6 +41,7 @@ type Hub interface {
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	SetCalDAV(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
+	SetMCP(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
 	Restart(ctx context.Context, selector string) (service.AccountInfo, error)
 	Health(ctx context.Context, selector string) (service.Health, error)
 }
@@ -87,6 +88,7 @@ var routes = []route{
 	{"/v2/accounts/{id}/logout", http.MethodPost, "logout", (*Server).logout},
 	{"/v2/accounts/{id}/remove", http.MethodPost, "account remove", (*Server).remove},
 	{"/v2/accounts/{id}/caldav", http.MethodPost, "account caldav", (*Server).setCalDAV},
+	{"/v2/accounts/{id}/mcp", http.MethodPost, "account mcp", (*Server).setMCP},
 	{"/v2/accounts/{id}/restart", http.MethodPost, "account restart", (*Server).restart},
 }
 
@@ -404,13 +406,33 @@ func logoutRequest(body []byte) (req service.LogoutRequest, err error) {
 // setCalDAV is POST /v2/accounts/{id}/caldav: Hub.SetCalDAV on the body's
 // "on", which must be given.
 func (s *Server) setCalDAV(ctx context.Context, id string, body []byte) (any, error) {
+	on, err := switchBody(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.SetCalDAV(ctx, id, on)
+}
+
+// setMCP is POST /v2/accounts/{id}/mcp: Hub.SetMCP on the body's "on",
+// which must be given.
+func (s *Server) setMCP(ctx context.Context, id string, body []byte) (any, error) {
+	on, err := switchBody(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hub.SetMCP(ctx, id, on)
+}
+
+// switchBody is the "on" of an adapter switch's body (CalDAVRequest,
+// MCPRequest); a body without it is errBadBody.
+func switchBody(body []byte) (bool, error) {
 	var req struct {
 		On *bool `json:"on"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.On == nil {
-		return nil, errBadBody
+		return false, errBadBody
 	}
-	return s.Hub.SetCalDAV(ctx, id, *req.On)
+	return *req.On, nil
 }
 
 // restart is POST /v2/accounts/{id}/restart: Hub.Restart.

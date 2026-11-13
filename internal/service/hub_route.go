@@ -113,7 +113,7 @@ func (h *Hub) verify(a *hubAccount, password string) (found, on bool, err error)
 	if err != nil {
 		return false, false, err
 	}
-	on = st.CalDAV == nil || *st.CalDAV
+	on = switchOn(st.CalDAV)
 	found, err = a.local.verifyClient(password, on)
 	return found, on, err
 }

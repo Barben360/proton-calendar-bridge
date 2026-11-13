@@ -48,6 +48,12 @@ type CalDAVRequest struct {
 	On bool `json:"on"`
 }
 
+// MCPRequest is the body of POST /v2/accounts/{id}/mcp: the account's MCP
+// switch.
+type MCPRequest struct {
+	On bool `json:"on"`
+}
+
 // TOTPRequest is the body of POST /v2/accounts/{id}/login/totp: the 2FA
 // code (or the otpauth:// URI) of the login the daemon holds for the account.
 type TOTPRequest struct {

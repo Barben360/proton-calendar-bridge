@@ -23,6 +23,7 @@ type stubAccount struct {
 	api         service.API
 	pending     bool
 	caldavOff   bool
+	mcpOff      bool
 }
 
 // stubHub is a cli.Hub over stub services, one per account, choosing among
@@ -31,7 +32,7 @@ type stubAccount struct {
 type stubHub struct {
 	mu       sync.Mutex
 	accounts []*stubAccount
-	changes  []string // "signout ID", "remove ID", "caldav ID on|off", "restart ID", "totp ID", "login USERNAME"
+	changes  []string // "signout ID", "remove ID", "caldav ID on|off", "mcp ID on|off", "restart ID", "totp ID", "login USERNAME"
 	closed   int
 }
 
@@ -71,7 +72,7 @@ func (h *stubHub) info(a *stubAccount) service.AccountInfo {
 	if address == "" {
 		address = st.Address
 	}
-	return service.AccountInfo{ID: a.id, Address: address, Phase: st.Phase, Pending: a.pending, CalDAV: !a.caldavOff}
+	return service.AccountInfo{ID: a.id, Address: address, Phase: st.Phase, Pending: a.pending, CalDAV: !a.caldavOff, MCP: !a.mcpOff}
 }
 
 func (h *stubHub) list() []*stubAccount {
@@ -200,6 +201,18 @@ func (h *stubHub) SetCalDAV(_ context.Context, sel string, on bool) (service.Acc
 	h.record("caldav " + a.id + " " + map[bool]string{true: "on", false: "off"}[on])
 	h.mu.Lock()
 	a.caldavOff = !on
+	h.mu.Unlock()
+	return h.info(a), nil
+}
+
+func (h *stubHub) SetMCP(_ context.Context, sel string, on bool) (service.AccountInfo, error) {
+	a, err := h.pick(sel)
+	if err != nil {
+		return service.AccountInfo{}, err
+	}
+	h.record("mcp " + a.id + " " + map[bool]string{true: "on", false: "off"}[on])
+	h.mu.Lock()
+	a.mcpOff = !on
 	h.mu.Unlock()
 	return h.info(a), nil
 }

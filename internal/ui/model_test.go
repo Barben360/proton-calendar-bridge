@@ -25,7 +25,7 @@ func ago(d time.Duration) *time.Time { t := now.Add(-d); return &t }
 // seconds.
 func ready(id string, age time.Duration, interval int) ctl.AccountStatus {
 	return ctl.AccountStatus{
-		AccountInfo: service.AccountInfo{ID: id, Address: id + "@proton.test", Phase: "ready", CalDAV: true},
+		AccountInfo: service.AccountInfo{ID: id, Address: id + "@proton.test", Phase: "ready", CalDAV: true, MCP: true},
 		Login:       service.Status{Phase: "ready", Secrets: "ok"},
 		Health: &service.Health{Serve: service.ServeServing, IntervalSeconds: interval,
 			LastPass: &service.PassHealth{At: *ago(age), OK: true}},
@@ -114,6 +114,9 @@ func TestShortTexts(t *testing.T) {
 		{"needs totp", with(ready("a", 0, 300), func(a *ctl.AccountStatus) { a.Phase, a.Login.Phase = "needs-totp", "needs-totp" }), "needs 2FA code"},
 		{"needs captcha", with(ready("a", 0, 300), func(a *ctl.AccountStatus) { a.Phase, a.Login.Phase = "needs-captcha", "needs-captcha" }), "needs CAPTCHA"},
 		{"caldav off", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.CalDAV = false }), "CalDAV off"},
+		// MCP off alone leaves the sync running: its state is what matters.
+		{"mcp off", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.MCP = false }), "synced 1 min ago"},
+		{"both adapters off", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.CalDAV, a.MCP = false, false }), "CalDAV and MCP off"},
 		{"stopped", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) {
 			a.Stopped = &service.StopInfo{Message: "the session was revoked"}
 		}), "stopped: the session was revoked"},
@@ -140,8 +143,12 @@ func TestAccountFields(t *testing.T) {
 	if got.Username != "a@proton.test" || got.Address != "a@proton.test" || got.URL != a.URL || got.Fingerprint != "AA:BB" {
 		t.Errorf("credentials: %+v", got)
 	}
-	if !got.SignedIn || got.Pending || !got.CalDAV || got.ID != "a" || v.Listener != s.Listener {
+	if !got.SignedIn || got.Pending || !got.CalDAV || !got.MCP || got.ID != "a" || v.Listener != s.Listener {
 		t.Errorf("flags: %+v", got)
+	}
+	a.MCP = false
+	if got := ui.Build(status(a), now).Accounts[0]; got.MCP || !got.CalDAV {
+		t.Errorf("MCP off: flags %+v, want MCP false, CalDAV true", got)
 	}
 	if got.LastSync == nil || !got.LastSync.Equal(a.Health.LastPass.At) {
 		t.Errorf("LastSync = %v, want the last pass %v", got.LastSync, a.Health.LastPass.At)
@@ -413,6 +420,12 @@ func TestAccountActionsGoThroughTheHub(t *testing.T) {
 	if got := b.Hub().Accounts()[0].CalDAV; got {
 		t.Errorf("CalDAV = true after SetCalDAV(false)")
 	}
+	if err := act.SetMCP(t.Context(), id, false); err != nil {
+		t.Fatalf("SetMCP: %v", err)
+	}
+	if got := b.Hub().Accounts()[0]; got.MCP || got.CalDAV {
+		t.Errorf("after SetMCP(false): %+v, want MCP and CalDAV off", got)
+	}
 	if err := act.SignOut(t.Context(), id); err != nil {
 		t.Fatalf("SignOut: %v", err)
 	}
@@ -478,6 +491,7 @@ func refused(t *testing.T, act ui.Actions) {
 		"SignOut":     act.SignOut(context.Background(), "a"),
 		"Remove":      act.Remove(context.Background(), "a"),
 		"SetCalDAV":   act.SetCalDAV(context.Background(), "a", true),
+		"SetMCP":      act.SetMCP(context.Background(), "a", true),
 		"Password":    func() error { _, err := act.Password(context.Background(), "a"); return err }(),
 		"NewPassword": func() error { _, err := act.NewPassword(context.Background(), "a"); return err }(),
 	} {

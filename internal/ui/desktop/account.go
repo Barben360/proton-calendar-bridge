@@ -95,8 +95,8 @@ type accountPane struct {
 	root                *fyne.Container
 	addr, state, last   *widget.Label
 	signBtn, removeBtn  *widget.Button
-	caldav              *widget.Check
-	silent              bool // setting the switch from the view, not the person
+	caldav, mcp         *widget.Check
+	silent              bool // setting the switches from the view, not the person
 	conn                *fyne.Container
 	url, user, fp       *widget.Label
 	fpRow               *fyne.Container
@@ -113,6 +113,7 @@ func newAccountPane(w *Window) *accountPane {
 	p.signBtn = widget.NewButton("Sign out", p.signInOut)
 	p.removeBtn = widget.NewButton("Remove", p.remove)
 	p.caldav = widget.NewCheck("CalDAV", p.setCalDAV)
+	p.mcp = widget.NewCheck("MCP", p.setMCP)
 	p.url, p.user, p.fp = widget.NewLabel(""), widget.NewLabel(""), widget.NewLabel("")
 	p.pw = newPwBox(w)
 	p.pw.fetch = func() func(context.Context) (string, error) {
@@ -120,7 +121,7 @@ func newAccountPane(w *Window) *accountPane {
 		return func(ctx context.Context) (string, error) { return w.act.Password(ctx, id) }
 	}
 	p.newPw = widget.NewButton("New password", p.newPassword)
-	p.b = newBusy(p.signBtn, p.removeBtn, p.caldav, p.newPw, p.pw.showBtn, p.pw.copyBtn)
+	p.b = newBusy(p.signBtn, p.removeBtn, p.caldav, p.mcp, p.newPw, p.pw.showBtn, p.pw.copyBtn)
 	p.pw.b = p.b
 	p.calendars, p.alertBox = container.NewVBox(), container.NewVBox()
 
@@ -138,7 +139,7 @@ func newAccountPane(w *Window) *accountPane {
 	)
 	body := container.NewVBox(
 		header, widget.NewSeparator(),
-		widget.NewLabelWithStyle("Adapters", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.caldav,
+		widget.NewLabelWithStyle("Adapters", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.caldav, p.mcp,
 		p.conn, widget.NewSeparator(),
 		widget.NewLabelWithStyle("Calendars", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.calendars,
 		widget.NewLabelWithStyle("Alerts", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.alertBox,
@@ -165,7 +166,8 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	} else {
 		p.signBtn.SetText("Sign in")
 	}
-	p.setChecked(av.CalDAV)
+	p.setChecked(p.caldav, av.CalDAV)
+	p.setChecked(p.mcp, av.MCP)
 	p.url.SetText(av.URL)
 	p.user.SetText(av.Username)
 	p.fp.SetText(av.Fingerprint)
@@ -205,22 +207,28 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	p.alertBox.Refresh()
 }
 
-func (p *accountPane) setChecked(on bool) {
+func (p *accountPane) setChecked(sw *widget.Check, on bool) {
 	p.silent = true
-	p.caldav.SetChecked(on)
+	sw.SetChecked(on)
 	p.silent = false
 }
 
-func (p *accountPane) setCalDAV(on bool) {
+func (p *accountPane) setCalDAV(on bool) { p.flip(p.caldav, p.w.act.SetCalDAV, on) }
+
+func (p *accountPane) setMCP(on bool) { p.flip(p.mcp, p.w.act.SetMCP, on) }
+
+// flip runs set for the person's tap on the switch sw; a failure puts sw
+// back, unless the pane shows another account by then.
+func (p *accountPane) flip(sw *widget.Check, set func(ctx context.Context, id string, on bool) error, on bool) {
 	if p.silent {
 		return
 	}
 	id, prev := p.av.ID, !on
-	p.w.run(p.b, "Working…", func(ctx context.Context) error { return p.w.act.SetCalDAV(ctx, id, on) }, func(err error) {
+	p.w.run(p.b, "Working…", func(ctx context.Context) error { return set(ctx, id, on) }, func(err error) {
 		if err != nil {
 			p.w.showErr(err)
 			if p.av.ID == id { // the pane may show another account by now
-				p.setChecked(prev)
+				p.setChecked(sw, prev)
 			}
 		}
 	})

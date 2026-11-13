@@ -797,6 +797,55 @@ func TestSetCalDAVPersists(t *testing.T) {
 	}
 }
 
+// Design §5.5b: the MCP switch is the state.json key "mcp"; absent (every
+// account before M8) it is on. It survives a reopening and a sign-out, and
+// leaves the CalDAV switch alone.
+func TestSetMCPPersists(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	dir := store.AccountDir(e.dirs.State, ra.Account)
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"mcp"`) {
+		t.Fatalf("a new account's state.json has an mcp key: %s", raw)
+	}
+	if got := find(h.Accounts(), ra.Account); got == nil || !got.MCP {
+		t.Fatalf("a new account: %+v, want MCP on (no mcp key)", got)
+	}
+	info, err := h.SetMCP(t.Context(), userA, false)
+	if err != nil || info.MCP || !info.CalDAV || info.ID != ra.Account {
+		t.Fatalf("SetMCP(off) = %+v, %v; want MCP off, CalDAV on", info, err)
+	}
+	if st, err := store.LoadState(dir); err != nil || st.MCP == nil || *st.MCP || st.CalDAV != nil {
+		t.Fatalf("state.json after off: mcp %v, caldav %v, %v; want mcp false, caldav absent", st.MCP, st.CalDAV, err)
+	}
+	_ = h.Close()
+	h = e.open(t)
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCP || !got.CalDAV {
+		t.Fatalf("after reopening: %+v, want MCP off, CalDAV on", got)
+	}
+	if _, err := h.SignOut(t.Context(), ra.Account, service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCP {
+		t.Fatalf("after a sign-out: %+v, want MCP still off", got)
+	}
+	if info, err := h.SetMCP(t.Context(), ra.Account, true); err != nil || !info.MCP {
+		t.Fatalf("SetMCP(on) = %+v, %v", info, err)
+	}
+	if got := find(h.Accounts(), ra.Account); got == nil || !got.MCP {
+		t.Fatalf("after on: %+v", got)
+	}
+	if _, err := h.SetMCP(t.Context(), "nobody@x", false); exitcode.From(err) != exitcode.Usage {
+		t.Errorf("SetMCP of an unknown account = %v, want exit 2", err)
+	}
+}
+
 // Ruling R11, lazily: an add whose 2FA code never came is gone at the next
 // listing once its login expired.
 func TestExpiredTOTPAddIsRemovedLazily(t *testing.T) {

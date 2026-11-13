@@ -138,12 +138,12 @@ a second account is a second `service.Local` in the same process, held by
   touches the root `sync.lock`, so CLI commands work while a daemon serves (R2)
   [verified: `TestOpenHubIgnoresSyncLockOnLayoutV2`, `TestOpenHubRefusesWhileM5SyncLockHeld`].
 - **One loop per account.** `Hub.Serve` runs one `Local.Serve` per account that is not
-  pending and has its CalDAV adapter on, each in its own goroutine and always waiting for a
+  pending and has either adapter (CalDAV, MCP; M8) on, each in its own goroutine and always waiting for a
   login when it has none (R3; the process exit rule below is the Hub's own). An account
   added, completed or switched on while serving starts its loop at once; a removed or
   switched-off one has its loop stopped (and waited for) first (R18)
   [verified: `TestServeRunsEveryAccount`, `TestAddedAccountStartsServing`,
-  `TestRemovedAccountStopsFirst`, `TestCalDAVOffPausesTheLoop`]. One account's CAPTCHA or
+  `TestRemovedAccountStopsFirst`, `TestBothAdaptersOffPausesTheLoop`]. One account's CAPTCHA or
   failure never stalls or stops another [verified: `TestOneAccountsCaptchaDoesNotStallTheOther`].
 - **Parked accounts.** A loop that ends on an error its context did not cause (a damaged
   cache: exit code 10, as the single account of M5 (R21)) is **parked**: `AccountInfo.Stopped`
@@ -163,7 +163,9 @@ a second account is a second `service.Local` in the same process, held by
   it, it refuses to start when no account is logged in (exit 10; the only account's own error when
   there is one) and exits with the first stopped account's code once **every** account that is not
   pending has stopped (parked, or waiting for a login); with one account that is the M5 behaviour.
-  An account with CalDAV off counts as running [verified: `TestServeExitsWhenEveryAccountStopped`,
+  An account with either adapter on is served and counts as any served account does (M8: one with
+  CalDAV off and MCP on whose login ends has stopped); one with both off, its loop paused, counts as
+  running [verified: `TestServeExitRuleCountsMCPOnAsRunning`, `TestServeExitsWhenEveryAccountStopped`,
   `TestServeRefusesWithNoLoggedInAccount`, `TestServeWithoutTheFlagExitsWhenTheOnlyAccountNeedsALogin`,
   `TestServeWaitForLoginParksAnUnreadableAccount`, `TestServeWaitsForALoginWithNoAccount`].
 - **Adding, relogin, pending.** `Hub.Login` takes the username: an account whose address matches
@@ -209,10 +211,14 @@ a second account is a second `service.Local` in the same process, held by
   CalDAV client (decision 0013).
 - **Adapters switch.** `pcb account caldav on|off` writes `caldav` (a boolean; absent, as in an M5
   `state.json`, means on) into the account's `state.json`; the design's `adapters: {"caldav": ...}`
-  became this one key, CalDAV being the only adapter. Off: CalDAV refuses the account's clients (401)
-  and its loop pauses; on: the loop resumes with a pass at once, and a switch made while a relogin runs
-  is kept (R19) [verified: `TestSetCalDAVPersists`, `TestCalDAVSwitchDuringAReloginIsKept`,
-  `TestCalDAVSwitchDuringACaptchaReloginIsKept`].
+  became this one key. M8 adds `pcb account mcp on|off`, the key `mcp` (absent means on), beside it
+  (design `2026-11-13-mcp-design.md` §5.5b). CalDAV off: CalDAV refuses the account's clients (401,
+  no charge, R28). MCP off: the account is hidden from every MCP entry. The loop pauses only once
+  both are off; an adapter switched on resumes it with a pass at once, and a switch made while a
+  relogin runs, or kept across a sign-out, is kept (R19) [verified: `TestSetCalDAVPersists`,
+  `TestSetMCPPersists`, `TestBothAdaptersOffPausesTheLoop`, `TestCalDAVOffMCPOnKeepsSyncing`,
+  `TestCalDAVSwitchDuringAReloginIsKept`, `TestCalDAVSwitchDuringACaptchaReloginIsKept`,
+  `TestMCPSwitchDuringAReloginIsKept`, `TestMCPSwitchDuringACaptchaReloginIsKept`].
 - **Daemon wiring** is `internal/daemon` (one entry point, `daemon.Run`: Hub.Serve, control socket,
   CalDAV listener with TLS, the 5 s drain), used by `pcb serve` and, later, `pcb-ui`; it follows the
   `cli` import rule and owns no account (the caller opens and closes the Hub, and closes it only after
@@ -1253,6 +1259,7 @@ pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL (M6: the a
 pcb client rotate NAME|ID                    # M5, decision 0013: a new password, the old one stops working at once
 pcb account list                            # M6: local ID, address, phase, CalDAV on/off, last sync; pending adds included; the daemon's view when one answers
 pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
+pcb account mcp on|off                      # M8: the account's MCP switch (§4.1)
 pcb account restart                         # M6: serve the account again after its loop stopped on an error (§4.1, "Parked accounts")
 pcb account remove [--yes]                  # M6: sign out, then delete the account's directory (cache and CalDAV passwords included)
 pcb config get|set|validate                  # not built (M5 out of scope: edit config.toml, run pcb doctor)
@@ -1260,7 +1267,7 @@ pcb version
 ```
 Several accounts per process since M6 (decision 0014, §4.1); the "one account per daemon in v1" rule is gone.
 The account selector (`--account A`, else `PCB_ACCOUNT`) is taken by `logout`, `login resume`, `status`, `calendar list`,
-`event list`, `sync`, `client add|list|show|rotate|remove` and `account caldav|restart|remove`; every other command
+`event list`, `sync`, `client add|list|show|rotate|remove` and `account caldav|mcp|restart|remove`; every other command
 refuses `--account` (exit 2, `pcb login takes no --account: the username decides ...`).
 Secrets are entered only at a terminal, a file descriptor or the
 environment, never argv; tokens are printed once.
@@ -1369,11 +1376,12 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   (a lone pending add is found without one; with several waiting and none named it lists them, exit 2); `pcb logout` of a state whose only account is a pending add acts on it
   (R34) [verified: `TestLoginAddsAccountByUsername`, `TestLoginResumeSelectsThePendingLogin`, `TestLoginResumeNamesTheWaitingLogins`,
   `TestLogoutOfTheOnlyPendingAccount`].
-- With a daemon, every account-changing command (login, 2FA code, logout, `account remove`, `caldav`, `restart`) goes through the control socket, which runs the
+- With a daemon, every account-changing command (login, 2FA code, logout, `account remove`, `caldav`, `mcp`, `restart`) goes through the control socket, which runs the
   Hub's own rules: a running Hub does not rescan `accounts/`, so an offline add would stay unseen until the next start (R15). Offline, `account restart` only
-  says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountRestartOffline`].
+  says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountMCPThroughTheDaemon`, `TestAccountRestartOffline`].
 - `pcb account remove` asks you to type `remove` (or `--yes`; without a terminal or with `--non-interactive` and no `--yes`: exit 10) [verified: `TestAccountRemoveNeedsYes`];
-  `pcb account caldav on|off` [verified: `TestAccountCalDAVOff`].
+  `pcb account caldav on|off` and `pcb account mcp on|off`; `account list` and `status` show both switches [verified: `TestAccountCalDAVOff`,
+  `TestAccountListShowsBothSwitches`].
 - `pcb status`: the process (daemon, listener, process alerts: `needs-login` with no account at all (ruling R44), the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
   render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
   is the command's (the `pcb status` key-fault exception of §13 stands). `pcb status --daemon --json` is still the container's health check [verified:
@@ -1507,7 +1515,7 @@ Render counters and the read path (initial-version audit; `internal/service/rend
 Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v2/` since M6 (`/v1/` is gone and answers 404, as does any unclean path), internal and versioned:
   `GET /v2/accounts`, `GET /v2/status` (every account; one account that cannot be read still gets its entry, with an `account-unreadable` alert, instead of failing the others),
-  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` (body `{"on": bool}`) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7), and a `pcb-ui` daemon adds `POST /v2/ui/show` (below). Each answer is one `output.Envelope`:
+  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` and `/mcp` (M8; body `{"on": bool}`, required) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7), and a `pcb-ui` daemon adds `POST /v2/ui/show` (below). Each answer is one `output.Envelope`:
   200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
   are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
   dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.

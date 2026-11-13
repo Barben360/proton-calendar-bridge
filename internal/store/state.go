@@ -41,8 +41,8 @@ type Captcha struct {
 //
 // Address is the account's Proton address, kept after a sign-out so a
 // signed-out account still shows its name. CalDAV is the account's CalDAV
-// switch: nil (an M5 state.json) is on. Created is when the account was
-// added.
+// switch: nil (an M5 state.json) is on. MCP is its MCP switch: nil (a
+// state.json before M8) is on. Created is when the account was added.
 type State struct {
 	AccountID   string    `json:"account_id,omitempty"`
 	Phase       Phase     `json:"phase"`
@@ -53,6 +53,7 @@ type State struct {
 	LastRelogin time.Time `json:"last_relogin,omitzero"`
 	Address     string    `json:"address,omitempty"`
 	CalDAV      *bool     `json:"caldav,omitempty"`
+	MCP         *bool     `json:"mcp,omitempty"`
 	Created     time.Time `json:"created,omitzero"`
 
 	SecretsGeneration uint64 `json:"secrets_generation,omitempty"`

@@ -44,8 +44,9 @@ pcb login --username alice             # the username may be a flag (default: $P
 pcb login --password-fd 3 3<pwfile     # the password never goes in a flag
 pcb login --unattended-relogin         # store the credentials so pcb can log in again without you
 pcb login resume --captcha-token T     # after solving the CAPTCHA Proton asked for
-pcb account list                       # every account: local ID, address, phase, CalDAV on or off, last sync (a pending add, stopped by a CAPTCHA, is listed too)
-pcb account caldav off                 # an account's CalDAV switch (on|off): off, its CalDAV clients are refused and its sync pauses
+pcb account list                       # every account: local ID, address, phase, CalDAV and MCP on or off, last sync (a pending add, stopped by a CAPTCHA, is listed too)
+pcb account caldav off                 # an account's CalDAV switch (on|off): off, its CalDAV clients are refused; its sync pauses only when MCP is off too
+pcb account mcp off                    # an account's MCP switch (on|off): off, agents do not see it; its sync pauses only when CalDAV is off too
 pcb account restart                    # serve an account again after it stopped on an error (pcb status shows it as account-stopped)
 pcb account remove [--yes]             # sign the account out, then delete its directory (its cache and CalDAV passwords too)
 pcb status                             # every account's login; with pcb serve running, its live state too (listener, per-calendar sync and write gate, alerts)

@@ -30,9 +30,9 @@ const serveLockName = "serve.lock"
 //
 // The callbacks run on the account's loop goroutine: they must not wait
 // for a change of the accounts (Login, SubmitTOTP, Remove, SetCalDAV,
-// Restart), which may wait for that loop to end. OnState also gets
+// SetMCP, Restart), which may wait for that loop to end. OnState also gets
 // ServeStopped when a loop ends: parked (AccountInfo.Stopped), paused
-// (CalDAV off), removed, or Serve ending.
+// (CalDAV and MCP off), removed, or Serve ending.
 type HubServeOptions struct {
 	ServeOptions
 	OnState func(accountID string, s ServeState)
@@ -74,13 +74,14 @@ func (run *accountLoop) stop() {
 }
 
 // Serve serves every account until ctx ends: one Local.Serve loop per
-// account that is not pending and has its CalDAV adapter on, each in its
-// own goroutine and waiting for a login while it has none (ruling R3). It
-// holds the root's serve.lock (another holder: Blocked, naming the PID it
-// wrote) and the root's sync.lock, so an older pcb refuses to write, for
-// its whole run. A loop starts when its account is added, completes its
-// first login or has CalDAV switched on, and stops (Serve waits for its
-// end) when the account is removed or CalDAV switched off. A loop that
+// account that is not pending and has either adapter (CalDAV, MCP) on,
+// each in its own goroutine and waiting for a login while it has none
+// (ruling R3). It holds the root's serve.lock (another holder: Blocked,
+// naming the PID it wrote) and the root's sync.lock, so an older pcb
+// refuses to write, for its whole run. A loop starts when its account is
+// added, completes its first login or has an adapter switched on, and
+// stops (Serve waits for its end) when the account is removed or its last
+// adapter on is switched off (design §5.5b). A loop that
 // ends on an error its context did not cause parks its account
 // (AccountInfo.Stopped, OnChange runs) until Restart, a login of that
 // account, or a new Hub. One account's loop never stops another's.
@@ -91,7 +92,9 @@ func (run *accountLoop) stop() {
 // account that is not pending has stopped (parked, or waiting for a login:
 // the loop of one account without WaitForLogin would have ended there),
 // with the error of the first to stop; with one account that is the
-// single-account Serve. An account with CalDAV off counts as running.
+// single-account Serve. An account with either adapter on is served, and
+// counts as any served account does; one with both off (its loop paused)
+// counts as running.
 // Serve returns once every loop ended, its locks released.
 func (h *Hub) Serve(ctx context.Context, o HubServeOptions) error {
 	if h.isClosed() {
@@ -217,8 +220,8 @@ func (h *Hub) anyLoggedIn() error {
 
 // allStopped is the error of the account that stopped first once every
 // account that is not pending has stopped (parked, or waiting for a
-// login), nil while one runs (or starts, or has CalDAV off). With no such
-// account left it is MustAct, as a start with none.
+// login), nil while one runs (or starts, or is paused with both adapters
+// off). With no such account left it is MustAct, as a start with none.
 func (h *Hub) allStopped() error {
 	var (
 		first error
@@ -254,8 +257,8 @@ func (h *Hub) allStopped() error {
 }
 
 // loops makes the serve loops match the accounts while the Hub serves: a
-// loop runs for every account that is not pending, has CalDAV on and is
-// not parked; the others' loops are stopped, each waited for.
+// loop runs for every account wantsLoop names; the others' loops are
+// stopped, each waited for.
 func (h *Hub) loops() {
 	h.srv.Lock()
 	defer h.srv.Unlock()
@@ -276,11 +279,12 @@ func (h *Hub) loops() {
 	sv.poke() // the accounts may have changed: the exit rule looks again
 }
 
-// wantsLoop reports whether a is served: not pending, CalDAV on, not
-// parked.
+// wantsLoop reports whether a is served: not pending, not parked, and
+// either adapter on (design §5.5b: CalDAV off only refuses its clients;
+// the loop pauses once MCP is off too).
 func (h *Hub) wantsLoop(a *hubAccount) bool {
 	d := inspect(a)
-	if d.pending || (d.st.CalDAV != nil && !*d.st.CalDAV) {
+	if d.pending || (!switchOn(d.st.CalDAV) && !switchOn(d.st.MCP)) {
 		return false
 	}
 	h.mu.Lock()
@@ -413,8 +417,8 @@ func (h *Hub) clearStop(a *hubAccount) bool {
 }
 
 // Restart clears the account's park (AccountInfo.Stopped) and, while the
-// Hub serves, starts its loop (unless it is pending or has CalDAV off).
-// An account that is not parked is left as it is.
+// Hub serves, starts its loop (unless it is pending or has both adapters
+// off). An account that is not parked is left as it is.
 func (h *Hub) Restart(ctx context.Context, selector string) (AccountInfo, error) {
 	h.ops.Lock()
 	a, err := h.pick(selector)

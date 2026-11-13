@@ -493,7 +493,10 @@ func TestRemovedAccountStopsFirst(t *testing.T) {
 	running(t, done)
 }
 
-func TestCalDAVOffPausesTheLoop(t *testing.T) {
+// Design §5.5b: the loop runs while either adapter is on; it pauses only
+// once both are off, and either one switched on again resumes it with a
+// pass at once.
+func TestBothAdaptersOffPausesTheLoop(t *testing.T) {
 	t.Parallel()
 	e := newServeEnv(t)
 	h := e.open(t)
@@ -508,16 +511,33 @@ func TestCalDAVOffPausesTheLoop(t *testing.T) {
 	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
 		t.Fatal(err)
 	}
+	if lockFree(t, syncLock(e, a)) {
+		t.Error("a's loop stopped with CalDAV off and MCP on (its sync.lock is free)")
+	}
+	if _, err := h.SetMCP(t.Context(), a, false); err != nil {
+		t.Fatal(err)
+	}
 	if !lockFree(t, syncLock(e, a)) {
-		t.Error("a's loop still runs with CalDAV off (its sync.lock is held)")
+		t.Error("a's loop still runs with both adapters off (its sync.lock is held)")
 	}
 	if hl := health(t, h, a); hl.Serve != service.ServeStopped {
-		t.Errorf("Health(a).Serve = %q with CalDAV off, want stopped", hl.Serve)
+		t.Errorf("Health(a).Serve = %q with both adapters off, want stopped", hl.Serve)
 	}
 	if info := accountInfo(t, h, a); info.Stopped != nil {
-		t.Errorf("a.Stopped = %+v with CalDAV off, want nil (paused, not parked)", info.Stopped)
+		t.Errorf("a.Stopped = %+v with both adapters off, want nil (paused, not parked)", info.Stopped)
 	}
 	n := r.passCount(a)
+	if _, err := h.SetMCP(t.Context(), a, true); err != nil {
+		t.Fatal(err)
+	}
+	r.waitPassed(t, a, n)
+	if _, err := h.SetMCP(t.Context(), a, false); err != nil {
+		t.Fatal(err)
+	}
+	if !lockFree(t, syncLock(e, a)) {
+		t.Error("a's loop still runs with both adapters off again")
+	}
+	n = r.passCount(a)
 	if _, err := h.SetCalDAV(t.Context(), a, true); err != nil {
 		t.Fatal(err)
 	}
@@ -525,6 +545,93 @@ func TestCalDAVOffPausesTheLoop(t *testing.T) {
 	if hl := health(t, h, b); hl.Serve != service.ServeServing {
 		t.Errorf("Health(b).Serve = %q, want serving", hl.Serve)
 	}
+}
+
+// Design §5.5b: with CalDAV off and MCP on the loop keeps running, so the
+// account's writes go through (an MCP write is a PutObject on its API),
+// while CalDAV refuses its client (401: no API, no wait, no error).
+func TestCalDAVOffMCPOnKeepsSyncing(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	h := e.open(t)
+	a, _ := e.loginBoth(t, h)
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := api.ShowClient(t.Context(), "default")
+	if err != nil || creds.Password == "" {
+		t.Fatalf("ShowClient(a) = %v, %v", creds.Password != "", err)
+	}
+	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
+		t.Fatal(err)
+	}
+	r := newServeRig(h)
+	r.serve(t, r.options(true))
+	r.waitPassed(t, a, 0)
+	if lockFree(t, syncLock(e, a)) {
+		t.Error("a's loop does not run with CalDAV off and MCP on (its sync.lock is free)")
+	}
+	if hl := health(t, h, a); hl.Serve != service.ServeServing {
+		t.Errorf("Health(a).Serve = %q with CalDAV off and MCP on, want serving", hl.Serve)
+	}
+	for _, url := range []string{a, ""} {
+		if got, _, wait, err := h.Route(t.Context(), url, creds.Password, "192.0.2.1:1"); got != nil || wait != 0 || err != nil {
+			t.Errorf("Route(%q) with a's password, CalDAV off = %v, %v, %v; want a refusal (401)", url, got != nil, wait, err)
+		}
+	}
+	cals, err := api.Calendars(t.Context())
+	if err != nil || len(cals) != 1 {
+		t.Fatalf("Calendars(a) = %+v, %v", cals, err)
+	}
+	res, err := api.PutObject(t.Context(), cals[0].ID, "mcp@x.ics", newEvent("mcp@x", "Planned by an agent"), service.Precondition{IfNoneMatchAny: true})
+	if err != nil || !res.Created {
+		t.Fatalf("PutObject with CalDAV off and MCP on = %+v, %v; want created", res, err)
+	}
+}
+
+// Design §5.5b, the exit rule: an account with CalDAV off and MCP on is
+// served like one with CalDAV on. Without WaitForLogin, its running loop
+// keeps Serve up while another account is parked; once its own session
+// ends it has stopped for the rule (waiting for a login), and Serve exits
+// with that stop, where a paused loop (both off) would keep it running.
+func TestServeExitRuleCountsMCPOnAsRunning(t *testing.T) {
+	t.Parallel()
+	t.Run("served while another is parked", func(t *testing.T) {
+		t.Parallel()
+		e := newServeEnv(t)
+		h := e.open(t)
+		a, b := e.loginBoth(t, h)
+		if _, err := h.SetCalDAV(t.Context(), b, false); err != nil {
+			t.Fatal(err)
+		}
+		e.damageCache(t, a)
+		r := newServeRig(h)
+		done, _ := r.serve(t, r.options(false))
+		r.waitStopped(t, a)
+		r.waitPassed(t, b, 0)
+		running(t, done)
+	})
+	t.Run("its ended session stops it", func(t *testing.T) {
+		t.Parallel()
+		e := newServeEnv(t)
+		h := e.open(t)
+		e.skip(t, h)
+		a := e.mustLogin(t, h, userA).Account
+		if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
+			t.Fatal(err)
+		}
+		e.f.RevokeSessions()
+		r := newServeRig(h)
+		done, _ := r.serve(t, r.options(false))
+		select {
+		case err := <-done:
+			done <- err
+			_ = wantExit(t, err, exitcode.MustAct)
+		case <-time.After(waitLimit):
+			t.Fatal("Serve kept running with its only account, CalDAV off and MCP on, waiting for a login")
+		}
+	})
 }
 
 func TestSecondServeIsRefused(t *testing.T) {
@@ -659,10 +766,43 @@ func TestReloginsOfTwoAccountsAreSpaced(t *testing.T) {
 	}
 }
 
+// adapterSwitch is one of an account's adapter switches: how to turn it off
+// through the Hub, and its value in a state.json.
+type adapterSwitch struct {
+	name string
+	off  func(ctx context.Context, h *service.Hub, id string) error
+	of   func(st store.State) *bool
+}
+
+var (
+	caldavSwitch = adapterSwitch{"CalDAV",
+		func(ctx context.Context, h *service.Hub, id string) error {
+			_, err := h.SetCalDAV(ctx, id, false)
+			return err
+		},
+		func(st store.State) *bool { return st.CalDAV }}
+	mcpSwitch = adapterSwitch{"MCP",
+		func(ctx context.Context, h *service.Hub, id string) error {
+			_, err := h.SetMCP(ctx, id, false)
+			return err
+		},
+		func(st store.State) *bool { return st.MCP }}
+)
+
 // Ruling R19: a switch made while an unattended relogin runs is kept: the
 // relogin's state write reads the switch again under state.lock.
 func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	t.Parallel()
+	switchDuringARelogin(t, caldavSwitch)
+}
+
+// Design §5.5b: the MCP switch is kept as the CalDAV one is (ruling R19).
+func TestMCPSwitchDuringAReloginIsKept(t *testing.T) {
+	t.Parallel()
+	switchDuringARelogin(t, mcpSwitch)
+}
+
+func switchDuringARelogin(t *testing.T, sw adapterSwitch) {
 	e := newHubEnv(t)
 	h := e.open(t)
 	e.skip(t, h)
@@ -697,7 +837,7 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	case <-time.After(waitLimit):
 		t.Fatal("the relogin never reached its key calls")
 	}
-	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
+	if err := sw.off(t.Context(), h, a); err != nil {
 		t.Fatal(err)
 	}
 	setAddress(t, e, a, "A@x")
@@ -709,9 +849,9 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseReady || st.LastRelogin.IsZero() || st.Address != "A@x" {
-		t.Errorf("state = caldav %v, phase %q, last relogin %v, address %q; want CalDAV off and the address A@x kept by a completed relogin",
-			st.CalDAV, st.Phase, st.LastRelogin, st.Address)
+	if on := sw.of(st); on == nil || *on || st.Phase != store.PhaseReady || st.LastRelogin.IsZero() || st.Address != "A@x" {
+		t.Errorf("state = %s %v, phase %q, last relogin %v, address %q; want %[1]s off and the address A@x kept by a completed relogin",
+			sw.name, on, st.Phase, st.LastRelogin, st.Address)
 	}
 }
 
@@ -719,6 +859,16 @@ func TestCalDAVSwitchDuringAReloginIsKept(t *testing.T) {
 // switch made while it ran.
 func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	t.Parallel()
+	switchDuringACaptchaRelogin(t, caldavSwitch)
+}
+
+// Design §5.5b: the MCP switch is kept by a CAPTCHA relogin too.
+func TestMCPSwitchDuringACaptchaReloginIsKept(t *testing.T) {
+	t.Parallel()
+	switchDuringACaptchaRelogin(t, mcpSwitch)
+}
+
+func switchDuringACaptchaRelogin(t *testing.T, sw adapterSwitch) {
 	e := newHubEnv(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var freed sync.Once
@@ -759,7 +909,7 @@ func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	case <-time.After(waitLimit):
 		t.Fatal("the relogin never reached its SRP step")
 	}
-	if _, err := h.SetCalDAV(t.Context(), a, false); err != nil {
+	if err := sw.off(t.Context(), h, a); err != nil {
 		t.Fatal(err)
 	}
 	setAddress(t, e, a, "A@x")
@@ -769,8 +919,8 @@ func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.CalDAV == nil || *st.CalDAV || st.Phase != store.PhaseNeedsCaptcha || st.Address != "A@x" {
-		t.Errorf("state = caldav %v, phase %q, address %q; want CalDAV off and the address A@x kept by the CAPTCHA relogin", st.CalDAV, st.Phase, st.Address)
+	if on := sw.of(st); on == nil || *on || st.Phase != store.PhaseNeedsCaptcha || st.Address != "A@x" {
+		t.Errorf("state = %s %v, phase %q, address %q; want %[1]s off and the address A@x kept by the CAPTCHA relogin", sw.name, on, st.Phase, st.Address)
 	}
 }
 
