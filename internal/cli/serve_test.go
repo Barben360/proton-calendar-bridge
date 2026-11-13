@@ -1412,8 +1412,15 @@ func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
 					t.Errorf("log line lacks %q:\n%s", want, line)
 				}
 			}
-			for _, secret := range []string{tc.text, "fakeacc", "fakeref"} {
-				if strings.Contains(s.errb.String(), secret) {
+			// Proton's text, and every token the fake handed out (the
+			// login's and each refresh's, access and refresh).
+			secrets := append([]string{tc.text}, r.f.AccessTokens()...)
+			secrets = append(secrets, r.f.RefreshTokens()...)
+			if len(secrets) < 3 {
+				t.Fatalf("the fake handed out no tokens to look for: %q", secrets)
+			}
+			for _, secret := range secrets {
+				if secret != "" && strings.Contains(s.errb.String(), secret) {
 					t.Errorf("logs carry %q:\n%s", secret, s.errb.String())
 				}
 			}

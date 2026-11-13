@@ -68,7 +68,7 @@ Status: **HUMAN-CHECKS step 7 run on 2026-11-13** (7.1 to 7.7 and 7.9; 7.8 was d
 
 On ede976e. Before: the VM's session from the re-login (created 17:19:46) was listed. `--plan`: exit 0, lists disable `--now`, remove the unit, `daemon-reload`, logout (best effort) and both directories; nothing changed. `--yes`: exit 0 at 18:32:04; both directories and the unit gone, both binaries stay, the service inactive. After: no session created on 2026-11-13 listed, so the session was revoked. 7.6.4: `pcb service status` exit 10, `pcb is not installed as a service`, hint `pcb install`; `pcb status` exit 0, logged out, alert needs-login.
 
-Two nits, for the maintainers (code changes, not made here): the apply prints the plan lines only and no revoke confirmation (HUMAN-CHECKS 7.6.2 now says to check the session list); `pcb status` after `--delete-data` still prints the configured `key_file` path, which no longer exists.
+Two nits, for the maintainers (code changes, not made here): the apply prints the plan lines only and no revoke confirmation (HUMAN-CHECKS 7.6.2 now says to check the session list); `pcb status` after `--delete-data` still prints the configured `key_file` path, which no longer exists. Since fixed by the polish round: the apply ends with the logout's outcome (d9c0c66, kept on a partial failure by 86421b1) and `pcb status` says `key_file: <path> (absent)` (d9c0c66).
 
 ## 7.7 `client show --reveal`, `client rotate`: PASS (curl instead of Thunderbird)
 
@@ -91,4 +91,4 @@ Done on 2026-11-12 (see HUMAN-CHECKS 7.8); not part of this session.
 
 - SPEC §7.3 (sealed session in a service and a container), §13 (real systemd, linger across a reboot, a real login) and the E15 compose-secret note: verified live.
 - SPEC §8.1 (idle and wake): verified by curl; Thunderbird's own behaviour at default settings stays assumed (7.4.4 skipped).
-- Fixes 7, 8, 9 as above. Open: O1; the two 7.6 nits.
+- Fixes 7, 8, 9 as above. O1 and the two 7.6 nits were fixed later by the polish round: O1 by e12dffc (the "Checking the CAPTCHA with Proton…" line after Enter, and a debug record of each API retry wait, so the cause of the wait can be read next time), the nits by d9c0c66 and 86421b1 (7.6 above). Not re-run live.

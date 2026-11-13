@@ -3,6 +3,8 @@ package cli_test
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -539,6 +541,70 @@ func TestUninstallSignsOutEveryAccount(t *testing.T) {
 	}
 	if s.exists(userStateDir) {
 		t.Error("the state survived --delete-data")
+	}
+}
+
+// With several accounts the uninstall's logout says each account's own
+// outcome, named: one revoked, one Proton could not be told of (its revoke
+// failed), in text and in --json; the step is not a failure (exit 0).
+func TestUninstallReportsEachAccountsOutcome(t *testing.T) {
+	t.Parallel()
+	for _, asJSON := range []bool{false, true} {
+		s := newSysRig(t)
+		s.want(exitcode.OK, "install")
+		r := accountsRig(t)
+		r.dirs = paths.Dirs{Config: filepath.Join(s.root, userConfigDir), State: filepath.Join(s.root, userStateDir)}
+		if err := os.WriteFile(config.Path(r.dirs), []byte("[proton]\nbase_url = \""+r.f.URL+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loginAs(t, r, userA, exitcode.OK)
+		loginAs(t, r, userB, exitcode.OK)
+		idA, idB := accountID(t, r, userA), accountID(t, r, userB)
+		s.openHub = func(env func(string) string) (cli.Hub, error) {
+			dirs := paths.Dirs{Config: env(paths.EnvConfigDir), State: env(paths.EnvStateDir)}
+			cfg, err := config.Load(config.Path(dirs), dirs)
+			if err != nil {
+				return nil, err
+			}
+			h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg, Now: r.now,
+				Sleep: func(context.Context, time.Duration) error { return nil }}})
+			if err != nil {
+				return nil, err
+			}
+			return h, nil
+		}
+		r.f.FailNextFor(userB, "DELETE", "/auth/v4", http.StatusInternalServerError, 0, 0)
+		args := []string{"uninstall", "--delete-data", "--yes", "--non-interactive"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		s.want(exitcode.OK, args...)
+		if !asJSON {
+			lines := strings.Split(s.stdout.String(), "\n")
+			for _, want := range []string{
+				userA + " (" + idA + "): Logged out.",
+				userB + " (" + idB + "): Logged out locally; Proton could not be told: end the session in " + service.SessionsPage + ".",
+			} {
+				if !slices.Contains(lines, want) {
+					t.Errorf("output lacks the line %q:\n%s", want, s.stdout.String())
+				}
+			}
+			if strings.Contains(s.stdout.String(), "logout failed") {
+				t.Errorf("the logout step says failed beside the outcomes:\n%s", s.stdout.String())
+			}
+			continue
+		}
+		got := map[string]service.LogoutResult{}
+		for _, l := range s.data().Logout {
+			got[l.Account+" "+l.Address] = l.LogoutResult
+		}
+		want := map[string]service.LogoutResult{
+			idA + " " + userA: {WasLoggedIn: true, Revoked: true},
+			idB + " " + userB: {WasLoggedIn: true},
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("--json logout = %+v, want %+v", got, want)
+		}
 	}
 }
 

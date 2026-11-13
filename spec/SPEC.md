@@ -266,7 +266,7 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   solved token survives across processes and for how long [assumed → E02];
   the design relies on it for `pcb login resume --captcha-token`. After "Press Enter once solved" an interactive login
   prints "Checking the CAPTCHA with Proton…" while Proton checks the token (seconds, observation O1; never with
-  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session").
+  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session") is written up: it ran on 2026-11-13, its results are not written up yet.
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies
@@ -539,7 +539,7 @@ the key proof would find it; a DELETE is unaffected.
 Goal: incremental sync without re-listing. Source-based so far (third-party
 clients, nothing Proton-documented; `spec/experiments/E04-calendar-feed.md`,
 `E05-core-events.md`, evidence in `spec/experiments/raw/m2-feed-research.md`);
-the live run is deferred (`spec/HUMAN-CHECKS.md`, "M2 live session").
+the live run (`spec/HUMAN-CHECKS.md`, "M2 live session") ran on 2026-11-13; its results are not written up yet, and the markers stay `[assumed]` until then.
 - Calendar model events (M2 uses this): `GET /calendar/v1/{cal}/modelevents/latest`
   gives `{CalendarModelEventID}`; `GET /calendar/v1/{cal}/modelevents/{cursor}`
   gives `{CalendarModelEventID, More, Refresh, CalendarEvents:[{ID, Action, Event?}]}`.
@@ -1405,11 +1405,14 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
   base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
-  After the steps it says what the logout got, in the first line of `pcb logout`'s words ("Logged out.", "Logged out
-  locally; Proton could not be told: …", "Not logged in."), also when a later step fails (exit 40), and `--json`
-  carries it as `logout` (`was_logged_in`, `revoked`); a logout that got no answer has no outcome and its step's note
-  says `logout failed (…)` [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`,
-  `TestUninstallPartialFailureKeepsTheLogoutOutcome`, `TestUninstallLogoutWithoutAnAnswerIsTheStepsNote`].
+  Since M6 the logout step signs out every account of the state. After the steps it says what each account's logout got,
+  in the first line of `pcb logout`'s words ("Logged out.", "Logged out locally; Proton could not be told: …", "Not logged
+  in."), one line per account, prefixed `<address> (<local-id>): ` when there are several, also when a later step fails
+  (exit 40); `--json` carries a list `logout`, one `{account, address, was_logged_in, revoked, sync_running}` per account
+  that answered. An account whose logout got no answer has no outcome: the step's note says `logout failed (…)`, the error
+  named after its account when there are several [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`,
+  `TestUninstallPartialFailureKeepsTheLogoutOutcome`, `TestUninstallLogoutWithoutAnAnswerIsTheStepsNote`,
+  `TestUninstallSignsOutEveryAccount`, `TestUninstallReportsEachAccountsOutcome`].
   With no unit installed and no `--user`/`--system`, applying exits 10 ("nothing to uninstall"), while `--plan`
   exits 0 with "Nothing to remove" and no step (M5-R16) [verified: `TestUninstallPlanWithNothingInstalled`].
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
@@ -1647,7 +1650,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   `TestHubSyncStalledFollowsEachAccountsCadence`, `TestStatusNamesAClientsFileThatCannotBeLoaded`]. [verified: live 2026-11-13] build bc0f196 (M5) measured the bug: with outgoing
   443 rejected (cadence 30 s, back-off waits 31 s, 56 s, 2m6s) `pcb status` showed no alert after 3m41s without a sync, because the
   threshold was 5 × `interval_seconds`, the back-off wait, so a longer outage delayed the warning; fixed by measuring against
-  `cadence_seconds`. Re-record with the fixed build in HUMAN-CHECKS 7.5.
+  `cadence_seconds`; the second cut on build ede976e showed `sync-stalled` once five cadences passed (`[verified: live 2026-11-13]`, `spec/experiments/M5-live.md` 7.5).
 - `keyring-locked` (M7; error, per account): the desktop keyring that seals the account is locked; message `the desktop keyring is locked`, fix `unlock it (log in to the desktop session), pcb retries every 30 s`; it clears by itself once the
   keyring unlocks (§7.3) [verified: `TestKeyringLockedAlert`].
 - `keyring-unavailable` (M7; error, per account): no Secret Service answers for a keyring state (ruling R15); message `the desktop keyring is not available`, fix `run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state`;
@@ -1729,7 +1732,7 @@ Status at the close of M0 (2026-11-11):
 - Live runs, in order: `spec/HUMAN-CHECKS.md`.
 
 Status at the close of M2 (2026-11-11):
-- E04, E05, E07: source-based write-ups (`E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md`; evidence `raw/m2-feed-research.md`), every marker stays `[assumed]`; the live run is deferred ("M2 live session" in `spec/HUMAN-CHECKS.md`, recorded with `pcb-lab probe feed`).
+- E04, E05, E07: source-based write-ups (`E04-calendar-feed.md`, `E05-core-events.md`, `E07-row-changes.md`; evidence `raw/m2-feed-research.md`), every marker stays `[assumed]`; the live run ("M2 live session" in `spec/HUMAN-CHECKS.md`, recorded with `pcb-lab probe feed`) ran on 2026-11-13, its results are not written up yet, so the markers stay `[assumed]` until then.
 - E09: moved to M3 with event decryption (M2-R1); the M2 cache stores ciphertext only.
 - E06 (rate limits): not started; M2 relies on the client's limiter and on honouring `Retry-After`.
 

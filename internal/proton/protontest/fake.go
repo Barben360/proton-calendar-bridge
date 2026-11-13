@@ -116,6 +116,7 @@ type Fake struct {
 	sessions  map[string]sessionRec         // access token minted by Session → session
 	logins    map[string]loginRec           // UID → session handed out by Login, not spent
 	rotated   map[string]string             // refresh token issued by a refresh → its pair's access token
+	refreshes []string                      // every refresh token handed out, in order
 
 	cal calendars
 }
@@ -349,6 +350,15 @@ func (f *Fake) AccessTokens() []string {
 	return append([]string(nil), f.minted...)
 }
 
+// RefreshTokens returns every refresh token the fake has handed out (by a
+// login, a refresh, Session or Login), spent or not, so a test can check that
+// none leaks into a message.
+func (f *Fake) RefreshTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.refreshes...)
+}
+
 // ExpireAccessTokens makes every access token handed out so far answer 401
 // until it is refreshed.
 func (f *Fake) ExpireAccessTokens() {
@@ -398,6 +408,7 @@ func (f *Fake) Session(t TB, username string) api.Tokens {
 	f.sessions[tk.AccessToken] = sessionRec{username, tk.UID}
 	f.issued[tk.AccessToken] = true
 	f.minted = append(f.minted, tk.AccessToken)
+	f.refreshes = append(f.refreshes, tk.RefreshToken)
 	return tk
 }
 
@@ -440,6 +451,7 @@ func (f *Fake) Login(t TB, username string) api.Tokens {
 	f.logins[tok.UID] = loginRec{username, tok}
 	f.issued[tok.AccessToken] = true
 	f.minted = append(f.minted, tok.AccessToken)
+	f.refreshes = append(f.refreshes, tok.RefreshToken)
 	return tok
 }
 
@@ -777,8 +789,11 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 			f.mu.Lock()
 			f.issued[tok] = true
 			f.minted = append(f.minted, tok)
-			if ref, ok := body["RefreshToken"].(string); ok && route == "POST /auth/v4/refresh" {
-				f.rotated[ref] = tok
+			if ref, ok := body["RefreshToken"].(string); ok {
+				f.refreshes = append(f.refreshes, ref)
+				if route == "POST /auth/v4/refresh" {
+					f.rotated[ref] = tok
+				}
 			}
 			f.mu.Unlock()
 		}

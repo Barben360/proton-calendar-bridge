@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +220,26 @@ func TestRefreshOfARefreshedPairNeedsItsAccessToken(t *testing.T) {
 	b := login(t, f, f.Username, f.Password)
 	if status, _, _ := refresh(t, f, b.UID, b.RefreshToken, b.AccessToken); status != http.StatusOK {
 		t.Fatalf("a login's refresh token with its access token answered %d, want 200", status)
+	}
+}
+
+// RefreshTokens lists every refresh token handed out, by a login, a
+// refresh, Session and Login, so a test can check that none leaks.
+func TestRefreshTokensListsEveryIssuedOne(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	a := login(t, f, f.Username, f.Password)
+	status, _, t1 := refresh(t, f, a.UID, a.RefreshToken, "")
+	if status != http.StatusOK {
+		t.Fatalf("refresh answered %d", status)
+	}
+	s := f.Session(t, f.Username)
+	l := f.Login(t, f.Username)
+	got := f.RefreshTokens()
+	for _, want := range []string{a.RefreshToken, t1.RefreshToken, s.RefreshToken, l.RefreshToken} {
+		if want == "" || !slices.Contains(got, want) {
+			t.Errorf("RefreshTokens() = %q lacks %q", got, want)
+		}
 	}
 }
 
