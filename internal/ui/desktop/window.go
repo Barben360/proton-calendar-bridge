@@ -87,6 +87,7 @@ type Window struct {
 	selected string // the account of the account pane
 
 	banner *widget.Label
+	notice *widget.Label // the one-time no-tray line
 	rows   []row
 	rowBox *fyne.Container
 	right  *fyne.Container
@@ -112,6 +113,9 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	w.banner = widget.NewLabel("")
 	w.banner.Wrapping = fyne.TextWrapWord
 	w.banner.Hide()
+	w.notice = widget.NewLabel("")
+	w.notice.Wrapping = fyne.TextWrapWord
+	w.notice.Hide()
 	w.rowBox = container.NewVBox()
 	w.pane = newAccountPane(w)
 	w.wiz = &wizardPane{w: w}
@@ -123,7 +127,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	left := container.NewBorder(nil, container.NewVBox(add, gear), nil, nil, container.NewVScroll(w.rowBox))
 	split := container.NewHSplit(left, container.NewPadded(w.right))
 	split.Offset = 0.3
-	w.win.SetContent(container.NewBorder(w.banner, nil, nil, nil, split))
+	w.win.SetContent(container.NewBorder(container.NewVBox(w.banner, w.notice), nil, nil, nil, split))
 	w.win.Resize(fyne.NewSize(800, 550))
 	w.win.SetCloseIntercept(w.onClose)
 	return w
