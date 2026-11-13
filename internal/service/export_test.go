@@ -203,3 +203,7 @@ const SyncLockRetry = syncLockRetry
 // KeyringRetry is how long a loop waits before it asks a locked desktop
 // keyring again.
 const KeyringRetry = keyringRetry
+
+// SetRenderBudget sets how many objects one agenda call may render (set it
+// before the call).
+func (l *Local) SetRenderBudget(n int) { l.agendaBudget = n }

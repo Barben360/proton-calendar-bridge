@@ -553,6 +553,17 @@ func (h *Hub) Account(selector string) (API, AccountInfo, error) {
 	return accountAPI{a}, h.info(a), nil
 }
 
+// Agenda is the Agenda of the account selector names, chosen as Account
+// chooses; it answers like Account's API once the account is removed.
+func (h *Hub) Agenda(selector string) (Agenda, AccountInfo, error) {
+	h.sweep()
+	a, err := h.pick(selector)
+	if err != nil {
+		return nil, AccountInfo{}, err
+	}
+	return accountAPI{a}, h.info(a), nil
+}
+
 func (h *Hub) pick(selector string) (*hubAccount, error) {
 	if h.isClosed() {
 		return nil, errClosed()

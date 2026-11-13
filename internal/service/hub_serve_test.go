@@ -588,6 +588,19 @@ func TestCalDAVOffMCPOnKeepsSyncing(t *testing.T) {
 	if err != nil || !res.Created {
 		t.Fatalf("PutObject with CalDAV off and MCP on = %+v, %v; want created", res, err)
 	}
+	ag, _, err := h.Agenda(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end := service.EventTime{At: time.Unix(base, 0).UTC()}, service.EventTime{At: time.Unix(base+3600, 0).UTC()}
+	summary := "Created through the agenda"
+	ref, etag, err := ag.CreateEvent(t.Context(), cals[0].ID, service.EventFields{Summary: &summary, Start: &start, End: &end})
+	if err != nil || etag == "" {
+		t.Fatalf("Agenda.CreateEvent with CalDAV off and MCP on = %+v, %q, %v", ref, etag, err)
+	}
+	if d, err := ag.Event(t.Context(), ref); err != nil || d.Data.Summary != summary || d.ETag != etag {
+		t.Errorf("Agenda.Event after the create = %+v, %v", d, err)
+	}
 }
 
 // Design §5.5b, the exit rule: an account with CalDAV off and MCP on is

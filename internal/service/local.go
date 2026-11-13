@@ -121,6 +121,7 @@ type Local struct {
 	// Tests only: a write's pre-send budget when set (preSendBudget
 	// otherwise), and a failure injected at a write's cache steps (fault).
 	preSend      time.Duration
+	agendaBudget int // the agenda's render budget when set (renderBudget otherwise)
 	writeFault   func(stage string) error
 	humanHook    func()                                 // runs once a needs-login mark is decided, before its write
 	keyPassHook  func([]byte)                           // sees a login's key passphrase before it is sealed
