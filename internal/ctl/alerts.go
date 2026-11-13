@@ -106,8 +106,11 @@ func healthAlerts(h *service.Health, now time.Time, add func(code, sev, msg, fix
 	// The threshold follows the cadence, never IntervalSeconds: that is the
 	// next wait, which grows while passes fail (live 2026-11-13).
 	interval := time.Duration(h.CadenceSeconds) * time.Second
-	if interval <= 0 {
+	if interval <= 0 { // an older daemon reports none
 		interval = service.ActiveInterval
+		if h.Idle {
+			interval = service.IdleInterval
+		}
 	}
 	for _, c := range h.Calendars {
 		if h.Serve == service.ServeServing {

@@ -270,7 +270,38 @@ func TestSetIntervalReplacesTheActiveCadence(t *testing.T) {
 		if p := r.waitPass(t); p.Next != 10*time.Minute {
 			t.Fatalf("pass %d waits %v, want 10m0s idle or not", i+1, p.Next)
 		}
+		if h, err := r.svc.Health(t.Context()); err != nil || h.CadenceSeconds != 600 {
+			t.Fatalf("pass %d: cadence_seconds %+v, %v; want the set 600", i+1, h, err)
+		}
 		r.resume <- struct{}{}
+	}
+}
+
+// A wake makes the loop active at once, but the last good sync can be 300 s
+// old until the woken pass ends: cadence_seconds is the one in force at the
+// last pass, so the wake alone never pushes sync-stalled's threshold down.
+func TestCadenceKeepsTheLastPassValueUntilTheWokenPassEnds(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	r.failEvents(r.work)
+	stop := r.serve(t, service.ServeOptions{})
+	defer stop()
+	r.waitPass(t)
+	r.clk.advance(service.IdleAfter) // the next pass is idle
+	r.resume <- struct{}{}
+	p2 := r.waitPass(t)
+	r.hold.Store(true) // it sleeps in its back-off; a wake cannot cut that
+	r.resume <- struct{}{}
+	r.waitIdle(t)
+	if ok, _ := r.svc.CheckClient(t.Context(), r.pw, "192.0.2.1:1000"); !ok {
+		t.Fatal("the client was refused")
+	}
+	h, err := r.svc.Health(t.Context())
+	if err != nil || h.Idle {
+		t.Fatalf("Health: %+v, %v; want the loop no longer idle after the request", h, err)
+	}
+	if h.CadenceSeconds != 300 || h.IntervalSeconds != int(p2.Next/time.Second) {
+		t.Errorf("cadence_seconds %d, interval_seconds %d after a wake; want 300 (the last pass's) and the back-off %v", h.CadenceSeconds, h.IntervalSeconds, p2.Next)
 	}
 }
 
@@ -315,9 +346,9 @@ func (r *idleRig) waitWakeTaken(t *testing.T) {
 	}
 }
 
-// failEvents makes the next n listings of calendar id's events answer 400.
-func (r *idleRig) failEvents(id string, n int) {
-	for range n {
+// failEvents makes the next 30 listings of calendar id's events answer 400.
+func (r *idleRig) failEvents(id string) {
+	for range 30 {
 		r.f.FailNext(http.MethodGet, "/calendar/v1/"+id+"/events", http.StatusBadRequest, 2000, 0)
 	}
 }
@@ -328,7 +359,7 @@ func TestPartialPassKeepsTheCadence(t *testing.T) {
 	t.Parallel()
 	r := newIdleRig(t)
 	bad := r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Bad"})
-	r.failEvents(bad, 30)
+	r.failEvents(bad)
 	stop := r.serve(t, service.ServeOptions{})
 	defer stop()
 	p := r.waitPass(t)
@@ -362,7 +393,7 @@ func TestPartialPassKeepsTheCadence(t *testing.T) {
 func TestWakeDuringBackOffDoesNotShortenIt(t *testing.T) {
 	t.Parallel()
 	r := newIdleRig(t)
-	r.failEvents(r.work, 30)
+	r.failEvents(r.work)
 	stop := r.serve(t, service.ServeOptions{})
 	defer stop()
 	p1 := r.waitPass(t)
@@ -411,7 +442,7 @@ func TestWakeDuringBackOffDoesNotShortenIt(t *testing.T) {
 func TestHealthCadenceIgnoresTheBackOff(t *testing.T) {
 	t.Parallel()
 	r := newIdleRig(t)
-	r.failEvents(r.work, 30)
+	r.failEvents(r.work)
 	stop := r.serve(t, service.ServeOptions{})
 	defer stop()
 	r.waitPass(t)

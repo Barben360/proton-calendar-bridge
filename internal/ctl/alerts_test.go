@@ -164,6 +164,24 @@ func TestSyncStalledIgnoresTheBackOffWait(t *testing.T) {
 	if stalled(health(30, 126, time.Minute)) {
 		t.Error("a good pass a minute ago is stalled")
 	}
+	// A wake: the loop is active again (not idle), the last good sync is 290 s
+	// old, and the cadence still reported is the idle one until the woken pass ends.
+	woken := health(300, 30, 290*time.Second)
+	woken.Idle = false
+	if stalled(woken) {
+		t.Error("a wake alone raised sync-stalled")
+	}
+	// An older daemon reports no cadence: its idle loop keeps 5 × 300 s.
+	idleOld := health(0, 300, 24*time.Minute)
+	idleOld.Idle = true
+	if stalled(idleOld) {
+		t.Error("an idle daemon without cadence_seconds is stalled before 5 × 300 s")
+	}
+	idleOld = health(0, 300, 25*time.Minute+time.Second)
+	idleOld.Idle = true
+	if !stalled(idleOld) {
+		t.Error("an idle daemon without cadence_seconds is not stalled past 5 × 300 s")
+	}
 	// A health without a cadence (older daemon) falls back to the active one.
 	if !stalled(health(0, 126, 3*time.Minute+41*time.Second)) {
 		t.Error("no cadence: want the active 30 s, not the back-off wait")
