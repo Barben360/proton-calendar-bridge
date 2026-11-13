@@ -85,14 +85,14 @@ func asLoginNeeded(ee *exitcode.Error) *exitcode.Error {
 	return &exitcode.Error{Code: ee.Code, Err: &d, Hint: ee.Hint}
 }
 
-// keyringFix is what a person does about a locked desktop keyring; the
+// KeyringFix is what a person does about a locked desktop keyring; the
 // alert's fix says the same.
-const keyringFix = "unlock it (log in to the desktop session), pcb retries every 30 s"
+const KeyringFix = "unlock it (log in to the desktop session), pcb retries every 30 s"
 
 // keyringLockedError is the Blocked error of a locked desktop keyring: no
 // retry of the same call fixes it, but the desktop session unlocking does.
 func keyringLockedError() *exitcode.Error {
-	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "the desktop keyring is locked", locked: true}, Hint: keyringFix}
+	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: "the desktop keyring is locked", locked: true}, Hint: KeyringFix}
 }
 
 // keyringLocked reports whether err is keyringLockedError's, by type.

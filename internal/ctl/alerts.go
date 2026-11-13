@@ -75,7 +75,7 @@ func Alerts(in AlertInput) []Alert {
 			"pcb login resume --captcha-token TOKEN (the token parameter of that URL)", "")
 	}
 	if in.Login.Secrets == "locked" {
-		add(CodeKeyringLocked, SeverityError, "the desktop keyring is locked", "unlock it (log in to the desktop session), pcb retries every 30 s", "")
+		add(CodeKeyringLocked, SeverityError, "the desktop keyring is locked", service.KeyringFix, "")
 	}
 	if f := in.Login.ClientsFile; f != "" {
 		add(CodeClientsUnreadable, SeverityError, "the CalDAV clients file cannot be loaded: every CalDAV request answers 503",

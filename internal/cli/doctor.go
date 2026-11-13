@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -34,7 +35,7 @@ func (a *app) newDoctor() *cobra.Command {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
 			daemon := a.askDaemon(cmd.Context())
-			results := doctor.Run(cmd.Context(), doctorChecks(a.Env, daemon.live()), stream)
+			results := doctor.Run(cmd.Context(), a.doctorChecks(daemon.live()), stream)
 			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, daemon.results()...) {
 				if stream != nil {
 					stream(r)
@@ -164,7 +165,8 @@ func alertResults(prefix string, alerts []ctl.Alert, waiting bool) []doctor.Resu
 // account checks of each account directory, named by the account (design
 // §4.6). env looks up an environment variable; live is the running
 // daemon's listener (nil: none).
-func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
+func (a *app) doctorChecks(live *doctor.Live) []doctor.Check {
+	env := a.Env
 	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(env)
 	if err != nil {
@@ -183,16 +185,23 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 	if err != nil { // ConfigCheck already reports it
 		return checks
 	}
+	layout, lerr := doctor.Accounts(dirs.State)
+	if layout.Sealer != "" { // the layout is readable
+		checks = append(checks, doctor.SealerCheck{Sealer: layout.Sealer})
+	}
+	if layout.Sealer == doctor.SealerSecretService {
+		checks = append(checks, doctor.KeyringCheck{Keyring: a.Keyring})
+	} else { // the key file, also while the layout cannot be read
+		checks = append(checks, doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile})
+	}
 	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
 	checks = append(checks,
-		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
 		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
 		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live})
-	layout, err := doctor.Accounts(dirs.State)
-	var lerr *doctor.LayoutError
+	var layoutErr *doctor.LayoutError
 	switch {
-	case errors.As(err, &lerr):
-		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: lerr.Error(), Fix: lerr.Fix})
+	case errors.As(lerr, &layoutErr):
+		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: layoutErr.Error(), Fix: layoutErr.Fix})
 	case layout.Interrupted != "":
 		checks = append(checks, warnCheck{label: "accounts", message: "the move to the per-account layout stopped midway (" + layout.Interrupted +
 			"): the next pcb command that opens the state finishes it", fix: "pcb status"})
@@ -200,6 +209,7 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 		checks = append(checks, warnCheck{label: "accounts", message: "no account: nothing can sign in to pcb serve",
 			fix: "pcb login (it creates the client default), then pcb client show"})
 	}
+	sealer := doctor.NewSealer(layout.Sealer, cfg.Secrets.KeyFile, dirs.State, a.Keyring)
 	for _, acct := range layout.Accounts {
 		prefix := ""
 		if acct.Label != "" {
@@ -207,15 +217,41 @@ func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
 		}
 		for _, c := range []doctor.Check{
 			doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(acct.Dir, "secrets.sealed"), Want: 0o600},
-			doctor.SecretsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
+			doctor.SecretsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile, Sealer: sealer},
 			doctor.CacheCheck{StateDir: acct.Dir},
 			doctor.ClientsCheck{StateDir: acct.Dir},
-			doctor.SealedClientsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
+			doctor.SealedClientsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile, Sealer: sealer},
 		} {
 			checks = append(checks, named{prefix: prefix, Check: c})
 		}
 	}
-	return checks
+	return append(checks, doctor.DesktopCheck{AppDirs: a.desktopDirs(), ServiceInstalled: a.serviceInstalled})
+}
+
+// serviceInstalled reports whether a pcb systemd unit is installed, user or
+// system scope (an ambiguous install counts: both are units).
+func (a *app) serviceInstalled() bool {
+	_, _, err := install.Detect(a.Host)
+	return err == nil || errors.Is(err, install.ErrAmbiguous)
+}
+
+// desktopDirs are the applications directories pcb-ui.desktop is looked
+// for in: $XDG_DATA_HOME/applications (default ~/.local/share/applications),
+// then the two system ones. A custom PREFIX install is not found.
+func (a *app) desktopDirs() []string {
+	var dirs []string
+	data := a.Env("XDG_DATA_HOME")
+	if !filepath.IsAbs(data) {
+		if home := a.Env("HOME"); filepath.IsAbs(home) {
+			data = filepath.Join(home, ".local", "share")
+		} else {
+			data = ""
+		}
+	}
+	if data != "" {
+		dirs = append(dirs, filepath.Join(data, "applications"))
+	}
+	return append(dirs, a.Host.Path("/usr/local/share/applications"), a.Host.Path("/usr/share/applications"))
 }
 
 // warnCheck is a warning found without a check of its own to run.

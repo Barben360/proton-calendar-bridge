@@ -306,8 +306,8 @@ func (c ClientsCheck) Run(context.Context) Result {
 	return r
 }
 
-// SealedClientsCheck warns, per CalDAV client, when the key file no
-// longer opens the sealed copy of its password (a new key file, an edited
+// SealedClientsCheck warns, per CalDAV client, when the sealer (the key
+// file, or the desktop keyring's key) no longer opens the sealed copy of its password (a new key file, an edited
 // clients.json): pcb client show cannot give it, and only a rotation does
 // (ux Minor, parked M5). A key file that cannot be read at all is the key
 // file check's to report, and a missing one beside secrets.sealed the
@@ -315,6 +315,10 @@ func (c ClientsCheck) Run(context.Context) Result {
 type SealedClientsCheck struct {
 	StateDir string
 	KeyFile  string
+	// Sealer opens the sealed copies; nil is the key file's. A keyring
+	// that is locked or absent is the keyring check's to report: no
+	// warning here.
+	Sealer seal.Sealer
 }
 
 // Name implements Check.
@@ -331,24 +335,32 @@ func (c SealedClientsCheck) Run(ctx context.Context) Result {
 // RunAll implements Multi: one warning per client whose password cannot be
 // shown, none when all can.
 func (c SealedClientsCheck) RunAll(context.Context) []Result {
-	kf := &seal.KeyFile{Path: c.KeyFile}
-	switch err := kf.Check(); {
-	case err == nil:
-	case errors.Is(err, fs.ErrNotExist) && !exists(filepath.Join(c.StateDir, "secrets.sealed")):
-		// Lost with no session sealed: a rotation makes a new key.
-	default:
-		return nil
+	var sealer seal.Sealer = &seal.KeyFile{Path: c.KeyFile}
+	if c.Sealer != nil {
+		sealer = c.Sealer
+	}
+	if kf, ok := sealer.(*seal.KeyFile); ok {
+		switch err := kf.Check(); {
+		case err == nil:
+		case errors.Is(err, fs.ErrNotExist) && !exists(filepath.Join(c.StateDir, "secrets.sealed")):
+			// Lost with no session sealed: a rotation makes a new key.
+		default:
+			return nil
+		}
 	}
 	st := access.NewStore(c.StateDir, nil)
-	st.Sealer = kf
+	st.Sealer = sealer
 	list, err := st.List()
 	if err != nil {
 		return nil // the clients check reports it
 	}
 	var out []Result
 	for _, cl := range list {
-		_, err := st.Reveal(cl.ID, kf.Open)
+		_, err := st.Reveal(cl.ID, sealer.Open)
 		if err == nil || errors.Is(err, access.ErrNoSealedCopy) || !errors.Is(err, access.ErrNotRecoverable) {
+			continue
+		}
+		if errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) {
 			continue
 		}
 		out = append(out, Result{Name: c.Name() + " " + cl.Name, Status: StatusWarn,

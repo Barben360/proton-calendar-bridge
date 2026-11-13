@@ -14,15 +14,27 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
-// SecretsCheck reports how the secrets are protected. Only the key-file
-// sealer exists so far: a 0600 key file stops other local users and casual
-// disclosure, not root or the user's own processes, and a backup of one
-// volume holding both key and data exposes both (E15). A secrets.sealed older
+// SecretsCheck reports how the secrets are protected. A 0600 key file stops
+// other local users and casual disclosure, not root or the user's own
+// processes, and a backup of one volume holding both key and data exposes
+// both (E15); the desktop keyring keeps the key off the disk. A secrets.sealed older
 // than the last one pcb wrote (restored or replaced, R3m) is an error; other
 // failures to open it are left to pcb status and pcb logout.
 type SecretsCheck struct {
 	StateDir string // holds state.json and secrets.sealed
 	KeyFile  string
+	// Sealer opens secrets.sealed; nil is the key file's.
+	Sealer seal.Sealer
+}
+
+// resolve is the sealer that opens the secrets, and whether it is the key
+// file's.
+func (c SecretsCheck) resolve() (s seal.Sealer, keyFile bool) {
+	if c.Sealer == nil {
+		return &seal.KeyFile{Path: c.KeyFile}, true
+	}
+	_, ok := c.Sealer.(*seal.KeyFile)
+	return c.Sealer, ok
 }
 
 // Name implements Check.
@@ -50,9 +62,10 @@ func (c SecretsCheck) Run(context.Context) Result {
 		return r
 	}
 	sealed := filepath.Join(c.StateDir, "secrets.sealed")
+	sealer, keyFile := c.resolve()
 	var msgs []string
 	if exists(sealed) {
-		if !exists(c.KeyFile) {
+		if keyFile && !exists(c.KeyFile) {
 			r.Status = StatusError
 			r.Message = "sealed secrets exist but the key file is missing: they cannot be read; `pcb logout` wipes them, then log in again"
 			r.Fix = "pcb logout"
@@ -62,8 +75,13 @@ func (c SecretsCheck) Run(context.Context) Result {
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
 		)
-		_, err := store.NewSecrets(c.StateDir, &seal.KeyFile{Path: c.KeyFile}).Load()
+		_, err := store.NewSecrets(c.StateDir, sealer).Load()
 		switch {
+		case errors.Is(err, seal.ErrNoKey) && !keyFile:
+			r.Status = StatusError
+			r.Message = "sealed secrets exist but the desktop keyring holds no key for them: they cannot be read; `pcb logout` wipes them, then log in again"
+			r.Fix = "pcb logout"
+			return r
 		case errors.As(err, &rb):
 			r.Status = StatusError
 			r.Message, r.Fix = rb.Explain(), store.RolledBackHint
@@ -73,13 +91,21 @@ func (c SecretsCheck) Run(context.Context) Result {
 			r.Message, r.Fix = ue.Explain(), "upgrade pcb"
 			return r
 		}
-		msgs = append(msgs, "secrets sealed with a key file (headless fallback)")
-		if c.sameVolume() {
-			msgs = append(msgs, "the key and the sealed data are on the same volume, so a backup or copy of that volume exposes both")
+		if keyFile {
+			msgs = append(msgs, "secrets sealed with a key file (headless fallback)")
+			if c.sameVolume() {
+				msgs = append(msgs, "the key and the sealed data are on the same volume, so a backup or copy of that volume exposes both")
+			}
+		} else {
+			r.Status, r.Message = StatusOK, "secrets sealed with the desktop keyring"
 		}
 	}
 	if state.Unattended {
-		msgs = append(msgs, "unattended relogin is on: whoever can read "+c.KeyFile+" and "+sealed+" owns the Proton account")
+		if keyFile {
+			msgs = append(msgs, "unattended relogin is on: whoever can read "+c.KeyFile+" and "+sealed+" owns the Proton account")
+		} else {
+			msgs = append(msgs, "unattended relogin is on: whoever can use this desktop session's keyring and read "+sealed+" owns the Proton account")
+		}
 	}
 	if len(msgs) > 0 {
 		r.Status, r.Message = StatusWarn, strings.Join(msgs, "; ")

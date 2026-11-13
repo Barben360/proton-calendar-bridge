@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
+	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -42,6 +43,9 @@ type IO struct {
 	// on (install.OSHost). One with Run set is used as it is; a nil Env
 	// takes IO's Env.
 	Host install.Host
+	// Keyring is the desktop keyring pcb doctor probes for a state sealed
+	// with it (nil: the session bus's, doctor.SystemKeyring).
+	Keyring doctor.Keyring
 	// Signals subscribes to SIGINT and SIGTERM (signal.Notify) and returns
 	// the function that unsubscribes: pcb serve exits at once on a second
 	// one while it stops (ruling M5-P22).
@@ -83,6 +87,9 @@ func (o IO) withDefaults() IO {
 	}
 	if o.DialDaemon == nil {
 		o.DialDaemon = ctl.Dial
+	}
+	if o.Keyring == nil {
+		o.Keyring = doctor.SystemKeyring()
 	}
 	if o.Signals == nil {
 		o.Signals = osSignals
