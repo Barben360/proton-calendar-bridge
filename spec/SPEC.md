@@ -1671,7 +1671,8 @@ M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal
   `TestSealerGuardRefusesWithoutAKeyring`, `TestSealerGuardAllowsAnExplicitBackend`].
 - While a session daemon serves, `pcb serve` exits 20 naming `kind mcp` with the hint `end the agent session (pcb mcp), then
   try again`, and `pcb-ui` shows `an agent session (pcb mcp, PID N, kind mcp) already serves this state directory` with the
-  same hint; `pcb status` shows `kind mcp` and no listener (§4.1, §15) [verified: `TestBridgeNamesAnAgentSession`,
+  same hint; `pcb status` and `pcb doctor` show `kind mcp` on their daemon line (`daemon: running since T (pid N,
+  version V, kind mcp)`) and no listener (§4.1, §15) [verified: `TestStatusAndDoctorNameTheDaemonsKind`, `TestBridgeNamesAnAgentSession`,
   `TestServeLockNamesTheKind`; `make rehearse` step 22].
 - `pcb mcp token add NAME --allow CAPS`: `CAPS` among `freebusy`, `read`, `write`, `delete` (duplicates dropped); `login` or
   `manage` is exit 2 `login and manage are stdio only: grant them with pcb mcp --profile`, `delete` without `write` exit 2

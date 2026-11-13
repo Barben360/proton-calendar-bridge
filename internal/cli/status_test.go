@@ -493,3 +493,22 @@ func TestStatusShowsRemoteMCP(t *testing.T) {
 		t.Errorf("offline status shows an MCP line:\n%s", r.out.String())
 	}
 }
+
+// Review C M2/M5: pcb status and pcb doctor name the daemon's kind in
+// text, so a person tells an agent session (mcp) from pcb serve or pcb-ui.
+func TestStatusAndDoctorNameTheDaemonsKind(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"mcp", "serve", "ui"} {
+		r := stubRig(t, &stubAPI{statusPhase: "ready"})
+		startDaemonWith(t, r, newStubHub(&daemonAPI{status: service.Status{Phase: "ready"}}), nil, func(s *ctl.Server) { s.Daemon.Kind = kind })
+		want := "running since " + daemonNow.Add(-2*time.Hour).Format(time.RFC3339) + " (pid 4242, version v1.2.3, kind " + kind + ")"
+		r.want(exitcode.OK, "status")
+		if !strings.Contains(r.out.String(), "daemon: "+want+"\n") {
+			t.Errorf("status lacks %q:\n%s", want, r.out.String())
+		}
+		r.want(exitcode.OK, "doctor")
+		if !strings.Contains(r.out.String(), want+"\n") {
+			t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+		}
+	}
+}

@@ -131,12 +131,18 @@ func (d doctorDaemon) results() []doctor.Result {
 	return results
 }
 
-// daemonText is "running since T (pid N, version V)".
+// daemonText is "running since T (pid N, version V, kind K)": the kind
+// (serve, ui or mcp) tells an agent session from pcb serve or pcb-ui; an
+// older daemon that sends none leaves it out.
 func daemonText(d *ctl.Daemon) string {
 	if d == nil {
 		return "running"
 	}
-	return fmt.Sprintf("running since %s (pid %d, version %s)", d.StartedAt.Format(time.RFC3339), d.PID, d.Version)
+	kind := ""
+	if d.Kind != "" {
+		kind = ", kind " + d.Kind
+	}
+	return fmt.Sprintf("running since %s (pid %d, version %s%s)", d.StartedAt.Format(time.RFC3339), d.PID, d.Version, kind)
 }
 
 // alertResults is one result per alert, its name prefixed: an error alert
