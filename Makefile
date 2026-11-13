@@ -32,7 +32,7 @@ install: build
 	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
 
 # pcb-ui, the desktop app (M7): cgo and the GL/X development headers
-# (libgl1-mesa-dev xorg-dev on Debian), so it is not part of make build.
+# (libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev on Debian), so it is not part of make build.
 UI_OUT ?= bin/pcb-ui
 
 ui:

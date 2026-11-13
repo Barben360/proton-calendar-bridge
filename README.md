@@ -145,7 +145,7 @@ make install-ui              # $(PREFIX)/bin/pcb-ui, share/applications/pcb-ui.d
 pcb-ui [--background]        # --background: tray only (the window opens anyway when no tray answers)
 ```
 
-- **Build dependencies** (Fyne draws with OpenGL and X11, so `make ui` needs the C headers; `make build` and the container image do not, but `make lint test` does, since `go vet`, golangci-lint and `go test ./...` compile `cmd/pcb-ui` with cgo): Debian and Ubuntu, `sudo apt-get install libgl1-mesa-dev xorg-dev` (what CI installs); Arch, `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi` (from Fyne's documented list, not run here), plus a C compiler on both.
+- **Build dependencies** (Fyne draws with OpenGL on X11 and Wayland, so `make ui` needs the C headers; `make build` and the container image do not, but `make lint test` does, since `go vet`, golangci-lint and `go test ./...` compile `cmd/pcb-ui` with cgo): Debian and Ubuntu, `sudo apt-get install libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev` (what CI installs); Arch, `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi wayland libxkbcommon` (from Fyne's documented list, not run here), plus a C compiler on both.
 - **GNOME shows no tray icon** unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled. Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
 - **One server per state directory.** `pcb-ui` and `pcb serve` (the systemd service, the container) cannot both serve one state. A second `pcb-ui` just shows the first one's window; `pcb-ui` facing `pcb serve` says so in a dialog and exits 20 (`pcb service stop` first when it is installed as a service). `pcb doctor` warns when the desktop entry and the service are both installed.
 - **Start at login:** Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`; switching it off deletes that file.
@@ -296,7 +296,7 @@ when its SHA-256 fingerprint is the printed one (again after a replacement; `pcb
 make build        # bin/pcb
 make lint test    # gofmt, go vet, golangci-lint, go test -race, on JOBS CPUs (4 at most by default); compiles cmd/pcb-ui, so it needs a C compiler and the GL/X headers of "Desktop app"
 make install      # bin/pcb -> $(PREFIX)/bin/pcb, PREFIX ?= ~/.local
-make ui           # bin/pcb-ui, the desktop app (cgo; Debian: libgl1-mesa-dev xorg-dev, Arch: libglvnd libxcursor libxrandr libxinerama libxi; see "Desktop app")
+make ui           # bin/pcb-ui, the desktop app (cgo; Debian: libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev, Arch: libglvnd libxcursor libxrandr libxinerama libxi wayland libxkbcommon; see "Desktop app")
 make install-ui   # pcb-ui, its desktop entry and its icon under $(PREFIX)
 make image        # the container image, pcb:local
 make container-smoke systemd-smoke   # throwaway containers; each prints PASS last
