@@ -837,6 +837,30 @@ func partProperties(s slot, text string, lenient bool) ([]property, error) {
 	return props, nil
 }
 
+// unescapeText is a TEXT value unescaped (RFC 5545 §3.3.11): "\\", "\;",
+// "\," and "\n" or "\N" stand for what they escape; any other backslash
+// is kept. Proton stores a UID so: the row of `UID:a\,b` is `a,b` (measured
+// live 2026-11-13, HUMAN-CHECKS W10).
+func unescapeText(v string) string {
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] == '\\' && i+1 < len(v) {
+			switch c := v[i+1]; c {
+			case '\\', ';', ',':
+				b.WriteByte(c)
+				i++
+				continue
+			case 'n', 'N':
+				b.WriteByte('\n')
+				i++
+				continue
+			}
+		}
+		b.WriteByte(v[i])
+	}
+	return b.String()
+}
+
 // propValues are the values of the properties named name, in order.
 func propValues(props []property, name string) []string {
 	var out []string
@@ -860,7 +884,7 @@ func parseColumns(props []property, lenient bool) (columns, error) {
 		var err error
 		switch p.name {
 		case "UID":
-			c.UID = p.value
+			c.UID = unescapeText(p.value)
 		case "DTSTART":
 			var t time.Time
 			t, c.FullDay, c.StartTZ, err = instantOf(p, lenient)

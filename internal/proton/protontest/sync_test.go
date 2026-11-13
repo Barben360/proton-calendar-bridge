@@ -923,6 +923,37 @@ func TestSyncWritesReachTheFeed(t *testing.T) {
 	}
 }
 
+// Proton stores a UID by its TEXT value, unescaped (RFC 5545 §3.3.11):
+// `UID:a\,b` in the parts is the row `a,b`, listed by ?UID=a,b and not by
+// the escaped text (measured live 2026-11-13, HUMAN-CHECKS W10). The parts
+// are served as sent.
+func TestSyncStoresTheUIDUnescaped(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	for _, c := range []struct{ text, column string }{
+		{`esc-a\,b@pcb.test`, "esc-a,b@pcb.test"},
+		{`esc-c\;d\\e@pcb.test`, `esc-c;d\e@pcb.test`},
+		{"plain@pcb.test", "plain@pcb.test"},
+	} {
+		sent := w.create(t, simple(c.text, "0", "Escaped"), newKeys(t))
+		row := w.row(t, w.mustCreate(t, sent))
+		if row["UID"] != c.column {
+			t.Errorf("UID:%s: the row's UID is %q, want %q", c.text, row["UID"], c.column)
+		}
+		if !strings.Contains(partData(row, "SharedEvents", 0), "UID:"+c.text+"\r\n") {
+			t.Errorf("UID:%s: the shared signed part is not served as sent", c.text)
+		}
+		if rows := w.byUID(t, c.column); len(rows) != 1 {
+			t.Errorf("?UID=%s: %d rows, want 1", c.column, len(rows))
+		}
+		if c.text != c.column {
+			if rows := w.byUID(t, c.text); len(rows) != 0 {
+				t.Errorf("?UID=%s (the escaped text): %d rows, want none", c.text, len(rows))
+			}
+		}
+	}
+}
+
 func TestListByUID(t *testing.T) {
 	t.Parallel()
 	w := newWriter(t, protontest.Options{})
