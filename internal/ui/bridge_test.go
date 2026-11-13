@@ -72,9 +72,9 @@ func (l *lab) bridge(t *testing.T, show func(string)) *ui.Bridge {
 	return b
 }
 
-func (l *lab) start(t *testing.T, show func(string)) *ui.Bridge {
+func (l *lab) start(t *testing.T) *ui.Bridge {
 	t.Helper()
-	b := l.bridge(t, show)
+	b := l.bridge(t, nil)
 	if err := b.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -92,7 +92,7 @@ func (l *lab) login(t *testing.T, b *ui.Bridge) string {
 
 func TestBridgeServesCalDAV(t *testing.T) {
 	l := newLab(t)
-	b := l.start(t, nil)
+	b := l.start(t)
 	id := l.login(t, b)
 	info := b.Info()
 	_, port, _ := net.SplitHostPort(info.Addr)
@@ -115,7 +115,7 @@ func TestBridgeServesCalDAV(t *testing.T) {
 
 func TestQuitDrainsAndReleases(t *testing.T) {
 	l := newLab(t)
-	b := l.start(t, nil)
+	b := l.start(t)
 	// The first sync pass of the new account stalls on Proton.
 	l.f.StallNext("GET", "/calendar/v1", 30*time.Second)
 	l.login(t, b)
@@ -145,7 +145,7 @@ func TestQuitDrainsAndReleases(t *testing.T) {
 
 func TestRestartReadsTheConfig(t *testing.T) {
 	l := newLab(t)
-	b := l.start(t, nil)
+	b := l.start(t)
 	first := b.Info().Addr
 	// A free port the new config names.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -316,7 +316,7 @@ func TestStartBlockedByAServeLeaksNothing(t *testing.T) {
 
 func TestChangesFireOnLogin(t *testing.T) {
 	l := newLab(t)
-	b := l.start(t, nil)
+	b := l.start(t)
 	select { // drain what Start itself poked
 	case <-b.Changes():
 	default:
