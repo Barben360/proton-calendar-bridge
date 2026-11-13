@@ -19,6 +19,7 @@ const (
 	ssService    = "org.freedesktop.Secret.Service"
 	ssCollection = "org.freedesktop.Secret.Collection"
 	ssSession    = "org.freedesktop.Secret.Session"
+	ssItem       = "org.freedesktop.Secret.Item"
 	ssItemLabel  = "org.freedesktop.Secret.Item.Label"
 	ssItemAttrs  = "org.freedesktop.Secret.Item.Attributes"
 	ssNoPrompt   = dbus.ObjectPath("/")
@@ -220,6 +221,37 @@ func (k dbusKeyring) Set(ctx context.Context, label string, attrs map[string]str
 			// The service wants the user to answer something: pcb does not
 			// drive prompts, which would hang a headless process.
 			return ErrLocked
+		}
+		return nil
+	})
+}
+
+// Delete implements Keyring: Item.Delete on every item SearchItems finds.
+func (k dbusKeyring) Delete(ctx context.Context, attrs map[string]string) error {
+	return k.run(ctx, func(ctx context.Context, c *dbus.Conn) error {
+		l, err := locked(ctx, c)
+		if err != nil {
+			return err
+		}
+		if l {
+			return ErrLocked
+		}
+		var items []dbus.ObjectPath
+		if err := c.Object(ssBus, ssDefaultCol).CallWithContext(ctx, ssCollection+".SearchItems", 0, attrs).Store(&items); err != nil {
+			return classify(err)
+		}
+		for _, item := range items {
+			var prompt dbus.ObjectPath
+			if err := c.Object(ssBus, item).CallWithContext(ctx, ssItem+".Delete", 0).Store(&prompt); err != nil {
+				var de dbus.Error
+				if errors.As(err, &de) && de.Name == ssNoObject {
+					continue // gone meanwhile
+				}
+				return classify(err)
+			}
+			if prompt != ssNoPrompt {
+				return ErrLocked // pcb drives no prompt (see Set)
+			}
 		}
 		return nil
 	})

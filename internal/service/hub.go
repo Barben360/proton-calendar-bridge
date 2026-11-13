@@ -49,6 +49,7 @@ type Keyring interface {
 	Get(ctx context.Context, attrs map[string]string) ([]byte, error)
 	Set(ctx context.Context, label string, attrs map[string]string, secret []byte) error
 	Locked(ctx context.Context) (bool, error)
+	Delete(ctx context.Context, attrs map[string]string) error
 }
 
 // Hub holds every account of a state directory, one Local per account
@@ -350,6 +351,22 @@ func NewSealer(root, name, keyFile string, kr Keyring) (seal.Sealer, error) {
 		return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
 	}
 	return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
+}
+
+// DeleteSealingKey deletes the desktop keyring item ("pcb sealing key") of
+// the state root, for pcb uninstall --delete-data (ruling R13): nothing to
+// delete is no error. A locked keyring or none answering is the error the
+// commands give for it ("the desktop keyring is locked", "... is not
+// available"). pcb account remove never calls it: the key is the state's.
+func DeleteSealingKey(ctx context.Context, root string, kr Keyring) error {
+	s, err := NewSealer(root, SealerSecretService, "", kr)
+	if err != nil {
+		return err
+	}
+	if err := s.(*seal.SecretService).DeleteKey(ctx); err != nil {
+		return mapError(err, keyringRef)
+	}
+	return nil
 }
 
 // tryLock takes dir/name without waiting; held, it is Blocked with msg and

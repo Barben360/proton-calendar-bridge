@@ -24,6 +24,9 @@ type Keyring interface {
 	Set(ctx context.Context, label string, attrs map[string]string, secret []byte) error
 	// Locked reports whether the default collection is locked.
 	Locked(ctx context.Context) (bool, error)
+	// Delete removes every item whose attributes include attrs: nil when
+	// none matches, ErrLocked when the keyring is locked. It never prompts.
+	Delete(ctx context.Context, attrs map[string]string) error
 }
 
 const (
@@ -120,6 +123,14 @@ func (s *SecretService) create(ctx context.Context, attrs map[string]string) ([]
 		return nil, err
 	}
 	return s.Keyring.Get(ctx, attrs) // what the keyring now holds
+}
+
+// DeleteKey removes this state directory's item ("pcb sealing key") from
+// the keyring, for pcb uninstall --delete-data (ruling R13): what it sealed
+// can never be opened again. Nothing to delete is no error; a locked
+// keyring is ErrLocked, none answering ErrNoService.
+func (s *SecretService) DeleteKey(ctx context.Context) error {
+	return s.Keyring.Delete(ctx, s.attrs())
 }
 
 // Probe reports whether the keyring is usable: nil when a Secret Service

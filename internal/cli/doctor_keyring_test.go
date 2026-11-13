@@ -63,6 +63,17 @@ func (k *memKeyring) Set(_ context.Context, _ string, attrs map[string]string, v
 	return nil
 }
 
+func (k *memKeyring) Delete(_ context.Context, attrs map[string]string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.gate(); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(attrs)
+	delete(k.items, string(b))
+	return nil
+}
+
 func (k *memKeyring) Locked(context.Context) (bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()

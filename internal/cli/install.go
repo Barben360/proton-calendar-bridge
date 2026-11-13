@@ -233,7 +233,10 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h)}); err != nil {
+	hooks := install.Hooks{Logout: a.logoutHook(h), Keyring: func(ctx context.Context, stateDir string) error {
+		return service.DeleteSealingKey(ctx, stateDir, a.Keyring)
+	}}
+	if err := install.Apply(ctx, h, steps, hooks); err != nil {
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
 	return Finish(cmd, data, appliedText(steps, nil), nil)

@@ -52,6 +52,16 @@ func (m *memKeyring) Set(_ context.Context, _ string, attrs map[string]string, s
 	return nil
 }
 
+func (m *memKeyring) Delete(_ context.Context, attrs map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locked {
+		return seal.ErrLocked
+	}
+	delete(m.items, memKey(attrs))
+	return nil
+}
+
 func (m *memKeyring) Locked(context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

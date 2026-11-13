@@ -169,3 +169,51 @@ func TestDBusKeyringHungServiceIsErrNoServiceWithinTheBound(t *testing.T) {
 		t.Fatalf("took %v, want about 2 s", d)
 	}
 }
+
+// Ruling R13: DeleteKey removes this state's item through Item.Delete, and
+// only it; a second DeleteKey finds nothing and is no error. A locked
+// keyring is ErrLocked and deletes nothing, without a prompt.
+func TestDBusKeyringDeleteKeyRemovesOnlyThisState(t *testing.T) {
+	addr, fake := sstest.Start(t)
+	k := seal.DBusKeyring(addr)
+	ctx := context.Background()
+	a := &seal.SecretService{Keyring: k, StateDir: t.TempDir()}
+	b := &seal.SecretService{Keyring: k, StateDir: t.TempDir()}
+	for _, s := range []*seal.SecretService{a, b} {
+		if _, err := s.Seal([]byte("x"), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake.SetLocked(true)
+	if err := a.DeleteKey(ctx); !errors.Is(err, seal.ErrLocked) {
+		t.Fatalf("locked: DeleteKey = %v, want ErrLocked", err)
+	}
+	if n := len(fake.Items()); n != 2 {
+		t.Fatalf("locked: %d items left, want both", n)
+	}
+	fake.SetLocked(false)
+	if err := a.DeleteKey(ctx); err != nil {
+		t.Fatalf("DeleteKey: %v", err)
+	}
+	items := fake.Items()
+	if len(items) != 1 || items[0].Attributes["state"] != b.StateDir {
+		t.Fatalf("items = %+v, want only b's", items)
+	}
+	if !slices.Contains(fake.Calls(), "Item.Delete") {
+		t.Errorf("calls = %v, want Item.Delete", fake.Calls())
+	}
+	if _, err := a.Open(make([]byte, 64), nil); !errors.Is(err, seal.ErrNoKey) {
+		t.Errorf("a's key still opens: %v, want ErrNoKey", err)
+	}
+	if err := a.DeleteKey(ctx); err != nil {
+		t.Errorf("a second DeleteKey = %v, want nil (nothing to delete)", err)
+	}
+	for _, c := range fake.Calls() {
+		if strings.HasPrefix(c, "Unlock") || strings.HasPrefix(c, "Prompt") {
+			t.Fatalf("a prompt reached the service: %v", fake.Calls())
+		}
+	}
+	if err := (&seal.SecretService{Keyring: seal.DBusKeyring(dbustest.Start(t)), StateDir: a.StateDir}).DeleteKey(ctx); !errors.Is(err, seal.ErrNoService) {
+		t.Errorf("no service: DeleteKey = %v, want ErrNoService", err)
+	}
+}

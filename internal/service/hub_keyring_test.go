@@ -31,6 +31,7 @@ type fakeKeyring struct {
 	failSet error // Set's error when it is not locked or absent
 	asked   int   // calls of any method
 	sets    int
+	deletes int
 }
 
 func (k *fakeKeyring) setLocked(v bool) {
@@ -88,6 +89,17 @@ func (k *fakeKeyring) Set(_ context.Context, _ string, attrs map[string]string, 
 	}
 	k.sets++
 	k.items[attrKey(attrs)] = bytes.Clone(secret)
+	return nil
+}
+
+func (k *fakeKeyring) Delete(_ context.Context, attrs map[string]string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.gate(); err != nil {
+		return err
+	}
+	k.deletes++
+	delete(k.items, attrKey(attrs))
 	return nil
 }
 
@@ -732,5 +744,38 @@ func TestLoginChecksTheKeyringBeforeSRP(t *testing.T) {
 				t.Errorf("a login right after the refused one: %v", err)
 			}
 		})
+	}
+}
+
+// Ruling R13: removing an account (pcb account remove) keeps the state's
+// keyring item: the key is the state's, and the other accounts' secrets
+// are sealed with it. DeleteSealingKey (pcb uninstall --delete-data) is
+// what removes it.
+func TestAccountRemoveKeepsTheKeyringItem(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	b := e.mustLogin(t, h, userB).Account
+	if _, err := h.Remove(t.Context(), a, service.LogoutRequest{}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	kr.mu.Lock()
+	deletes, items := kr.deletes, len(kr.items)
+	kr.mu.Unlock()
+	if deletes != 0 || items != 1 {
+		t.Fatalf("after account remove: %d keyring deletes, %d items; want none and the one sealing key", deletes, items)
+	}
+	if st := accountStatus(t, h, b); st.Secrets != "sealed" {
+		t.Errorf("the remaining account's secrets = %q, want sealed", st.Secrets)
+	}
+	if err := service.DeleteSealingKey(t.Context(), e.dirs.State, kr); err != nil {
+		t.Fatalf("DeleteSealingKey: %v", err)
+	}
+	if _, _, items := kr.counts(); items != 0 {
+		t.Errorf("%d items after DeleteSealingKey, want 0", items)
 	}
 }

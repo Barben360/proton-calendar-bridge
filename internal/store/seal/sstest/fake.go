@@ -41,6 +41,7 @@ type Fake struct {
 	mu       sync.Mutex
 	locked   bool
 	items    []Item
+	deleted  map[int]bool // items removed by Item.Delete (their paths stay unused)
 	calls    []string
 	sessions int
 	hang     chan struct{} // non-nil: Properties.Get blocks until it closes
@@ -70,16 +71,20 @@ func (f *Fake) SetLocked(l bool) {
 func (f *Fake) Items() []Item {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]Item, len(f.items))
+	out := []Item{}
 	for i, it := range f.items {
+		if f.deleted[i] {
+			continue
+		}
 		it.Secret = slices.Clone(it.Secret)
-		out[i] = it
+		out = append(out, it)
 	}
 	return out
 }
 
 // Calls returns the methods called so far, in order ("OpenSession:plain",
-// "SearchItems", "GetSecrets", "CreateItem", "Unlock", "Prompt"...).
+// "SearchItems", "GetSecrets", "CreateItem", "Item.Delete", "Unlock",
+// "Prompt"...).
 func (f *Fake) Calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -129,7 +134,7 @@ func (s service) SearchItems(attrs map[string]string) ([]dbus.ObjectPath, []dbus
 	defer s.f.mu.Unlock()
 	found := []dbus.ObjectPath{}
 	for i, it := range s.f.items {
-		if matches(it.Attributes, attrs) {
+		if !s.f.deleted[i] && matches(it.Attributes, attrs) {
 			found = append(found, s.f.itemPath(i))
 		}
 	}
@@ -149,7 +154,7 @@ func (s service) GetSecrets(items []dbus.ObjectPath, session dbus.ObjectPath) (m
 	out := map[dbus.ObjectPath]secret{}
 	for _, p := range items {
 		var i int
-		if _, err := fmt.Sscanf(string(p), string(collPath)+"/item%d", &i); err != nil || i < 0 || i >= len(s.f.items) {
+		if _, err := fmt.Sscanf(string(p), string(collPath)+"/item%d", &i); err != nil || i < 0 || i >= len(s.f.items) || s.f.deleted[i] {
 			return nil, dbusErr("org.freedesktop.Secret.Error.NoSuchObject", "no such item")
 		}
 		it := s.f.items[i]
@@ -172,7 +177,7 @@ func (c collection) SearchItems(attrs map[string]string) ([]dbus.ObjectPath, *db
 	defer c.f.mu.Unlock()
 	found := []dbus.ObjectPath{}
 	for i, it := range c.f.items {
-		if matches(it.Attributes, attrs) {
+		if !c.f.deleted[i] && matches(it.Attributes, attrs) {
 			found = append(found, c.f.itemPath(i))
 		}
 	}
@@ -191,7 +196,7 @@ func (c collection) CreateItem(props map[string]dbus.Variant, sec secret, replac
 	it := Item{Label: label, Attributes: attrs, Secret: slices.Clone(sec.Value), ContentType: sec.ContentType}
 	if replace {
 		for i, old := range c.f.items {
-			if maps(old.Attributes, attrs) {
+			if !c.f.deleted[i] && maps(old.Attributes, attrs) {
 				c.f.items[i] = it
 				return c.f.itemPath(i), "/", nil
 			}
@@ -220,6 +225,28 @@ func (p props) Get(iface, name string) (dbus.Variant, *dbus.Error) {
 	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
 	return dbus.MakeVariant(p.f.locked), nil
+}
+
+// item is org.freedesktop.Secret.Item on every item path: Delete only.
+type item struct{ f *Fake }
+
+func (it item) Delete(msg dbus.Message) (dbus.ObjectPath, *dbus.Error) {
+	it.f.record("Item.Delete")
+	path, _ := msg.Headers[dbus.FieldPath].Value().(dbus.ObjectPath)
+	it.f.mu.Lock()
+	defer it.f.mu.Unlock()
+	var i int
+	if _, err := fmt.Sscanf(string(path), string(collPath)+"/item%d", &i); err != nil || i < 0 || i >= len(it.f.items) || it.f.deleted[i] {
+		return "/", dbusErr("org.freedesktop.Secret.Error.NoSuchObject", "no such item")
+	}
+	if it.f.locked {
+		return "/prompt/u1", nil // a real service prompts to unlock
+	}
+	if it.f.deleted == nil {
+		it.f.deleted = map[int]bool{}
+	}
+	it.f.deleted[i] = true
+	return "/", nil
 }
 
 // prompt is org.freedesktop.Secret.Prompt, exported only to record calls.
@@ -256,6 +283,7 @@ func Start(t testing.TB) (string, *Fake) {
 		must(conn.Export(props{f}, p, "org.freedesktop.DBus.Properties"))
 	}
 	must(conn.ExportSubtree(session{f}, "/org/freedesktop/secrets/session", "org.freedesktop.Secret.Session"))
+	must(conn.ExportSubtree(item{f}, collPath, "org.freedesktop.Secret.Item"))
 	must(conn.Export(prompt{f}, "/prompt/u1", "org.freedesktop.Secret.Prompt"))
 	reply, err := conn.RequestName(busName, dbus.NameFlagDoNotQueue)
 	if err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
