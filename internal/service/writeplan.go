@@ -735,7 +735,11 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int, needSequence b
 		return seq, nil, nil
 	}
 	if zero && kept && !needSequence {
-		if _, changedBare, err := ical.Patch(r.parts, bare); err == nil && !slices.Contains(mapValues(changedBare), true) {
+		_, changedBare, err := ical.Patch(r.parts, bare)
+		if err != nil {
+			return 0, nil, asRefusal(err)
+		}
+		if !slices.Contains(mapValues(changedBare), true) {
 			return seq, nil, nil // SEQUENCE:0 alone: not worth a write
 		}
 	}

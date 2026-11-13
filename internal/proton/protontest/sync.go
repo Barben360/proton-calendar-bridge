@@ -525,9 +525,11 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys, lenient b
 		m := tx.master(cols.UID)
 		switch {
 		case m != nil && !m.cols.HasSequence:
-			// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): an exception of a
-			// master whose signed part has no SEQUENCE; the message is
-			// the fake's (pcb logged the code alone).
+			// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): the create of an
+			// exception of a master whose signed part has no SEQUENCE;
+			// the message is the fake's (pcb logged the code alone). The
+			// same refusal of an exception update is [assumed, not
+			// measured live].
 			return nil, failed(codeInvalid, "fake: the main event has no SEQUENCE")
 		case m != nil && cols.Sequence < m.cols.Sequence:
 			return nil, failed(codeInvalid, "Single edits should have a Sequence greater or equal to main event")
