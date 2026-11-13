@@ -123,6 +123,74 @@ func TestNotifyClickOpensAccount(t *testing.T) {
 	}
 }
 
+func TestNotifyIgnoresForgedSignals(t *testing.T) {
+	addr := dbustest.Start(t)
+	_, sc := startFakeNotifier(t, addr)
+	t.Cleanup(closeNotifier)
+	var mu sync.Mutex
+	var clicked []string
+	click := func(a string) { mu.Lock(); clicked = append(clicked, a); mu.Unlock() }
+	got := func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(clicked) }
+	if err := Notify(addr, ui.Notification{Account: "a1", Title: "t"}, click); err != nil { // id 41
+		t.Fatal(err)
+	}
+	// another process on the bus forges a click on the live id
+	evil, err := dbus.Connect(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = evil.Close() }()
+	if err := evil.Emit("/org/freedesktop/Notifications", "org.freedesktop.Notifications.ActionInvoked", uint32(41), "default"); err != nil {
+		t.Fatal(err)
+	}
+	// the real server's later signal proves the forged one was processed first
+	emit(t, sc, "ActionInvoked", uint32(41), "default")
+	waitFor(t, "real click", func() bool { return len(got()) >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	if g := got(); len(g) != 1 {
+		t.Fatalf("clicks = %v, want exactly the real one", g)
+	}
+}
+
+func TestNotifyForgetsIdsWhenServerChanges(t *testing.T) {
+	addr := dbustest.Start(t)
+	_, sc := startFakeNotifier(t, addr)
+	t.Cleanup(closeNotifier)
+	var mu sync.Mutex
+	n := 0
+	click := func(string) { mu.Lock(); n++; mu.Unlock() }
+	count := func() int { mu.Lock(); defer mu.Unlock(); return n }
+	if err := Notify(addr, ui.Notification{Account: "a1"}, click); err != nil { // id 41
+		t.Fatal(err)
+	}
+	if err := Notify(addr, ui.Notification{Account: "old2"}, click); err != nil { // id 42
+		t.Fatal(err)
+	}
+	_ = sc.Close() // the server goes away, a new one starts (ids restart)
+	_, sc2 := startFakeNotifier(t, addr)
+	if err := Notify(addr, ui.Notification{Account: "a2"}, click); err != nil { // id 41 again, a2
+		t.Fatal(err)
+	}
+	emit(t, sc2, "ActionInvoked", uint32(42), "default") // 42 was the old server's: stale
+	emit(t, sc2, "ActionInvoked", uint32(41), "default")
+	waitFor(t, "click", func() bool { return count() >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	if count() != 1 {
+		t.Fatal("stale entry fired")
+	}
+}
+
+func TestNotifyNilOnClick(t *testing.T) {
+	addr := dbustest.Start(t)
+	_, sc := startFakeNotifier(t, addr)
+	t.Cleanup(closeNotifier)
+	if err := Notify(addr, ui.Notification{Account: "a1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	emit(t, sc, "ActionInvoked", uint32(41), "default") // must not panic
+	time.Sleep(100 * time.Millisecond)
+}
+
 func TestNotifyWithoutBus(t *testing.T) {
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
 	if err := Notify("", ui.Notification{Title: "x"}, func(string) {}); err == nil {
@@ -202,5 +270,52 @@ func TestAutostartDefaultDirAndQuoting(t *testing.T) {
 	}
 	if err := SetAutostart(true, "relative/pcb-ui"); err == nil {
 		t.Fatal("a relative exe must be refused")
+	}
+}
+
+func TestAutostartExecEscaping(t *testing.T) {
+	cases := map[string]string{
+		`/o/a\b c`: `Exec="/o/a\\\\b c" --background`,
+		`/o/q"x y`: `Exec="/o/q\\"x y" --background`,
+		"/o/b`x y": "Exec=\"/o/b\\\\`x y\" --background",
+		`/o/$x y`:  `Exec="/o/\\$x y" --background`,
+		`/o/100%`:  `Exec="/o/100%%" --background`,
+	}
+	for exe, want := range cases {
+		cfg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", cfg)
+		if err := SetAutostart(true, exe); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(filepath.Join(cfg, "autostart", "pcb-ui.desktop"))
+		if !strings.Contains(string(b), "\n"+want+"\n") {
+			t.Errorf("exe %q: want line %s in\n%s", exe, want, b)
+		}
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := SetAutostart(true, "/o/a\nExec=evil"); err == nil {
+		t.Fatal("a newline in the path must be refused")
+	}
+}
+
+func TestAutostartDirPrivateAndOffKeepsOthers(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	if err := SetAutostart(true, "/opt/pcb-ui"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(cfg, "autostart")
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("autostart dir: %v %v", fi, err)
+	}
+	other := filepath.Join(dir, "other.desktop")
+	if err := os.WriteFile(other, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAutostart(false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("off removed another file: %v", err)
 	}
 }

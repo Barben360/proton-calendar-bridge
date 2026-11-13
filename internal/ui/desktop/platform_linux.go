@@ -83,8 +83,41 @@ type pending struct {
 // notifications it sent, to route a click to its account.
 type notifier struct {
 	conn *dbus.Conn
-	mu   sync.Mutex
+	mu   sync.Mutex // ids (held across a Notify call)
 	ids  map[uint32]pending
+
+	omu   sync.Mutex
+	owner string // unique name of the notification server's owner, "" if none
+}
+
+// setOwner records the server's owner; a change forgets every id (they
+// belonged to the previous server).
+func (n *notifier) setOwner(o string) {
+	n.omu.Lock()
+	changed := n.owner != o
+	n.owner = o
+	n.omu.Unlock()
+	if changed {
+		n.mu.Lock()
+		clear(n.ids)
+		n.mu.Unlock()
+	}
+}
+
+func (n *notifier) isOwner(sender string) bool {
+	n.omu.Lock()
+	defer n.omu.Unlock()
+	return n.owner != "" && sender == n.owner
+}
+
+// resolveOwner asks the bus who owns org.freedesktop.Notifications.
+func (n *notifier) resolveOwner(ctx context.Context) error {
+	var o string
+	if err := n.conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, notifBus).Store(&o); err != nil {
+		return fmt.Errorf("no notification server: %w", err)
+	}
+	n.setOwner(o)
+	return nil
 }
 
 var (
@@ -125,7 +158,14 @@ func getNotifier(addr string) (*notifier, error) {
 		_ = c.Close()
 		return nil, err
 	}
+	if err := c.AddMatchSignal(dbus.WithMatchInterface("org.freedesktop.DBus"), dbus.WithMatchMember("NameOwnerChanged"), dbus.WithMatchArg(0, notifBus)); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	n := &notifier{conn: c, ids: map[uint32]pending{}}
+	ctx, cancel := context.WithTimeout(context.Background(), busTimeout)
+	_ = n.resolveOwner(ctx) // none yet: Notify retries and fails with it
+	cancel()
 	sig := make(chan *dbus.Signal, 16)
 	c.Signal(sig)
 	go func() {
@@ -144,8 +184,16 @@ func getNotifier(addr string) (*notifier, error) {
 
 func (n *notifier) handle(s *dbus.Signal) {
 	switch s.Name {
+	case "org.freedesktop.DBus.NameOwnerChanged":
+		if s.Sender != "org.freedesktop.DBus" || len(s.Body) < 3 {
+			return
+		}
+		if name, _ := s.Body[0].(string); name == notifBus {
+			o, _ := s.Body[2].(string)
+			n.setOwner(o)
+		}
 	case notifBus + ".ActionInvoked":
-		if len(s.Body) < 2 {
+		if !n.isOwner(s.Sender) || len(s.Body) < 2 {
 			return
 		}
 		id, ok1 := s.Body[0].(uint32)
@@ -160,7 +208,7 @@ func (n *notifier) handle(s *dbus.Signal) {
 			p.onClick(p.account)
 		}
 	case notifBus + ".NotificationClosed":
-		if len(s.Body) < 1 {
+		if !n.isOwner(s.Sender) || len(s.Body) < 1 {
 			return
 		}
 		if id, ok := s.Body[0].(uint32); ok {
@@ -173,14 +221,21 @@ func (n *notifier) handle(s *dbus.Signal) {
 
 // Notify shows n on the desktop through org.freedesktop.Notifications on the
 // session bus at addr ("" is DBUS_SESSION_BUS_ADDRESS). A click calls
-// onClick with n.Account, from a goroutine of its own (go through fyne.Do).
+// onClick (nil: none) with n.Account, from a goroutine of its own (go through
+// fyne.Do). Only signals from the server's own connection count.
 func Notify(addr string, n ui.Notification, onClick func(account string)) error {
+	if onClick == nil {
+		onClick = func(string) {}
+	}
 	nt, err := getNotifier(addr)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), busTimeout)
 	defer cancel()
+	if err := nt.resolveOwner(ctx); err != nil {
+		return err
+	}
 	// Held across the call so that a click arriving right after the reply
 	// finds its id.
 	nt.mu.Lock()
@@ -210,10 +265,10 @@ func autostartPath() (string, error) {
 
 // execArg quotes a path for a desktop entry's Exec key when it needs it.
 func execArg(p string) string {
-	if !strings.ContainsAny(p, " \t\"'\\<>~|&;$*?#()`") {
+	if !strings.ContainsAny(p, " \t\"'\\<>~|&;$*?#()`%") {
 		return p
 	}
-	r := strings.NewReplacer(`\`, `\\\\`, `"`, `\\"`, "`", "\\\\`", "$", `\\$`)
+	r := strings.NewReplacer(`\`, `\\\\`, `"`, `\\"`, "`", "\\\\`", "$", `\\$`, "%", "%%")
 	return `"` + r.Replace(p) + `"`
 }
 
@@ -233,7 +288,10 @@ func SetAutostart(on bool, exe string) error {
 	if !filepath.IsAbs(exe) {
 		return fmt.Errorf("autostart needs the absolute path of pcb-ui, got %q", exe)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if strings.ContainsAny(exe, "\n\r") {
+		return errors.New("autostart: the path of pcb-ui holds a line break")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	content := "[Desktop Entry]\nType=Application\nName=pcb\nComment=Proton calendar bridge\n" +
