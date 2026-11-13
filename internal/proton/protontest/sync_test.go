@@ -933,6 +933,7 @@ func TestSyncStoresTheUIDUnescaped(t *testing.T) {
 	for _, c := range []struct{ text, column string }{
 		{`esc-a\,b@pcb.test`, "esc-a,b@pcb.test"},
 		{`esc-c\;d\\e@pcb.test`, `esc-c;d\e@pcb.test`},
+		{`esc-f\ng@pcb.test`, "esc-f\ng@pcb.test"},
 		{"plain@pcb.test", "plain@pcb.test"},
 	} {
 		sent := w.create(t, simple(c.text, "0", "Escaped"), newKeys(t))

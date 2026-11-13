@@ -2315,6 +2315,30 @@ func TestAnEscapedUIDIsCreatedConfirmedAndEdited(t *testing.T) {
 	if n := r.sendCalls(); n != 4 {
 		t.Errorf("%d sync calls, want 4 (two creates, two edits)", n)
 	}
+
+	// A client spelling the comma bare (`UID:pcb-m4-a,b`, invalid TEXT but
+	// the same value) reaches the same event.
+	obj := r.object(t, "pcb-m4-a,b")
+	bare := edit(t, edit(t, obj.Data, `UID:pcb-m4-a\,b`, "UID:pcb-m4-a,b"), "SUMMARY:Edited", "SUMMARY:Bare")
+	if res, err := r.put(t, obj.Name, bare, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the bare-comma edit = %+v, %v; want the event updated", res, err)
+	}
+	if rows := r.proton(t, "pcb-m4-a,b"); len(rows) != 1 {
+		t.Fatalf("Proton holds %d rows of pcb-m4-a,b after the bare-comma edit, want 1", len(rows))
+	}
+	contains(t, "the object after the bare-comma edit", r.object(t, "pcb-m4-a,b").Data, "SUMMARY:Bare")
+
+	// The DELETE at its served name removes it from Proton and the cache.
+	obj = r.object(t, "pcb-m4-a,b")
+	if err := r.svc.DeleteObject(t.Context(), r.cal, obj.Name, service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("DELETE at %q: %v", obj.Name, err)
+	}
+	if rows := r.proton(t, "pcb-m4-a,b"); len(rows) != 0 {
+		t.Errorf("Proton holds %d rows after the DELETE, want none", len(rows))
+	}
+	if got := r.object(t, "pcb-m4-a,b"); !got.Missing {
+		t.Errorf("the deleted object is still served at %q", got.Name)
+	}
 }
 
 // An event Proton holds under its unescaped UID (`pcb-a,b`, its parts
