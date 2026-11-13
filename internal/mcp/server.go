@@ -46,7 +46,11 @@ type Options struct {
 	Zone      *time.Location // [mcp] timezone, else the process's zone
 	Logger    *slog.Logger   // audit lines go here
 	ShowLogin func(username string) error
-	Version   string // pcb's version, shown to clients
+	// LoginGuard, when set, is asked before a login that would create
+	// the state: an error refuses the login (pcb mcp's sealer guard,
+	// design §5.3).
+	LoginGuard func(ctx context.Context) error
+	Version    string // pcb's version, shown to clients
 }
 
 // Server builds the SDK server of each session.

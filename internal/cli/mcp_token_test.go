@@ -173,6 +173,24 @@ func TestMCPTokenRefusesLoginCap(t *testing.T) {
 	noTokenFile(t, r)
 }
 
+// Ruling R19: a token add refuses, at creation, any capability set the
+// server would refuse to serve (mcp.ParseCaps): delete without write is
+// exit 2 naming the rule, and no token is written; with write it passes.
+func TestMCPTokenRefusesDeleteWithoutWrite(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	for _, allow := range []string{"delete", "read,delete", "freebusy,delete"} {
+		r.want(exitcode.Usage, "mcp", "token", "add", "claude", "--allow", allow, "--json")
+		if e := r.envelope(); e.OK || e.Error == nil || !strings.Contains(e.Error.Message, "delete needs write") {
+			t.Errorf("--allow %s: envelope = %+v, want the rule delete needs write", allow, e)
+		}
+	}
+	noTokenFile(t, r)
+	if d := tokenAdd(t, r, "claude", "--allow", "write,delete"); !slices.Contains(d.Caps, "delete") {
+		t.Errorf("--allow write,delete: caps = %v, want delete kept", d.Caps)
+	}
+}
+
 func TestMCPTokenUnknownAccount(t *testing.T) {
 	t.Parallel()
 	hubOf := func() *stubHub {
@@ -220,10 +238,10 @@ func TestMCPTokenUnknownAccount(t *testing.T) {
 func TestMCPTokenPlanChangesNothing(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, nil)
-	r.want(exitcode.OK, "mcp", "token", "add", "claude", "--allow", "read,delete", "--expires", "30d", "--plan", "--json")
+	r.want(exitcode.OK, "mcp", "token", "add", "claude", "--allow", "write,delete", "--expires", "30d", "--plan", "--json")
 	var d tokenData
 	mustUnmarshal(t, r.envelope().Data, &d)
-	if !d.Plan || d.Name != "claude" || !slices.Equal(d.Caps, []string{"read", "delete"}) || d.Token != "" || d.Expires == nil {
+	if !d.Plan || d.Name != "claude" || !slices.Equal(d.Caps, []string{"write", "delete"}) || d.Token != "" || d.Expires == nil {
 		t.Errorf("plan data = %+v", d)
 	}
 	if strings.Contains(r.out.String(), access.TokenPrefix) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
@@ -168,6 +169,11 @@ func parseCaps(allow string) ([]string, error) {
 		if !slices.Contains(access.TokenCaps, c) {
 			return nil, UsageError(fmt.Errorf("unknown capability %q for --allow: the valid ones are %s", c, valid))
 		}
+	}
+	// What the server would refuse to serve is refused now (ruling R19):
+	// delete without write.
+	if _, err := mcp.ParseCaps(strings.Join(caps, ",")); err != nil {
+		return nil, &exitcode.Error{Code: exitcode.Usage, Err: err, Hint: "add write to --allow, or drop delete"}
 	}
 	return caps, nil
 }
