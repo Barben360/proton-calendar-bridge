@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -348,4 +349,46 @@ func TestStatusRefusesAForeignSocketPath(t *testing.T) {
 	if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, "is not a socket") || e.Hint == "" {
 		t.Errorf("error = %+v", e)
 	}
+}
+
+// pcb status says when the configured key file is not there (before the
+// first login, or after pcb uninstall --delete-data deleted it): the path
+// stays as configured, "(absent)" follows it, and --json carries
+// key_file_absent.
+func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	key := config.Defaults(r.dirs).Secrets.KeyFile
+	check := func(when string, absent bool) {
+		t.Helper()
+		want := "key_file: " + key + "\n"
+		if absent {
+			want = "key_file: " + key + " (absent)\n"
+		}
+		r.want(exitcode.OK, "status")
+		if got := r.out.String(); !strings.Contains(got, want) {
+			t.Errorf("%s: status lacks %q:\n%s", when, want, got)
+		}
+		r.want(exitcode.OK, "status", "--json")
+		var st struct {
+			KeyFile       string `json:"key_file"`
+			KeyFileAbsent *bool  `json:"key_file_absent"`
+		}
+		mustUnmarshal(t, r.envelope().Data, &st)
+		switch {
+		case st.KeyFile != key:
+			t.Errorf("%s: --json key_file %q, want %q", when, st.KeyFile, key)
+		case st.KeyFileAbsent == nil:
+			t.Errorf("%s: --json has no key_file_absent", when)
+		case *st.KeyFileAbsent != absent:
+			t.Errorf("%s: --json key_file_absent %v, want %v", when, *st.KeyFileAbsent, absent)
+		}
+	}
+	check("before the first login", true)
+	r.want(exitcode.OK, "login", "--non-interactive")
+	check("logged in", false)
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	check("the key file deleted", true)
 }

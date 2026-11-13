@@ -1144,6 +1144,9 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
   base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
+  After the steps it says what the logout got, in `pcb logout`'s words ("Logged out.", "Logged out locally; Proton
+  could not be told: …", "Not logged in."), and `--json` carries it as `logout` (`was_logged_in`, `revoked`), absent
+  when no logout answered [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`].
   With no unit installed and no `--user`/`--system`, applying exits 10 ("nothing to uninstall"), while `--plan`
   exits 0 with "Nothing to remove" and no step (M5-R16) [verified: `TestUninstallPlanWithNothingInstalled`].
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`
@@ -1270,7 +1273,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb status` keeps `service.Status`'s fields flat at the top level of its JSON (M5-P4) and adds `daemon` (null
   offline), `health` (serve state, `interval_seconds` (the next wait, which backs off), `cadence_seconds` (the wait after a good pass), `idle`, `last_pass`, per-calendar sync and write gate
   with its reason, render counters, human verification), `listener` (URL, TLS, fingerprint, certificate end) and `alerts`.
-  Text lines: first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:`, `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
+  Text lines: first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:` (the configured path, followed by `(absent)` when no file is there, as before the first login or after `pcb uninstall --delete-data`; `--json`: `key_file_absent`), `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>`
   (offline: `daemon: not running (offline view)`), `listener:`, one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
   the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the

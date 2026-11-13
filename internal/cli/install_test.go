@@ -230,10 +230,11 @@ func (s *sysRig) failure() (code int, message, hint string) {
 }
 
 type planData struct {
-	Scope string         `json:"scope"`
-	Plan  bool           `json:"plan"`
-	Steps []install.Step `json:"steps"`
-	Next  []string       `json:"next"`
+	Scope  string                `json:"scope"`
+	Plan   bool                  `json:"plan"`
+	Steps  []install.Step        `json:"steps"`
+	Next   []string              `json:"next"`
+	Logout *service.LogoutResult `json:"logout"`
 }
 
 func (s *sysRig) data() planData {
@@ -735,6 +736,53 @@ func TestUninstallDeleteDataStopsThenLogsOutThenDeletes(t *testing.T) {
 	}
 }
 
+// The apply of --delete-data says whether Proton revoked the session, in
+// pcb logout's words, in text and in --json; without --delete-data no
+// logout runs and none is reported.
+func TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked(t *testing.T) {
+	t.Parallel()
+	const notTold = "Logged out locally; Proton could not be told: end the session in the Proton web app (Settings → Security → Sessions)."
+	for _, c := range []struct {
+		name    string
+		res     service.LogoutResult
+		line    string
+		notLine string
+	}{
+		{"revoked", service.LogoutResult{WasLoggedIn: true, Revoked: true}, "Logged out.", notTold},
+		{"not revoked", service.LogoutResult{WasLoggedIn: true}, notTold, "Logged out."},
+		{"not logged in", service.LogoutResult{}, "Not logged in.", "Logged out."},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			for _, asJSON := range []bool{false, true} {
+				s := newSysRig(t)
+				s.logout = func() (service.LogoutResult, error) { return c.res, nil }
+				s.want(exitcode.OK, "install")
+				args := []string{"uninstall", "--delete-data", "--yes"}
+				if asJSON {
+					s.want(exitcode.OK, append(args, "--json")...)
+					d := s.data()
+					if d.Logout == nil || *d.Logout != c.res {
+						t.Errorf("--json logout = %+v, want %+v", d.Logout, c.res)
+					}
+					continue
+				}
+				s.want(exitcode.OK, args...)
+				lines := strings.Split(strings.TrimSuffix(s.stdout.String(), "\n"), "\n")
+				if !slices.Contains(lines, c.line) || slices.Contains(lines, c.notLine) {
+					t.Errorf("output lacks the line %q (or holds %q):\n%s", c.line, c.notLine, s.stdout.String())
+				}
+			}
+		})
+	}
+	s := newSysRig(t)
+	s.want(exitcode.OK, "install")
+	s.want(exitcode.OK, "uninstall", "--json")
+	if d := s.data(); d.Logout != nil {
+		t.Errorf("without --delete-data: logout = %+v, want none", *d.Logout)
+	}
+}
+
 func TestUninstallKeepsAKeyFileOutsideTheConfigDir(t *testing.T) {
 	t.Parallel()
 	s := newSysRig(t)
@@ -776,8 +824,8 @@ func TestUninstallSystemDeleteData(t *testing.T) {
 	if s.exists("/etc/pcb") || s.exists("/var/lib/pcb") || s.exists(install.SystemUnitPath) {
 		t.Errorf("left behind: %q", s.tree())
 	}
-	if !s.exists("/usr/local/bin/pcb") || !strings.HasSuffix(s.stdout.String(), "keep file /usr/local/bin/pcb — kept /usr/local/bin/pcb: rm it if unused\n") {
-		t.Errorf("binary not kept or not named last:\n%s", s.stdout.String())
+	if !s.exists("/usr/local/bin/pcb") || !strings.HasSuffix(s.stdout.String(), "keep file /usr/local/bin/pcb — kept /usr/local/bin/pcb: rm it if unused\nLogged out.\n") {
+		t.Errorf("binary not kept or not named last of the steps (before the logout's outcome):\n%s", s.stdout.String())
 	}
 }
 

@@ -393,6 +393,9 @@ func (l *Local) Status(context.Context) (Status, error) {
 		KeyFile:    l.keyFile(),
 		Unattended: st.Unattended,
 	}
+	if _, err := os.Stat(l.keyFile()); errors.Is(err, os.ErrNotExist) {
+		s.KeyFileAbsent = true
+	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL
 	}

@@ -20,6 +20,10 @@ type installData struct {
 	Plan  bool           `json:"plan"`
 	Steps []install.Step `json:"steps"`
 	Next  []string       `json:"next"`
+	// Logout is what the uninstall's logout step got from Proton, as pcb
+	// logout prints it; absent when no logout ran or it failed before an
+	// answer (its step's note says why).
+	Logout *service.LogoutResult `json:"logout,omitempty"`
 }
 
 // scopeFlags are --user and --system.
@@ -233,10 +237,14 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h)}); err != nil {
+	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h, &data.Logout)}); err != nil {
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
-	return Finish(cmd, data, appliedText(steps, nil), nil)
+	text := appliedText(steps, nil)
+	if data.Logout != nil {
+		text += "\n" + logoutText(*data.Logout)
+	}
+	return Finish(cmd, data, text, nil)
 }
 
 // runsSystemctl reports whether steps run systemctl.
@@ -329,8 +337,9 @@ func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 }
 
 // logoutHook revokes the session of the directories the plan resolved,
-// with the in-process service, never the caller's own (M5-P19).
-func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error {
+// with the in-process service, never the caller's own (M5-P19), and sets
+// *out to the service's answer.
+func (a *app) logoutHook(h install.Host, out **service.LogoutResult) func(context.Context, paths.Dirs) error {
 	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
 			switch k {
@@ -350,6 +359,7 @@ func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error
 		if err != nil {
 			return err
 		}
+		*out = &res
 		if res.WasLoggedIn && !res.Revoked {
 			return errors.New("the Proton session could not be revoked")
 		}

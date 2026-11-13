@@ -208,16 +208,19 @@ type LogoutResult struct {
 // names which) or "rolled-back" (secrets.sealed older than the last one pcb
 // wrote).
 type Status struct {
-	Phase       string     `json:"phase"`
-	Reason      string     `json:"reason,omitempty"`
-	Username    string     `json:"username,omitempty"`
-	AccountID   string     `json:"account_id,omitempty"`
-	Secrets     string     `json:"secrets"`
-	KeyFile     string     `json:"key_file"`
-	Unattended  bool       `json:"unattended"`
-	CaptchaURL  string     `json:"captcha_url,omitempty"`
-	LastLogin   *time.Time `json:"last_login,omitempty"`
-	LastRelogin *time.Time `json:"last_relogin,omitempty"`
+	Phase     string `json:"phase"`
+	Reason    string `json:"reason,omitempty"`
+	Username  string `json:"username,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
+	Secrets   string `json:"secrets"`
+	KeyFile   string `json:"key_file"`
+	// KeyFileAbsent: no file at KeyFile (before the first login, or once
+	// deleted); another stat failure is not absence.
+	KeyFileAbsent bool       `json:"key_file_absent"`
+	Unattended    bool       `json:"unattended"`
+	CaptchaURL    string     `json:"captcha_url,omitempty"`
+	LastLogin     *time.Time `json:"last_login,omitempty"`
+	LastRelogin   *time.Time `json:"last_relogin,omitempty"`
 	// LoginExpires is set with needs-totp: when the login waiting for its
 	// code ends.
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
