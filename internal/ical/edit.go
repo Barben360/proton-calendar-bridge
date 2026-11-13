@@ -837,10 +837,13 @@ func sameRule(a, b string) bool {
 }
 
 // replaceAlarms replaces every VALARM the view shows as an Alarm (a whole
-// number of minutes relative to the start) by one DISPLAY alarm per entry,
-// in the wording ical.Alarms renders. Other VALARMs stay. Alarms Proton
-// would drop (NotificationsFromAlarms: more than ten, after a timed
-// event's start, a day or more after an all-day one's) are refused.
+// number of minutes relative to the start) by one alarm per entry: an
+// existing one at those minutes is kept as it is (its ACTION, an e-mail
+// notification included, and its other lines; each used once), a new
+// minute value gets a DISPLAY alarm in the wording ical.Alarms renders.
+// Other VALARMs stay. Alarms Proton would drop (NotificationsFromAlarms:
+// more than ten, after a timed event's start, a day or more after an
+// all-day one's) are refused.
 func replaceAlarms(ev *Component, minutes []int) *Refusal {
 	sp, _ := ev.Get("DTSTART")
 	allDay := strings.EqualFold(firstParam(sp, "VALUE"), "DATE")
@@ -848,8 +851,24 @@ func replaceAlarms(ev *Component, minutes []int) *Refusal {
 	if allDay {
 		text = "Reminder (all-day event)"
 	}
+	var stored []*Component // the relative alarms, unused yet
+	for _, it := range ev.Items {
+		if it.Comp != nil {
+			if _, relative := alarmOf(*it.Comp); relative {
+				stored = append(stored, it.Comp)
+			}
+		}
+	}
 	alarms := make([]Component, len(minutes))
 	for i, m := range minutes {
+		if j := slices.IndexFunc(stored, func(c *Component) bool {
+			a, _ := alarmOf(*c)
+			return a.MinutesBefore == m
+		}); j >= 0 {
+			alarms[i] = stored[j].Clone()
+			stored = slices.Delete(stored, j, j+1)
+			continue
+		}
 		trigger := fmt.Sprintf("-PT%dM", m)
 		if m <= 0 {
 			trigger = fmt.Sprintf("PT%dM", -m)

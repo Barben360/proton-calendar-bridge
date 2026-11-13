@@ -841,3 +841,45 @@ func TestOccurrenceAfterUntilIsRefused(t *testing.T) {
 		t.Errorf("the last occurrence: %v", err)
 	}
 }
+
+// Review A finding 2: setting alarms by minutes keeps an existing alarm at
+// those minutes as it is (an e-mail notification stays one); only a new
+// minute value gets a DISPLAY alarm.
+func TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain(t *testing.T) {
+	obj := calendar("BEGIN:VEVENT", "UID:a@x", "DTSTAMP:20260101T000000Z", "SUMMARY:Review",
+		"DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",
+		"BEGIN:VALARM", "ACTION:EMAIL", "TRIGGER:-PT30M", "SUMMARY:Review soon", "DESCRIPTION:Mail me", "ATTENDEE:mailto:me@example.com", "END:VALARM",
+		"BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT60M", "DESCRIPTION:Gone", "END:VALARM",
+		"END:VEVENT")
+	for _, tc := range []struct {
+		name    string
+		minutes []int
+		want    []Alarm
+	}{
+		{"sent again unchanged", []int{30}, []Alarm{{30, "EMAIL"}}},
+		{"one added", []int{30, 10}, []Alarm{{30, "EMAIL"}, {10, "DISPLAY"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ApplyEdit(obj, ScopeSeries, nil, Fields{Alarms: &tc.minutes}, editNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := DecodeEvent(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(d.Alarms, tc.want) {
+				t.Errorf("alarms %+v, want %+v", d.Alarms, tc.want)
+			}
+			s := string(out)
+			for _, line := range []string{"ACTION:EMAIL\r\nTRIGGER:-PT30M\r\nSUMMARY:Review soon\r\nDESCRIPTION:Mail me\r\nATTENDEE:mailto:me@example.com\r\n"} {
+				if !strings.Contains(s, line) {
+					t.Errorf("the e-mail alarm lost its lines:\n%s", s)
+				}
+			}
+			if strings.Contains(s, "Gone") {
+				t.Errorf("the alarm at 60 minutes, not asked for, is still there:\n%s", s)
+			}
+		})
+	}
+}

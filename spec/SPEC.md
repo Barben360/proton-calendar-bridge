@@ -1344,7 +1344,9 @@ step 10, not run yet.
   `dry_run` (the changed fields before and after, nothing written); new times keep the event's own zone unless `tz` is
   given [verified: `TestUpdateChangesNullClears`, `TestUpdateDryRunShowsBeforeAfter`, `TestUpdateEventDryRunWritesNothing`,
   `TestUpdateTimesKeepTheEventZone`]. Edits patch the stored iCalendar, so what the call did not touch (alarms,
-  exceptions, unknown properties) stays [verified: `TestApplyEditKeepsUntouchedLines`]; one occurrence becomes an
+  exceptions, unknown properties) stays [verified: `TestApplyEditKeepsUntouchedLines`]; `alarms` given keeps an existing
+  alarm at the same minutes as it is (an e-mail notification stays an e-mail), and only a new minute value becomes a
+  device (DISPLAY) alarm [verified: `TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain`]; one occurrence becomes an
   override, deleting one adds an EXDATE [verified: `TestApplyEditOccurrenceCreatesOverride`, `TestDeleteOccurrenceAddsExdate`,
   `TestDeleteOneOccurrence`]. A series that only moves in time takes its EXDATEs, its overrides' RECURRENCE-IDs and its
   UNTIL along; a change that would leave an exception, or the start, off the rule kept is refused (`refused`,
