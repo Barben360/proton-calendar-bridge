@@ -69,7 +69,7 @@ func TestLoadOverridesEachKey(t *testing.T) {
 	}
 	want := config.Config{
 		Proton:  config.Proton{BaseURL: "https://example.org", AppVersion: "web-calendar@1.2.3"},
-		Secrets: config.Secrets{KeyFile: "/k/my.key"},
+		Secrets: config.Secrets{KeyFile: "/k/my.key", Backend: "auto"},
 		CalDAV:  config.CalDAV{Listen: "127.0.0.1:1080"},
 		Log:     config.Log{Level: "info"},
 	}
@@ -269,4 +269,29 @@ func TestUnknownLogLevelIsRefused(t *testing.T) {
 		}
 	}
 	refused(t, "[log]\nlevel = \"\"\n")
+}
+
+func TestBackendDefaultsToAuto(t *testing.T) {
+	if got := config.Defaults(dirs).Secrets.Backend; got != "auto" {
+		t.Fatalf("default backend = %q", got)
+	}
+	cfg, err := config.Load(write(t, "[secrets]\nkey_file = \"/k\"\n"), dirs)
+	if err != nil || cfg.Secrets.Backend != "auto" {
+		t.Fatalf("backend = %q, %v", cfg.Secrets.Backend, err)
+	}
+	for _, ok := range []string{"auto", "keyfile", "secret-service"} {
+		cfg, err := config.Load(write(t, "[secrets]\nbackend = \""+ok+"\"\n"), dirs)
+		if err != nil || cfg.Secrets.Backend != ok {
+			t.Errorf("backend %q: got %q, %v", ok, cfg.Secrets.Backend, err)
+		}
+	}
+}
+
+func TestBadBackendIsUsage(t *testing.T) {
+	const want = "[secrets] backend must be auto, keyfile or secret-service"
+	for _, bad := range []string{"tpm", "", "Auto", "secret_service"} {
+		if msg := refused(t, "[secrets]\nbackend = \""+bad+"\"\n"); msg != want {
+			t.Errorf("backend %q: message = %q", bad, msg)
+		}
+	}
 }

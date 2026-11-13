@@ -506,7 +506,7 @@ func layoutError(err error, root string, legacy []string) error {
 			msg += ": " + strings.Join(legacy, ", ")
 		}
 		return mustAct(msg+" in "+root, "remove them or move the state directory aside: this pcb version cannot be downgraded")
-	case errors.Is(err, store.ErrNewerLayout):
+	case errors.Is(err, store.ErrNewerLayout), errors.Is(err, store.ErrUnknownSealer):
 		return mustAct("the state layout (layout.json) was written by a newer pcb", "upgrade pcb")
 	case errors.As(err, &pe):
 		return mustAct("cannot use the state layout: "+pe.Op+" "+pe.Path+": "+pe.Err.Error(),

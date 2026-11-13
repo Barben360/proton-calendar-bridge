@@ -150,6 +150,7 @@ func TestAccountsOfAnUnreadableLayout(t *testing.T) {
 	}{
 		{"malformed", `{"version":`, "check ", nil},
 		{"newer", `{"version": 3}`, "upgrade pcb", store.ErrNewerLayout},
+		{"unknown sealer", `{"version": 2, "sealer": "tpm"}`, "upgrade pcb", store.ErrUnknownSealer},
 	} {
 		root := t.TempDir()
 		writeFile(t, filepath.Join(root, "layout.json"), c.layout)

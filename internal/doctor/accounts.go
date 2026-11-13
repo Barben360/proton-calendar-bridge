@@ -48,7 +48,7 @@ func Accounts(stateDir string) (Layout, error) {
 	switch {
 	case errors.Is(err, store.ErrLegacyBesideLayout):
 		lerr = &LayoutError{Err: err, Fix: "remove them or move the state directory aside: this pcb version cannot be downgraded"}
-	case errors.Is(err, store.ErrNewerLayout):
+	case errors.Is(err, store.ErrNewerLayout), errors.Is(err, store.ErrUnknownSealer):
 		return Layout{}, &LayoutError{Err: err, Fix: "upgrade pcb"}
 	case err != nil:
 		return Layout{}, &LayoutError{Err: err, Fix: "check " + filepath.Join(stateDir, "layout.json") + " and the accounts directory beside it"}
