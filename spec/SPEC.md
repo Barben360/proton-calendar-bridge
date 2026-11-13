@@ -1369,8 +1369,9 @@ step 10, not run yet.
     `TestLoginPageSingleUse`, `TestLoginPageExpires`, `TestLoginPageRefusesForeignHostAndOrigin`, `TestLoginPageNoStore`,
     `TestLoginPageNeverEchoesThePassword`, `TestLoginPageRunsTOTPAndCaptchaSteps`, `TestLoginPageStopCancels`]. A client that
     declares URL elicitation is handed the link that way (declined or cancelled: the page closes, `refused`); otherwise
-    the URL is in the result. Every result carries `cli_fallback` (`pcb login --username U`), for a `pcb mcp` in a
-    container whose loopback the browser cannot reach [verified: `TestLoginToolResultHasNoSecret`].
+    the URL is in the result. Every result carries the CLI fallback `pcb login --username U` (the `cli_fallback` field, and
+    the hint of a refusal), for a `pcb mcp` in a container whose loopback the browser cannot reach [verified:
+    `TestLoginToolResultHasNoSecret`, `TestLoginToolRaisesTheWizardInPcbUI`].
   - One `login` per 60 s per MCP session (`retry`, with `retry_after_s`), on top of the Hub's login guard and its one
     login at a time; a later login of the same session replaces its page [verified: `TestLoginToolCooldown`,
     `TestLoginToolReplacesTheSessionsPage`]. A session daemon asks its sealer guard (§13) first [verified: `TestLoginToolAsksTheGuard`].
@@ -1382,14 +1383,16 @@ step 10, not run yet.
   (§13), kept in `<state>/mcp-tokens.json` (0600, version 1, strict decoding) as a salted SHA-256 only, never sealed or
   shown again; the prefix keeps a CalDAV password from passing as a token [verified: `TestTokenAddStoresOnlyAHash`,
   `TestTokenFileStrictDecoding`, `TestTokenFileMode0600`, `TestTokenWrongPrefixRefused`]. No token, or a bad, unknown or
-  expired one: 401 with `WWW-Authenticate: Bearer`, counted by the remote's own failure limiter (5 a minute per IP, /64
-  for IPv6), 503 with `Retry-After` beyond; a token whose stored grant is refused: 403 [verified: `TestRemoteMCPNeedsAToken`,
-  `TestRemoteMCPLimiter503AfterFiveFailures`, `TestTokenExpired`]. `Host` must be a loopback name, a `[caldav] hostnames`
+  expired one: 401 with `WWW-Authenticate: Bearer`, counted by the remote's own failure limiter (`access.Limiter`: after 5
+  failures in a minute from one IP, IPv6 keyed by its /64, further requests get 503 with `Retry-After`); a token whose stored
+  grant is refused: 403 [verified: `TestRemoteMCPNeedsAToken`, `TestRemoteMCPLimiter503AfterFiveFailures`,
+  `TestLimiterKeysIPv6ByPrefix64`, `TestTokenExpired`]. `Host` must be a loopback name, a `[caldav] hostnames`
   entry or the IP the request arrived on, and a present `Origin` must equal it (`null` refused): else 403, a
   DNS-rebinding guard of pcb's own (the SDK checks no Origin, E19) [verified: `TestRemoteMCPRefusesForeignHost`,
-  `TestRemoteMCPRefusesForeignOrigin`]. Sessions are stateful, bound to the token that opened them (another token: 403),
-  forgotten after 1 h idle, and their streams outlive the listener's write timeout [verified: `TestRemoteMCPSessionBoundToItsToken`,
-  `TestRemoteMCPStreamOutlivesWriteTimeout`]. The token never reaches a tool [verified: `TestRemoteMCPKeepsTheTokenFromTools`].
+  `TestRemoteMCPRefusesForeignOrigin`, `TestE19HostCheckedOriginNot`]. Sessions are stateful, bound to the token that opened
+  them (another token: 403), forgotten after 1 h idle (their ID then answers 404, and the client initialises again), and their
+  streams outlive the listener's write timeout [verified: `TestRemoteMCPSessionBoundToItsToken`,
+  `TestRemoteMCPSessionEndsWhenIdle`, `TestRemoteMCPStreamOutlivesWriteTimeout`]. The token never reaches a tool [verified: `TestRemoteMCPKeepsTheTokenFromTools`].
   TLS follows the listener's rule (§9: TLS on any non-loopback bind).
 - **Audit.** One `info` line `mcp call` per tool call in the daemon's log (stderr of `pcb serve` and `pcb mcp`, `pcb-ui.log`):
   `tool`, `entry` (`remote`, `relay`, `stdio`), `grant` (token name or stdio profile), `account` (local IDs), `calendar`,
@@ -2049,7 +2052,7 @@ M8 delivered (2026-11-13, branch m8-mcp; the live checks of `spec/HUMAN-CHECKS.m
 | R14 | under a grant that names calendars, an account whose calendars are not known yet (before its first sync) counts as holding none: it is hidden until it is known to hold one (fail closed) |
 | R15 | every tool taking an `event_id` hides an invisible account or calendar as missing (`no event X`, the same text as a malformed id), whatever the agenda would answer; one audit line per logical call, a run that only asks the person writes none |
 | R16 | the delete confirmation for a whole recurring series names it: `Delete «S» on D and every occurrence of its series?` |
-| R17 | remote sessions are forgotten after 1 h idle (the client initialises again); `Host` may also be the IP the request arrived on; a present `Origin` must equal `Host` exactly, `null` refused; `pcb status` shows the `mcp:` line only when a daemon answers |
+| R17 | remote sessions are forgotten after 1 h idle (the client initialises again; `TestRemoteMCPSessionEndsWhenIdle`); `Host` may also be the IP the request arrived on; a present `Origin` must equal `Host` exactly, `null` refused; `pcb status` shows the `mcp:` line only when a daemon answers |
 | R19 | `pcb mcp token add --allow delete` without `write` is refused at creation (exit 2), as the grant itself would refuse it |
 | R20 | `pcb mcp`'s sealer guard runs when the session daemon starts (exit 10 on a new state with `backend = auto` and no Secret Service), before it opens the state, not only in the `login` tool; the relay's own connections are not UID-checked beyond the probe (same-UID trust, a 0700 directory) |
 | T9 | an account signed out (`logged-out`) is invisible to agents, as if outside the grant; one that needs a login stays visible with its step; a tool error is a JSON text `{"error": {...}}` |

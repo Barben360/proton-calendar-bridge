@@ -283,6 +283,42 @@ func TestRemoteMCPSessionBoundToItsToken(t *testing.T) {
 	}
 }
 
+// A remote session nobody uses is forgotten after an hour (design §5.2,
+// ruling R17): its ID then answers 404, and the client starts a new one.
+// The hour is shortened here; not parallel, since it sets the idle time.
+func TestRemoteMCPSessionEndsWhenIdle(t *testing.T) {
+	if got := mcp.SessionIdle(); got != time.Hour {
+		t.Fatalf("a remote session idles out after %s, want 1h (SPEC §12)", got)
+	}
+	defer mcp.SetSessionIdle(300 * time.Millisecond)()
+	r := newRemote(t, newHub(), nil)
+	a := r.add(t, access.Token{Name: "a", Caps: []string{"read"}})
+	res := r.post(t, initialize, bearer(a))
+	id := res.Header.Get("Mcp-Session-Id")
+	if res.StatusCode != http.StatusOK || id == "" {
+		t.Fatalf("initialize: %d, session %q", res.StatusCode, id)
+	}
+	hdr := map[string]string{"Authorization": "Bearer " + a, "Mcp-Session-Id": id, "Mcp-Protocol-Version": "2025-06-18"}
+	const list = `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
+	if got := r.post(t, list, hdr); got.StatusCode != http.StatusOK {
+		t.Fatalf("the session right after initialize: %d, want 200", got.StatusCode)
+	}
+	// Each request restarts the idle clock, so wait well past it between
+	// tries (a loaded machine may fire the timer late).
+	for try := 0; try < 5; try++ {
+		time.Sleep(time.Second)
+		got := r.post(t, list, hdr)
+		_, _ = io.Copy(io.Discard, got.Body)
+		if got.StatusCode == http.StatusNotFound {
+			return
+		}
+		if got.StatusCode != http.StatusOK {
+			t.Fatalf("an idle session: %d, want 404", got.StatusCode)
+		}
+	}
+	t.Fatal("the session still answers after 1 s idle (five tries), with a 300 ms idle time: want 404")
+}
+
 // Over HTTP a read token gets the read tools and never login nor logout;
 // the live sessions are counted per entry until they close.
 func TestRemoteMCPServesReadTools(t *testing.T) {

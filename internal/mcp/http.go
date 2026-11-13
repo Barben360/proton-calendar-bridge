@@ -22,12 +22,13 @@ import (
 // The daemon mounts it on its listener behind TokenAuth; the control
 // socket mounts it for the relays of pcb mcp.
 
+// sessionIdle closes a session nobody used for that long: the idle
+// timeout that replaces the listener's write timeout on /mcp (design
+// §5.2). A client that comes back later gets 404 and starts a session
+// again. A variable only so a test can shorten it.
+var sessionIdle = time.Hour
+
 const (
-	// sessionIdle closes a session nobody used for that long: the idle
-	// timeout that replaces the listener's write timeout on /mcp (design
-	// §5.2). A client that comes back later gets 404 and starts a session
-	// again.
-	sessionIdle = time.Hour
 	// boundBearer replaces the caller's Authorization header before the
 	// SDK reads the request: the secret never reaches a tool's
 	// RequestExtra, and the SDK's bearer middleware, which alone can bind
