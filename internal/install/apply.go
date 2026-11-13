@@ -19,8 +19,8 @@ import (
 // Hooks are what Apply cannot do on its own.
 type Hooks struct {
 	// Logout revokes the Proton session of dirs, the scope's directories
-	// the plan resolved (a logout step). Its failure becomes the step's
-	// note: the uninstall goes on (M5-P19).
+	// the plan resolved (a logout step). Its failure (no answer from the
+	// service) becomes the step's note: the uninstall goes on (M5-P19).
 	Logout func(ctx context.Context, dirs paths.Dirs) error
 }
 
@@ -69,12 +69,14 @@ func apply(ctx context.Context, h Host, s *Step, hooks Hooks) error {
 	case s.Action == ActionRun && (s.Kind == KindCommand || s.Kind == KindUser):
 		return runCommand(ctx, h, s.Command)
 	case s.Action == ActionRun && s.Kind == KindLogout:
+		// The pointer is pcb logout's (service.SessionsPage).
+		const end = "end the session in the Proton web app (Settings → Security → Sessions)"
 		if hooks.Logout == nil {
-			s.Note = "not logged out: revoke the session in the Proton account settings"
+			s.Note = "not logged out: " + end
 			return nil
 		}
 		if err := hooks.Logout(ctx, s.dirs); err != nil {
-			s.Note = "logout failed (" + err.Error() + "): revoke the session in the Proton account settings"
+			s.Note = "logout failed (" + err.Error() + "): " + end
 		}
 		return nil
 	case s.Action == ActionRemove && s.Kind == KindFile:

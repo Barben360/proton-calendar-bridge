@@ -856,6 +856,44 @@ func TestARetryIsLoggedAtDebugWithoutSecrets(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a GET that got no answer", func(t *testing.T) {
+		var n atomic.Int32
+		var buf bytes.Buffer
+		log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		cl, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if n.Add(1) == 1 {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close() // no answer at all
+				}
+				return
+			}
+			reply(w, 200, `{"Code":1000}`)
+		}, api.Options{Logger: log})
+		if err := cl.Get(t.Context(), "/core/v4/x", url.Values{"Email": {"hunter2@example.com"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.d) != 1 {
+			t.Fatalf("sleeps = %v, want one", s.d)
+		}
+		var rec struct {
+			Method, Path string
+			Status       *int
+			Wait         time.Duration
+		}
+		lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+		if len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &rec) != nil {
+			t.Fatalf("log = %q, want one record", buf.String())
+		}
+		if rec.Method != "GET" || rec.Path != "/core/v4/x" || rec.Status == nil || *rec.Status != 0 || rec.Wait != s.d[0] {
+			t.Errorf("record %s; want GET /core/v4/x, status 0, wait %v", lines[0], s.d[0])
+		}
+		for _, bad := range []string{"access-secret", "refresh-secret", "uid-1", "hunter2", "Email", "127.0.0.1", "Bearer"} {
+			if strings.Contains(buf.String(), bad) {
+				t.Errorf("the record holds %q: %s", bad, lines[0])
+			}
+		}
+	})
 	t.Run("a request answered at once logs nothing", func(t *testing.T) {
 		var buf bytes.Buffer
 		log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))

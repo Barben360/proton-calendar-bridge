@@ -288,7 +288,12 @@ func TestCaptchaSaysItIsCheckedAfterEnter(t *testing.T) {
 	n := stubRig(t, &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) {
 		return service.LoginResult{State: service.StateNeedsCaptcha, CaptchaURL: "https://verify.proton.me/?t=T1", CaptchaToken: "T1"}, nil
 	}})
+	// A person at a terminal who passes --non-interactive: no wait, no line.
+	n.term = &fakeTerm{interactive: true, lines: []string{""}}
 	n.want(exitcode.MustAct, "login", "--non-interactive")
+	if len(n.term.linePrompts) != 0 {
+		t.Errorf("--non-interactive: prompts %q, want none", n.term.linePrompts)
+	}
 	if strings.Contains(n.errb.String()+n.out.String(), "Checking") {
 		t.Errorf("--non-interactive: stderr %q, stdout %q; want no checking line", n.errb.String(), n.out.String())
 	}

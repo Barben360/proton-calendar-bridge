@@ -1151,9 +1151,11 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
   caller's environment; unreadable: exit 10 naming the directories to pass) and removes a directory only when its
   base name is exactly `pcb` (otherwise it is kept and the `rm` command printed, M5-R5). A key file outside the
   config directory is kept and named; `/usr/local/bin/pcb` is left, with the `rm` line printed (M5-P16, P19).
-  After the steps it says what the logout got, in `pcb logout`'s words ("Logged out.", "Logged out locally; Proton
-  could not be told: …", "Not logged in."), and `--json` carries it as `logout` (`was_logged_in`, `revoked`), absent
-  when no logout answered [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`].
+  After the steps it says what the logout got, in the first line of `pcb logout`'s words ("Logged out.", "Logged out
+  locally; Proton could not be told: …", "Not logged in."), also when a later step fails (exit 40), and `--json`
+  carries it as `logout` (`was_logged_in`, `revoked`); a logout that got no answer has no outcome and its step's note
+  says `logout failed (…)` [verified: `TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked`,
+  `TestUninstallPartialFailureKeepsTheLogoutOutcome`, `TestUninstallLogoutWithoutAnAnswerIsTheStepsNote`].
   With no unit installed and no `--user`/`--system`, applying exits 10 ("nothing to uninstall"), while `--plan`
   exits 0 with "Nothing to remove" and no step (M5-R16) [verified: `TestUninstallPlanWithNothingInstalled`].
 - `pcb service start|stop|restart` on the system scope needs root (exit 10, `sudo pcb service <verb>`); `status`

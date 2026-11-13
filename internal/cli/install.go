@@ -238,13 +238,25 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 		}
 	}
 	if err := install.Apply(ctx, h, steps, install.Hooks{Logout: a.logoutHook(h, &data.Logout)}); err != nil {
+		if data.Logout != nil {
+			// A later step failed: what Proton answered still matters.
+			return Finish(cmd, data, uninstallLogoutText(*data.Logout), applyFailed(err))
+		}
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
 	text := appliedText(steps, nil)
 	if data.Logout != nil {
-		text += "\n" + logoutText(*data.Logout)
+		text += "\n" + uninstallLogoutText(*data.Logout)
 	}
 	return Finish(cmd, data, text, nil)
+}
+
+// uninstallLogoutText is pcb logout's first line for res: its advice to
+// run pcb logout again after a sync makes no sense once the directories
+// are deleted.
+func uninstallLogoutText(res service.LogoutResult) string {
+	first, _, _ := strings.Cut(logoutText(res), "\n")
+	return first
 }
 
 // runsSystemctl reports whether steps run systemctl.
@@ -338,7 +350,7 @@ func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 
 // logoutHook revokes the session of the directories the plan resolved,
 // with the in-process service, never the caller's own (M5-P19), and sets
-// *out to the service's answer.
+// *out to the service's answer; only a failure to get one is an error.
 func (a *app) logoutHook(h install.Host, out **service.LogoutResult) func(context.Context, paths.Dirs) error {
 	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
@@ -359,10 +371,9 @@ func (a *app) logoutHook(h install.Host, out **service.LogoutResult) func(contex
 		if err != nil {
 			return err
 		}
+		// Not revoked is an answer: the outcome line says so, in pcb
+		// logout's words, not a note of the step.
 		*out = &res
-		if res.WasLoggedIn && !res.Revoked {
-			return errors.New("the Proton session could not be revoked")
-		}
 		return nil
 	}
 }

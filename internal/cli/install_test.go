@@ -751,6 +751,10 @@ func TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked(t *testing.T) {
 		{"revoked", service.LogoutResult{WasLoggedIn: true, Revoked: true}, "Logged out.", notTold},
 		{"not revoked", service.LogoutResult{WasLoggedIn: true}, notTold, "Logged out."},
 		{"not logged in", service.LogoutResult{}, "Not logged in.", "Logged out."},
+		// pcb logout's advice to run it again after the sync makes no sense
+		// once the directories are gone: the outcome's first line only.
+		{"revoked while a sync runs", service.LogoutResult{WasLoggedIn: true, Revoked: true, SyncRunning: true}, "Logged out.",
+			"Another pcb process is syncing (pcb sync or pcb serve): once it stops, run pcb logout again so it leaves no event cache."},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -772,6 +776,11 @@ func TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked(t *testing.T) {
 				if !slices.Contains(lines, c.line) || slices.Contains(lines, c.notLine) {
 					t.Errorf("output lacks the line %q (or holds %q):\n%s", c.line, c.notLine, s.stdout.String())
 				}
+				// One wording per outcome: the logout step carries no note
+				// of its own once Proton answered.
+				if strings.Contains(s.stdout.String(), "logout failed") {
+					t.Errorf("the logout step says failed beside the outcome:\n%s", s.stdout.String())
+				}
 			}
 		})
 	}
@@ -780,6 +789,69 @@ func TestUninstallDeleteDataSaysWhetherTheSessionWasRevoked(t *testing.T) {
 	s.want(exitcode.OK, "uninstall", "--json")
 	if d := s.data(); d.Logout != nil {
 		t.Errorf("without --delete-data: logout = %+v, want none", *d.Logout)
+	}
+}
+
+// A logout that gets no answer has no outcome: its step's note says so, in
+// pcb logout's pointer to the sessions page.
+func TestUninstallLogoutWithoutAnAnswerIsTheStepsNote(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.logout = func() (service.LogoutResult, error) { return service.LogoutResult{}, errors.New("no route to Proton") }
+	s.want(exitcode.OK, "install")
+	s.want(exitcode.OK, "uninstall", "--delete-data", "--yes")
+	out := s.stdout.String()
+	if want := "logout failed (no route to Proton): end the session in " + service.SessionsPage; !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	for _, bad := range []string{"Logged out", "Not logged in"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("an outcome %q without an answer:\n%s", bad, out)
+		}
+	}
+}
+
+// A step after the logout that fails (exit 40) still says what Proton
+// answered, in text and in --json.
+func TestUninstallPartialFailureKeepsTheLogoutOutcome(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a directory whatever its parent's mode")
+	}
+	for _, asJSON := range []bool{false, true} {
+		s := newSysRig(t)
+		s.want(exitcode.OK, "install")
+		s.mkdir(userStateDir)
+		parent := filepath.Join(s.root, filepath.Dir(userStateDir))
+		if err := os.Chmod(parent, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+		args := []string{"uninstall", "--delete-data", "--yes"}
+		if asJSON {
+			args = append(args, "--json")
+		}
+		s.want(exitcode.Partial, args...)
+		if !asJSON {
+			if lines := strings.Split(s.stdout.String(), "\n"); !slices.Contains(lines, "Logged out.") {
+				t.Errorf("text: stdout %q, stderr %q; want the line Logged out.", s.stdout.String(), s.errb.String())
+			}
+			continue
+		}
+		var env struct {
+			OK    bool      `json:"ok"`
+			Data  *planData `json:"data"`
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(s.stdout.Bytes(), &env); err != nil {
+			t.Fatalf("envelope: %v: %s", err, s.stdout.String())
+		}
+		if env.OK || env.Error == nil || env.Error.Code != 40 || env.Data == nil || env.Data.Logout == nil ||
+			*env.Data.Logout != (service.LogoutResult{WasLoggedIn: true, Revoked: true}) {
+			t.Errorf("--json: %s; want exit 40 with data.logout revoked", s.stdout.String())
+		}
 	}
 }
 
