@@ -592,11 +592,20 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 	if err != nil {
 		return 0, events.Op{}, asRefusal(err)
 	}
-	// A create stores the client's device alarms: null only when they are
-	// the calendar's whole default set, so never when it holds an email.
+	// A new event stores the client's device alarms: null only when they
+	// are the calendar's whole default set, so never when it holds an email.
+	// A new exception follows its master as an update would (Fix 4 review
+	// I1): the master's value when the alarms mean its device part (null
+	// stays null), else them plus the master's email entries, so a moved
+	// occurrence keeps the series' email reminder.
 	list := pl.alarms(we)
 	notifications := events.Value(wireNotifications(list))
-	if ical.SameNotifications(list, pl.d.notifications(we.AllDay)) {
+	switch {
+	case master != nil && strings.TrimSpace(string(master.Event.Notifications)) != "":
+		if notifications, _, err = pl.notificationsAfter(master, list); err != nil {
+			return 0, events.Op{}, err
+		}
+	case ical.SameNotifications(list, pl.d.notifications(we.AllDay)):
 		notifications = events.Null[events.NotificationList]()
 	}
 	sealed, err := cards.Seal(parts, cards.SealKeys{Signer: pl.d.Signer, CalendarPrimary: pl.d.CalendarPrimary})
@@ -785,7 +794,13 @@ func (pl *planner) alarms(we ical.WriteEvent) []ical.Notification {
 // followed by the email ones of r's set, unchanged (none for the parts'
 // VALARMs), within Proton's limit: a null row's email default is not lost.
 func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Optional[events.NotificationList], bool, error) {
-	list := pl.alarms(we)
+	return pl.notificationsAfter(r, pl.alarms(we))
+}
+
+// notificationsAfter is updatedNotifications for the device notifications
+// list, against r's set: of the row itself on an update, of the master for
+// a new exception.
+func (pl *planner) notificationsAfter(r *row, list []ical.Notification) (events.Optional[events.NotificationList], bool, error) {
 	raw := strings.TrimSpace(string(r.Event.Notifications))
 	var effective []ical.Notification
 	keep := events.Optional[events.NotificationList]{} // absent: the row keeps its own

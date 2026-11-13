@@ -110,7 +110,7 @@ Not checked by the bridge: that DTSTART is the rule's first occurrence (research
 
 Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}]`), never in a card part (research D). Rules ported, as rules, from cal-gateway (README credits), except for email.
 
-Email notifications (`Type` 0) are Proton-side (Fix 4, the author's choice A): Proton's servers send them and a CalDAV client cannot act on them. pcb does not serve them as VALARMs, from a row's list or from the calendar defaults a `null` row follows, and never writes one from CalDAV; an update keeps the row's. Why: a new Proton calendar's defaults are an email and a device notification; pcb served both, Thunderbird's edit dialog showed one reminder and saved the DISPLAY one alone, and the update turned the row's `null` into that one entry, losing the email reminder [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4; `TestThunderbirdKeepsProtonEmailReminders`, `TestEmailNotificationsStayProtonSide`].
+Email notifications (`Type` 0) are Proton-side (Fix 4, the author's choice A): Proton's servers send them and a CalDAV client cannot act on them. pcb does not serve them as VALARMs, from a row's list or from the calendar defaults a `null` row follows, and never writes one from CalDAV; an update keeps the row's. One exception to "not served": a row without a `Notifications` field (older clients kept alarms in the card) is served with its card's VALARMs as stored, an `ACTION:EMAIL` one included; a write ignores that EMAIL alarm on both sides of the comparison, so it changes nothing. Why: a new Proton calendar's defaults are an email and a device notification; pcb served both, Thunderbird's edit dialog showed one reminder and saved the DISPLAY one alone, and the update turned the row's `null` into that one entry, losing the email reminder [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4; `TestThunderbirdKeepsProtonEmailReminders`, `TestEmailNotificationsStayProtonSide`].
 
 | VALARM | Outcome |
 |---|---|
@@ -131,6 +131,7 @@ Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (typ
 | create, no VALARM | `[]`, or `null` when the calendar's default set is empty too |
 | create, the set equals the calendar's whole default set (part-day or full-day) | `null` (follows later changes of the defaults); never when the defaults hold an email notification |
 | create, otherwise | the array |
+| create of a new exception of a stored master (Thunderbird moving one occurrence) | as an update against the master's set: the master's value when the set equals its device part (`null` stays `null`), else the set then the master's email entries (a `null` master's: the defaults'), so the occurrence keeps the series' email reminder [verified: `TestEmailNotificationsStayProtonSide`] |
 | update, the set equals the device part of the one pcb served from (the defaults when the row has `null`, the row's list, the parts' VALARMs when the row has none) | the row's own value, unchanged (`null` stays `null`) |
 | update, otherwise | the set, then the email entries of that one unchanged (a `null` row's: the defaults'), within 10 |
 

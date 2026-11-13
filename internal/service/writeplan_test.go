@@ -640,6 +640,14 @@ func TestEmailNotificationsStayProtonSide(t *testing.T) {
 		}
 		return p
 	}
+	planDs := func(t *testing.T, g Group, bodies ...[]string) WritePlan {
+		t.Helper()
+		p, err := Plan(g, parse(t, cal(bodies...)), d)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return p
+	}
 	email := func(trigger string) []string {
 		return []string{"BEGIN:VALARM", "ACTION:EMAIL", "TRIGGER:" + trigger, "DESCRIPTION:Reminder", "SUMMARY:Reminder", "ATTENDEE:mailto:" + meEmail, "END:VALARM"}
 	}
@@ -713,6 +721,62 @@ func TestEmailNotificationsStayProtonSide(t *testing.T) {
 		}
 		if !slices.Contains(p.Notes, noteAlarms) {
 			t.Errorf("notes %v lack %q", p.Notes, noteAlarms)
+		}
+	})
+	t.Run("a new exception follows its master", func(t *testing.T) {
+		// Thunderbird moves one occurrence and sends the DISPLAY alarm
+		// alone: the new row keeps the master's reminders, email included.
+		for _, c := range []struct {
+			name, master, trigger, want string
+		}{
+			{"null master, the display default", "", "-PT15M", "null"},
+			{"null master, another display alarm", "", "-PT30M", `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT15M"}]`},
+			{"explicit master, its display alarm", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`, "-PT15M", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`},
+			{"explicit master, another display alarm", `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`, "-PT30M", `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT1H"}]`},
+		} {
+			m := seed{id: "row-m", parts: seriesParts("SEQUENCE:1"), notifications: c.master}.row(t)
+			gs := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{m}}, groupKeys(t))
+			master := seriesBody("SEQUENCE:1")
+			exc := with(t, exceptionBody(22, "SEQUENCE:1"), map[string]string{"TRIGGER:-PT15M": "TRIGGER:" + c.trigger})
+			p := planD(t, gs, master)
+			if len(p.Ops) != 0 {
+				t.Fatalf("%s: the series as served plans %s", c.name, describe(p))
+			}
+			p = planDs(t, gs, master, exc)
+			i := slices.IndexFunc(p.Ops, func(op events.Op) bool { return op.Create != nil })
+			if i < 0 {
+				t.Fatalf("%s: ops = %s, want the exception's create", c.name, describe(p))
+			}
+			if n := open(t, p.Ops[i], nil).field("Notifications"); n != c.want {
+				t.Errorf("%s: the new exception's Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+	t.Run("an all-day null row with the full-day defaults", func(t *testing.T) {
+		dd := d
+		dd.FullDay = []ical.Notification{{Type: 0, Trigger: "-PT15H"}, {Type: 1, Trigger: "-PT15H"}}
+		parts := masterParts()
+		parts[ical.SharedSigned] = frag("UID:"+planUID, stamp, "SEQUENCE:2", "DTSTART;VALUE=DATE:20261115", "DTEND;VALUE=DATE:20261116")
+		allDay := seed{id: "row-a", fullDay: true, parts: parts}.row(t)
+		ga := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{allDay}}, groupKeys(t))
+		body := with(t, masterBody(), map[string]string{
+			"DTSTART;TZID=Europe/Paris:20261115T100000": "DTSTART;VALUE=DATE:20261115",
+			"DTEND;TZID=Europe/Paris:20261115T110000":   "DTEND;VALUE=DATE:20261116",
+			"TRIGGER:-PT15M": "TRIGGER:-PT15H",
+		})
+		for _, c := range []struct{ name, trigger, want string }{
+			{"the display default", "-PT15H", "null"},
+			{"the display default spelt otherwise", "-P0DT15H0M0S", "null"},
+			{"another display alarm", "-PT14H", `[{"Type":1,"Trigger":"-PT14H"},{"Type":0,"Trigger":"-PT15H"}]`},
+		} {
+			edited := with(t, body, map[string]string{"SUMMARY:Standup": "SUMMARY:Planning", "TRIGGER:-PT15H": "TRIGGER:" + c.trigger})
+			p, err := Plan(ga, parse(t, cal(edited)), dd)
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			if n := open(t, onlyUpdate(t, p, "row-a"), &allDay).field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
 		}
 	})
 	t.Run("a create", func(t *testing.T) {
