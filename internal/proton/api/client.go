@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -31,7 +32,32 @@ const (
 	maxRetryAfterHeader = time.Hour
 	refreshTimeout      = 30 * time.Second
 	defaultAppVersion   = "Other"
+	// pingAfter and pingTimeout are the HTTP/2 health check of the default
+	// transport: after pingAfter without a frame from Proton a PING is
+	// sent, and a connection whose PING is unanswered for pingTimeout is
+	// closed (its requests fail and are retried on a new one). A dead
+	// connection is so found within 30 s, the request timeout; a live one
+	// costs one PING per 15 s of silence, and a slow answer on it is not
+	// cut, since Proton answers the PING meanwhile.
+	pingAfter   = 15 * time.Second
+	pingTimeout = 15 * time.Second
 )
+
+// defaultTransport is the transport of the clients built without Options.HTTP:
+// http.DefaultTransport's settings with the HTTP/2 health check, one pool
+// for all of them and nothing else in the process.
+var defaultTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ForceAttemptHTTP2 = true
+	t.HTTP2 = HTTP2Health()
+	return t
+}()
+
+// HTTP2Health is the HTTP/2 health check pcb's transports to Proton use
+// (pingAfter, pingTimeout).
+func HTTP2Health() *http.HTTP2Config {
+	return &http.HTTP2Config{SendPingTimeout: pingAfter, PingTimeout: pingTimeout}
+}
 
 var errTooLarge = errors.New("response too large")
 
@@ -41,7 +67,7 @@ type Options struct {
 	BaseURL    string
 	AppVersion string       // x-pm-appversion; default "Other"
 	UserAgent  string       // default "pcb/<buildinfo.Version>"
-	HTTP       *http.Client // default: 30 s timeout; redirects are never followed
+	HTTP       *http.Client // default: 30 s timeout, an HTTP/2 health check; redirects are never followed
 	// Refresh exchanges stale tokens for new ones. It should wrap
 	// ErrSessionEnded when the refresh token is no longer usable. Without it,
 	// a 401 ends the session. It runs under the client's lock and detached
@@ -57,12 +83,15 @@ type Client struct {
 	o  Options
 	mu sync.Mutex // guards tok and serialises refreshes
 	tk Tokens
+	// failed is set when a send failed: its connection may be one that
+	// stopped answering, kept in the pool once its stream is reset.
+	failed atomic.Bool
 }
 
 // New returns a Client holding t.
 func New(t Tokens, o Options) *Client {
 	if o.HTTP == nil {
-		o.HTTP = &http.Client{Timeout: defaultTimeout}
+		o.HTTP = &http.Client{Timeout: defaultTimeout, Transport: defaultTransport}
 	}
 	// A followed redirect would send the session headers to another URL; the
 	// 3xx is answered as a failure instead. Set on a copy: the caller's client
@@ -167,8 +196,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			return notSent(fmt.Errorf("%s: %w", where, err))
 		}
 		sent := c.Tokens()
+		if c.failed.Swap(false) {
+			c.dropIdle()
+		}
 		status, hdr, data, err := c.send(ctx, method, target, payload, sent)
 		if err != nil {
+			c.failed.Store(true)
+			c.dropIdle()
 			if ctx.Err() != nil {
 				return fmt.Errorf("%s: %w", where, ctx.Err())
 			}
@@ -228,6 +262,14 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 	}
 }
+
+// dropIdle closes the idle connections of the client's transport after a
+// send failed (live 2026-11-13): an HTTP/2 connection that stops answering
+// stays in the pool once the timed-out stream is reset, and every later
+// request would go to it again. A connection still carrying a request is
+// left alone. It runs at the failure and again before the next send, as
+// the reset stream may still hold the connection at the first call.
+func (c *Client) dropIdle() { c.o.HTTP.CloseIdleConnections() }
 
 // refresh rotates the tokens unless another goroutine already did.
 func (c *Client) refresh(ctx context.Context, stale Tokens) error {
