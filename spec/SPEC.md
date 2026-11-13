@@ -570,8 +570,8 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
   clients may want generated VTIMEZONEs, which stay unbuilt [call].
 - JSCalendar (0006) returns with the first adapter that is not iCalendar-native, as a
   codec over this model. Cost if wrong: that layer is added later.
-- Recurrence: no expansion in M3 (no `calendar-query`, no free-busy); library choice
-  after the audit E16 when time-range queries or free-busy are needed [call].
+- Recurrence: no expansion in M3 (no `calendar-query`, no free-busy); expansion in
+  `ical.Expand`, our own expander over Proton's set (E16).
 - Fuzz tests on every parser (`internal/ical`, `internal/caldav` request bodies)
   [verified: `FuzzReportBody`, `FuzzPropfindBody`]; golden files from real Proton,
   Thunderbird and Apple exports are not yet collected.
@@ -1639,7 +1639,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
 | E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on a headless Debian 13 server |
-| E16 | RRULE library audit vs our own | C0 | read, test against RFC 5545 examples |
+| E16 | RRULE library audit vs our own | C0 | done (M8): rrule-go v1.8.2 not adopted (DST gap and overlap instants differ from RFC 5545 §3.3.5); own expander over Proton's set, `E16-rrule.md` |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
 | E18 | (dropped: no REST API planned) | – | – |
 | E19 | MCP Go SDK: version, names, CGO-freeness, Host/Origin checks, which agent clients declare elicitation | A4 (M8) | done (M8): `modelcontextprotocol/go-sdk` v1.8.0 pinned, pure Go (Go ≥ 1.25), stateful streamable HTTP, elicitation through `InputRequests`, the SDK checks loopback `Host` but never `Origin`; client declarations from Claude Code's docs, live check in HUMAN-CHECKS 10; `E19-mcp-go-sdk.md` |
