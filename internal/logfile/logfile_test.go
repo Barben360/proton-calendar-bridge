@@ -263,3 +263,29 @@ func TestLogfileFailedRenameLosesNothing(t *testing.T) {
 		t.Errorf("log = %q, want a fresh file", got)
 	}
 }
+
+// One Close that fails during a rotation does not stop the log: the
+// rotation goes on (the file is renamed and a fresh one opened), and every
+// later write lands (review M5).
+func TestLogfileFailedCloseKeepsLogging(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "ui.log")
+	f, err := logfile.Open(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	write(t, f, "aaaaaa")
+	if err := logfile.CloseHandle(f); err != nil {
+		t.Fatal(err)
+	}
+	write(t, f, "bbbbbb") // rotates: its Close fails
+	write(t, f, "cc")
+	write(t, f, "dddddd") // rotates again, normally
+	if got := read(t, path+".1"); got != "bbbbbbcc" {
+		t.Errorf(".1 = %q, want the writes after the failed Close", got)
+	}
+	if got := read(t, path); got != "dddddd" {
+		t.Errorf("log = %q, want the last write", got)
+	}
+}

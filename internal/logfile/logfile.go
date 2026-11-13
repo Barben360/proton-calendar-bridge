@@ -89,11 +89,12 @@ func (f *File) Write(p []byte) (int, error) {
 // rotate moves the file to path+".1" and opens a fresh one. mu is held. A
 // failed rename is not an error of the write: the log keeps going in the
 // same file, uncapped, and the rename is retried only once the file has
-// grown by another max. Only a failure to reopen the file is returned.
+// grown by another max. A failed Close is not one either: every write went
+// straight to the file (no buffer to lose), and keeping the handle would
+// fail every later write (review M5). Only a failure to reopen the file is
+// returned.
 func (f *File) rotate() error {
-	if err := f.f.Close(); err != nil {
-		return err
-	}
+	_ = f.f.Close()
 	f.f = nil
 	renameErr := os.Rename(f.path, f.path+".1")
 	if err := f.open(); err != nil {
