@@ -111,7 +111,18 @@ func (k dbusKeyring) run(ctx context.Context, fn func(ctx context.Context, c *db
 		return err
 	}
 	defer c.Close() //nolint:errcheck // nothing to recover
-	return fn(ctx, c)
+	return bounded(ctx, fn(ctx, c))
+}
+
+// bounded maps a call's failure once the bound has expired: godbus closes
+// the connection at the deadline, so a hung call may fail with "use of
+// closed network connection" rather than the deadline itself. Either way
+// the service did not answer in time. A locked keyring stays ErrLocked.
+func bounded(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || errors.Is(err, ErrNoService) || errors.Is(err, ErrLocked) {
+		return err
+	}
+	return fmt.Errorf("%w: the Secret Service did not answer", ErrNoService)
 }
 
 func locked(ctx context.Context, c *dbus.Conn) (bool, error) {

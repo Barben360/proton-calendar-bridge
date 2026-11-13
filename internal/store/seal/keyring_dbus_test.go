@@ -170,6 +170,29 @@ func TestDBusKeyringHungServiceIsErrNoServiceWithinTheBound(t *testing.T) {
 	}
 }
 
+// Once the 2 s bound has expired, godbus closes the connection and a
+// pending call may fail with "use of closed network connection" instead of
+// the deadline: that failure still reads as an absent service. Before the
+// bound, a plain failure stays itself; a locked keyring stays ErrLocked.
+func TestBoundExpiryReadsAsNoServiceWhateverTheCallReturned(t *testing.T) {
+	closed := errors.New("secret service: read unix @->/tmp/dbus-x: use of closed network connection")
+	expired, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	<-expired.Done()
+	if err := seal.Bounded(expired, closed); !errors.Is(err, seal.ErrNoService) {
+		t.Fatalf("expired bound: err = %v, want ErrNoService", err)
+	}
+	if err := seal.Bounded(expired, seal.ErrLocked); !errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) {
+		t.Fatalf("expired bound, locked: err = %v, want ErrLocked only", err)
+	}
+	if err := seal.Bounded(expired, nil); err != nil {
+		t.Fatalf("expired bound, success: err = %v, want nil", err)
+	}
+	if err := seal.Bounded(context.Background(), closed); errors.Is(err, seal.ErrNoService) || !errors.Is(err, closed) {
+		t.Fatalf("live bound: err = %v, want the call's own error", err)
+	}
+}
+
 // Ruling R13: DeleteKey removes this state's item through Item.Delete, and
 // only it; a second DeleteKey finds nothing and is no error. A locked
 // keyring is ErrLocked and deletes nothing, without a prompt.
