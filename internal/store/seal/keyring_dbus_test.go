@@ -134,3 +134,38 @@ func TestProbeFailsWithoutService(t *testing.T) {
 		t.Fatalf("dead address: err = %v, want ErrNoService", err)
 	}
 }
+
+// replace=true: a second Set on the same attributes replaces the item.
+func TestDBusKeyringSetReplacesTheSameAttributes(t *testing.T) {
+	addr, fake := sstest.Start(t)
+	k := seal.DBusKeyring(addr)
+	ctx := context.Background()
+	attrs := map[string]string{"application": "pcb", "state": "/x"}
+	if err := k.Set(ctx, "l", attrs, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Set(ctx, "l", attrs, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(fake.Items()); n != 1 {
+		t.Fatalf("items = %d, want 1", n)
+	}
+	if got, err := k.Get(ctx, attrs); err != nil || string(got) != "second" {
+		t.Fatalf("Get = %q, %v, want the second secret", got, err)
+	}
+}
+
+// A service that stops answering reads as absent within the 2 s bound.
+func TestDBusKeyringHungServiceIsErrNoServiceWithinTheBound(t *testing.T) {
+	addr, fake := sstest.Start(t)
+	fake.SetHang(true)
+	start := time.Now()
+	err := seal.Probe(context.Background(), seal.DBusKeyring(addr))
+	d := time.Since(start)
+	if !errors.Is(err, seal.ErrNoService) {
+		t.Fatalf("err = %v, want ErrNoService", err)
+	}
+	if d < 1500*time.Millisecond || d > 3500*time.Millisecond {
+		t.Fatalf("took %v, want about 2 s", d)
+	}
+}

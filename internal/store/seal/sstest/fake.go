@@ -43,6 +43,20 @@ type Fake struct {
 	items    []Item
 	calls    []string
 	sessions int
+	hang     chan struct{} // non-nil: Properties.Get blocks until it closes
+}
+
+// SetHang makes the service stop answering: Properties.Get (the first call
+// the keyring client makes) blocks until SetHang(false) or the test ends.
+func (f *Fake) SetHang(h bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !h && f.hang != nil {
+		close(f.hang)
+		f.hang = nil
+	} else if h && f.hang == nil {
+		f.hang = make(chan struct{})
+	}
 }
 
 // SetLocked locks or unlocks the default collection.
@@ -198,6 +212,12 @@ func (p props) Get(iface, name string) (dbus.Variant, *dbus.Error) {
 		return dbus.Variant{}, dbusErr("org.freedesktop.DBus.Error.UnknownProperty", name)
 	}
 	p.f.mu.Lock()
+	hang := p.f.hang
+	p.f.mu.Unlock()
+	if hang != nil {
+		<-hang
+	}
+	p.f.mu.Lock()
 	defer p.f.mu.Unlock()
 	return dbus.MakeVariant(p.f.locked), nil
 }
@@ -223,6 +243,7 @@ func Start(t testing.TB) (string, *Fake) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	f := &Fake{}
+	t.Cleanup(func() { f.SetHang(false) }) // free a blocked handler before the bus goes
 	must := func(err error) {
 		t.Helper()
 		if err != nil {

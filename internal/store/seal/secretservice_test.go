@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -83,6 +84,46 @@ func TestSecretServiceRoundTrip(t *testing.T) {
 	}
 	if _, err := s.Seal([]byte("again"), nil); err != nil || len(k.items) != 1 {
 		t.Fatalf("second Seal: err = %v, items = %d (key must be created once)", err, len(k.items))
+	}
+}
+
+// slowMissKeyring widens the window between "no key" and the write: a Get
+// that finds nothing returns only after a pause, so two unsynchronised first
+// sealers both see "no key" before either stores one.
+type slowMissKeyring struct{ *memKeyring }
+
+func (g slowMissKeyring) Get(ctx context.Context, attrs map[string]string) ([]byte, error) {
+	v, err := g.memKeyring.Get(ctx, attrs)
+	if errors.Is(err, seal.ErrNoKey) {
+		time.Sleep(150 * time.Millisecond)
+	}
+	return v, err
+}
+
+// Two processes sealing for the first time at once must agree on one key.
+func TestSecretServiceFirstSealsAgreeOnOneKey(t *testing.T) {
+	g := slowMissKeyring{newMem()}
+	dir := t.TempDir()
+	blobs := make([][]byte, 2)
+	var wg sync.WaitGroup
+	for i := range blobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b, err := (&seal.SecretService{Keyring: g, StateDir: dir}).Seal([]byte{byte('a' + i)}, nil)
+			if err != nil {
+				t.Error(err)
+			}
+			blobs[i] = b
+		}()
+	}
+	wg.Wait()
+	third := &seal.SecretService{Keyring: g.memKeyring, StateDir: dir}
+	for i, b := range blobs {
+		got, err := third.Open(b, nil)
+		if err != nil || string(got) != string([]byte{byte('a' + i)}) {
+			t.Errorf("blob %d: %q, %v (the second Set replaced the first key)", i, got, err)
+		}
 	}
 }
 

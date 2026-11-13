@@ -5,7 +5,11 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 )
 
 // Keyring is the part of a desktop keyring (freedesktop Secret Service) the
@@ -23,8 +27,9 @@ type Keyring interface {
 }
 
 const (
-	itemLabel = "pcb sealing key"
-	itemApp   = "pcb"
+	createLockWait = 30 * time.Second
+	itemLabel      = "pcb sealing key"
+	itemApp        = "pcb"
 )
 
 // SecretService seals with AES-256-GCM under a random key kept in the
@@ -70,20 +75,10 @@ func (s *SecretService) key(create bool) ([]byte, error) {
 	ctx := context.Background()
 	attrs := s.attrs()
 	key, err := s.Keyring.Get(ctx, attrs)
-	if errors.Is(err, ErrNoKey) {
-		if !create {
-			return nil, fmt.Errorf("%w: no item for %s in the desktop keyring", ErrNoKey, attrs["state"])
-		}
-		fresh := make([]byte, keySize)
-		if _, err := rand.Read(fresh); err != nil {
-			return nil, fmt.Errorf("random key: %w", err)
-		}
-		if err := s.Keyring.Set(ctx, itemLabel, attrs, fresh); err != nil {
-			return nil, err
-		}
-		// Read back what stands: if another process created the item
-		// meanwhile, its key is the one to use.
-		key, err = s.Keyring.Get(ctx, attrs)
+	if errors.Is(err, ErrNoKey) && create {
+		key, err = s.create(ctx, attrs)
+	} else if errors.Is(err, ErrNoKey) {
+		return nil, fmt.Errorf("%w: no item for %s in the desktop keyring", ErrNoKey, attrs["state"])
 	}
 	if err != nil {
 		return nil, err
@@ -92,6 +87,39 @@ func (s *SecretService) key(create bool) ([]byte, error) {
 		return nil, fmt.Errorf("%w: the keyring item for %s is not %d bytes", ErrCorrupt, attrs["state"], keySize)
 	}
 	return key, nil
+}
+
+// create makes the key under an exclusive lock on <StateDir>/sealer.lock:
+// the keyring replaces an item with the same attributes, so two first
+// sealers racing would each store a key and the first one's data would be
+// sealed under a key that no longer exists. Under the lock the loser finds
+// the winner's key. Off Unix the lock is a no-op, as elsewhere.
+func (s *SecretService) create(ctx context.Context, attrs map[string]string) ([]byte, error) {
+	if err := os.MkdirAll(s.StateDir, 0o700); err != nil {
+		return nil, err
+	}
+	lctx, cancel := context.WithTimeout(ctx, createLockWait)
+	defer cancel()
+	unlock, err := filelock.Lock(lctx, filepath.Join(s.StateDir, "sealer.lock"))
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+	case err != nil:
+		return nil, fmt.Errorf("locking the key creation: %w", err)
+	default:
+		defer unlock()
+	}
+	key, err := s.Keyring.Get(ctx, attrs)
+	if !errors.Is(err, ErrNoKey) {
+		return key, err // another process created it meanwhile (or a real error)
+	}
+	fresh := make([]byte, keySize)
+	if _, err := rand.Read(fresh); err != nil {
+		return nil, fmt.Errorf("random key: %w", err)
+	}
+	if err := s.Keyring.Set(ctx, itemLabel, attrs, fresh); err != nil {
+		return nil, err
+	}
+	return s.Keyring.Get(ctx, attrs) // what the keyring now holds
 }
 
 // Probe reports whether the keyring is usable: nil when a Secret Service
