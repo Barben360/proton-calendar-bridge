@@ -115,6 +115,8 @@ type Fake struct {
 	codes     []string                      // 2FA codes received, in order
 	sessions  map[string]sessionRec         // access token minted by Session → session
 	logins    map[string]loginRec           // UID → session handed out by Login, not spent
+	rotated   map[string]string             // refresh token issued by a refresh → its pair's access token
+	refreshes []string                      // every refresh token handed out, in order
 
 	cal calendars
 }
@@ -181,6 +183,7 @@ func New(t TB, o Options) *Fake {
 		passwords: map[string]string{},
 		sessions:  map[string]sessionRec{},
 		logins:    map[string]loginRec{},
+		rotated:   map[string]string{},
 		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
@@ -347,6 +350,15 @@ func (f *Fake) AccessTokens() []string {
 	return append([]string(nil), f.minted...)
 }
 
+// RefreshTokens returns every refresh token the fake has handed out (by a
+// login, a refresh, Session or Login), spent or not, so a test can check that
+// none leaks into a message.
+func (f *Fake) RefreshTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.refreshes...)
+}
+
 // ExpireAccessTokens makes every access token handed out so far answer 401
 // until it is refreshed.
 func (f *Fake) ExpireAccessTokens() {
@@ -396,6 +408,7 @@ func (f *Fake) Session(t TB, username string) api.Tokens {
 	f.sessions[tk.AccessToken] = sessionRec{username, tk.UID}
 	f.issued[tk.AccessToken] = true
 	f.minted = append(f.minted, tk.AccessToken)
+	f.refreshes = append(f.refreshes, tk.RefreshToken)
 	return tk
 }
 
@@ -438,6 +451,7 @@ func (f *Fake) Login(t TB, username string) api.Tokens {
 	f.logins[tok.UID] = loginRec{username, tok}
 	f.issued[tok.AccessToken] = true
 	f.minted = append(f.minted, tok.AccessToken)
+	f.refreshes = append(f.refreshes, tok.RefreshToken)
 	return tok
 }
 
@@ -526,6 +540,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		reply(w, fail.status, fail.code, "injected failure")
 	case expired:
 		reply(w, http.StatusUnauthorized, http.StatusUnauthorized, "Invalid access token")
+	case route == "POST /auth/v4/refresh" && f.refusesRefresh(r):
+		reply(w, http.StatusBadRequest, api.CodeRefreshInvalid, "Invalid refresh token")
 	case route == "POST /auth/v4" && f.challenged(r, user):
 		WriteChallenge(w, f.captchaToken(user), f.o.CaptchaMethods)
 	case strings.HasPrefix(r.URL.Path, "/calendar/") || route == "GET /settings/calendar":
@@ -545,6 +561,27 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.proxy.ServeHTTP(w, r)
 	}
+}
+
+// refusesRefresh reports a refresh Proton refuses before looking further
+// (measured live 2026-11-12, spec/experiments/E01): the refresh token was
+// issued by a refresh and the body does not carry that pair's access token.
+// A login's refresh token needs none. The refusal does not spend the token.
+// The body is put back for the route.
+func (f *Fake) refusesRefresh(r *http.Request) bool {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var req struct{ RefreshToken, AccessToken string }
+	if json.Unmarshal(body, &req) != nil {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc, rotated := f.rotated[req.RefreshToken]
+	return rotated && req.AccessToken != acc
 }
 
 // requestUser returns the user of r: the session's, or on POST /auth/v4 and
@@ -752,6 +789,12 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 			f.mu.Lock()
 			f.issued[tok] = true
 			f.minted = append(f.minted, tok)
+			if ref, ok := body["RefreshToken"].(string); ok {
+				f.refreshes = append(f.refreshes, ref)
+				if route == "POST /auth/v4/refresh" {
+					f.rotated[ref] = tok
+				}
+			}
 			f.mu.Unlock()
 		}
 		return setBody(resp, http.StatusOK, body)

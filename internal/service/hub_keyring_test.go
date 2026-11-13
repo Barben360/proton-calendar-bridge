@@ -158,6 +158,11 @@ func TestFreshStatePicksTheUnlockedKeyring(t *testing.T) {
 	if st.Secrets != "sealed" || st.Sealer != "secret-service" || st.KeyFile != "" {
 		t.Errorf("Status = secrets %q sealer %q key_file %q, want sealed, secret-service, none", st.Secrets, st.Sealer, st.KeyFile)
 	}
+	// No key file is configured to be absent: pcb status must not say
+	// "key_file:  (absent)" for a key in the keyring.
+	if st.KeyFileAbsent {
+		t.Error("KeyFileAbsent on a keyring state, want false")
+	}
 }
 
 func TestFreshStateWithoutKeyringUsesKeyFile(t *testing.T) {

@@ -257,6 +257,48 @@ func TestCaptchaInteractiveRetries(t *testing.T) {
 	}
 }
 
+// Observation O1: Proton takes seconds to check a solved CAPTCHA. Once
+// Enter is pressed, one line says the check is under way, before the next
+// login attempt; without a person (no Enter) it is never printed.
+func TestCaptchaSaysItIsCheckedAfterEnter(t *testing.T) {
+	t.Parallel()
+	const checking = "Checking the CAPTCHA with Proton…\n"
+	var r *rig
+	var atEnter, atLogin []string
+	s := &stubAPI{login: func(req service.LoginRequest) (service.LoginResult, error) {
+		atLogin = append(atLogin, r.errb.String())
+		if req.CaptchaToken == "" {
+			return service.LoginResult{State: service.StateNeedsCaptcha, CaptchaURL: "https://verify.proton.me/?t=T1", CaptchaToken: "T1"}, nil
+		}
+		return ready()
+	}}
+	r = stubRig(t, s)
+	r.term = &fakeTerm{interactive: true, lines: []string{""}, onLine: func() { atEnter = append(atEnter, r.errb.String()) }}
+	r.want(exitcode.OK, "login")
+	if len(atEnter) != 1 || len(atLogin) != 2 {
+		t.Fatalf("%d Enter, %d logins; want 1, 2", len(atEnter), len(atLogin))
+	}
+	if strings.Contains(atEnter[0], "Checking") {
+		t.Errorf("the line is printed before Enter: %q", atEnter[0])
+	}
+	if !strings.HasSuffix(atLogin[1], checking) || strings.Count(r.errb.String(), checking) != 1 {
+		t.Errorf("stderr at the retried login %q (all %q), want it to end with %q, printed once", atLogin[1], r.errb.String(), checking)
+	}
+
+	n := stubRig(t, &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) {
+		return service.LoginResult{State: service.StateNeedsCaptcha, CaptchaURL: "https://verify.proton.me/?t=T1", CaptchaToken: "T1"}, nil
+	}})
+	// A person at a terminal who passes --non-interactive: no wait, no line.
+	n.term = &fakeTerm{interactive: true, lines: []string{""}}
+	n.want(exitcode.MustAct, "login", "--non-interactive")
+	if len(n.term.linePrompts) != 0 {
+		t.Errorf("--non-interactive: prompts %q, want none", n.term.linePrompts)
+	}
+	if strings.Contains(n.errb.String()+n.out.String(), "Checking") {
+		t.Errorf("--non-interactive: stderr %q, stdout %q; want no checking line", n.errb.String(), n.out.String())
+	}
+}
+
 func TestCaptchaInteractiveStopsAfterThreeRounds(t *testing.T) {
 	t.Parallel()
 	s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) {

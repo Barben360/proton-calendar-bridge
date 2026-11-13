@@ -1,6 +1,6 @@
 # E12 — Recurrence forms Proton refuses or alters
 
-Status: **source-based; the M4 write path gatekeeps on it; live run pending** (`spec/HUMAN-CHECKS.md` §6, steps W8, W9, 6.3 B2–B4 and D5–D10). Marks as in E10. Evidence: `raw/m4-research.md` §E ("research E"), §A.4. Feeds SPEC §8.4, `spec/mapping.md` §4 and §7, rulings M4-R5, M4-R10, M4-R12.
+Status: **source-based; the M4 write path gatekeeps on it; partly run live** (2026-11-13: the off-rule DTSTART of W8 `pcb-m4-notfirst`, below; the other forms, W9, 6.3 B2–B4, D4b and D5–D10 still pending, `spec/HUMAN-CHECKS.md` §6). Marks as in E10. Evidence: `raw/m4-research.md` §E ("research E"), §A.4. Feeds SPEC §8.4, `spec/mapping.md` §4 and §7, rulings M4-R5, M4-R10, M4-R12.
 
 ## Question
 
@@ -27,7 +27,7 @@ Status: **source-based; the M4 write path gatekeeps on it; live run pending** (`
 `internal/ical/validate.go` (`checkRRule`, `monthlyOrdinal`, `dailyByday`) and `internal/service/writeplan.go` (`Plan`); the table is `spec/mapping.md` §4.
 - The bridge refuses, before any Proton call, every rule outside the allowed set per FREQ (ruling M4-R10), RDATE, EXRULE and RANGE (403 `pcb:unsupported-recurrence`, `pcb:rdate`, `pcb:exrule`, `pcb:recurrence-range`), so the server's own enforcement never matters for what pcb sends. [verified: `TestRRuleLimits`, `TestRefusals`]
 - Rewrites with the same meaning: R5 and R12. [verified: `TestMonthlyOrdinalBydayIsRewritten`, `TestDailyBydayIsRewritten`]
-- DTSTART being the first occurrence is **not** checked.
+- A write that introduces a master DTSTART not an occurrence of its rule (a create, or an update changing DTSTART or RRULE) is refused (403 `pcb:unsupported-recurrence`, `DTSTART is not an occurrence of the RRULE`), since the live finding below; an update keeping both passes (`spec/mapping.md` §4). Whether the web app can create such a series is 6.3 D4b. [verified: `TestRRuleStartMustBeAnOccurrence`, `TestADTSTARTOffItsRuleIsRefusedBeforeProton`, `TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt`]
 - One sync call per PUT, master first, then the exceptions (updates and creates), then deletes; an exception row absent from the body is deleted; an exception's SEQUENCE is at least the master's; deleting one occurrence is the master's EXDATE (in both signed parts) plus the delete of its exception row. [verified: `TestDeleteOneOccurrenceOfASeries`, `TestMasterEditMirrorsExceptions`, `TestExceptionCreateHasSequenceAtLeastMaster`, `TestPatchExdateInBothSignedParts`]
 - After a refused or partly applied call, the rows are read back: what Proton holds is cached and the answer is 412 for a concurrent change, else 403 `pcb:proton-refused` (M4-R34). [verified: `TestOccurrenceDeleteRaceIsTruthful`, `TestEntryRefusalIsReadBack`]
 
@@ -41,7 +41,9 @@ The fake Proton accepts mixed batches; with its `AllOrNothing` switch it refuses
 3. **6.3 B2–B4** (author): the web app and Thunderbird show each series as written: occurrences, days, the moved and missing occurrences; for `pcb-m4-notfirst`, which days each app shows.
 4. **6.3 D5–D10** (author in Thunderbird, agent reads what was stored): every weekday, the second Tuesday, one occurrence moved, one deleted, "this and all future".
 
-Results: not run yet. Fill:
+Live finding (2026-11-13, W8 `pcb-m4-notfirst`, 6.3 B.3) [verified: live 2026-11-13]: pcb then accepted (201) `DTSTART;TZID=Europe/Paris:20270106T120000` (a Wednesday) with `RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3`. Proton (the web app, and proton-cal's expansion of what Proton stores) shows Mondays 11, 18 and 25 Jan: the Wednesday is dropped and COUNT counts Mondays only. Thunderbird shows 4 occurrences, Wed 6 Jan plus those Mondays. RFC 5545 §3.8.5.3 (DTSTART is the first instance and counts in COUNT) reads Wed 6, Mon 11, Mon 18. One event, two sets of occurrences: pcb now refuses such a write before any request (`spec/mapping.md` §4).
+
+Results for the other forms: not run yet. Fill:
 
 | Form | pcb answer | Stored RRULE | Web app shows | Thunderbird shows |
 |---|---|---|---|---|

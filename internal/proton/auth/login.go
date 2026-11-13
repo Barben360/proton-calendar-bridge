@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -100,35 +99,30 @@ func VerifyURL(token string) string {
 // NewManager returns a go-proton-api manager for baseURL (required: its own
 // default host is not ours) with pcb's identity and a silent logger. It never
 // retries: one login attempt is one request, and writes are not repeated.
+// Refresh needs a manager built here.
 func NewManager(baseURL, appVersion string) *gpa.Manager {
+	return newManager(baseURL, appVersion, newTransport())
+}
+
+func newManager(baseURL, appVersion string, t *http.Transport) *gpa.Manager {
 	if appVersion == "" {
 		appVersion = "Other"
 	}
-	return gpa.New(
+	m := gpa.New(
 		gpa.WithHostURL(baseURL),
 		gpa.WithAppVersion(appVersion),
 		gpa.WithLogger(silent{}),
 		gpa.WithRetryCount(0),
-		gpa.WithTransport(userAgent{newTransport()}),
+		gpa.WithTransport(userAgent{t}),
 	)
+	hook(m) // Refresh sends the access token (refreshHook)
+	return m
 }
 
-// newTransport clones http.DefaultTransport, or builds the same defaults when
-// something replaced it with another RoundTripper.
-func newTransport() *http.Transport {
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		return t.Clone()
-	}
-	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-}
+// newTransport is the manager's transport: api.NewTransport's, so a
+// connection that stops answering is closed by the HTTP/2 health check
+// rather than kept for every later login call or refresh.
+func newTransport() *http.Transport { return api.NewTransport(api.DefaultPing) }
 
 type silent struct{}
 

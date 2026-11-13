@@ -69,6 +69,10 @@ type Health struct {
 	Since *time.Time `json:"since,omitempty"`
 	// IntervalSeconds is the wait the loop last chose before its next pass.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
+	// CadenceSeconds is the wait after a pass that got through: the active
+	// or the idle interval, never a back-off or Retry-After wait. The
+	// sync-stalled threshold is a multiple of it.
+	CadenceSeconds int `json:"cadence_seconds,omitempty"`
 	// Idle: no client was authenticated for IdleAfter (see ActiveInterval).
 	Idle     bool        `json:"idle"`
 	LastPass *PassHealth `json:"last_pass,omitempty"`
@@ -211,6 +215,7 @@ type live struct {
 	active   time.Duration // the interval after a pass when clients are about
 	idleIv   time.Duration // and when none is
 	interval time.Duration // the last wait chosen
+	cadence  time.Duration // the wait after a good pass, as of the last pass (not moved by a wake before the woken pass ends)
 	activity time.Time     // the last authenticated request; zero: none yet
 	last     *PassHealth
 	classes  map[string]string // calendar ID → error class, as of its last pass
@@ -219,7 +224,7 @@ type live struct {
 }
 
 func newLive(now time.Time, active time.Duration) *live {
-	return &live{since: now, active: active, idleIv: max(IdleInterval, active), interval: active,
+	return &live{since: now, active: active, idleIv: max(IdleInterval, active), interval: active, cadence: active,
 		classes: map[string]string{}, wake: make(chan struct{}, 1)}
 }
 
@@ -252,6 +257,10 @@ func (v *live) notePass(at time.Time, p WatchPass) {
 		ph.ErrorClass, ph.Error = errorClass(p.Err), p.Err.Error()
 	}
 	v.last = ph
+	v.cadence = v.active
+	if v.idleAt(at) {
+		v.cadence = v.idleIv
+	}
 	if p.Next > 0 {
 		v.interval = p.Next
 	}
@@ -334,7 +343,9 @@ func (l *Local) Health(ctx context.Context) (Health, error) {
 	now := l.o.Now()
 	v.mu.Lock()
 	since := v.since
-	h := Health{Serve: ServeServing, Since: &since, IntervalSeconds: int(v.interval / time.Second), Idle: v.idleAt(now), Calendars: []CalendarHealth{}}
+	cadence := v.cadence
+	h := Health{Serve: ServeServing, Since: &since, IntervalSeconds: int(v.interval / time.Second), CadenceSeconds: int(cadence / time.Second),
+		Idle: v.idleAt(now), Calendars: []CalendarHealth{}}
 	if v.last != nil {
 		last := *v.last
 		h.LastPass = &last

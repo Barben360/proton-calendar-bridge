@@ -3,6 +3,7 @@ package ical
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -83,6 +84,10 @@ type WriteEvent struct {
 // holds exceptions only) and its exceptions keyed by RECURRENCE-ID in Unix
 // seconds (a DATE is midnight UTC, as Proton stores it).
 type Incoming struct {
+	// UID is the event's UID by its TEXT value, unescaped (UnescapeText):
+	// what Proton stores and lists (`a,b` for `UID:a\,b`; SPEC §5.3,
+	// HUMAN-CHECKS W10) and so what identifies the event in pcb. The
+	// VEVENTs keep the UID line as written.
 	UID        string
 	Master     *WriteEvent
 	Exceptions map[int64]WriteEvent
@@ -102,12 +107,39 @@ func (n *notes) add(s string) {
 	n.list = append(n.list, s)
 }
 
+// uidTextProblem says why pcb cannot name an event by the UID text v, ""
+// when it can: an escape RFC 5545 §3.3.11 does not define (`\x`, or a
+// trailing backslash: what Proton stores for it is unknown, and guessing
+// would leave the write unconfirmed), or a control character in the
+// unescaped value (a newline included: a UID is an identifier, and a
+// newline would reach the ?UID= lookup and the object name). The UID
+// forms Thunderbird, Proton and Outlook are known to generate (UUIDs,
+// "...@domain", hex) hold no backslash and pass [inferred].
+func uidTextProblem(v string) string {
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			continue
+		}
+		if i+1 == len(v) || !strings.ContainsRune(`\;,nN`, rune(v[i+1])) {
+			return `holds a backslash that is not a TEXT escape (\\, \;, \, or \n)`
+		}
+		i++
+	}
+	for _, r := range UnescapeText(v) {
+		if r < 0x20 || r == 0x7f {
+			return "holds a control character, a newline included"
+		}
+	}
+	return ""
+}
+
 // ParseWrite reads what a CalDAV client PUTs: one VCALENDAR whose VEVENTs
-// share one UID (at most MaxEvents, at most one master, no two exceptions
-// at the same RECURRENCE-ID). VCALENDAR-level properties and VTIMEZONEs are
-// dropped (TZIDs are resolved by name); any other component is refused.
-// Each VEVENT is validated and normalised (see WriteEvent). Errors are
-// *Refusal.
+// share one UID, compared unescaped (at most MaxEvents, at most one master,
+// no two exceptions at the same RECURRENCE-ID); a UID pcb cannot name an
+// event by (uidTextProblem) is refused. VCALENDAR-level properties and
+// VTIMEZONEs are dropped (TZIDs are resolved by name); any other component
+// is refused. Each VEVENT is validated and normalised (see WriteEvent).
+// Errors are *Refusal.
 func ParseWrite(body []byte) (Incoming, error) {
 	if !utf8.Valid(body) {
 		return Incoming{}, refuse(BadData, "not valid UTF-8")
@@ -158,9 +190,12 @@ func ParseWrite(body []byte) (Incoming, error) {
 		if len(uids) != 1 || uids[0] == "" {
 			return Incoming{}, refuse(BadData, "a VEVENT without exactly one non-empty UID")
 		}
+		if reason := uidTextProblem(uids[0]); reason != "" {
+			return Incoming{}, refuse(BadData, "the UID "+reason)
+		}
 		if i == 0 {
-			in.UID = uids[0]
-		} else if uids[0] != in.UID {
+			in.UID = UnescapeText(uids[0])
+		} else if UnescapeText(uids[0]) != in.UID {
 			return Incoming{}, refuse(NotOneUID, "VEVENTs of more than one UID")
 		}
 	}
@@ -596,7 +631,8 @@ var (
 // (a weekday), only these parts (ruling M4-R10): WEEKLY BYDAY of plain
 // weekdays; MONTHLY one BYMONTHDAY, or one plain BYDAY weekday with one
 // BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY. A
-// malformed rule is BadData.
+// malformed rule is BadData. Whether DTSTART is one of the rule's
+// occurrences is StartOffRule's, which the planner applies.
 func checkRRule(rule string, start when) *Refusal {
 	parts := map[string]string{}
 	for kv := range strings.SplitSeq(rule, ";") {
@@ -678,6 +714,127 @@ func checkRRule(rule string, start when) *Refusal {
 		}
 	}
 	return nil
+}
+
+// StartOffRule refuses a master VEVENT (as ParseWrite returns it: its
+// RRULE accepted and normalised) whose DTSTART is not itself an occurrence
+// of its RRULE, by the rule's BY* parts on DTSTART's calendar day: in its
+// TZID's zone, on its UTC day for a UTC time (`Z`), as written for a DATE.
+// Proton drops such a start and counts COUNT from the first match, while
+// Thunderbird shows it: one event, two sets of occurrences (live
+// 2026-11-13, HUMAN-CHECKS W8). It returns nil for an event without RRULE
+// or DTSTART. The planner refuses only a write that introduces such a start
+// (a create, or an update changing DTSTART or RRULE, SameRecurrence).
+func StartOffRule(ev Component) *Refusal {
+	start, rule, ok := recurrence(ev)
+	if !ok || rule == nil || startOccurs(rule["FREQ"], rule, start) {
+		return nil
+	}
+	return refuse(UnsupportedRecurrence, "DTSTART is not an occurrence of the RRULE")
+}
+
+// SameRecurrence reports whether VEVENTs a and b have the same DTSTART (the
+// same instant, both DATEs or both times, the same zone) and the same RRULE
+// once normalised (M4-R5, M4-R12; parts in any order, any case), or neither
+// has one. Anything that does not parse is not the same.
+func SameRecurrence(a, b Component) bool {
+	sa, ra, okA := recurrence(a)
+	sb, rb, okB := recurrence(b)
+	return okA && okB && sa.t.Equal(sb.t) && sa.date == sb.date && zoneName(sa) == zoneName(sb) && maps.Equal(ra, rb)
+}
+
+func zoneName(w when) string {
+	if w.loc == nil {
+		return ""
+	}
+	return w.loc.String()
+}
+
+// recurrence reads ev's DTSTART and its RRULE, normalised, as upper-case
+// parts (nil without RRULE); ok is false when DTSTART is missing or does not
+// parse, or the RRULE is malformed.
+func recurrence(ev Component) (when, map[string]string, bool) {
+	p, has := ev.Get("DTSTART")
+	if !has {
+		return when{}, nil, false
+	}
+	start, r := parseWhen(&p, p.Value, nil)
+	if r != nil {
+		return when{}, nil, false
+	}
+	rp, has := ev.Get("RRULE")
+	if !has {
+		return start, nil, true
+	}
+	rule := rp.Value
+	if v, ok := monthlyOrdinal(rule); ok {
+		rule = v
+	}
+	if v, ok := dailyByday(rule); ok {
+		rule = v
+	}
+	parts := map[string]string{}
+	for kv := range strings.SplitSeq(rule, ";") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return when{}, nil, false
+		}
+		parts[strings.ToUpper(k)] = strings.ToUpper(v)
+	}
+	return start, parts, true
+}
+
+// startOccurs reports whether start is an occurrence of the rule (FREQ
+// freq, its parts upper-case), by its BY* parts on start's calendar day.
+// INTERVAL never matters: DTSTART sets the phase.
+func startOccurs(freq string, parts map[string]string, start when) bool {
+	day := start.t // a TZID time is in its zone (parseWhen), a UTC time and a DATE in UTC
+	weekday := strings.ToUpper(day.Weekday().String()[:2])
+	switch freq {
+	case "WEEKLY":
+		v, ok := parts["BYDAY"]
+		return !ok || slices.ContainsFunc(strings.Split(v, ","), func(d string) bool { return strings.EqualFold(d, weekday) })
+	case "MONTHLY":
+		if v, ok := parts["BYMONTHDAY"]; ok {
+			return isMonthDay(day, atoiSigned(v))
+		}
+		if v, ok := parts["BYDAY"]; ok {
+			return strings.EqualFold(v, weekday) && isSetPos(day, atoiSigned(parts["BYSETPOS"]))
+		}
+	case "YEARLY":
+		if v, ok := parts["BYMONTH"]; ok {
+			return int(day.Month()) == atoi(v) && isMonthDay(day, atoiSigned(parts["BYMONTHDAY"]))
+		}
+	}
+	return true
+}
+
+// isMonthDay: day is the month's n-th day, counted from the end when n < 0.
+func isMonthDay(day time.Time, n int) bool {
+	if n < 0 {
+		n += daysIn(day) + 1
+	}
+	return day.Day() == n
+}
+
+// isSetPos: day is the n-th of its weekday in its month (n in 1..4), or the
+// last when n is -1.
+func isSetPos(day time.Time, n int) bool {
+	if n < 0 {
+		return day.Day()+7 > daysIn(day)
+	}
+	return (day.Day()-1)/7+1 == n
+}
+
+func daysIn(day time.Time) int {
+	return time.Date(day.Year(), day.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func atoiSigned(s string) int {
+	if rest, neg := strings.CutPrefix(s, "-"); neg {
+		return -atoi(rest)
+	}
+	return atoi(strings.TrimPrefix(s, "+"))
 }
 
 // allowedParts are the RRULE parts Proton supports per FREQ (ruling

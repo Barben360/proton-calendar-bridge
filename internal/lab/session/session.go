@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -135,7 +136,10 @@ func newManager(o Options) *proton.Manager {
 	if app == "" {
 		app = DefaultAppVersion
 	}
-	opts := []proton.Option{proton.WithAppVersion(app), proton.WithLogger(quietLogger{})}
+	// No automatic retry: a 429 or 5xx is reported with its Retry-After at
+	// once, never waited out or resent behind the caller (a resent login
+	// would spend the login budget).
+	opts := []proton.Option{proton.WithAppVersion(app), proton.WithLogger(quietLogger{}), proton.WithRetryCount(0)}
 	if o.BaseURL != "" {
 		opts = append(opts, proton.WithHostURL(o.BaseURL))
 	}
@@ -202,11 +206,7 @@ func Login(ctx context.Context, o Options) (*Session, error) {
 		s.Close()
 		return nil, fmt.Errorf("saving the session: %w", err)
 	}
-	c.AddAuthHandler(func(a proton.Auth) {
-		if err := saveRotation(o.StateDir, &st, a); err != nil {
-			o.warn(err)
-		}
-	})
+	c.AddAuthHandler(o.saveRotations(&st))
 	// The challenge is solved: its file is stale.
 	if err := os.Remove(filepath.Join(o.StateDir, hvFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		o.warn(err)
@@ -292,8 +292,15 @@ func apiMessage(err error) error {
 	return err
 }
 
-// Resume rebuilds a client from session.json by refreshing its tokens, and
-// persists the rotated tokens.
+// Resume rebuilds a client from session.json on the saved tokens and checks
+// them with one GET /core/v4/users, without refreshing: the saved scopes stay
+// as saved. On a rejected access token the client refreshes itself
+// (go-proton-api's refresh, which sends the access token Proton requires;
+// live finding 2026-11-12, E01) and the rotated tokens are saved. A refresh
+// per command would rotate the session for nothing. An ended session (see
+// ended) is MustAct, to log in again; any other failure of the check (429,
+// 5xx, network) is Blocked, to retry later: it says nothing about the
+// session and must not cost a login.
 func Resume(ctx context.Context, o Options) (*Session, error) {
 	st, err := load(o.StateDir)
 	if err != nil {
@@ -304,33 +311,55 @@ func Resume(ctx context.Context, o Options) (*Session, error) {
 		o.Recorder.Forbid(st.RefreshToken)
 	}
 	m := newManager(o)
-	c, auth, err := m.NewClientWithRefresh(ctx, st.UID, st.RefreshToken)
-	if err != nil {
-		m.Close()
-		return nil, &exitcode.Error{
-			Code: exitcode.MustAct,
-			Err:  fmt.Errorf("the saved session cannot be refreshed: %w", apiMessage(err)),
-			Hint: "pcb-lab login",
-		}
-	}
-	if o.Recorder != nil {
-		o.Recorder.Forbid(auth.AccessToken)
-		o.Recorder.Forbid(auth.RefreshToken)
-	}
-	if sc := scopes(auth.Scope); len(sc) > 0 {
-		st.Scopes = sc
-	}
-	if err := saveRotation(o.StateDir, &st, auth); err != nil {
+	c := m.NewClient(st.UID, st.AccessToken, st.RefreshToken)
+	c.AddAuthHandler(o.saveRotations(&st))
+	var deauthed bool // go-proton-api de-auths on a refresh refused with 400 or 422
+	c.AddDeauthHandler(func() { deauthed = true })
+	if _, err := c.GetUser(ctx); err != nil {
 		c.Close()
 		m.Close()
-		return nil, fmt.Errorf("saving the rotated session tokens (the previous refresh token may no longer work): %w", err)
+		if ended(err, deauthed) {
+			return nil, &exitcode.Error{
+				Code: exitcode.MustAct,
+				Err:  fmt.Errorf("the saved session has ended: %w", apiMessage(err)),
+				Hint: "pcb-lab login",
+			}
+		}
+		return nil, &exitcode.Error{
+			Code: exitcode.Blocked,
+			Err:  fmt.Errorf("the saved session could not be checked: %w", apiMessage(err)),
+			Hint: "retry later, after any Retry-After; the session may still be good, so do not log in for this",
+		}
 	}
-	c.AddAuthHandler(func(a proton.Auth) {
-		if err := saveRotation(o.StateDir, &st, a); err != nil {
+	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
+}
+
+// ended reports a session Proton ended, as pcb classifies a refresh (ruling
+// R6m): code 10013 (invalid refresh token), a 401 (the refresh, or the
+// request retried after it), or a refresh refused with 422 (deauthed: the
+// failed call was the refresh). A 400 with another code, a 422 on the check
+// itself, a 429, a 5xx or a network error leave the session alone.
+func ended(err error, deauthed bool) bool {
+	var apiErr *proton.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == 10013 || apiErr.Status == http.StatusUnauthorized ||
+		(deauthed && apiErr.Status == http.StatusUnprocessableEntity)
+}
+
+// saveRotations is a client's auth handler: it redacts the rotated tokens
+// from the recording and saves them, warning when the write fails.
+func (o Options) saveRotations(st *stored) proton.AuthHandler {
+	return func(a proton.Auth) {
+		if o.Recorder != nil {
+			o.Recorder.Forbid(a.AccessToken)
+			o.Recorder.Forbid(a.RefreshToken)
+		}
+		if err := saveRotation(o.StateDir, st, a); err != nil {
 			o.warn(err)
 		}
-	})
-	return &Session{UID: st.UID, Scopes: st.Scopes, Client: c, manager: m, opts: o}, nil
+	}
 }
 
 var saveMu sync.Mutex

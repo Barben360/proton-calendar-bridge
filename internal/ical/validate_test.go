@@ -32,6 +32,12 @@ func timed(extra ...string) string {
 	return wev(slices.Concat(head, []string{"DTSTART;TZID=Europe/Paris:20261105T100000", "DTEND;TZID=Europe/Paris:20261105T110000"}, extra)...)
 }
 
+// on is head plus a one-hour Europe/Paris event at 10:00 on day
+// (YYYYMMDD), then extra.
+func on(day string, extra ...string) string {
+	return wev(slices.Concat(head, []string{"DTSTART;TZID=Europe/Paris:" + day + "T100000", "DTEND;TZID=Europe/Paris:" + day + "T110000"}, extra)...)
+}
+
 // exception is an exception VEVENT of u1 at the given Paris local time.
 func exception(recID string, extra ...string) string {
 	return wev(slices.Concat(head, []string{"RECURRENCE-ID;TZID=Europe/Paris:" + recID,
@@ -149,11 +155,11 @@ func TestHundredVEventsAreAccepted(t *testing.T) {
 func TestRRuleLimits(t *testing.T) {
 	cases := []struct {
 		rule  string
-		start string // DTSTART line, Paris 10:00 by default
+		start string // DTSTART line, Paris 10:00 on Thursday 2026-11-05 by default; an occurrence of the rule
 		ok    bool
 	}{
 		{"FREQ=DAILY", "", true},
-		{"FREQ=WEEKLY;BYDAY=MO,WE", "", true},
+		{"FREQ=WEEKLY;BYDAY=MO,WE", "DTSTART;TZID=Europe/Paris:20261104T100000", true},
 		{"FREQ=MONTHLY", "", true},
 		{"FREQ=YEARLY", "", true},
 		{"FREQ=HOURLY", "", false},
@@ -171,8 +177,8 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=MONTHLY;BYMONTHDAY=5", "", true},
 		{"FREQ=MONTHLY;BYMONTHDAY=5,6", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=1", "", true},
-		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=4", "", true},
-		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=-1", "", true},
+		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=4", "DTSTART;TZID=Europe/Paris:20261126T100000", true},
+		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=-1", "DTSTART;TZID=Europe/Paris:20261126T100000", true},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=5", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=-2", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=0", "", false},
@@ -190,10 +196,10 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=WEEKLY;BYSETPOS=1;BYDAY=MO", "", false},
 		{"FREQ=DAILY;WKST=SU;INTERVAL=2", "", true},
 		{"FREQ=DAILY;WKST=XX", "", false},
-		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "", true}, // M4-R12: written as WEEKLY
-		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO", "", true},  // M4-R12
-		{"FREQ=DAILY;INTERVAL=2;BYDAY=MO", "", false}, // M4-R12: not the same meaning as WEEKLY
-		{"FREQ=DAILY;BYDAY=1MO", "", false},           // M4-R12: plain days only
+		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "", true},                                         // M4-R12: written as WEEKLY
+		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO", "DTSTART;TZID=Europe/Paris:20261102T100000", true}, // M4-R12
+		{"FREQ=DAILY;INTERVAL=2;BYDAY=MO", "", false},                                         // M4-R12: not the same meaning as WEEKLY
+		{"FREQ=DAILY;BYDAY=1MO", "", false},                                                   // M4-R12: plain days only
 		{"FREQ=DAILY;BYDAY=MO;BYHOUR=3", "", false},
 		{"FREQ=DAILY;BYHOUR=3,4", "", false},
 		{"FREQ=WEEKLY;BYHOUR=3", "", false},
@@ -209,10 +215,10 @@ func TestRRuleLimits(t *testing.T) {
 		{"FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=5,6", "", false},
 		{"FREQ=YEARLY;BYMONTH=13;BYMONTHDAY=5", "", false},
 		{"FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=32", "", false},
-		{"FREQ=YEARLY;BYMONTH=12;BYMONTHDAY=-1", "", true},
+		{"FREQ=YEARLY;BYMONTH=12;BYMONTHDAY=-1", "DTSTART;TZID=Europe/Paris:20261231T100000", true},
 		{"FREQ=MONTHLY;BYMONTHDAY=0", "", false},
-		{"FREQ=MONTHLY;BYMONTHDAY=-31", "", true},
-		{"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;WKST=MO", "", true},
+		{"FREQ=MONTHLY;BYMONTHDAY=-31", "DTSTART;TZID=Europe/Paris:20261201T100000", true},
+		{"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;WKST=MO", "DTSTART;TZID=Europe/Paris:20261102T100000", true},
 		{"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;BYHOUR=3", "", false},
 		{"FREQ=MONTHLY;X-NAME=1", "", false},
 		{"FREQ=MONTHLY;BYDAY=TH;BYSETPOS=1;BYMONTHDAY=5", "", false},
@@ -456,19 +462,20 @@ func TestDurationBecomesDTEnd(t *testing.T) {
 // Ruling M4-R5: Thunderbird's MONTHLY BYDAY=<n><DAY> (n in 1..4 or -1, one
 // day) is written in Proton's form BYDAY=<DAY>;BYSETPOS=<n>, in place.
 func TestMonthlyOrdinalBydayIsRewritten(t *testing.T) {
-	cases := []struct{ rule, want string }{
-		{"FREQ=MONTHLY;BYDAY=2TU", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"},
-		{"FREQ=MONTHLY;BYDAY=1MO;COUNT=10", "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;COUNT=10"},
-		{"FREQ=MONTHLY;BYDAY=4SU", "FREQ=MONTHLY;BYDAY=SU;BYSETPOS=4"},
-		{"FREQ=MONTHLY;BYDAY=-1FR;INTERVAL=2", "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;INTERVAL=2"},
-		{"FREQ=MONTHLY;BYDAY=+3we", "FREQ=MONTHLY;BYDAY=WE;BYSETPOS=3"},
-		{"freq=monthly;byday=2tu", "freq=monthly;BYDAY=TU;BYSETPOS=2"},
+	// day is a DTSTART date (November 2026) that is an occurrence of the rule.
+	cases := []struct{ rule, want, day string }{
+		{"FREQ=MONTHLY;BYDAY=2TU", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "20261110"},
+		{"FREQ=MONTHLY;BYDAY=1MO;COUNT=10", "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1;COUNT=10", "20261102"},
+		{"FREQ=MONTHLY;BYDAY=4SU", "FREQ=MONTHLY;BYDAY=SU;BYSETPOS=4", "20261122"},
+		{"FREQ=MONTHLY;BYDAY=-1FR;INTERVAL=2", "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;INTERVAL=2", "20261127"},
+		{"FREQ=MONTHLY;BYDAY=+3we", "FREQ=MONTHLY;BYDAY=WE;BYSETPOS=3", "20261118"},
+		{"freq=monthly;byday=2tu", "freq=monthly;BYDAY=TU;BYSETPOS=2", "20261110"},
 		// Already Proton's form, or not MONTHLY: as sent.
-		{"FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"},
+		{"FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "20261110"},
 	}
 	for _, c := range cases {
 		t.Run(c.rule, func(t *testing.T) {
-			in := mustParseWrite(t, wcal(timed("RRULE:"+c.rule)))
+			in := mustParseWrite(t, wcal(on(c.day, "RRULE:"+c.rule)))
 			if got := values(in.Master.Comp, "RRULE"); len(got) != 1 || got[0] != ":"+c.want {
 				t.Fatalf("RRULE = %v, want %q", got, c.want)
 			}
@@ -503,17 +510,18 @@ func TestThunderbirdFakedMasterIsDropped(t *testing.T) {
 // form Thunderbird is believed to write for "every weekday") is written
 // as the WEEKLY rule it means, in place; COUNT and UNTIL stay as sent.
 func TestDailyBydayIsRewritten(t *testing.T) {
-	cases := []struct{ rule, want string }{
-		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"},
-		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO,WE;COUNT=10", "FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE;COUNT=10"},
-		{"BYDAY=SA,SU;FREQ=DAILY;UNTIL=20271231T225959Z", "BYDAY=SA,SU;FREQ=WEEKLY;UNTIL=20271231T225959Z"},
-		{"freq=daily;byday=mo", "freq=WEEKLY;byday=mo"},
-		{"FREQ=DAILY;COUNT=3", "FREQ=DAILY;COUNT=3"},
-		{"FREQ=WEEKLY;BYDAY=MO", "FREQ=WEEKLY;BYDAY=MO"},
+	// day is a DTSTART date (November 2026) that is an occurrence of the rule.
+	cases := []struct{ rule, want, day string }{
+		{"FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", "20261105"},
+		{"FREQ=DAILY;INTERVAL=1;BYDAY=MO,WE;COUNT=10", "FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE;COUNT=10", "20261104"},
+		{"BYDAY=SA,SU;FREQ=DAILY;UNTIL=20271231T225959Z", "BYDAY=SA,SU;FREQ=WEEKLY;UNTIL=20271231T225959Z", "20261107"},
+		{"freq=daily;byday=mo", "freq=WEEKLY;byday=mo", "20261102"},
+		{"FREQ=DAILY;COUNT=3", "FREQ=DAILY;COUNT=3", "20261105"},
+		{"FREQ=WEEKLY;BYDAY=MO", "FREQ=WEEKLY;BYDAY=MO", "20261102"},
 	}
 	for _, c := range cases {
 		t.Run(c.rule, func(t *testing.T) {
-			in := mustParseWrite(t, wcal(timed("RRULE:"+c.rule)))
+			in := mustParseWrite(t, wcal(on(c.day, "RRULE:"+c.rule)))
 			if got := values(in.Master.Comp, "RRULE"); len(got) != 1 || got[0] != ":"+c.want {
 				t.Fatalf("RRULE = %v, want %q", got, c.want)
 			}
@@ -521,5 +529,165 @@ func TestDailyBydayIsRewritten(t *testing.T) {
 				t.Fatalf("notes %q, rewritten %v", in.Notes, rewritten)
 			}
 		})
+	}
+}
+
+// The body's UID is its TEXT value, unescaped (what Proton stores, SPEC
+// §5.3); the VEVENT keeps the line as written, and VEVENTs whose UIDs are
+// the same value in other spellings are one event.
+func TestParseWriteUnescapesTheUID(t *testing.T) {
+	t.Parallel()
+	esc := func(uid string, extra ...string) string {
+		return wev(slices.Concat([]string{"UID:" + uid, "DTSTAMP:20261101T080000Z"}, extra)...)
+	}
+	in := mustParseWrite(t, wcal(esc(`pcb-m4-a\,b`, "DTSTART;TZID=Europe/Paris:20261105T100000", "RRULE:FREQ=DAILY"),
+		esc("pcb-m4-a,b", "RECURRENCE-ID;TZID=Europe/Paris:20261106T100000", "DTSTART;TZID=Europe/Paris:20261106T100000")))
+	if in.UID != "pcb-m4-a,b" {
+		t.Errorf("UID %q, want the value pcb-m4-a,b", in.UID)
+	}
+	if p, _ := in.Master.Comp.Get("UID"); p.Value != `pcb-m4-a\,b` {
+		t.Errorf("the master's UID line holds %q, want it as written", p.Value)
+	}
+	if len(in.Exceptions) != 1 {
+		t.Errorf("%d exceptions, want the one of the same UID value", len(in.Exceptions))
+	}
+	// A series as Thunderbird sends it: every VEVENT spells the UID alike.
+	series := mustParseWrite(t, wcal(esc(`s\,t`, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY"),
+		esc(`s\,t`, "RECURRENCE-ID:20261106T100000Z", "DTSTART:20261106T100000Z")))
+	if series.UID != "s,t" || series.Master == nil || len(series.Exceptions) != 1 {
+		t.Errorf("a series with an escaped UID: UID %q, master %v, %d exceptions", series.UID, series.Master != nil, len(series.Exceptions))
+	}
+	if _, err := ParseWrite(wcal(esc(`a\,b`, "DTSTART:20261105T100000Z"), esc(`a\;b`, "RECURRENCE-ID:20261106T100000Z", "DTSTART:20261106T100000Z"))); err == nil {
+		t.Error("VEVENTs of two UID values parsed as one event")
+	}
+}
+
+// A UID is refused (bad-data) when its text holds an escape RFC 5545 does
+// not define (pcb would have to guess what Proton stores) or its value holds
+// a control character, a newline included.
+func TestParseWriteRefusesAUIDItCannotName(t *testing.T) {
+	t.Parallel()
+	for _, uid := range []string{`a\nb`, `a\Nb`, `a\xb`, `a\:b`, `trailing\`, `a\\\x`} {
+		body := wcal(wev("UID:"+uid, "DTSTAMP:20261101T080000Z", "DTSTART:20261105T100000Z"))
+		r := refusalOf(t, body)
+		if r.Code != BadData || !strings.Contains(r.Reason, "UID") {
+			t.Errorf("UID:%s: code %q (%s), want bad-data naming the UID", uid, r.Code, r.Reason)
+		}
+	}
+	for _, uid := range []string{`a\\x`, `a\,b`, `a\;b`, "{0f5c-uuid}@thunderbird", "040000008200E00074C5B7101A82E008"} {
+		if _, err := ParseWrite(wcal(wev("UID:"+uid, "DTSTAMP:20261101T080000Z", "DTSTART:20261105T100000Z"))); err != nil {
+			t.Errorf("UID:%s refused: %v", uid, err)
+		}
+	}
+}
+
+// StartOffRule: a master's DTSTART must be an occurrence of its RRULE, by
+// the rule's own BY* parts on DTSTART's day (its zone; a UTC time on its UTC
+// day; a DATE as written): otherwise Proton drops it (and counts COUNT from
+// the first match) while Thunderbird shows it, so one event has two sets of
+// occurrences (live 2026-11-13, HUMAN-CHECKS W8 pcb-m4-notfirst). ParseWrite
+// itself accepts such a body (the planner decides, as only a write that
+// introduces such a start is refused); the rule as sent and as normalised
+// (M4-R5, M4-R12) agree. Thunderbird's own series, whose DTSTART its dialog
+// puts on a matching day, pass.
+func TestRRuleStartMustBeAnOccurrence(t *testing.T) {
+	t.Parallel()
+	paris := func(day string) string { return "DTSTART;TZID=Europe/Paris:" + day + "T120000" }
+	for _, c := range []struct {
+		name, start, rule string
+		ok                bool
+	}{
+		// The live case: Wednesday 6 January 2027, Mondays only.
+		{"weekly Mondays from a Wednesday", paris("20270106"), "FREQ=WEEKLY;BYDAY=MO;COUNT=3", false},
+		{"weekly Mondays from a Monday", paris("20270104"), "FREQ=WEEKLY;BYDAY=MO;COUNT=3", true},
+		{"weekly, no BYDAY (the start's weekday)", paris("20270106"), "FREQ=WEEKLY", true},
+		{"weekly on the start's weekday", paris("20270106"), "FREQ=WEEKLY;BYDAY=WE", true},
+		{"weekly MO,WE from a Wednesday", paris("20270106"), "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE", true},
+		{"weekly MO,WE from a Tuesday", paris("20270105"), "FREQ=WEEKLY;BYDAY=MO,WE", false},
+		{"every weekday from a Monday", paris("20270104"), "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", true},
+		{"every weekday from a Saturday", paris("20270109"), "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", false},
+		{"every weekday as DAILY (M4-R12) from a Friday", paris("20270108"), "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", true},
+		{"every weekday as DAILY (M4-R12) from a Sunday", paris("20270110"), "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", false},
+		{"daily", paris("20270110"), "FREQ=DAILY;COUNT=5", true},
+		{"second Tuesday from a second Tuesday", paris("20270112"), "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", true},
+		{"second Tuesday from a first Tuesday", paris("20270105"), "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", false},
+		{"second Tuesday from a Wednesday", paris("20270113"), "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", false},
+		{"2TU as sent (M4-R5) from a second Tuesday", paris("20270112"), "FREQ=MONTHLY;BYDAY=2TU", true},
+		{"2TU as sent (M4-R5) from a third Tuesday", paris("20270119"), "FREQ=MONTHLY;BYDAY=2TU", false},
+		{"last Friday from a last Friday", paris("20270129"), "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1", true},
+		{"last Friday from a fourth, not last, Friday", paris("20270122"), "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1", false},
+		{"-1FR as sent from a last Friday", paris("20270129"), "FREQ=MONTHLY;BYDAY=-1FR", true},
+		{"monthly, no BY part", paris("20270113"), "FREQ=MONTHLY", true},
+		{"monthly on the 13th from the 13th", paris("20270113"), "FREQ=MONTHLY;BYMONTHDAY=13", true},
+		{"monthly on the 13th from the 14th", paris("20270114"), "FREQ=MONTHLY;BYMONTHDAY=13", false},
+		{"monthly on the last day from 31 January", paris("20270131"), "FREQ=MONTHLY;BYMONTHDAY=-1", true},
+		{"monthly on the last day from 30 January", paris("20270130"), "FREQ=MONTHLY;BYMONTHDAY=-1", false},
+		{"monthly on the last day from 28 February", paris("20270228"), "FREQ=MONTHLY;BYMONTHDAY=-1", true},
+		{"yearly, no BY part", paris("20270113"), "FREQ=YEARLY", true},
+		{"yearly on 13 January from 13 January", paris("20270113"), "FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=13", true},
+		{"yearly on 13 January from 13 February", paris("20270213"), "FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=13", false},
+		{"yearly on 31 December (-1) from 31 December", paris("20271231"), "FREQ=YEARLY;BYMONTH=12;BYMONTHDAY=-1", true},
+		// The zone decides the day: 00:30 Monday in Paris is Sunday 23:30Z.
+		{"Paris Monday 00:30", "DTSTART;TZID=Europe/Paris:20270104T003000", "FREQ=WEEKLY;BYDAY=MO", true},
+		{"UTC Sunday 23:30 for Mondays", "DTSTART:20270103T233000Z", "FREQ=WEEKLY;BYDAY=MO", false},
+		{"all-day Monday", "DTSTART;VALUE=DATE:20270104", "FREQ=WEEKLY;BYDAY=MO", true},
+		{"all-day Wednesday for Mondays", "DTSTART;VALUE=DATE:20270106", "FREQ=WEEKLY;BYDAY=MO", false},
+		{"all-day second Tuesday", "DTSTART;VALUE=DATE:20270112", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := mustParseWrite(t, wcal(wev(slices.Concat(head, []string{c.start, "RRULE:" + c.rule})...)))
+			r := StartOffRule(in.Master.Comp)
+			switch {
+			case c.ok && r != nil:
+				t.Fatalf("off the rule: %v", r)
+			case !c.ok && (r == nil || r.Code != UnsupportedRecurrence || r.Reason != "DTSTART is not an occurrence of the RRULE"):
+				t.Fatalf("StartOffRule = %v, want %q with the reason", r, UnsupportedRecurrence)
+			}
+		})
+	}
+	// No RRULE: nothing to be off.
+	if r := StartOffRule(mustParseWrite(t, wcal(on("20261105"))).Master.Comp); r != nil {
+		t.Errorf("a single event: %v", r)
+	}
+}
+
+// SameRecurrence: DTSTART (instant, DATE or not, zone) and the RRULE as
+// normalised, parts in any order and case, are what an update keeps or
+// changes; nothing else counts.
+func TestSameRecurrence(t *testing.T) {
+	t.Parallel()
+	ev := func(lines ...string) Component {
+		return mustParseWrite(t, wcal(wev(slices.Concat(head, lines)...))).Master.Comp
+	}
+	start := "DTSTART;TZID=Europe/Paris:20270106T120000"
+	stored := ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "DESCRIPTION:x")
+	for _, c := range []struct {
+		name  string
+		other Component
+		same  bool
+	}{
+		{"identical", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), true},
+		{"another description and DTEND", ev(start, "DTEND;TZID=Europe/Paris:20270106T140000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "DESCRIPTION:y"), true},
+		{"parts reordered, lower case", ev(start, "RRULE:count=3;byday=mo;freq=weekly"), true},
+		{"the same instant in UTC", ev("DTSTART:20270106T110000Z", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"another start", ev("DTSTART;TZID=Europe/Paris:20270106T130000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"a week later, the same weekday", ev("DTSTART;TZID=Europe/Paris:20270113T120000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"the same wall time in another zone", ev("DTSTART;TZID=America/New_York:20270106T120000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"the same instant in a zone of the same offset", ev("DTSTART;TZID=Europe/Berlin:20270106T120000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"another COUNT", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4"), false},
+		{"another BYDAY", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3"), false},
+		{"no RRULE", ev(start), false},
+	} {
+		if got := SameRecurrence(stored, c.other); got != c.same {
+			t.Errorf("%s: SameRecurrence = %v, want %v", c.name, got, c.same)
+		}
+	}
+	// Normalised forms agree with the forms as sent: 2TU and TU;BYSETPOS=2.
+	a := ev("DTSTART;TZID=Europe/Paris:20270112T120000", "RRULE:FREQ=MONTHLY;BYDAY=2TU")
+	b := Component{Name: "VEVENT", Items: items([]Property{{Name: "UID", Value: "u1"},
+		{Name: "DTSTART", Params: ";TZID=Europe/Paris", Value: "20270112T120000"}, {Name: "RRULE", Value: "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"}})}
+	if !SameRecurrence(a, b) || !SameRecurrence(Component{Name: "VEVENT", Items: items([]Property{{Name: "UID", Value: "u1"},
+		{Name: "DTSTART", Params: ";TZID=Europe/Paris", Value: "20270112T120000"}, {Name: "RRULE", Value: "FREQ=MONTHLY;BYDAY=2TU"}})}, b) {
+		t.Error("BYDAY=2TU and BYDAY=TU;BYSETPOS=2 are not the same recurrence")
 	}
 }

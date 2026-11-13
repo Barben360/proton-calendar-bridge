@@ -141,9 +141,14 @@ func healthAlerts(h *service.Health, now time.Time, add func(code, sev, msg, fix
 				first.UTC().Format(time.RFC3339), strings.Join(sources, ", ")),
 			"open the Proton web app from this machine's network and complete the verification", "")
 	}
-	interval := time.Duration(h.IntervalSeconds) * time.Second
-	if interval <= 0 {
+	// The threshold follows the cadence, never IntervalSeconds: that is the
+	// next wait, which grows while passes fail (live 2026-11-13).
+	interval := time.Duration(h.CadenceSeconds) * time.Second
+	if interval <= 0 { // an older daemon reports none
 		interval = service.ActiveInterval
+		if h.Idle {
+			interval = service.IdleInterval
+		}
 	}
 	for _, c := range h.Calendars {
 		if h.Serve == service.ServeServing {

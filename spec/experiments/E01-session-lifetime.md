@@ -13,7 +13,7 @@ Feeds C1 auth, the refresh policy (M1) and §5.2 (SPEC §17).
 
 Two separate sessions, never mixed:
 
-- **Disposable session = login #1** of the pending sequence. `pcb-lab probe refresh [--record-dir spec/experiments/raw/E01]` runs **once** on it: one `POST /auth/v4/refresh` with the saved refresh token, saves the new pair, then one retry with the previous refresh token. It reports HTTP status, Proton code, `ExpiresIn` (as returned, 0 when absent), whether the refresh and access tokens changed, and whether the old refresh token was accepted (a success is saved too, so the file holds the newest pair). It is a raw call rather than go-proton-api's, because go-proton-api's `Auth` drops `ExpiresIn` and the old-token answer's Proton code. A refused first refresh exits 20 (Blocked) with the Proton code and no token. Replaying an old refresh token may end the session on Proton's side, so it is never run on a session anything else uses: the E03 candidates and the seeder log in again afterwards.
+- **Disposable session = login #1** of the pending sequence. `pcb-lab probe refresh [--record-dir spec/experiments/raw/E01]` runs **once** on it: one `POST /auth/v4/refresh` with the saved pair (refresh token, and its access token in the body: see the live finding below), saves the new pair, then one retry with the previous pair. It reports HTTP status, Proton code, `ExpiresIn` (as returned, 0 when absent), whether the refresh and access tokens changed, and whether the old refresh token was accepted (a success is saved too, so the file holds the newest pair). It is a raw call rather than go-proton-api's, because go-proton-api's `Auth` drops `ExpiresIn` and the old-token answer's Proton code. A refused first refresh exits 20 (Blocked) with the Proton code and no token. Replaying an old refresh token may end the session on Proton's side, so it is never run on a session anything else uses: the E03 candidates and the seeder log in again afterwards.
 - **Dedicated session = the timer's.** Its own state dir, `$XDG_STATE_HOME/pcb-lab-e01` (default `~/.local/state/pcb-lab-e01`), created by its own `pcb-lab login --state-dir ...` step. **Nothing else ever uses that state dir** (no probe, no seeder, no E03 run): a session shared with other probes would not measure the lifetime of a session refreshed only every 6 h. `pcb-lab probe alive --state-dir <that dir>` makes one authenticated `GET /core/v4/users` with the saved access token; if it is rejected (401) it refreshes once, saves the new tokens and repeats the GET. It appends `{at, ok, code, refreshed, rotated, expires_in}` to `e01.jsonl` in that dir. A refused refresh is itself the sample (`ok: false`, the refresh's Proton code, no retry of the GET): that is how the session ended, and its age is `at` minus the first line's `at`. After 14 days from the first sample it samples nothing and says so (the timer then only reports the window is over).
 - `scripts/e01-timer/pcb-lab-e01.{service,timer}`: a user timer every 6 h (`OnCalendar=*-*-* 00/6:00:00`), `Persistent=true` so runs missed while the desktop slept catch up (ruling R4), running only `probe alive --state-dir %S/pcb-lab-e01`.
 
@@ -23,7 +23,31 @@ Tested offline against the shared fake (`internal/lab/probe/session_test.go`, `c
 
 ## Results
 
-No live measurement yet (the test account's CAPTCHA is pending, HUMAN-CHECKS step 1).
+The planned measurements below are still pending. One finding came first.
+
+### Live finding (2026-11-12): a refresh needs the access token
+
+Test account, times UTC, tokens redacted (T1, T2, T3: the pairs successive refreshes returned) [verified: live 2026-11-12]:
+
+| Time | `POST /auth/v4/refresh` | Answer |
+|---|---|---|
+| 22:34:51 | the login's pair, body without `AccessToken` (go-proton-api `Manager.NewClientWithRefresh`) | 200, new pair T1 |
+| 22:34:5x, 22:34:59 | T1's refresh token, body without `AccessToken` | 400, code 10013 "Invalid refresh token" |
+| 22:36:00 | (`GET /core/v4/users` with T1's access token) | 200: the session was alive |
+| 22:37:30 | T1's refresh token, body with T1's `AccessToken` | 200, new pair T2 |
+| 22:40:46 | T2's refresh token, body without `AccessToken` | 400, 10013 |
+| 22:41:02 | T2's refresh token, with `AccessToken` (16 s after the refusal) | 400, 10013 |
+| 22:44:43 | T2's refresh token, with `AccessToken` | 200, new pair T3 |
+
+`ExpiresIn` was 86400 on these answers.
+
+Rule: **a refresh token obtained from a refresh is refused unless the refresh body carries that pair's current access token**; only the first refresh after a login worked without it. A refused attempt does not spend the refresh token, but is followed by a short cooldown (the 22:41:02 refusal); a client that always sends the access token never meets it.
+
+go-proton-api's exported `Manager.NewClientWithRefresh` sends no access token (`manager_auth.go`); its client's own refresh after a 401 (`Client.authRefresh`) does. Consequences, fixed on 2026-11-12:
+
+- pcb (`auth.Refresh`) used `NewClientWithRefresh`: every session's second refresh, about 48 h after login, was refused and read as "session ended" (needs-login every two days). It now sends the access token (SPEC §5.2).
+- pcb-lab refreshed the saved session on every command (`session.Resume`) and in `probe refresh` / `probe alive` without the access token. `Resume` now uses the saved tokens, checked by one `GET /core/v4/users`, without refreshing; every refresh it makes carries the access token, and `probe refresh`'s retry with the previous refresh token carries the previous pair's access token.
+- The shared fake (`protontest`) enforces the rule (400, 10013), so a regression fails the tests and `make rehearse`.
 
 ## Pending live run (HUMAN-CHECKS steps 2 and 3)
 

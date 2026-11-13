@@ -470,7 +470,7 @@ func TestSyncRefusesKeyPacketsToARetiredKey(t *testing.T) {
 	w.mustCreate(t, w.create(t, c, k)) // to the primary key only
 }
 
-func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
+func TestSyncUpdateReplacesAndResetsAbsentNotifications(t *testing.T) {
 	t.Parallel()
 	w := newWriter(t, protontest.Options{})
 	k := newKeys(t)
@@ -483,8 +483,8 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 	id := w.mustCreate(t, ev)
 	before := w.row(t, id)
 
-	// Absent Notifications and null Color keep the row's; the omitted
-	// calendar encrypted part goes (full replace); no key packets are sent.
+	// Absent Notifications reset to null (live L.4 #10); null Color keeps
+	// the row's; the omitted calendar encrypted part goes (full replace); no key packets are sent.
 	c.calEnc, c.sharedEnc = nil, []string{"SUMMARY:After"}
 	upd := w.update(t, c, k)
 	delete(upd, "Notifications")
@@ -492,8 +492,9 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 		t.Fatalf("update: code %d, want 1000", code)
 	}
 	after := w.row(t, id)
-	if n, _ := json.Marshal(after["Notifications"]); string(n) != `[{"Trigger":"-PT15M","Type":1}]` {
-		t.Errorf("absent Notifications: %s, want the row's [-PT15M]", n)
+	if after["Notifications"] != nil {
+		n, _ := json.Marshal(after["Notifications"])
+		t.Errorf("absent Notifications on update: %s, want null (live L.4 #10), not the row's", n)
 	}
 	if after["Color"] != "#3CBB3A" {
 		t.Errorf("null Color on update: %v, want the row's #3CBB3A", after["Color"])
@@ -593,6 +594,45 @@ func TestSyncExceptionNeedsSequenceAtLeastMaster(t *testing.T) {
 	if got := codes(ans); got[0] != 1000 || got[1] != 2001 || got[2] != 1000 {
 		t.Errorf("master to 3, exception at 2 then 3: codes %v, want 1000, 2001, 1000", got)
 	}
+}
+
+// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): Proton refuses (2001) an
+// exception of a master whose shared signed part has no SEQUENCE, whatever
+// the exception's; a master with SEQUENCE:0 takes it, and so does one given
+// SEQUENCE:0 earlier in the same call.
+func TestSyncExceptionNeedsAMasterSequence(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	bare := card{
+		uid:          "bare@pcb.test",
+		sharedSigned: []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "RRULE:FREQ=DAILY;COUNT=5"},
+		sharedEnc:    []string{"SUMMARY:Daily"},
+		calSigned:    []string{"STATUS:CONFIRMED"},
+	}
+	mk := newKeys(t)
+	masterID := w.mustCreate(t, w.create(t, bare, mk))
+	exception := card{
+		uid:          "bare@pcb.test",
+		sharedSigned: []string{"DTSTART:20261113T100000Z", "DTEND:20261113T110000Z", "RECURRENCE-ID:20261113T090000Z", "SEQUENCE:1"},
+		sharedEnc:    []string{"SUMMARY:Moved"},
+		calSigned:    []string{"STATUS:CONFIRMED"},
+	}
+	ek := newKeys(t)
+	if code := w.entryCode(t, map[string]any{"Event": w.create(t, exception, ek)}); code != 2001 {
+		t.Errorf("an exception of a master without SEQUENCE: code %d, want 2001", code)
+	}
+	withSeq := bare
+	withSeq.sharedSigned = append(slices.Clone(bare.sharedSigned), "SEQUENCE:0")
+	_, ans := w.sync(t,
+		map[string]any{"ID": masterID, "Event": w.update(t, withSeq, mk)},
+		map[string]any{"Event": w.create(t, exception, ek)})
+	if got := codes(ans); len(got) != 2 || got[0] != 1000 || got[1] != 1000 {
+		t.Errorf("the master given SEQUENCE:0, then the exception, in one call: codes %v, want 1000, 1000", got)
+	}
+	// A single event without SEQUENCE is taken (pcb-m4 tb new, live).
+	single := bare
+	single.uid, single.sharedSigned = "single@pcb.test", bare.sharedSigned[:2]
+	w.mustCreate(t, w.create(t, single, newKeys(t)))
 }
 
 // TestSyncRefusesWhatProtonRefuses covers the rest of research A.4 and the
@@ -919,6 +959,38 @@ func TestSyncWritesReachTheFeed(t *testing.T) {
 	for i, e := range want {
 		if g := got.CalendarEvents[i]; g.ID != e.id || g.Action != e.action {
 			t.Errorf("entry %d = %+v, want %+v", i, g, e)
+		}
+	}
+}
+
+// Proton stores a UID by its TEXT value, unescaped (RFC 5545 §3.3.11):
+// `UID:a\,b` in the parts is the row `a,b`, listed by ?UID=a,b and not by
+// the escaped text (measured live 2026-11-13, HUMAN-CHECKS W10). The parts
+// are served as sent.
+func TestSyncStoresTheUIDUnescaped(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	for _, c := range []struct{ text, column string }{
+		{`esc-a\,b@pcb.test`, "esc-a,b@pcb.test"},
+		{`esc-c\;d\\e@pcb.test`, `esc-c;d\e@pcb.test`},
+		{`esc-f\ng@pcb.test`, "esc-f\ng@pcb.test"},
+		{"plain@pcb.test", "plain@pcb.test"},
+	} {
+		sent := w.create(t, simple(c.text, "0", "Escaped"), newKeys(t))
+		row := w.row(t, w.mustCreate(t, sent))
+		if row["UID"] != c.column {
+			t.Errorf("UID:%s: the row's UID is %q, want %q", c.text, row["UID"], c.column)
+		}
+		if !strings.Contains(partData(row, "SharedEvents", 0), "UID:"+c.text+"\r\n") {
+			t.Errorf("UID:%s: the shared signed part is not served as sent", c.text)
+		}
+		if rows := w.byUID(t, c.column); len(rows) != 1 {
+			t.Errorf("?UID=%s: %d rows, want 1", c.column, len(rows))
+		}
+		if c.text != c.column {
+			if rows := w.byUID(t, c.text); len(rows) != 0 {
+				t.Errorf("?UID=%s (the escaped text): %d rows, want none", c.text, len(rows))
+			}
 		}
 	}
 }

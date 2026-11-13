@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "command": "probe write-matrix",
+  "ok": true,
+  "data": {
+    "run_id": "0e0bedde",
+    "uid_prefix": "pcb-lab-wm-0e0bedde-",
+    "key_salts": "read after an SRP unlock of this session (no new session)",
+    "cases": [
+      {
+        "case": "key-packets-on-update",
+        "ref": "L.4 #3",
+        "uid": "pcb-lab-wm-0e0bedde-key-packets-on-update",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          },
+          {
+            "what": "update with new key packets",
+            "answer": {
+              "http_status": 200,
+              "code": 2000,
+              "message": "Les données de l'événement ne sont pas valides. (SharedKeyPacket is not allowed)"
+            }
+          }
+        ],
+        "read_back": "1 row(s): key packet the old one, parts differ: shared signed part, shared encrypted part",
+        "line": "key-packets-on-update (L.4 #3): create: HTTP 200, code 1000; update with new key packets: HTTP 200, code 2000 \"Les données de l'événement ne sont pas valides. (SharedKeyPacket is not allowed)\"; read-back: 1 row(s): key packet the old one, parts differ: shared signed part, shared encrypted part"
+      },
+      {
+        "case": "second-master",
+        "ref": "L.4 #5",
+        "uid": "pcb-lab-wm-0e0bedde-second-master",
+        "steps": [
+          {
+            "what": "first create",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          },
+          {
+            "what": "second create, same UID",
+            "answer": {
+              "http_status": 200,
+              "code": 2500,
+              "message": "L'événement a déjà été ajouté à votre calendrier. (UID already exists)"
+            }
+          }
+        ],
+        "read_back": "1 row(s), 1 master(s); as the first create 1, as the second 0",
+        "line": "second-master (L.4 #5): first create: HTTP 200, code 1000; second create, same UID: HTTP 200, code 2500 \"L'événement a déjà été ajouté à votre calendrier. (UID already exists)\"; read-back: 1 row(s), 1 master(s); as the first create 1, as the second 0"
+      },
+      {
+        "case": "rrule-count-50",
+        "ref": "L.4 #6",
+        "uid": "pcb-lab-wm-0e0bedde-rrule-count-50",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (RRule.COUNT is too large)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "rrule-count-50 (L.4 #6): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (RRule.COUNT is too large)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "rrule-until-2038",
+        "ref": "L.4 #6",
+        "uid": "pcb-lab-wm-0e0bedde-rrule-until-2038",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (RRule.UNTIL is too large)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "rrule-until-2038 (L.4 #6): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (RRule.UNTIL is too large)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "rrule-bysetpos-5",
+        "ref": "L.4 #6",
+        "uid": "pcb-lab-wm-0e0bedde-rrule-bysetpos-5",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          }
+        ],
+        "read_back": "1 row(s); RRULE column \"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=5;COUNT=3\" (as sent), parts as sent",
+        "line": "rrule-bysetpos-5 (L.4 #6): create: HTTP 200, code 1000; read-back: 1 row(s); RRULE column \"FREQ=MONTHLY;BYDAY=MO;BYSETPOS=5;COUNT=3\" (as sent), parts as sent"
+      },
+      {
+        "case": "rrule-hourly",
+        "ref": "L.4 #6",
+        "uid": "pcb-lab-wm-0e0bedde-rrule-hourly",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (RRule.FREQ=hourly is not allowed)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "rrule-hourly (L.4 #6): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (RRule.FREQ=hourly is not allowed)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "rrule-interval-1000",
+        "ref": "L.4 #6",
+        "uid": "pcb-lab-wm-0e0bedde-rrule-interval-1000",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (RRule.INTERVAL is too large)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "rrule-interval-1000 (L.4 #6): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (RRule.INTERVAL is too large)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "status-tentative",
+        "ref": "L.4 #8",
+        "uid": "pcb-lab-wm-0e0bedde-status-tentative",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2000,
+              "message": "Les données de l'événement ne sont pas valides. (Unknown EventStatus: TENTATIVE)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "status-tentative (L.4 #8): create: HTTP 200, code 2000 \"Les données de l'événement ne sont pas valides. (Unknown EventStatus: TENTATIVE)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "floating-time",
+        "ref": "L.4 #8",
+        "uid": "pcb-lab-wm-0e0bedde-floating-time",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (Date-time must be localized)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "floating-time (L.4 #8): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (Date-time must be localized)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "non-iana-tzid",
+        "ref": "L.4 #8",
+        "uid": "pcb-lab-wm-0e0bedde-non-iana-tzid",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2001,
+              "message": "Les données de l'événement ne sont pas valides. (Invalid timezone)"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "non-iana-tzid (L.4 #8): create: HTTP 200, code 2001 \"Les données de l'événement ne sont pas valides. (Invalid timezone)\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "duration",
+        "ref": "L.4 #8",
+        "uid": "pcb-lab-wm-0e0bedde-duration",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 2011,
+              "message": "These properties are not supported"
+            }
+          }
+        ],
+        "read_back": "0 row(s)",
+        "line": "duration (L.4 #8): create: HTTP 200, code 2011 \"These properties are not supported\"; read-back: 0 row(s)"
+      },
+      {
+        "case": "unbumped-time-edit",
+        "ref": "R4",
+        "uid": "pcb-lab-wm-0e0bedde-unbumped-time-edit",
+        "steps": [
+          {
+            "what": "create",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          },
+          {
+            "what": "time edit, SEQUENCE unchanged",
+            "answer": {
+              "http_status": 200,
+              "code": 2000,
+              "message": "Les données de l'événement ne sont pas valides. (Cannot update time data without also incrementing Sequence)"
+            }
+          }
+        ],
+        "read_back": "1 row, StartTime unchanged by the update, parts differ: shared signed part",
+        "line": "unbumped-time-edit (R4): create: HTTP 200, code 1000; time edit, SEQUENCE unchanged: HTTP 200, code 2000 \"Les données de l'événement ne sont pas valides. (Cannot update time data without also incrementing Sequence)\"; read-back: 1 row, StartTime unchanged by the update, parts differ: shared signed part"
+      },
+      {
+        "case": "notifications-absent",
+        "ref": "L.4 #10",
+        "uid": "pcb-lab-wm-0e0bedde-notifications-absent",
+        "steps": [
+          {
+            "what": "create with one reminder",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          },
+          {
+            "what": "update, Notifications absent",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          }
+        ],
+        "read_back": "Notifications after the create [{\"Type\":1,\"Trigger\":\"-PT15M\"}], after the update null, parts as sent",
+        "line": "notifications-absent (L.4 #10): create with one reminder: HTTP 200, code 1000; update, Notifications absent: HTTP 200, code 1000; read-back: Notifications after the create [{\"Type\":1,\"Trigger\":\"-PT15M\"}], after the update null, parts as sent"
+      },
+      {
+        "case": "personal-part-left-out",
+        "ref": "L.4 #10",
+        "uid": "pcb-lab-wm-0e0bedde-personal-part-left-out",
+        "steps": [
+          {
+            "what": "create with a personal part",
+            "answer": {
+              "http_status": 200,
+              "code": 1000
+            }
+          },
+          {
+            "what": "update leaving it out",
+            "not_sent": "the create stored no personal part"
+          }
+        ],
+        "read_back": "1 row, personal parts after the create 0",
+        "line": "personal-part-left-out (L.4 #10): create with a personal part: HTTP 200, code 1000; update leaving it out: not sent (the create stored no personal part); read-back: 1 row, personal parts after the create 0"
+      }
+    ],
+    "cleanup": "delete 6 row(s) in one call: HTTP 200, code 0, 0 entr(ies) refused; left 0",
+    "writes": 19
+  }
+}

@@ -107,7 +107,8 @@ type Body struct {
 	IsOrganizer *int `json:",omitempty"`
 	// Attendees: re-send the row's {Token, Status, Comment} on an update.
 	Attendees AttendeeList
-	// Notifications: absent keeps the row's on an update; null is the
+	// Notifications: absent is null, on an update as on a create (never the
+	// row's own) [verified: live 2026-11-13, L.4 #10]; null is the
 	// calendar's defaults; [] none; an array is custom (research D).
 	Notifications Optional[NotificationList] `json:",omitzero"`
 	// Color: absent or null keep the row's on an update; a palette colour

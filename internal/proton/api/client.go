@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -33,6 +35,43 @@ const (
 	defaultAppVersion   = "Other"
 )
 
+// DefaultPing is the HTTP/2 health check of pcb's transports to Proton
+// (NewTransport): after DefaultPing without a frame from Proton a PING is
+// sent, and a connection whose PING is unanswered for DefaultPing more is
+// closed (its requests fail and are retried on a new one). A dead
+// connection is so found within 30 s, the request timeout; a live one
+// costs one PING per 15 s of silence, and a slow answer on it is not cut,
+// since Proton answers the PING meanwhile.
+const DefaultPing = 15 * time.Second
+
+// defaultTransport is the transport of the clients built without
+// Options.HTTP: one pool for all of them and nothing else in the process.
+var defaultTransport = NewTransport(DefaultPing)
+
+// NewTransport returns a transport to Proton: http.DefaultTransport's
+// settings (the same defaults when something replaced it with another
+// RoundTripper), HTTP/2 when the server offers it, and the HTTP/2 health
+// check with ping as both its silence and its PING timeout (DefaultPing;
+// tests shorten it).
+func NewTransport(ping time.Duration) *http.Transport {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		t = t.Clone()
+	} else {
+		t = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	}
+	t.ForceAttemptHTTP2 = true
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: ping, PingTimeout: ping}
+	return t
+}
+
 var errTooLarge = errors.New("response too large")
 
 // Options configures a Client. BaseURL is required (Do refuses to send
@@ -41,7 +80,7 @@ type Options struct {
 	BaseURL    string
 	AppVersion string       // x-pm-appversion; default "Other"
 	UserAgent  string       // default "pcb/<buildinfo.Version>"
-	HTTP       *http.Client // default: 30 s timeout; redirects are never followed
+	HTTP       *http.Client // default: 30 s timeout, an HTTP/2 health check; redirects are never followed
 	// Refresh exchanges stale tokens for new ones. It should wrap
 	// ErrSessionEnded when the refresh token is no longer usable. Without it,
 	// a 401 ends the session. It runs under the client's lock and detached
@@ -50,6 +89,8 @@ type Options struct {
 	Refresh func(ctx context.Context, stale Tokens) (Tokens, error)
 	Limiter *rate.Limiter // default: one request per 250 ms, burst 8
 	Sleep   func(ctx context.Context, d time.Duration) error
+	// Logger gets one debug record per retry wait (retried); default: none.
+	Logger *slog.Logger
 }
 
 // Client sends authenticated requests. It is safe for concurrent use.
@@ -57,12 +98,15 @@ type Client struct {
 	o  Options
 	mu sync.Mutex // guards tok and serialises refreshes
 	tk Tokens
+	// failed is set when a send failed: its connection may be one that
+	// stopped answering, kept in the pool once its stream is reset.
+	failed atomic.Bool
 }
 
 // New returns a Client holding t.
 func New(t Tokens, o Options) *Client {
 	if o.HTTP == nil {
-		o.HTTP = &http.Client{Timeout: defaultTimeout}
+		o.HTTP = &http.Client{Timeout: defaultTimeout, Transport: defaultTransport}
 	}
 	// A followed redirect would send the session headers to another URL; the
 	// 3xx is answered as a failure instead. Set on a copy: the caller's client
@@ -81,6 +125,9 @@ func New(t Tokens, o Options) *Client {
 	}
 	if o.Sleep == nil {
 		o.Sleep = sleep
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	o.BaseURL = strings.TrimRight(o.BaseURL, "/")
 	return &Client{o: o, tk: t}
@@ -167,14 +214,18 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			return notSent(fmt.Errorf("%s: %w", where, err))
 		}
 		sent := c.Tokens()
+		if c.failed.Swap(false) {
+			c.dropIdle()
+		}
 		status, hdr, data, err := c.send(ctx, method, target, payload, sent)
 		if err != nil {
+			c.failed.Store(true) // the next send drops the idle connections
 			if ctx.Err() != nil {
 				return fmt.Errorf("%s: %w", where, ctx.Err())
 			}
 			failed++
 			if method == http.MethodGet && failed < maxAttempts && !errors.Is(err, errTooLarge) {
-				if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+				if err := c.wait(ctx, method, path, 0, backoff(failed)); err != nil {
 					return fmt.Errorf("%s: %w", where, err)
 				}
 				continue
@@ -212,7 +263,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			if wait > maxRetryAfter || limited >= maxAttempts {
 				return perr
 			}
-			if err := c.o.Sleep(ctx, wait); err != nil {
+			if err := c.wait(ctx, method, path, status, wait); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
 			}
 		case status >= 500 && method == http.MethodGet:
@@ -220,7 +271,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			if failed >= maxAttempts {
 				return perr
 			}
-			if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+			if err := c.wait(ctx, method, path, status, backoff(failed)); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
 			}
 		default:
@@ -228,6 +279,28 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 	}
 }
+
+// wait sleeps d before a retry and logs it at debug level (observation
+// O1: a login's retries were silent for seconds): the method, the path
+// (without its query), the status that made it wait (0: no answer, a
+// network error or timeout) and the wait. Never a token, the session UID, a
+// body, a query or a header.
+func (c *Client) wait(ctx context.Context, method, path string, status int, d time.Duration) error {
+	c.o.Logger.LogAttrs(ctx, slog.LevelDebug, "retrying a Proton request",
+		slog.String("method", method), slog.String("path", path), slog.Int("status", status), slog.Duration("wait", d))
+	return c.o.Sleep(ctx, d)
+}
+
+// dropIdle closes the idle connections of the client's transport after a
+// send failed (live 2026-11-13): an HTTP/2 connection that stops answering
+// stays in the pool once the timed-out stream is reset, and every later
+// request would go to it again. A connection still carrying a request is
+// left alone. It runs before the send that follows the failure: at the
+// failure itself the reset stream still holds the connection. A send that
+// comes too early (within milliseconds), or a connection another request
+// still holds, keeps the stalled connection one attempt more; the HTTP/2
+// health check (DefaultPing) closes it within 30 s in any case.
+func (c *Client) dropIdle() { c.o.HTTP.CloseIdleConnections() }
 
 // refresh rotates the tokens unless another goroutine already did.
 func (c *Client) refresh(ctx context.Context, stale Tokens) error {

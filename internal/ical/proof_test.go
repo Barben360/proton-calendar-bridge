@@ -239,3 +239,24 @@ func TestProvesKey(t *testing.T) {
 		}
 	}
 }
+
+// The proof's UID is compared by its TEXT value: the parts carry the UID as
+// written (`UID:a\,b`), the row the value Proton stores (`a,b`, SPEC §5.3).
+// A row whose column holds the escaped text is another value.
+func TestProvesKeyComparesTheUIDsValue(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		line, uid string
+		want      bool
+	}{
+		{`UID:a\,b`, "a,b", true},
+		{`UID:a\;b\\c`, `a;b\c`, true},
+		{"UID:a,b", "a,b", true},
+		{`UID:a\,b`, `a\,b`, false},
+		{`UID:a\\,b`, "a,b", false},
+	} {
+		if got := ProvesKey(frag(c.line, stampLine, "SUMMARY:x"), c.uid, SharedEncrypted); got != c.want {
+			t.Errorf("%s for the row %q: ProvesKey = %v, want %v", c.line, c.uid, got, c.want)
+		}
+	}
+}

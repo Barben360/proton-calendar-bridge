@@ -20,6 +20,10 @@ type installData struct {
 	Plan  bool           `json:"plan"`
 	Steps []install.Step `json:"steps"`
 	Next  []string       `json:"next"`
+	// Logout is what the uninstall's logout step got from Proton, one
+	// entry per account that answered, as pcb logout prints it; absent when
+	// no logout ran or none got an answer (its step's note says why).
+	Logout []uninstallLogout `json:"logout,omitempty"`
 }
 
 // scopeFlags are --user and --system.
@@ -233,13 +237,44 @@ func (a *app) uninstall(cmd *cobra.Command, s install.Scope, deleteData, yes, pl
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	hooks := install.Hooks{Logout: a.logoutHook(h), Keyring: func(ctx context.Context, stateDir string) error {
+	hooks := install.Hooks{Logout: a.logoutHook(h, &data.Logout), Keyring: func(ctx context.Context, stateDir string) error {
 		return service.DeleteSealingKey(ctx, stateDir, a.Keyring)
 	}}
 	if err := install.Apply(ctx, h, steps, hooks); err != nil {
+		if len(data.Logout) > 0 {
+			// A later step failed: what Proton answered still matters.
+			return Finish(cmd, data, uninstallLogoutText(data.Logout), applyFailed(err))
+		}
 		return Finish(cmd, nil, "", applyFailed(err))
 	}
-	return Finish(cmd, data, appliedText(steps, nil), nil)
+	text := appliedText(steps, nil)
+	if len(data.Logout) > 0 {
+		text += "\n" + uninstallLogoutText(data.Logout)
+	}
+	return Finish(cmd, data, text, nil)
+}
+
+// uninstallLogout is what the uninstall's logout step got from Proton for
+// one account, as pcb logout prints it.
+type uninstallLogout struct {
+	Account string `json:"account"`
+	Address string `json:"address"`
+	service.LogoutResult
+}
+
+// uninstallLogoutText is pcb logout's first line for each answer, after
+// the account's name when there are several: its advice to run pcb logout
+// again after a sync makes no sense once the directories are deleted.
+func uninstallLogoutText(answers []uninstallLogout) string {
+	lines := make([]string, 0, len(answers))
+	for _, l := range answers {
+		first, _, _ := strings.Cut(logoutText(l.LogoutResult), "\n")
+		if len(answers) > 1 {
+			first = accountName(service.AccountInfo{ID: l.Account, Address: l.Address}) + ": " + first
+		}
+		lines = append(lines, first)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runsSystemctl reports whether steps run systemctl.
@@ -333,8 +368,10 @@ func (a *app) confirmDelete(cmd *cobra.Command, d deletion) error {
 
 // logoutHook signs out every account of the directories the plan
 // resolved (design §4.6), with the in-process accounts, never the caller's
-// own (M5-P19). Each account is tried; the first failure is returned.
-func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error {
+// own (M5-P19), and appends each account's answer to *out. Each account is
+// tried; only a failure to get an answer is an error (the first one, named
+// after its account when there are several).
+func (a *app) logoutHook(h install.Host, out *[]uninstallLogout) func(context.Context, paths.Dirs) error {
 	return func(ctx context.Context, dirs paths.Dirs) error {
 		env := func(k string) string {
 			switch k {
@@ -351,15 +388,22 @@ func (a *app) logoutHook(h install.Host) func(context.Context, paths.Dirs) error
 		}
 		defer a.closeHub(hub)
 		var failure error
-		for _, info := range hub.Accounts() {
+		accounts := hub.Accounts()
+		for _, info := range accounts {
 			res, err := hub.SignOut(ctx, info.ID, service.LogoutRequest{})
-			if err == nil && res.WasLoggedIn && !res.Revoked {
-				err = errors.New("the Proton session of " + accountName(info) + " could not be revoked")
+			if err != nil {
+				if failure == nil {
+					failure = err
+					if len(accounts) > 1 {
+						failure = fmt.Errorf("%s: %w", accountName(info), err)
+					}
+				}
+				continue
 			}
-			if err != nil && failure == nil {
-				failure = err
-			}
+			*out = append(*out, uninstallLogout{Account: info.ID, Address: info.Address, LogoutResult: res})
 		}
+		// Not revoked is an answer: the outcome line says so, in pcb
+		// logout's words, not a note of the step.
 		return failure
 	}
 }

@@ -1,9 +1,11 @@
 package protontest_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,92 @@ func TestTOTPCodesRecordsSubmittedCodes(t *testing.T) {
 	_ = c.Auth2FA(t.Context(), gpa.Auth2FAReq{TwoFactorCode: "654321"})
 	if got := f.TOTPCodes(); len(got) != 2 || got[0] != "123456" || got[1] != "654321" {
 		t.Fatalf("TOTPCodes = %q", got)
+	}
+}
+
+// refresh sends one raw POST /auth/v4/refresh for uid's refresh token ref,
+// with the access token acc in the body unless it is empty, and returns the
+// status, the Proton code and the new pair (empty unless 200).
+func refresh(t *testing.T, f *protontest.Fake, uid, ref, acc string) (status, code int, fresh gpa.Auth) {
+	t.Helper()
+	body := map[string]string{
+		"UID": uid, "RefreshToken": ref, "ResponseType": "token", "GrantType": "refresh_token",
+		"RedirectURI": "https://protonmail.ch", "State": "fake-test-state",
+	}
+	if acc != "" {
+		body["AccessToken"] = acc
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.URL+"/auth/v4/refresh", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("x-pm-appversion", "Other")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test
+	var env struct {
+		Code int
+		gpa.Auth
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&env)
+	env.UID = uid
+	return resp.StatusCode, env.Code, env.Auth
+}
+
+// Proton refuses a refresh token issued by a refresh unless the body carries
+// that pair's access token (400, 10013); a login's refresh token works either
+// way, and a refused attempt does not spend the token (measured live,
+// 2026-11-12, E01).
+func TestRefreshOfARefreshedPairNeedsItsAccessToken(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	a := login(t, f, f.Username, f.Password)
+	status, _, t1 := refresh(t, f, a.UID, a.RefreshToken, "")
+	if status != http.StatusOK || t1.AccessToken == "" || t1.RefreshToken == "" {
+		t.Fatalf("a login's refresh token without the access token answered %d, want 200 with a pair", status)
+	}
+	for _, c := range []struct{ name, acc string }{{"no access token", ""}, {"the login's access token", a.AccessToken}} {
+		if status, code, _ := refresh(t, f, a.UID, t1.RefreshToken, c.acc); status != http.StatusBadRequest || code != 10013 {
+			t.Errorf("a refreshed pair's refresh token with %s answered %d/%d, want 400/10013", c.name, status, code)
+		}
+	}
+	status, _, t2 := refresh(t, f, a.UID, t1.RefreshToken, t1.AccessToken)
+	if status != http.StatusOK || t2.AccessToken == "" {
+		t.Fatalf("a refreshed pair's refresh token with its access token answered %d, want 200 (the refusals must not spend it)", status)
+	}
+	if status, _, _ := getUser(t, f, t2); status != http.StatusOK {
+		t.Fatalf("the second refresh's pair answered %d, want 200", status)
+	}
+	b := login(t, f, f.Username, f.Password)
+	if status, _, _ := refresh(t, f, b.UID, b.RefreshToken, b.AccessToken); status != http.StatusOK {
+		t.Fatalf("a login's refresh token with its access token answered %d, want 200", status)
+	}
+}
+
+// RefreshTokens lists every refresh token handed out, by a login, a
+// refresh, Session and Login, so a test can check that none leaks.
+func TestRefreshTokensListsEveryIssuedOne(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	a := login(t, f, f.Username, f.Password)
+	status, _, t1 := refresh(t, f, a.UID, a.RefreshToken, "")
+	if status != http.StatusOK {
+		t.Fatalf("refresh answered %d", status)
+	}
+	s := f.Session(t, f.Username)
+	l := f.Login(t, f.Username)
+	got := f.RefreshTokens()
+	for _, want := range []string{a.RefreshToken, t1.RefreshToken, s.RefreshToken, l.RefreshToken} {
+		if want == "" || !slices.Contains(got, want) {
+			t.Errorf("RefreshTokens() = %q lacks %q", got, want)
+		}
 	}
 }
 

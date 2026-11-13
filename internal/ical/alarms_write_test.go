@@ -32,7 +32,8 @@ func TestNotificationsFromAlarms(t *testing.T) {
 	}{
 		{"display", display("TRIGGER:-PT15M"), false, "1/-PT15M"},
 		{"audio", alarm("ACTION:AUDIO", "TRIGGER:-PT15M"), false, "1/-PT15M"},
-		{"email", alarm("ACTION:EMAIL", "TRIGGER:-P1D", "SUMMARY:s", "DESCRIPTION:d"), false, "0/-P1D"},
+		{"email (Proton-side, ignored)", alarm("ACTION:EMAIL", "TRIGGER:-P1D", "SUMMARY:s", "DESCRIPTION:d"), false, ""},
+		{"lower-case email", alarm("ACTION:email", "TRIGGER:-P1D"), false, ""},
 		{"lower-case action", alarm("ACTION:display", "TRIGGER:-PT5M"), false, "1/-PT5M"},
 		{"procedure", alarm("ACTION:PROCEDURE", "TRIGGER:-PT15M"), false, ""},
 		{"no action", alarm("TRIGGER:-PT15M"), false, ""},
@@ -148,7 +149,8 @@ func TestSameNotificationsComparesByMeaning(t *testing.T) {
 }
 
 // The comparison half of "unchanged default alarms keep null": the VALARMs
-// our render makes from the calendar defaults, read back, equal the defaults.
+// our render makes from the calendar defaults, read back, equal the
+// defaults' device part (their email part is Proton-side, not served).
 func TestRenderedDefaultsReadBackAsTheDefaults(t *testing.T) {
 	for _, c := range []struct {
 		defaults string
@@ -166,12 +168,16 @@ func TestRenderedDefaultsReadBackAsTheDefaults(t *testing.T) {
 		if err := json.Unmarshal([]byte(c.defaults), &defaults); err != nil {
 			t.Fatal(err)
 		}
-		if dropped != 0 || !SameNotifications(got, defaults) {
+		device, email := SplitEmail(defaults)
+		if len(email) != 1 || len(device) != 1 {
+			t.Fatalf("test bug: defaults %s", c.defaults)
+		}
+		if dropped != 0 || !SameNotifications(got, device) {
 			t.Fatalf("defaults %s read back as %+v (dropped %d)", c.defaults, got, dropped)
 		}
 		changed := slices.Clone(got)
 		changed[0].Trigger = "-PT20M"
-		if SameNotifications(changed, defaults) {
+		if SameNotifications(changed, device) {
 			t.Fatalf("an edited alarm still equals the defaults")
 		}
 	}

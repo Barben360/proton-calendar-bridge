@@ -20,7 +20,7 @@
 # XDG_DATA_HOME are checked the same way when set (a stray default would
 # otherwise reach ~/.config/pcb, ~/.local/state/pcb, ~/.local/share/pcb or
 # ~/.config/proton-cal, the author's real ones).
-# On success it prints the resolved dirs and exports PCB_LIVE_RUN, the run root.
+# On success it prints the resolved dirs on stderr and exports PCB_LIVE_RUN, the run root.
 #
 # It also defines live_login STEP PURPOSE, the login ledger: it refuses a
 # login within 60 s of the last one or beyond the budget (11 per run, 3 with
@@ -75,8 +75,12 @@ live_guard() {
   done
   PCB_LIVE_RUN=$(realpath -m -- "$(live_home)")/pcb-live-run/$run
   export PCB_LIVE_RUN
-  printf 'live guard ok, run root %s\n' "$PCB_LIVE_RUN"
-  printf '  %s\n' "${out[@]}"
+  # The banner goes to stderr, so a command's stdout stays its own (jq);
+  # run.sh --vm sets live_guard_quiet=1 and prints what is in force instead.
+  if [[ ${live_guard_quiet-} != 1 ]]; then
+    printf 'live guard ok, run root %s\n' "$PCB_LIVE_RUN" >&2
+    printf '  %s\n' "${out[@]}" >&2
+  fi
 }
 
 live_now() { live_hook PCB_LIVE_NOW "$(date +%s)"; }
@@ -129,7 +133,7 @@ live_login() {
     row=$(printf '%s\t%s\t%s\t%s\t%s' "$now" "$(date -u -d "@$now" +%FT%TZ)" "$step" "${what:-$purpose}" "${PCB_LIVE_RUN##*/}")
     printf '%s\n' "${row%$'\t'*}" >> "$PCB_LIVE_RUN/logins.tsv"
     printf '%s\n' "$row" >> "$base/.ledger"
-    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "${what:-$purpose}"
+    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "${what:-$purpose}" >&2
   )
   rc=$?
   return "$rc"

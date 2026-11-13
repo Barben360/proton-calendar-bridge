@@ -344,14 +344,21 @@ func PlanDelete(current Group) (WritePlan, error) {
 // (DTSTAMP the write time, DTEND from DTSTART); an attendee added or removed
 // is refused, edits of an existing attendee's parameters are ignored (ruling
 // M4-R9), a new exception takes its master's attendees when it has the same
-// set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming, stored), stored+1 when the shared signed
-// content changes and the client did not bump it, and an exception's is at
-// least its master's (ruling M4-R4). Notifications follow the tri-state
-// (research D). An update re-sends the row's Color (null when it has none),
-// Attendees and IsOrganizer, reuses the row's session keys only when
-// SessionKeys trusts both, and carries no key packet; a create mints its
-// keys and sends Color null (an exception the master's Color). A row whose
-// parts and notifications do not change gets no operation.
+// set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming,
+// stored), stored+1 when the shared signed content changes and the client
+// did not bump it, and an exception's is at least its master's (ruling
+// M4-R4). Every master written carries a SEQUENCE, 0 when neither the client
+// nor the row has one: Proton refuses an exception of a master whose signed
+// part has none (live 2026-11-13, HUMAN-CHECKS 6.3 D7). A master stored
+// without one gets SEQUENCE:0 with any write to its series (an exception
+// created, updated or deleted), first in the call, its body otherwise
+// unchanged; a body that changes nothing still plans nothing. Notifications
+// follow the tri-state (research D; never absent on an update, Proton would
+// reset the row to null). An update re-sends the row's Color (null when it
+// has none), Attendees and IsOrganizer, reuses the row's session keys only
+// when SessionKeys trusts both, and carries no key packet; a create mints
+// its keys and sends Color null (an exception the master's Color). A row
+// whose parts and notifications do not change gets no operation.
 func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	if in.UID == "" || in.UID != current.UID {
 		return WritePlan{}, errors.New("planning a write: the body's UID is not the event's")
@@ -384,6 +391,11 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if in.Master == nil {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "an event cannot be created without its master")
 		}
+		// A DTSTART off its RRULE is refused when the write introduces it:
+		// here a create; below an update changing DTSTART or RRULE.
+		if r := ical.StartOffRule(in.Master.Comp); r != nil {
+			return WritePlan{}, asRefusal(r)
+		}
 		seq, op, err := pl.create(*in.Master, 0, nil)
 		if err != nil {
 			return WritePlan{}, err
@@ -393,7 +405,12 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if in.Master == nil {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "the body leaves out the event's master")
 		}
-		seq, op, err := pl.update(master, *in.Master, 0)
+		// An update keeping the stored DTSTART and RRULE passes even when
+		// the stored series is off its rule (a re-PUT, a title edit).
+		if r := ical.StartOffRule(in.Master.Comp); r != nil && !ical.SameRecurrence(master.stored, in.Master.Comp) {
+			return WritePlan{}, asRefusal(r)
+		}
+		seq, op, err := pl.update(master, *in.Master, 0, false)
 		if err != nil {
 			return WritePlan{}, err
 		}
@@ -407,7 +424,7 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		var op *events.Op
 		switch {
 		case r != nil:
-			_, op, err = pl.update(r, we, minSeq)
+			_, op, err = pl.update(r, we, minSeq, false)
 		case master == nil && len(rows) > 0:
 			return WritePlan{}, refused(RefuseUnsupportedChange, "a new exception needs its series' master")
 		default:
@@ -423,6 +440,18 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	for _, rid := range sortedKeys(exceptions) {
 		if _, kept := in.Exceptions[rid]; !kept {
 			out.Ops = append(out.Ops, events.Op{Delete: &events.Delete{ID: exceptions[rid].ID}})
+		}
+	}
+	// A stored master without SEQUENCE gets SEQUENCE:0 with any write to its
+	// series, first in the call (Fix 5): Proton refuses an exception of
+	// such a master (live D7), and the master's body may be unchanged.
+	if master != nil && len(out.Ops) > 0 && !hasSequence(master.stored) && !updates(out.Ops[0], master.ID) {
+		_, op, err := pl.update(master, *in.Master, 0, true)
+		if err != nil {
+			return WritePlan{}, err
+		}
+		if op != nil {
+			out.Ops = append([]events.Op{*op}, out.Ops...)
 		}
 	}
 	out.Notes = pl.notes
@@ -518,6 +547,23 @@ func sequence(c ical.Component) (int, bool) {
 	return n, true
 }
 
+// hasSequence reports whether c holds a SEQUENCE.
+func hasSequence(c ical.Component) bool {
+	_, has := sequence(c)
+	return has
+}
+
+// updates reports whether op is an update of row id.
+func updates(op events.Op, id string) bool {
+	return op.Update != nil && op.Update.ID == id
+}
+
+// isMaster reports whether c is a master: it has no RECURRENCE-ID.
+func isMaster(c ical.Component) bool {
+	_, ok := c.Get("RECURRENCE-ID")
+	return !ok
+}
+
 // setSequence makes c's SEQUENCE the bare value n (research A.4: a
 // parameter on it is a 500), in place, or appended.
 func setSequence(c *ical.Component, n int) {
@@ -564,16 +610,27 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 		}
 	}
 	seq, has := sequence(c)
-	if seq = max(seq, minSeq); has || seq > 0 {
+	if seq = max(seq, minSeq); has || seq > 0 || isMaster(c) {
 		setSequence(&c, seq)
 	}
 	parts, _, err := ical.Patch(nil, c)
 	if err != nil {
 		return 0, events.Op{}, asRefusal(err)
 	}
+	// A new event stores the client's device alarms: null only when they
+	// are the calendar's whole default set, so never when it holds an email.
+	// A new exception follows its master as an update would (Fix 4 review
+	// I1): the master's value when the alarms mean its device part (null
+	// stays null), else them plus the master's email entries, so a moved
+	// occurrence keeps the series' email reminder.
 	list := pl.alarms(we)
 	notifications := events.Value(wireNotifications(list))
-	if ical.SameNotifications(list, pl.d.notifications(we.AllDay)) {
+	switch {
+	case master != nil && strings.TrimSpace(string(master.Event.Notifications)) != "":
+		if notifications, _, err = pl.notificationsAfter(master, list); err != nil {
+			return 0, events.Op{}, err
+		}
+	case ical.SameNotifications(list, pl.d.notifications(we.AllDay)):
 		notifications = events.Null[events.NotificationList]()
 	}
 	sealed, err := cards.Seal(parts, cards.SealKeys{Signer: pl.d.Signer, CalendarPrimary: pl.d.CalendarPrimary})
@@ -639,8 +696,11 @@ func sameAddress(a, b string) bool {
 }
 
 // update plans row r's update to we (nil when nothing changes) and returns
-// its SEQUENCE, at least minSeq.
-func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.Op, error) {
+// its SEQUENCE, at least minSeq. A master gets SEQUENCE:0 when neither we
+// nor r has one; when that is its only change, it is written only with
+// needSequence (another row of its series is written), else nothing is
+// planned.
+func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int, needSequence bool) (int, *events.Op, error) {
 	c, err := pl.prepared(we)
 	if err != nil {
 		return 0, nil, err
@@ -659,7 +719,10 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if bump {
 		seq = stored + 1
 	}
-	if seq = max(seq, minSeq); has || storedHas || seq > 0 {
+	bare := c.Clone() // as sent, for a master stored without SEQUENCE
+	seq = max(seq, minSeq)
+	zero := !has && !storedHas && seq == 0 && isMaster(c)
+	if has || storedHas || seq > 0 || zero {
 		setSequence(&c, seq)
 	}
 	parts, changed, err := ical.Patch(r.parts, c)
@@ -672,6 +735,15 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	}
 	if kept && !slices.Contains(mapValues(changed), true) {
 		return seq, nil, nil
+	}
+	if zero && kept && !needSequence {
+		_, changedBare, err := ical.Patch(r.parts, bare)
+		if err != nil {
+			return 0, nil, asRefusal(err)
+		}
+		if !slices.Contains(mapValues(changedBare), true) {
+			return seq, nil, nil // SEQUENCE:0 alone: not worth a write
+		}
 	}
 	shared, calendar, err := r.Event.SessionKeys()
 	if err != nil {
@@ -742,19 +814,35 @@ func (pl *planner) alarms(we ical.WriteEvent) []ical.Notification {
 	return list
 }
 
-// updatedNotifications is the tri-state on update (research D): when the
-// body's alarms mean the set the render serves for r (the calendar's
-// defaults when r's Notifications are null, the parts' VALARMs when the row
-// has none), r's value is kept as it is (kept: null stays null, absent stays
-// absent); no VALARM is []; otherwise the new list.
+// updatedNotifications is the tri-state on update (research D). Email
+// notifications are Proton-side (Fix 4, choice A): the render does not
+// serve them and the body's alarms map to device notifications alone. When
+// these mean the device part of r's set (the calendar's defaults when r's
+// Notifications are null, the row's list, the parts' VALARMs when the row
+// has none), r's value is kept as it is (kept: null stays null, a list stays
+// that list). A row stored without the field is kept by sending its
+// effective set as a list: Proton turns Notifications absent into null on an
+// update [verified: live 2026-11-13, L.4 #10], so pcb never sends it absent.
+// Otherwise the new list is the body's notifications
+// followed by the email ones of r's set, unchanged (none for the parts'
+// VALARMs), within Proton's limit: a null row's email default is not lost.
 func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Optional[events.NotificationList], bool, error) {
-	list := pl.alarms(we)
+	return pl.notificationsAfter(r, pl.alarms(we))
+}
+
+// notificationsAfter is updatedNotifications for the device notifications
+// list, against r's set: of the row itself on an update, of the master for
+// a new exception.
+func (pl *planner) notificationsAfter(r *row, list []ical.Notification) (events.Optional[events.NotificationList], bool, error) {
 	raw := strings.TrimSpace(string(r.Event.Notifications))
 	var effective []ical.Notification
-	keep := events.Optional[events.NotificationList]{} // absent: the row keeps its own
+	var keep events.Optional[events.NotificationList]
 	switch raw {
 	case "":
+		// Never absent: Proton would reset the row to null. Send the parts'
+		// VALARMs as the list they mean ([] when none).
 		effective, _ = ical.NotificationsFromAlarms(r.stored.Subs("VALARM"), r.FullDay)
+		keep = events.Value(wireNotifications(effective))
 	case "null":
 		effective, keep = pl.d.notifications(r.FullDay), events.Null[events.NotificationList]()
 	default:
@@ -764,13 +852,15 @@ func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Opti
 		}
 		keep = events.Value(wireNotifications(effective))
 	}
-	switch {
-	case ical.SameNotifications(list, effective):
+	device, email := ical.SplitEmail(effective)
+	if ical.SameNotifications(list, device) {
 		return keep, true, nil
-	case len(we.Alarms) == 0:
-		return events.Value(events.NotificationList{}), false, nil
 	}
-	return events.Value(wireNotifications(list)), false, nil
+	if room := ical.MaxNotifications - len(email); len(list) > room {
+		list = list[:max(room, 0)]
+		pl.note(noteAlarms)
+	}
+	return events.Value(wireNotifications(append(list, email...))), false, nil
 }
 
 func wireNotifications(list []ical.Notification) events.NotificationList {
