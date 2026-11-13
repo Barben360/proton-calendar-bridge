@@ -108,11 +108,13 @@ Not checked by the bridge: that DTSTART is the rule's first occurrence (research
 
 ## 5. VALARM → `Notifications`, and the other row fields
 
-Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}]`), never in a card part (research D). Rules ported, as rules, from cal-gateway (README credits).
+Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}]`), never in a card part (research D). Rules ported, as rules, from cal-gateway (README credits), except for email.
+
+Email notifications (`Type` 0) are Proton-side (Fix 4, the author's choice A): Proton's servers send them and a CalDAV client cannot act on them. pcb does not serve them as VALARMs, from a row's list or from the calendar defaults a `null` row follows, and never writes one from CalDAV; an update keeps the row's. Why: a new Proton calendar's defaults are an email and a device notification; pcb served both, Thunderbird's edit dialog showed one reminder and saved the DISPLAY one alone, and the update turned the row's `null` into that one entry, losing the email reminder [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4; `TestThunderbirdKeepsProtonEmailReminders`, `TestEmailNotificationsStayProtonSide`].
 
 | VALARM | Outcome |
 |---|---|
-| `ACTION:EMAIL` | `Type` 0 |
+| `ACTION:EMAIL` | dropped (email notifications are Proton-side) |
 | `ACTION:DISPLAY` or `AUDIO` | `Type` 1 |
 | other ACTION, no or several ACTION or TRIGGER | dropped |
 | TRIGGER `VALUE=DATE-TIME` (absolute) or `RELATED=END` | dropped |
@@ -122,16 +124,15 @@ Proton keeps reminders in the row's plaintext `Notifications` (`[{Type, Trigger}
 | more than 10 kept | the first 10 kept, the rest dropped |
 | `DESCRIPTION`, `SUMMARY`, `REPEAT`, `DURATION`, `ATTACH`, `X-MOZ-LASTACK` and every other VALARM-level property | lost: Proton has nowhere to keep them (research F). The VEVENT-level `X-MOZ-LASTACK` and `X-MOZ-SNOOZE-TIME*` survive in SE; whether Thunderbird needs the VALARM-level one is a live check (`HUMAN-CHECKS.md` §6) |
 
-Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (type and signed offset, any order or spelling: `-P1D` is `-PT24H`):
+Dropping an alarm never refuses the PUT. The tri-state, compared by meaning (type and signed offset, any order or spelling: `-P1D` is `-PT24H`); "the set" is the client's device notifications:
 
 | Case | `Notifications` sent |
 |---|---|
 | create, no VALARM | `[]`, or `null` when the calendar's default set is empty too |
-| create, the set equals the calendar's defaults (part-day or full-day) | `null` (follows later changes of the defaults) |
+| create, the set equals the calendar's whole default set (part-day or full-day) | `null` (follows later changes of the defaults); never when the defaults hold an email notification |
 | create, otherwise | the array |
-| update, the set equals the one pcb served (the defaults when the row has `null`) | the row's own value, unchanged (`null` stays `null`) |
-| update, no VALARM | `[]` |
-| update, otherwise | the new array |
+| update, the set equals the device part of the one pcb served from (the defaults when the row has `null`, the row's list, the parts' VALARMs when the row has none) | the row's own value, unchanged (`null` stays `null`) |
+| update, otherwise | the set, then the email entries of that one unchanged (a `null` row's: the defaults'), within 10 |
 
 Other row fields:
 

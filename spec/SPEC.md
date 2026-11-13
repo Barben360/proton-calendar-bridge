@@ -476,7 +476,9 @@ Decision 0012 (accepted 2026-11-11, supersedes 0006 for v1): the model is
   property it does not interpret (`X-MOZ-*`, `X-PM-*`, unknown ones) byte for byte
   [claim: `internal/ical` has round-trip and fuzz tests, not re-listed here; the merge rules come from proton-cal and are live-verified only by its author [claim]].
   Row-level data joins in: `Color` to `COLOR`, `Notifications` to VALARMs (a `null`
-  list means the calendar's default notifications), attendee `Status` to `PARTSTAT`
+  list means the calendar's default notifications; email notifications are
+  Proton-side, not served and kept by an update: `spec/mapping.md` §5
+  [verified: live 2026-11-13, `HUMAN-CHECKS.md` 6.3 D4]), attendee `Status` to `PARTSTAT`
   [claim: `internal/service` render tests, names not re-checked].
 - One CalDAV object per UID: master first, then exceptions by RecurrenceID; duplicate
   masters resolved to the most recently edited one, the others left out and counted
@@ -820,7 +822,8 @@ bridge's own, never Proton's text). The rule [call, research J]: accept and
 normalise where nothing the user sees is lost; refuse where writing would
 lose or corrupt data or reach the Proton web app in a form it cannot show.
 Accepted and normalised: `STATUS:TENTATIVE` dropped (Proton refuses it),
-unsupported VALARMs dropped, the client's `COLOR` ignored, `DURATION` made
+unsupported VALARMs dropped (`ACTION:EMAIL` among them: email
+notifications are Proton-side, `spec/mapping.md` §5), the client's `COLOR` ignored, `DURATION` made
 `DTEND`, Mozilla TZIDs mapped, two RRULE forms rewritten (M4-R5, M4-R12),
 missing `DTSTAMP`/`DTEND` defaulted (M4-R8), attendee parameter edits
 ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):

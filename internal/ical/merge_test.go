@@ -142,10 +142,12 @@ func alarmActions(c []Component) []string {
 }
 
 func TestAlarmsTriState(t *testing.T) {
-	defaults := json.RawMessage(`[{"Type":1,"Trigger":"-PT30M"}]`)
-	fullDay := json.RawMessage(`[{"Type":0,"Trigger":"-PT15H"}]`)
+	// A new Proton calendar's defaults: an email and a display reminder.
+	defaults := json.RawMessage(`[{"Type":0,"Trigger":"-PT30M"},{"Type":1,"Trigger":"-PT30M"}]`)
+	fullDay := json.RawMessage(`[{"Type":0,"Trigger":"-PT15H"},{"Type":1,"Trigger":"-PT15H"}]`)
 
-	// null -> defaults.
+	// null -> defaults, whose email reminder is not served (Proton sends
+	// it; a CalDAV client cannot act on it: Fix 4, choice A).
 	got, err := Alarms(json.RawMessage(`null`), defaults, false)
 	if err != nil {
 		t.Fatal(err)
@@ -158,28 +160,26 @@ func TestAlarmsTriState(t *testing.T) {
 	if err != nil || len(got) != 0 {
 		t.Errorf("[]: %v %v", got, err)
 	}
-	// custom array wins over defaults; Type 0 = EMAIL, 1 = DISPLAY.
+	// custom array wins over defaults; Type 1 is DISPLAY, Type 0 (email)
+	// is not served.
 	got, err = Alarms(json.RawMessage(`[{"Type":0,"Trigger":"-PT15M"},{"Type":1,"Trigger":"PT0S"},{"Type":1,"Trigger":"-P1DT9H"}]`), defaults, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := strings.Join(alarmActions(got), ","); a != "EMAIL/-PT15M,DISPLAY/PT0S,DISPLAY/-P1DT9H" {
+	if a := strings.Join(alarmActions(got), ","); a != "DISPLAY/PT0S,DISPLAY/-P1DT9H" {
 		t.Errorf("custom: %s", a)
 	}
-	// DISPLAY and EMAIL carry DESCRIPTION; EMAIL also SUMMARY.
-	for i, a := range got[:2] {
+	// DISPLAY carries DESCRIPTION, no SUMMARY.
+	for i, a := range got {
 		if d, ok := a.Get("DESCRIPTION"); !ok || d.Value == "" {
 			t.Errorf("alarm %d lacks DESCRIPTION", i)
 		}
-	}
-	if _, ok := got[0].Get("SUMMARY"); !ok {
-		t.Error("EMAIL alarm lacks SUMMARY")
-	}
-	if _, ok := got[1].Get("SUMMARY"); ok {
-		t.Error("DISPLAY alarm must not carry SUMMARY")
+		if _, ok := a.Get("SUMMARY"); ok {
+			t.Errorf("DISPLAY alarm %d must not carry SUMMARY", i)
+		}
 	}
 	// The exact serialisation.
-	if s := string(got[1].Bytes()); !strings.HasPrefix(s, "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:PT0S\r\nDESCRIPTION:") || !strings.HasSuffix(s, "\r\nEND:VALARM\r\n") {
+	if s := string(got[0].Bytes()); !strings.HasPrefix(s, "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:PT0S\r\nDESCRIPTION:") || !strings.HasSuffix(s, "\r\nEND:VALARM\r\n") {
 		t.Errorf("shape: %q", s)
 	}
 	// All-day: the caller passes the full-day defaults; they are used as given.
@@ -187,8 +187,15 @@ func TestAlarmsTriState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := alarmActions(got); len(a) != 1 || a[0] != "EMAIL/-PT15H" {
+	if a := alarmActions(got); len(a) != 1 || a[0] != "DISPLAY/-PT15H" {
 		t.Errorf("all-day defaults: %v", a)
+	}
+	// Email reminders alone: nothing served.
+	for _, raw := range []string{`[{"Type":0,"Trigger":"-PT15M"}]`, `null`} {
+		got, err = Alarms(json.RawMessage(raw), json.RawMessage(`[{"Type":0,"Trigger":"-PT15H"}]`), false)
+		if err != nil || len(got) != 0 {
+			t.Errorf("email only (%s): %v %v", raw, alarmActions(got), err)
+		}
 	}
 	// null defaults and null notifications: nothing.
 	got, err = Alarms(json.RawMessage(`null`), nil, false)

@@ -54,8 +54,9 @@ func TestUnlockDecryptsWithCalendarKey(t *testing.T) {
 	}
 	s := a.Settings
 	if s.DefaultEventDuration != 30 || s.MakesUserBusy != 1 ||
-		len(s.DefaultPartDayNotifications) != 1 || s.DefaultPartDayNotifications[0] != (calendar.Notification{Type: 1, Trigger: "-PT1H"}) ||
-		len(s.DefaultFullDayNotifications) != 1 {
+		len(s.DefaultPartDayNotifications) != 2 || s.DefaultPartDayNotifications[0] != (calendar.Notification{Type: 0, Trigger: "-PT1H"}) ||
+		s.DefaultPartDayNotifications[1] != (calendar.Notification{Type: 1, Trigger: "-PT1H"}) ||
+		len(s.DefaultFullDayNotifications) != 2 {
 		t.Errorf("settings = %+v", s)
 	}
 }

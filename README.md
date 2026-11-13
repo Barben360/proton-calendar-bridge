@@ -214,7 +214,7 @@ docker compose up -d
 
 Creating, editing, moving and deleting events, single occurrences included, go to Proton while `pcb serve` runs: each change is one Proton write call, read back before Thunderbird gets its answer, and never retried once it may have reached Proton (the one exception: it is resent once when Proton answers 401 for an expired token before processing it, which refreshes the session, M4-R23). Thunderbird shows what Proton stored, which can differ from what it sent (the full table: `spec/mapping.md`):
 
-- alarms become Proton notifications (email or device, before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost;
+- alarms become Proton device notifications (before or at the start, at most 10); others are dropped, and alarm-level properties such as Thunderbird's per-alarm acknowledgement are lost. Email notifications stay Proton-side: Proton sends them, pcb does not show them to the client, and your edits keep them (set them in the Proton web app);
 - `STATUS:TENTATIVE` is dropped (Proton refuses it), your colour choice is ignored (Proton's colour stays), `DURATION` becomes an end time, a "monthly on the 2nd Tuesday" or "every weekday" rule is written in Proton's equivalent form;
 - unknown properties (Thunderbird's `X-MOZ-*` and others) are kept, encrypted;
 - changes to an existing attendee's `ROLE`, `CN`, `PARTSTAT` or `RSVP` are ignored and still answered as saved (204): Proton keeps the attendee's stored line, so a participation status you change in Thunderbird shows its old value again at the next read; change it in the Proton web app.

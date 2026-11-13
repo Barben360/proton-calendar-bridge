@@ -621,6 +621,96 @@ func TestUnchangedDefaultAlarmsKeepNull(t *testing.T) {
 	}
 }
 
+// Email reminders are Proton-side (Fix 4, choice A; live 2026-11-13,
+// HUMAN-CHECKS 6.3 D4): with the calendar defaults of a new Proton
+// calendar, an email and a display reminder, Thunderbird sends back the
+// DISPLAY alarm only. The update maps the client's display alarms alone:
+// a null row stays null while they are the defaults' display part, and
+// otherwise gets them plus the defaults' email part; an explicit row
+// keeps its email entries. An incoming EMAIL VALARM is ignored.
+func TestEmailNotificationsStayProtonSide(t *testing.T) {
+	d := planDefaults(t)
+	d.PartDay = []ical.Notification{{Type: 0, Trigger: "-PT15M"}, {Type: 1, Trigger: "-PT15M"}}
+	planD := func(t *testing.T, g Group, body []string) WritePlan {
+		t.Helper()
+		p, err := Plan(g, parse(t, cal(body)), d)
+		if err != nil {
+			t.Fatalf("Plan: %v", err)
+		}
+		return p
+	}
+	email := func(trigger string) []string {
+		return []string{"BEGIN:VALARM", "ACTION:EMAIL", "TRIGGER:" + trigger, "DESCRIPTION:Reminder", "SUMMARY:Reminder", "ATTENDEE:mailto:" + meEmail, "END:VALARM"}
+	}
+	title := map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}
+	noAlarm := with(t, masterBody(), map[string]string{
+		"BEGIN:VALARM": "", "ACTION:DISPLAY": "", "TRIGGER:-PT15M": "", "DESCRIPTION:Reminder": "", "END:VALARM": "",
+	})
+	stored := seed{id: "row-m", parts: masterParts()}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	t.Run("a null row", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"a title edit with the display default", with(t, masterBody(), title), "null"},
+			{"the display default spelt otherwise", with(t, masterBody(), map[string]string{"SUMMARY:Standup": "SUMMARY:Planning", "TRIGGER:-PT15M": "TRIGGER:-P0DT0H15M0S"}), "null"},
+			{"the display default and an EMAIL alarm", with(t, masterBody(), title, email("-PT2H")...), "null"},
+			{"another display alarm", with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT30M"}), `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT15M"}]`},
+			{"no alarm", with(t, noAlarm, title), `[{"Type":0,"Trigger":"-PT15M"}]`},
+		} {
+			got := open(t, onlyUpdate(t, planD(t, g, c.body), "row-m"), &stored)
+			if n := got.field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+		if p := planD(t, g, masterBody()); len(p.Ops) != 0 {
+			t.Errorf("the object re-sent as served (display alarm only): ops = %s, want none", describe(p))
+		}
+	})
+	t.Run("an explicit list with an email entry", func(t *testing.T) {
+		const list = `[{"Type":1,"Trigger":"-PT15M"},{"Type":0,"Trigger":"-PT1H"}]`
+		custom := seed{id: "row-c", parts: masterParts(), notifications: list}.row(t)
+		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
+		if p := planD(t, gc, masterBody()); len(p.Ops) != 0 {
+			t.Errorf("the object re-sent as served: ops = %s, want none", describe(p))
+		}
+		if p := planD(t, gc, with(t, masterBody(), nil, email("-PT3H")...)); len(p.Ops) != 0 {
+			t.Errorf("an EMAIL alarm added: ops = %s, want none (ignored)", describe(p))
+		}
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"a title edit", with(t, masterBody(), title), list},
+			{"another display alarm", with(t, masterBody(), map[string]string{"TRIGGER:-PT15M": "TRIGGER:-PT45M"}), `[{"Type":1,"Trigger":"-PT45M"},{"Type":0,"Trigger":"-PT1H"}]`},
+			{"no alarm", with(t, noAlarm, title), `[{"Type":0,"Trigger":"-PT1H"}]`},
+		} {
+			got := open(t, onlyUpdate(t, planD(t, gc, c.body), "row-c"), &custom)
+			if n := got.field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+	t.Run("a create", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body []string
+			want string
+		}{
+			{"the display default", masterBody(), `[{"Type":1,"Trigger":"-PT15M"}]`},
+			{"the display default and an EMAIL alarm", with(t, masterBody(), nil, email("-PT15M")...), `[{"Type":1,"Trigger":"-PT15M"}]`},
+			{"an EMAIL alarm only", with(t, noAlarm, nil, email("-PT15M")...), "[]"},
+		} {
+			if n := open(t, onlyCreate(t, planD(t, Group{UID: planUID}, c.body)), nil).field("Notifications"); n != c.want {
+				t.Errorf("%s: Notifications = %s, want %s", c.name, n, c.want)
+			}
+		}
+	})
+}
+
 // Ruling M4-R4: SEQUENCE is max(incoming, stored), stored+1 when the times
 // change and the client did not bump it; never lowered, never dropped, not
 // bumped by a text edit.

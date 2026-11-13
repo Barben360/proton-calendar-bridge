@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -2536,3 +2537,82 @@ func TestIfMatchListsCompareStrongly(t *testing.T) {
 	}
 	contains(t, "the object", r.object(t, "a@x").Data, "SUMMARY:"+summary+"\r\n")
 }
+
+// storedNotifications is the Notifications field of uid's only row in
+// Proton, as raw JSON.
+func (r *rig) storedNotifications(t *testing.T, uid string) string {
+	t.Helper()
+	rows := r.proton(t, uid)
+	if len(rows) != 1 {
+		t.Fatalf("Proton holds %d rows of %s, want 1", len(rows), uid)
+	}
+	var row struct{ Notifications json.RawMessage }
+	if err := json.Unmarshal(rows[0].Raw, &row); err != nil {
+		t.Fatal(err)
+	}
+	return string(row.Notifications)
+}
+
+// The live D4 regression (HUMAN-CHECKS 6.3 D4, 2026-11-13): a calendar's
+// defaults hold an email and a display reminder (the fake's, as live) and
+// Thunderbird's edit dialog sends back the DISPLAY alarm only. Email
+// reminders are Proton-side (Fix 4, choice A): not served, never written
+// from CalDAV, kept across an update; a null row stays null while the
+// client's display alarms are the defaults' display part.
+func TestThunderbirdKeepsProtonEmailReminders(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "d@x", Start: base, End: base + 3600, Card: card("d@x", "Defaults", base)})
+		f.AddEvent(cal, protontest.Event{UID: "l@x", Start: base, End: base + 3600, Card: card("l@x", "List", base),
+			Notifications: []protontest.Notification{{Type: 1, Trigger: "-PT15M"}, {Type: 0, Trigger: "-PT2H"}}})
+	}).start(t)
+	put := func(name string, data []byte, pre service.Precondition) {
+		t.Helper()
+		if _, err := r.put(t, name, data, pre); err != nil {
+			t.Fatalf("PUT %s: %v", name, err)
+		}
+	}
+
+	d := r.object(t, "d@x")
+	lacks(t, "the object of a null row", d.Data, "ACTION:EMAIL")
+	contains(t, "the object of a null row", d.Data, "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT1H\r\n")
+	put(d.Name, edit(t, dropEmailAlarms(d.Data), "SUMMARY:Defaults", "SUMMARY:Renamed"), service.Precondition{IfMatch: d.ETag})
+	if n := r.storedNotifications(t, "d@x"); n != "null" {
+		t.Errorf("after a title edit keeping the display default: Notifications = %s, want null", n)
+	}
+	// Now written by pcb (a seeded row's parts carry VERSION and PRODID,
+	// which a write drops): the object re-sent as served changes nothing.
+	d = r.object(t, "d@x")
+	sent := len(r.f.SyncCalls())
+	put(d.Name, d.Data, service.Precondition{IfMatch: d.ETag})
+	if n := len(r.f.SyncCalls()) - sent; n != 0 {
+		t.Errorf("the object re-sent as served made %d sync calls, want none", n)
+	}
+	put(d.Name, edit(t, dropEmailAlarms(d.Data), "TRIGGER:-PT1H", "TRIGGER:-PT30M"), service.Precondition{IfMatch: d.ETag})
+	if n := r.storedNotifications(t, "d@x"); n != `[{"Type":1,"Trigger":"-PT30M"},{"Type":0,"Trigger":"-PT1H"}]` {
+		t.Errorf("after the display alarm changed: Notifications = %s, want it plus the default email", n)
+	}
+
+	l := r.object(t, "l@x")
+	lacks(t, "the object of an explicit list", l.Data, "ACTION:EMAIL")
+	contains(t, "the object of an explicit list", l.Data, "TRIGGER:-PT15M\r\n")
+	put(l.Name, edit(t, dropEmailAlarms(l.Data), "TRIGGER:-PT15M", "TRIGGER:-PT45M"), service.Precondition{IfMatch: l.ETag})
+	if n := r.storedNotifications(t, "l@x"); n != `[{"Type":1,"Trigger":"-PT45M"},{"Type":0,"Trigger":"-PT2H"}]` {
+		t.Errorf("after the display alarm changed: Notifications = %s, want the email entry kept", n)
+	}
+
+	emailToo := edit(t, newEvent("c@x", "Created"), "END:VEVENT", "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT1H\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\n"+
+		"BEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-PT1H\r\nDESCRIPTION:Reminder\r\nSUMMARY:Reminder\r\nATTENDEE:mailto:me@x\r\nEND:VALARM\r\nEND:VEVENT")
+	put("c@x.ics", emailToo, service.Precondition{IfNoneMatchAny: true})
+	if n := r.storedNotifications(t, "c@x"); n != `[{"Type":1,"Trigger":"-PT1H"}]` {
+		t.Errorf("a create with the defaults' display and email alarms: Notifications = %s, want the display one alone", n)
+	}
+}
+
+// dropEmailAlarms is data without its EMAIL VALARMs, as Thunderbird's
+// edit dialog saves an event (it shows one reminder).
+func dropEmailAlarms(data []byte) []byte {
+	return emailAlarm.ReplaceAll(data, nil)
+}
+
+var emailAlarm = regexp.MustCompile(`(?s)BEGIN:VALARM\r\nACTION:EMAIL\r\n.*?END:VALARM\r\n`)

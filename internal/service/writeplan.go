@@ -581,6 +581,8 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 	if err != nil {
 		return 0, events.Op{}, asRefusal(err)
 	}
+	// A create stores the client's device alarms: null only when they are
+	// the calendar's whole default set, so never when it holds an email.
 	list := pl.alarms(we)
 	notifications := events.Value(wireNotifications(list))
 	if ical.SameNotifications(list, pl.d.notifications(we.AllDay)) {
@@ -752,11 +754,15 @@ func (pl *planner) alarms(we ical.WriteEvent) []ical.Notification {
 	return list
 }
 
-// updatedNotifications is the tri-state on update (research D): when the
-// body's alarms mean the set the render serves for r (the calendar's
-// defaults when r's Notifications are null, the parts' VALARMs when the row
-// has none), r's value is kept as it is (kept: null stays null, absent stays
-// absent); no VALARM is []; otherwise the new list.
+// updatedNotifications is the tri-state on update (research D). Email
+// notifications are Proton-side (Fix 4, choice A): the render does not
+// serve them and the body's alarms map to device notifications alone. When
+// these mean the device part of r's set (the calendar's defaults when r's
+// Notifications are null, the row's list, the parts' VALARMs when the row
+// has none), r's value is kept as it is (kept: null stays null, absent
+// stays absent). Otherwise the new list is the body's notifications
+// followed by the email ones of r's set, unchanged (none for the parts'
+// VALARMs), within Proton's limit: a null row's email default is not lost.
 func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Optional[events.NotificationList], bool, error) {
 	list := pl.alarms(we)
 	raw := strings.TrimSpace(string(r.Event.Notifications))
@@ -774,13 +780,15 @@ func (pl *planner) updatedNotifications(r *row, we ical.WriteEvent) (events.Opti
 		}
 		keep = events.Value(wireNotifications(effective))
 	}
-	switch {
-	case ical.SameNotifications(list, effective):
+	device, email := ical.SplitEmail(effective)
+	if ical.SameNotifications(list, device) {
 		return keep, true, nil
-	case len(we.Alarms) == 0:
-		return events.Value(events.NotificationList{}), false, nil
 	}
-	return events.Value(wireNotifications(list)), false, nil
+	if room := ical.MaxNotifications - len(email); len(list) > room {
+		list = list[:max(room, 0)]
+		pl.note(noteAlarms)
+	}
+	return events.Value(wireNotifications(append(list, email...))), false, nil
 }
 
 func wireNotifications(list []ical.Notification) events.NotificationList {

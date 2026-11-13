@@ -9,7 +9,9 @@ import (
 
 // Notification is one entry of a row's Notifications (research D): Type 0
 // is an email, 1 a device notification; Trigger is an iCalendar duration
-// relative to the event's start (negative before it).
+// relative to the event's start (negative before it). Email notifications
+// are Proton-side (Fix 4, choice A): Proton's servers send them, a CalDAV
+// client cannot act on them, so pcb neither serves nor writes them.
 type Notification struct {
 	Type    int    `json:"Type"`
 	Trigger string `json:"Trigger"`
@@ -17,7 +19,7 @@ type Notification struct {
 
 // Proton's notification limits (research D).
 const (
-	maxNotifications = 10
+	MaxNotifications = 10
 	maxWeeks         = 999
 	maxDays          = 6999
 	maxHours         = 999
@@ -25,8 +27,9 @@ const (
 )
 
 // NotificationsFromAlarms maps a VEVENT's VALARMs to notifications, in
-// order, the first maxNotifications supported ones; dropped counts the
-// rest. Supported: ACTION EMAIL (Type 0), DISPLAY or AUDIO (Type 1), one
+// order, the first MaxNotifications supported ones; dropped counts the
+// rest. Supported: ACTION DISPLAY or AUDIO (Type 1; an EMAIL alarm is
+// dropped: email notifications are Proton-side, see Notification), one
 // TRIGGER that is a duration relative to the start (no VALUE=DATE-TIME,
 // no RELATED=END), not after the start (an all-day event takes less than
 // 24 hours after it: that day at that time), seconds cut away. The trigger
@@ -39,7 +42,7 @@ func NotificationsFromAlarms(alarms []Component, allDay bool) ([]Notification, i
 	dropped := 0
 	for _, a := range alarms {
 		n, ok := notificationOf(a, allDay)
-		if !ok || len(out) == maxNotifications {
+		if !ok || len(out) == MaxNotifications {
 			dropped++
 			continue
 		}
@@ -63,11 +66,9 @@ func notificationOf(a Component, allDay bool) (Notification, bool) {
 	}
 	var n Notification
 	switch strings.ToUpper(strings.TrimSpace(actions[0].Value)) {
-	case "EMAIL":
-		n.Type = 0
 	case "DISPLAY", "AUDIO":
 		n.Type = 1
-	default:
+	default: // EMAIL among them
 		return Notification{}, false
 	}
 	tr := triggers[0]
@@ -128,6 +129,19 @@ func triggerOf(minutes int64, allDay bool) (string, bool) {
 		return unit(minutes/60, "T", "H", maxHours)
 	}
 	return unit(minutes, "T", "M", maxMinutes)
+}
+
+// SplitEmail parts a notification list into its device notifications and
+// its email ones (Type 0), each in order.
+func SplitEmail(list []Notification) (device, email []Notification) {
+	for _, n := range list {
+		if n.Type == 0 {
+			email = append(email, n)
+		} else {
+			device = append(device, n)
+		}
+	}
+	return device, email
 }
 
 // SameNotifications compares two notification lists by meaning: the
