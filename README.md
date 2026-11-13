@@ -223,7 +223,8 @@ Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely. F
 
 - calendars you may not write: holidays and subscribed calendars, calendars where your member lacks write permission, calendars whose key signature does not check out (`pcb calendar list` shows them `read_only`);
 - adding or removing attendees, or an attendee on a new event: invitations are not supported, and **pcb never notifies attendees** in v1 (moving an occurrence of a meeting keeps its attendees but sends them nothing);
-- recurrence rules Proton cannot hold: hourly or finer, a count above 49, an end after 2037-12-31, `RDATE`, `EXRULE`, "this and all future occurrences" sent as one change, a series whose start is not one of its own occurrences (Proton would drop it, Thunderbird show it), and the other forms in `spec/mapping.md` §4;
+- recurrence rules Proton cannot hold: hourly or finer, a count above 49, an end after 2037-12-31, `RDATE`, `EXRULE`, "this and all future occurrences" sent as one change, and the other forms in `spec/mapping.md` §4;
+- a series whose start is not one of its own occurrences (Proton would drop that start, Thunderbird show it): refused when a write creates one or changes the start or rule of an existing one (other edits pass), so put the start on one of the rule's days in that same edit, or delete the series and create it again;
 - floating times (no time zone) and time zones Go's database does not know;
 - events pcb cannot rewrite safely: one it cannot decrypt or verify, one written by another person, someone else's invitation, one whose key material changed since pcb first saw it;
 - edits of an event that holds per-user data pcb cannot rewrite yet (`pcb:personal-part`: typically alarms stored by older Proton clients; edit it in the Proton web app); deleting it works.

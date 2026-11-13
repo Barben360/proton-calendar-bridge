@@ -3,6 +3,7 @@ package ical
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -629,9 +630,9 @@ var (
 // 4999 weekly, 99 yearly; besides FREQ, INTERVAL, COUNT, UNTIL and WKST
 // (a weekday), only these parts (ruling M4-R10): WEEKLY BYDAY of plain
 // weekdays; MONTHLY one BYMONTHDAY, or one plain BYDAY weekday with one
-// BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY; and
-// start, the master's DTSTART, one of the rule's occurrences (startOccurs).
-// A malformed rule is BadData.
+// BYSETPOS in {-1,1,2,3,4}; YEARLY one BYMONTH with one BYMONTHDAY. A
+// malformed rule is BadData. Whether DTSTART is one of the rule's
+// occurrences is StartOffRule's, which the planner applies.
 func checkRRule(rule string, start when) *Refusal {
 	parts := map[string]string{}
 	for kv := range strings.SplitSeq(rule, ";") {
@@ -712,24 +713,82 @@ func checkRRule(rule string, start when) *Refusal {
 			return refuse(UnsupportedRecurrence, "YEARLY RRULE other than none or one BYMONTH with one BYMONTHDAY")
 		}
 	}
-	if !startOccurs(freq, parts, start) {
-		return refuse(UnsupportedRecurrence, "DTSTART is not an occurrence of the RRULE")
-	}
 	return nil
 }
 
-// startOccurs reports whether start, a master's DTSTART, is itself an
-// occurrence of the rule (FREQ freq, parts as checkRRule accepted them), by
-// its BY* parts on start's own calendar day (its zone; a DATE as written).
-// Proton drops a DTSTART that is not and counts COUNT from the first match,
-// while Thunderbird shows it: one event, two sets of occurrences (live
-// 2026-11-13, HUMAN-CHECKS W8). INTERVAL never matters: DTSTART sets the
-// phase.
-func startOccurs(freq string, parts map[string]string, start when) bool {
-	day := start.t
-	if start.loc != nil {
-		day = day.In(start.loc)
+// StartOffRule refuses a master VEVENT (as ParseWrite returns it: its
+// RRULE accepted and normalised) whose DTSTART is not itself an occurrence
+// of its RRULE, by the rule's BY* parts on DTSTART's calendar day: in its
+// TZID's zone, on its UTC day for a UTC time (`Z`), as written for a DATE.
+// Proton drops such a start and counts COUNT from the first match, while
+// Thunderbird shows it: one event, two sets of occurrences (live
+// 2026-11-13, HUMAN-CHECKS W8). It returns nil for an event without RRULE
+// or DTSTART. The planner refuses only a write that introduces such a start
+// (a create, or an update changing DTSTART or RRULE, SameRecurrence).
+func StartOffRule(ev Component) *Refusal {
+	start, rule, ok := recurrence(ev)
+	if !ok || rule == nil || startOccurs(rule["FREQ"], rule, start) {
+		return nil
 	}
+	return refuse(UnsupportedRecurrence, "DTSTART is not an occurrence of the RRULE")
+}
+
+// SameRecurrence reports whether VEVENTs a and b have the same DTSTART (the
+// same instant, both DATEs or both times, the same zone) and the same RRULE
+// once normalised (M4-R5, M4-R12; parts in any order, any case), or neither
+// has one. Anything that does not parse is not the same.
+func SameRecurrence(a, b Component) bool {
+	sa, ra, okA := recurrence(a)
+	sb, rb, okB := recurrence(b)
+	return okA && okB && sa.t.Equal(sb.t) && sa.date == sb.date && zoneName(sa) == zoneName(sb) && maps.Equal(ra, rb)
+}
+
+func zoneName(w when) string {
+	if w.loc == nil {
+		return ""
+	}
+	return w.loc.String()
+}
+
+// recurrence reads ev's DTSTART and its RRULE, normalised, as upper-case
+// parts (nil without RRULE); ok is false when DTSTART is missing or does not
+// parse, or the RRULE is malformed.
+func recurrence(ev Component) (when, map[string]string, bool) {
+	p, has := ev.Get("DTSTART")
+	if !has {
+		return when{}, nil, false
+	}
+	start, r := parseWhen(&p, p.Value, nil)
+	if r != nil {
+		return when{}, nil, false
+	}
+	rp, has := ev.Get("RRULE")
+	if !has {
+		return start, nil, true
+	}
+	rule := rp.Value
+	if v, ok := monthlyOrdinal(rule); ok {
+		rule = v
+	}
+	if v, ok := dailyByday(rule); ok {
+		rule = v
+	}
+	parts := map[string]string{}
+	for kv := range strings.SplitSeq(rule, ";") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return when{}, nil, false
+		}
+		parts[strings.ToUpper(k)] = strings.ToUpper(v)
+	}
+	return start, parts, true
+}
+
+// startOccurs reports whether start is an occurrence of the rule (FREQ
+// freq, its parts upper-case), by its BY* parts on start's calendar day.
+// INTERVAL never matters: DTSTART sets the phase.
+func startOccurs(freq string, parts map[string]string, start when) bool {
+	day := start.t // a TZID time is in its zone (parseWhen), a UTC time and a DATE in UTC
 	weekday := strings.ToUpper(day.Weekday().String()[:2])
 	switch freq {
 	case "WEEKLY":

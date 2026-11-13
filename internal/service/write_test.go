@@ -2266,11 +2266,14 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	s.stop(t)
 }
 
-// Reads are never refused: an event Proton already holds whose DTSTART (a
-// Friday) is not an occurrence of its RRULE (Mondays) is served unchanged.
-// Its edit, a write like any other, is refused before anything is sent
-// (403 pcb:unsupported-recurrence, HUMAN-CHECKS W8).
-func TestAStoredDTSTARTOffItsRuleIsServedButNotRewritten(t *testing.T) {
+// Only a write that introduces a DTSTART off its RRULE is refused (403
+// pcb:unsupported-recurrence, HUMAN-CHECKS W8): a create, or an update that
+// changes the master's DTSTART or RRULE. An event Proton already holds with
+// such a start (a Friday, Mondays only) is served unchanged, re-PUT as it
+// is and edited otherwise (a title) as before; moving its start onto an
+// occurrence repairs it. A changing write is refused before anything is
+// sent.
+func TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt(t *testing.T) {
 	t.Parallel()
 	const rule = "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"
 	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
@@ -2280,11 +2283,43 @@ func TestAStoredDTSTARTOffItsRuleIsServedButNotRewritten(t *testing.T) {
 	obj := r.object(t, "off@x")
 	contains(t, "the object", obj.Data, rule+"\r\n")
 	contains(t, "the object", obj.Data, "DTSTART:"+stamp(base)+"\r\n")
-	_, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Off", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
-	wantRefused(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
-	if n := r.sendCalls(); n != 0 {
-		t.Errorf("%d requests reached the sync endpoint, want none", n)
+
+	if res, err := r.put(t, obj.Name, obj.Data, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the unchanged re-PUT = %+v, %v; want it accepted", res, err)
 	}
+	obj = r.object(t, "off@x")
+	if res, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Off", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the title edit = %+v, %v; want it accepted", res, err)
+	}
+	obj = r.object(t, "off@x")
+	contains(t, "the edited object", obj.Data, "SUMMARY:Edited")
+	contains(t, "the edited object", obj.Data, rule+"\r\n")
+	sent := r.sendCalls()
+
+	friday := time.Unix(base, 0).UTC()
+	saturday := edit(t, edit(t, obj.Data, "DTSTART:"+stamp(base)+"\r\n", "DTSTART:"+stamp(base+86400)+"\r\n"), "DTEND:"+stamp(base+3600)+"\r\n", "DTEND:"+stamp(base+86400+3600)+"\r\n")
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"another off-rule start", saturday},
+		{"another rule the start is still off", edit(t, obj.Data, rule+"\r\n", "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3\r\n")},
+	} {
+		_, err := r.put(t, obj.Name, c.body, service.Precondition{IfMatch: obj.ETag})
+		wantRefused(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
+		if n := r.sendCalls(); n != sent {
+			t.Errorf("%s: %d more requests reached the sync endpoint, want none", c.name, n-sent)
+		}
+	}
+	if friday.Weekday() != time.Friday {
+		t.Fatalf("test bug: base is a %s", friday.Weekday())
+	}
+	monday := base + 3*86400 // the next Monday: the start moved onto an occurrence
+	moved := edit(t, edit(t, obj.Data, "DTSTART:"+stamp(base)+"\r\n", "DTSTART:"+stamp(monday)+"\r\n"), "DTEND:"+stamp(base+3600)+"\r\n", "DTEND:"+stamp(monday+3600)+"\r\n")
+	if res, err := r.put(t, obj.Name, moved, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("moving the start onto a Monday = %+v, %v; want it accepted", res, err)
+	}
+	contains(t, "the repaired object", r.object(t, "off@x").Data, "DTSTART:"+stamp(monday)+"\r\n")
 }
 
 // A UID with a TEXT escape is the event's unescaped value (RFC 5545

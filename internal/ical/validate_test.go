@@ -581,11 +581,13 @@ func TestParseWriteRefusesAUIDItCannotName(t *testing.T) {
 	}
 }
 
-// A master's DTSTART must be an occurrence of its RRULE, by the rule's own
-// BY* parts in DTSTART's zone: otherwise Proton drops it (and counts COUNT
-// from the first match) while Thunderbird shows it, so one event has two
-// sets of occurrences (live 2026-11-13, HUMAN-CHECKS W8 pcb-m4-notfirst).
-// Refused before anything is sent; the rule as sent and as normalised
+// StartOffRule: a master's DTSTART must be an occurrence of its RRULE, by
+// the rule's own BY* parts on DTSTART's day (its zone; a UTC time on its UTC
+// day; a DATE as written): otherwise Proton drops it (and counts COUNT from
+// the first match) while Thunderbird shows it, so one event has two sets of
+// occurrences (live 2026-11-13, HUMAN-CHECKS W8 pcb-m4-notfirst). ParseWrite
+// itself accepts such a body (the planner decides, as only a write that
+// introduces such a start is refused); the rule as sent and as normalised
 // (M4-R5, M4-R12) agree. Thunderbird's own series, whose DTSTART its dialog
 // puts on a matching day, pass.
 func TestRRuleStartMustBeAnOccurrence(t *testing.T) {
@@ -633,23 +635,56 @@ func TestRRuleStartMustBeAnOccurrence(t *testing.T) {
 		{"all-day second Tuesday", "DTSTART;VALUE=DATE:20270112", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			body := wcal(wev(slices.Concat(head, []string{c.start, "RRULE:" + c.rule})...))
-			_, err := ParseWrite(body)
-			if c.ok {
-				if err != nil {
-					t.Fatalf("refused: %v", err)
-				}
-				return
-			}
-			if r := refusalOf(t, body); r.Code != UnsupportedRecurrence || r.Reason != "DTSTART is not an occurrence of the RRULE" {
-				t.Fatalf("code %q (%s), want %q with the reason", r.Code, r.Reason, UnsupportedRecurrence)
+			in := mustParseWrite(t, wcal(wev(slices.Concat(head, []string{c.start, "RRULE:" + c.rule})...)))
+			r := StartOffRule(in.Master.Comp)
+			switch {
+			case c.ok && r != nil:
+				t.Fatalf("off the rule: %v", r)
+			case !c.ok && (r == nil || r.Code != UnsupportedRecurrence || r.Reason != "DTSTART is not an occurrence of the RRULE"):
+				t.Fatalf("StartOffRule = %v, want %q with the reason", r, UnsupportedRecurrence)
 			}
 		})
 	}
-	// An exception keeps its own DTSTART: no rule applies to it.
-	ex := wcal(wev(slices.Concat(head, []string{paris("20270104"), "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"})...),
-		wev(slices.Concat(head, []string{"RECURRENCE-ID;TZID=Europe/Paris:20270111T120000", paris("20270113")})...))
-	if _, err := ParseWrite(ex); err != nil {
-		t.Errorf("an exception moved to a Wednesday: %v", err)
+	// No RRULE: nothing to be off.
+	if r := StartOffRule(mustParseWrite(t, wcal(on("20261105"))).Master.Comp); r != nil {
+		t.Errorf("a single event: %v", r)
+	}
+}
+
+// SameRecurrence: DTSTART (instant, DATE or not, zone) and the RRULE as
+// normalised, parts in any order and case, are what an update keeps or
+// changes; nothing else counts.
+func TestSameRecurrence(t *testing.T) {
+	t.Parallel()
+	ev := func(lines ...string) Component {
+		return mustParseWrite(t, wcal(wev(slices.Concat(head, lines)...))).Master.Comp
+	}
+	start := "DTSTART;TZID=Europe/Paris:20270106T120000"
+	stored := ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "DESCRIPTION:x")
+	for _, c := range []struct {
+		name  string
+		other Component
+		same  bool
+	}{
+		{"identical", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), true},
+		{"another description and DTEND", ev(start, "DTEND;TZID=Europe/Paris:20270106T140000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "DESCRIPTION:y"), true},
+		{"parts reordered, lower case", ev(start, "RRULE:count=3;byday=mo;freq=weekly"), true},
+		{"the same instant in UTC", ev("DTSTART:20270106T110000Z", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"another start", ev("DTSTART;TZID=Europe/Paris:20270106T130000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"), false},
+		{"another COUNT", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4"), false},
+		{"another BYDAY", ev(start, "RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3"), false},
+		{"no RRULE", ev(start), false},
+	} {
+		if got := SameRecurrence(stored, c.other); got != c.same {
+			t.Errorf("%s: SameRecurrence = %v, want %v", c.name, got, c.same)
+		}
+	}
+	// Normalised forms agree with the forms as sent: 2TU and TU;BYSETPOS=2.
+	a := ev("DTSTART;TZID=Europe/Paris:20270112T120000", "RRULE:FREQ=MONTHLY;BYDAY=2TU")
+	b := Component{Name: "VEVENT", Items: items([]Property{{Name: "UID", Value: "u1"},
+		{Name: "DTSTART", Params: ";TZID=Europe/Paris", Value: "20270112T120000"}, {Name: "RRULE", Value: "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"}})}
+	if !SameRecurrence(a, b) || !SameRecurrence(Component{Name: "VEVENT", Items: items([]Property{{Name: "UID", Value: "u1"},
+		{Name: "DTSTART", Params: ";TZID=Europe/Paris", Value: "20270112T120000"}, {Name: "RRULE", Value: "FREQ=MONTHLY;BYDAY=2TU"}})}, b) {
+		t.Error("BYDAY=2TU and BYDAY=TU;BYSETPOS=2 are not the same recurrence")
 	}
 }

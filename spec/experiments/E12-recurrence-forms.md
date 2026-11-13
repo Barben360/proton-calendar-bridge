@@ -1,6 +1,6 @@
 # E12 — Recurrence forms Proton refuses or alters
 
-Status: **source-based; the M4 write path gatekeeps on it; live run pending** (`spec/HUMAN-CHECKS.md` §6, steps W8, W9, 6.3 B2–B4 and D5–D10). Marks as in E10. Evidence: `raw/m4-research.md` §E ("research E"), §A.4. Feeds SPEC §8.4, `spec/mapping.md` §4 and §7, rulings M4-R5, M4-R10, M4-R12.
+Status: **source-based; the M4 write path gatekeeps on it; partly run live** (2026-11-13: the off-rule DTSTART of W8 `pcb-m4-notfirst`, below; the other forms, W9, 6.3 B2–B4, D4b and D5–D10 still pending, `spec/HUMAN-CHECKS.md` §6). Marks as in E10. Evidence: `raw/m4-research.md` §E ("research E"), §A.4. Feeds SPEC §8.4, `spec/mapping.md` §4 and §7, rulings M4-R5, M4-R10, M4-R12.
 
 ## Question
 
@@ -27,7 +27,7 @@ Status: **source-based; the M4 write path gatekeeps on it; live run pending** (`
 `internal/ical/validate.go` (`checkRRule`, `monthlyOrdinal`, `dailyByday`) and `internal/service/writeplan.go` (`Plan`); the table is `spec/mapping.md` §4.
 - The bridge refuses, before any Proton call, every rule outside the allowed set per FREQ (ruling M4-R10), RDATE, EXRULE and RANGE (403 `pcb:unsupported-recurrence`, `pcb:rdate`, `pcb:exrule`, `pcb:recurrence-range`), so the server's own enforcement never matters for what pcb sends. [verified: `TestRRuleLimits`, `TestRefusals`]
 - Rewrites with the same meaning: R5 and R12. [verified: `TestMonthlyOrdinalBydayIsRewritten`, `TestDailyBydayIsRewritten`]
-- A master whose DTSTART is not an occurrence of its rule is refused (403 `pcb:unsupported-recurrence`, `DTSTART is not an occurrence of the RRULE`), since the live finding below. [verified: `TestRRuleStartMustBeAnOccurrence`, `TestADTSTARTOffItsRuleIsRefusedBeforeProton`]
+- A write that introduces a master DTSTART not an occurrence of its rule (a create, or an update changing DTSTART or RRULE) is refused (403 `pcb:unsupported-recurrence`, `DTSTART is not an occurrence of the RRULE`), since the live finding below; an update keeping both passes (`spec/mapping.md` §4). Whether the web app can create such a series is 6.3 D4b. [verified: `TestRRuleStartMustBeAnOccurrence`, `TestADTSTARTOffItsRuleIsRefusedBeforeProton`, `TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt`]
 - One sync call per PUT, master first, then the exceptions (updates and creates), then deletes; an exception row absent from the body is deleted; an exception's SEQUENCE is at least the master's; deleting one occurrence is the master's EXDATE (in both signed parts) plus the delete of its exception row. [verified: `TestDeleteOneOccurrenceOfASeries`, `TestMasterEditMirrorsExceptions`, `TestExceptionCreateHasSequenceAtLeastMaster`, `TestPatchExdateInBothSignedParts`]
 - After a refused or partly applied call, the rows are read back: what Proton holds is cached and the answer is 412 for a concurrent change, else 403 `pcb:proton-refused` (M4-R34). [verified: `TestOccurrenceDeleteRaceIsTruthful`, `TestEntryRefusalIsReadBack`]
 

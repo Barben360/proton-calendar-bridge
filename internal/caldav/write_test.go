@@ -446,7 +446,7 @@ func TestAnAliasIsWrittenAndDeletedThere(t *testing.T) {
 }
 
 // HUMAN-CHECKS W8 pcb-m4-notfirst: a series whose DTSTART (a Wednesday) is
-// not an occurrence of its RRULE (Mondays) is refused before anything
+// not an occurrence of its RRULE (Mondays) is refused before any write
 // reaches Proton, 403 pcb:unsupported-recurrence with the reason: Proton
 // would drop that Wednesday and Thunderbird show it (live 2026-11-13). The
 // same series from a Monday is created.

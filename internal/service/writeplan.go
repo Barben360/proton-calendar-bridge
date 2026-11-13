@@ -384,6 +384,11 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if in.Master == nil {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "an event cannot be created without its master")
 		}
+		// A DTSTART off its RRULE is refused when the write introduces it:
+		// here a create; below an update changing DTSTART or RRULE.
+		if r := ical.StartOffRule(in.Master.Comp); r != nil {
+			return WritePlan{}, asRefusal(r)
+		}
 		seq, op, err := pl.create(*in.Master, 0, nil)
 		if err != nil {
 			return WritePlan{}, err
@@ -392,6 +397,11 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	case master != nil:
 		if in.Master == nil {
 			return WritePlan{}, refused(RefuseUnsupportedChange, "the body leaves out the event's master")
+		}
+		// An update keeping the stored DTSTART and RRULE passes even when
+		// the stored series is off its rule (a re-PUT, a title edit).
+		if r := ical.StartOffRule(in.Master.Comp); r != nil && !ical.SameRecurrence(master.stored, in.Master.Comp) {
+			return WritePlan{}, asRefusal(r)
 		}
 		seq, op, err := pl.update(master, *in.Master, 0)
 		if err != nil {

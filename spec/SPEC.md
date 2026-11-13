@@ -828,12 +828,16 @@ ignored (M4-R9). Refused (each with its code in `spec/mapping.md`):
 - an RRULE outside Proton's supported set (`spec/mapping.md` §4; whether
   Proton alters the accepted ones [assumed → E12,
   `spec/experiments/E12-recurrence-forms.md`]);
-- a master whose DTSTART is not an occurrence of its RRULE (by the rule's
-  BY parts, on DTSTART's day in its zone): Proton drops that start while
-  Thunderbird shows it [verified: live 2026-11-13, `HUMAN-CHECKS.md` W8],
-  so `pcb:unsupported-recurrence`, `DTSTART is not an occurrence of the
-  RRULE`, before any request [verified: `TestRRuleStartMustBeAnOccurrence`,
-  `TestADTSTARTOffItsRuleIsRefusedBeforeProton`]; reads are not checked;
+- a write that introduces a master DTSTART not an occurrence of its RRULE
+  (by the rule's BY parts, on DTSTART's day: its TZID's zone, a UTC time's
+  UTC day): a create, or an update changing the stored DTSTART or RRULE;
+  Proton drops that start while Thunderbird shows it [verified: live
+  2026-11-13, `HUMAN-CHECKS.md` W8], so `pcb:unsupported-recurrence`,
+  `DTSTART is not an occurrence of the RRULE`, before any write; an update
+  keeping both passes, and reads are not checked (`spec/mapping.md` §4)
+  [verified: `TestRRuleStartMustBeAnOccurrence`,
+  `TestADTSTARTOffItsRuleIsRefusedBeforeProton`,
+  `TestAStoredDTSTARTOffItsRuleIsEditedUnlessTheWriteMovesIt`];
 - floating date-times, TZIDs Go's zone database cannot resolve;
 - adding or removing attendees, any attendee on a new event, a new
   occurrence whose attendees differ from its series' (invitations are not
