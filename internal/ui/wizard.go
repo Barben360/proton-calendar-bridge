@@ -24,9 +24,9 @@ const (
 )
 
 // UnattendedWarning is the line pcb doctor prints when unattended relogin is
-// on (one constant, shared with internal/doctor): the wizard shows it next to
+// on (one format, shared with internal/doctor): the wizard shows it next to
 // the unattended-relogin checkbox.
-const UnattendedWarning = doctor.UnattendedKeyringWarning
+var UnattendedWarning = doctor.UnattendedKeyringWarning("secrets.sealed")
 
 // cancelTimeout bounds what Cancel does with the Hub.
 const cancelTimeout = 10 * time.Second
@@ -94,6 +94,16 @@ func (w *Wizard) fail(err error) error {
 	return w.failLocked(err)
 }
 
+// refuse records err and changes nothing else: the bridge is not running,
+// and the step, the account and the password stay for a retry or a Cancel
+// once it runs again.
+func (w *Wizard) refuse(err error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = asExitError(err)
+	return w.err
+}
+
 func (w *Wizard) failLocked(err error) error {
 	w.wipe()
 	w.step, w.captchaURL, w.captchaTok, w.account, w.created = StepCredentials, "", "", "", false
@@ -154,7 +164,7 @@ func (w *Wizard) CaptchaSolved(ctx context.Context) error {
 	defer w.op.Unlock()
 	h, err := w.hub()
 	if err != nil {
-		return w.fail(err)
+		return w.refuse(err)
 	}
 	w.mu.Lock()
 	if w.step != StepCaptcha {
@@ -209,7 +219,7 @@ func (w *Wizard) SubmitTOTP(ctx context.Context, code string) error {
 	defer w.op.Unlock()
 	h, err := w.hub()
 	if err != nil {
-		return w.fail(err)
+		return w.refuse(err)
 	}
 	w.mu.Lock()
 	if w.step != StepTOTP {
@@ -275,7 +285,8 @@ func (w *Wizard) Done() (AccountView, string) {
 // wizard added that never finished its first login is removed (a pending 2FA
 // or CAPTCHA add, with its directory); an account that existed before is
 // only signed out, which drops the login the Hub holds for it. It waits for
-// a call in flight.
+// a call in flight (bounded by that call's ctx), so a UI must call it off the
+// UI thread.
 func (w *Wizard) Cancel() {
 	w.op.Lock()
 	defer w.op.Unlock()

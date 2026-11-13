@@ -371,7 +371,7 @@ func TestWizardCopiesThePassword(t *testing.T) {
 }
 
 func TestWizardUnattendedWarningIsDoctors(t *testing.T) {
-	if ui.UnattendedWarning != doctor.UnattendedKeyringWarning || !strings.HasPrefix(ui.UnattendedWarning, "unattended relogin is on") {
+	if ui.UnattendedWarning != doctor.UnattendedKeyringWarning("secrets.sealed") || !strings.HasPrefix(ui.UnattendedWarning, "unattended relogin is on") {
 		t.Errorf("UnattendedWarning = %q", ui.UnattendedWarning)
 	}
 }
@@ -398,5 +398,57 @@ func TestWizardIsSafeConcurrently(t *testing.T) {
 	wg.Wait()
 	if n := len(b.Hub().Accounts()); n != 0 {
 		t.Errorf("%d accounts left after the cancels", n)
+	}
+}
+
+// The bridge stops while the wizard waits for a code or a CAPTCHA: the
+// wizard keeps its step and its account, so a Cancel once the bridge runs
+// again still removes the add.
+func TestWizardCancelAfterTheBridgeRestarted(t *testing.T) {
+	for _, step := range []ui.Step{ui.StepTOTP, ui.StepCaptcha} {
+		t.Run(string(step), func(t *testing.T) {
+			l := newLab(t)
+			b := l.start(t)
+			if step == ui.StepTOTP {
+				l.f.SetTwoFA(l.f.Username, true)
+			} else {
+				l.f.SetCaptchaFor(l.f.Username, "tok")
+			}
+			w := ui.NewWizard(b)
+			if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != step {
+				t.Fatalf("Submit: %v, Step %q", err, w.Step())
+			}
+			if err := b.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if step == ui.StepTOTP {
+				err = w.SubmitTOTP(t.Context(), "123456")
+			} else {
+				err = w.CaptchaSolved(t.Context())
+			}
+			if err == nil || w.Step() != step {
+				t.Fatalf("with the bridge stopped: err = %v, Step = %q; want the error and the same step", err, w.Step())
+			}
+			if err := b.Start(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			w.Cancel()
+			// A 2FA add the restart dropped has no account in the new Hub: its
+			// directory goes by the Hub's own abandoned-add rule (ruling R11),
+			// which Cancel cannot hurry. A CAPTCHA add is kept by the Hub, so
+			// Cancel removes it.
+			if step == ui.StepCaptcha {
+				if dirs := accountDirs(t, l); len(dirs) != 0 {
+					t.Errorf("account directories after Cancel: %v", dirs)
+				}
+			}
+			if n := len(b.Hub().Accounts()); n != 0 {
+				t.Errorf("%d accounts after Cancel", n)
+			}
+			if w.Step() != ui.StepCredentials {
+				t.Errorf("Step = %q after Cancel", w.Step())
+			}
+		})
 	}
 }

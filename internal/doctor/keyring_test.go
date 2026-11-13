@@ -166,7 +166,7 @@ func TestSecretsCheckWithTheKeyringNeedsNoKeyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = doctor.SecretsCheck{StateDir: acct, KeyFile: key, Sealer: sealer}.Run(t.Context())
-	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, doctor.UnattendedKeyringWarning) || strings.Contains(got.Message, key) {
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, doctor.UnattendedKeyringWarning(filepath.Join(acct, "secrets.sealed"))) || strings.Contains(got.Message, key) {
 		t.Errorf("unattended: %+v", got)
 	}
 }
