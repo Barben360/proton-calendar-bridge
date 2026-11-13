@@ -1786,3 +1786,46 @@ func TestEveryWrittenMasterCarriesASequence(t *testing.T) {
 		t.Errorf("the new exception without SEQUENCE: %q, want none written", got)
 	}
 }
+
+// Fix 5 round 1 (ruling): any write touching a series whose stored master
+// has no SEQUENCE (an exception updated, created or deleted) also writes
+// SEQUENCE:0 on the master in the same call, its body otherwise
+// unchanged; a body that changes nothing still plans nothing.
+func TestASeriesWriteGivesAMasterWithoutSequenceItsSequence(t *testing.T) {
+	parts := seriesParts("SEQUENCE:0")
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "\r\nSEQUENCE:0", "", 1)
+	m := seed{id: "row-m", parts: parts}.row(t)
+	x := seed{id: "row-x22", rid: rid(22), parts: exceptionParts(22, "SEQUENCE:1")}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{m, x}}, groupKeys(t))
+	master := with(t, seriesBody("SEQUENCE:0"), map[string]string{"SEQUENCE:0": ""})
+	exc := exceptionBody(22, "SEQUENCE:1")
+	if p := plan(t, g, cal(master, exc)); len(p.Ops) != 0 {
+		t.Errorf("the series as served: ops = %s, want none", describe(p))
+	}
+	seqOf := func(o opened) string {
+		for l := range strings.SplitSeq(o.parts[ical.SharedSigned], "\r\n") {
+			if strings.HasPrefix(l, "SEQUENCE") {
+				return l
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct {
+		name   string
+		bodies [][]string
+		want   string
+	}{
+		{"an exception edited", [][]string{master, with(t, exc, map[string]string{"SUMMARY:Standup moved": "SUMMARY:Standup moved again"})}, "[update:row-m update:row-x22]"},
+		{"an exception deleted", [][]string{master}, "[update:row-m delete:row-x22]"},
+		{"an exception created", [][]string{master, exc, exceptionBody(29, "SEQUENCE:1")}, "[update:row-m create]"},
+	} {
+		p := plan(t, g, cal(c.bodies...))
+		if got := describe(p); got != c.want {
+			t.Errorf("%s: ops = %s, want %s", c.name, got, c.want)
+			continue
+		}
+		if got := seqOf(open(t, p.Ops[0], &m)); got != "SEQUENCE:0" {
+			t.Errorf("%s: the master's %q, want SEQUENCE:0", c.name, got)
+		}
+	}
+}

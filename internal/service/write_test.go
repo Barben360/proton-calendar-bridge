@@ -21,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/cards"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/events"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -2682,4 +2683,55 @@ func TestAMovedOccurrenceOfASeriesWithoutSequenceIsWritten(t *testing.T) {
 func dropFirst(t *testing.T, data []byte, old string) []byte {
 	t.Helper()
 	return edit(t, data, old, "")
+}
+
+// rawCreate stores body's master as another client would, through the
+// write endpoint without pcb's planner: its parts exactly as sent (no
+// SEQUENCE added), Notifications and Color null.
+func (r *rig) rawCreate(t *testing.T, body []byte) {
+	t.Helper()
+	in, err := ical.ParseWrite(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, _, err := ical.Patch(nil, in.Master.Comp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := cards.Seal(parts, cards.SealKeys{Signer: r.f.AddressKeyRing(), CalendarPrimary: r.f.CalendarKeyRing(r.cal)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := events.Op{Create: &events.Body{WireEvent: sealed, Notifications: events.Null[events.NotificationList](), Color: events.Null[string]()}}
+	res, err := events.Sync(context.Background(), r.pc, r.cal, r.f.MemberID(r.cal), []events.Op{op})
+	if err != nil || events.FirstError(res) != nil {
+		t.Fatalf("raw create: %v, %v", err, events.FirstError(res))
+	}
+}
+
+// Fix 5 round 1: an exception update under a master stored without
+// SEQUENCE (another client's series) writes the master's SEQUENCE:0 in the
+// same call, its body otherwise unchanged; the fake refuses the exception
+// otherwise (2001), as Proton refuses its create (live D7).
+func TestAnExceptionEditUnderAMasterWithoutSequenceIsWritten(t *testing.T) {
+	t.Parallel()
+	rid := base + day
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	r.rawCreate(t, vcal([]string{"UID:other@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600),
+		"RRULE:FREQ=DAILY;COUNT=5", "SUMMARY:Other"}))
+	r.f.AddEvent(r.cal, protontest.Event{UID: "other@x", Start: rid + 1800, End: rid + 5400, RecurrenceID: &rid,
+		Card: card("other@x", "Moved", rid+1800, "RECURRENCE-ID:"+stamp(rid))})
+	r.s.next(t, false)
+	obj := r.object(t, "other@x")
+	lacks(t, "the series", obj.Data, "SEQUENCE")
+	contains(t, "the series", obj.Data, "SUMMARY:Moved\r\n")
+	calls := len(r.f.SyncCalls())
+	if _, err := r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Moved", "SUMMARY:Moved again"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the exception's edit: %v", err)
+	}
+	if got := r.f.SyncCalls()[calls:]; len(got) != 1 || len(got[0].Body.Events) != 2 {
+		t.Errorf("sync calls %+v, want one with the master's update and the exception's", got)
+	}
+	data := r.object(t, "other@x").Data
+	contains(t, "the series", data, "SUMMARY:Moved again\r\n", "SEQUENCE:0\r\n")
 }

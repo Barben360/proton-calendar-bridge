@@ -349,8 +349,9 @@ func PlanDelete(current Group) (WritePlan, error) {
 // least its master's (ruling M4-R4). Every master written carries a SEQUENCE,
 // 0 when neither the client nor the row has one: Proton refuses an exception
 // of a master whose signed part has none (live 2026-11-13, HUMAN-CHECKS 6.3
-// D7). A master stored without one is written for that alone only beside a
-// new exception, so an unchanged body still plans nothing. Notifications follow the tri-state
+// D7). A master stored without one gets SEQUENCE:0 with any write to its
+// series (an exception created, updated or deleted), first in the call, its
+// body otherwise unchanged; a body that changes nothing still plans nothing. Notifications follow the tri-state
 // (research D). An update re-sends the row's Color (null when it has none),
 // Attendees and IsOrganizer, reuses the row's session keys only when
 // SessionKeys trusts both, and carries no key packet; a create mints its
@@ -407,8 +408,7 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if r := ical.StartOffRule(in.Master.Comp); r != nil && !ical.SameRecurrence(master.stored, in.Master.Comp) {
 			return WritePlan{}, asRefusal(r)
 		}
-		newException := slices.ContainsFunc(sortedKeys(in.Exceptions), func(rid int64) bool { return exceptions[rid] == nil })
-		seq, op, err := pl.update(master, *in.Master, 0, newException)
+		seq, op, err := pl.update(master, *in.Master, 0, false)
 		if err != nil {
 			return WritePlan{}, err
 		}
@@ -438,6 +438,18 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 	for _, rid := range sortedKeys(exceptions) {
 		if _, kept := in.Exceptions[rid]; !kept {
 			out.Ops = append(out.Ops, events.Op{Delete: &events.Delete{ID: exceptions[rid].ID}})
+		}
+	}
+	// A stored master without SEQUENCE gets SEQUENCE:0 with any write to its
+	// series, first in the call (Fix 5): Proton refuses an exception of
+	// such a master (live D7), and the master's body may be unchanged.
+	if master != nil && len(out.Ops) > 0 && !hasSequence(master.stored) && !updates(out.Ops[0], master.ID) {
+		_, op, err := pl.update(master, *in.Master, 0, true)
+		if err != nil {
+			return WritePlan{}, err
+		}
+		if op != nil {
+			out.Ops = append([]events.Op{*op}, out.Ops...)
 		}
 	}
 	out.Notes = pl.notes
@@ -531,6 +543,17 @@ func sequence(c ical.Component) (int, bool) {
 		return 0, true
 	}
 	return n, true
+}
+
+// hasSequence reports whether c holds a SEQUENCE.
+func hasSequence(c ical.Component) bool {
+	_, has := sequence(c)
+	return has
+}
+
+// updates reports whether op is an update of row id.
+func updates(op events.Op, id string) bool {
+	return op.Update != nil && op.Update.ID == id
 }
 
 // isMaster reports whether c is a master: it has no RECURRENCE-ID.
@@ -673,7 +696,8 @@ func sameAddress(a, b string) bool {
 // update plans row r's update to we (nil when nothing changes) and returns
 // its SEQUENCE, at least minSeq. A master gets SEQUENCE:0 when neither we
 // nor r has one; when that is its only change, it is written only with
-// needSequence (a new exception beside it), else nothing is planned.
+// needSequence (another row of its series is written), else nothing is
+// planned.
 func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int, needSequence bool) (int, *events.Op, error) {
 	c, err := pl.prepared(we)
 	if err != nil {
