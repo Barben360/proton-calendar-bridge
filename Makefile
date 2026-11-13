@@ -41,7 +41,10 @@ ui:
 # The icon is the window's app icon, installed as the desktop entry's Icon.
 install-ui: ui
 	install -D -m 0755 $(UI_OUT) $(DESTDIR)$(PREFIX)/bin/pcb-ui
-	install -D -m 0644 packaging/pcb-ui.desktop $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
+	# The absolute Exec: launchers often lack $(PREFIX)/bin on their PATH.
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	sed 's|^Exec=pcb-ui|Exec=$(PREFIX)/bin/pcb-ui|' packaging/pcb-ui.desktop > $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
+	chmod 0644 $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
 	install -D -m 0644 internal/ui/desktop/icons/app.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/pcb-ui.svg
 
 # The fake Proton for rehearsals (plan R2): developer only, never in the

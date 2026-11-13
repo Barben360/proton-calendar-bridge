@@ -164,6 +164,10 @@ func fatal(a fyne.App, err error) int {
 		text += "\n\n" + h
 	}
 	w := a.NewWindow("pcb")
+	// Master: closing the window by its title bar quits the app too (the
+	// dialog's OnClosed does not fire then, and the hidden main window would
+	// keep the loop alive).
+	w.SetMaster()
 	d := dialog.NewInformation("pcb-ui cannot start", text, w)
 	d.SetOnClosed(func() { a.Quit() })
 	w.Resize(fyne.NewSize(480, 200))

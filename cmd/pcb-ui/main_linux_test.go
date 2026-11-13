@@ -141,3 +141,14 @@ func TestExecutableIsAbsoluteAndResolved(t *testing.T) {
 		t.Errorf("%q still has a symlink (%q)", p, r)
 	}
 }
+
+func TestFileURLEscapesSpacesAndSpecials(t *testing.T) {
+	u := fileURL("/home/my user/.local/state/pcb #1/logs")
+	if got, want := u.String(), "file:///home/my%20user/.local/state/pcb%20%231/logs"; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	back, err := url.Parse(u.String())
+	if err != nil || back.Path != "/home/my user/.local/state/pcb #1/logs" {
+		t.Errorf("round trip: %q, %v", back.Path, err)
+	}
+}
