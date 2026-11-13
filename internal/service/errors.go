@@ -137,9 +137,13 @@ func stopsWatch(err error) bool {
 		ee *exitcode.Error
 		d  *detail
 	)
-	// A locked keyring is no stop for good: the caller waits for it (keyringLocked).
-	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && (d.final || d.locked))
+	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && d.final)
 }
+
+// stopsServe is stopsWatch plus a locked desktop keyring: Serve's watch
+// ends on it and Serve waits for the keyring (keyringRetry). pcb sync
+// --watch keeps its back-off instead.
+func stopsServe(err error) bool { return stopsWatch(err) || keyringLocked(err) }
 
 // retryAfter is how long err asks a watch to wait before the next pass.
 func retryAfter(err error) time.Duration {
@@ -364,6 +368,9 @@ func keyFailure(err error, msg, hint string) *exitcode.Error {
 
 // keyFix is the hint for a key file that cannot be used.
 const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+
+// keyringFailFix is keyFix's for a key in the desktop keyring that cannot be used.
+const keyringFailFix = "check that the desktop keyring is running and unlocked (pcb doctor)"
 
 // storeError maps a failure of the sealed store: a lost or foreign key names
 // the key file, a rolled-back file is a MustAct; anything else is a store

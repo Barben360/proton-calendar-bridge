@@ -239,7 +239,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 			}
 		}
 		return res, err
-	}, pace)
+	}, pace, stopsServe)
 	if err == nil && ctx.Err() == nil && errors.Is(context.Cause(pctx), errLoggedOut) {
 		return loggedOut()
 	}

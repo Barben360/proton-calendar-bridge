@@ -248,6 +248,14 @@ func (l *Local) keyFile() string {
 	return l.o.Config.Secrets.KeyFile
 }
 
+// keyFix is the hint for a key that cannot be used, by where it lives.
+func (l *Local) keyFix() string {
+	if l.keyFile() == keyringRef {
+		return keyringFailFix
+	}
+	return keyFix
+}
+
 // keyWhat names where the sealing key lives, for a message: "the key file
 // <path>" or "the desktop keyring".
 func (l *Local) keyWhat() string {
@@ -457,6 +465,10 @@ func (l *Local) Status(context.Context) (Status, error) {
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
 		)
+		unreadable := "the stored secrets cannot be opened; see the key file"
+		if l.keyFile() == keyringRef {
+			unreadable = "the stored secrets cannot be opened with the key in the desktop keyring"
+		}
 		switch {
 		case errors.As(err, &rb):
 			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
@@ -465,7 +477,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		case errors.Is(err, seal.ErrLocked):
 			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
 		case err != nil:
-			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
+			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:
 			s.Secrets = "sealed"
 			s.Username = accounts[st.AccountID].Username

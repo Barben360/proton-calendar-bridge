@@ -68,7 +68,7 @@ func (l *Local) clientsError(err error) error {
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
-		return keyFailure(err, msg+", so nothing was stored", keyFix)
+		return keyFailure(err, msg+", so nothing was stored", l.keyFix())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
@@ -332,7 +332,7 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 // is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), keyFix)
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), l.keyFix())
 	}
 	why := "its sealed copy does not open with " + l.keyWhat()
 	switch {
@@ -344,11 +344,15 @@ func (l *Local) unrevealable(name string, err error) error {
 			why = "the desktop keyring has no key for it"
 		}
 	}
-	hint := "restore the key file from a backup, or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
+	restore := "restore the key file from a backup"
+	if l.keyFile() == keyringRef {
+		restore = "make sure the desktop keyring holds pcb's key (unlock it, or restore it from a backup of the keyring)"
+	}
+	hint := restore + ", or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
 	if errors.Is(err, seal.ErrNoKey) && l.sessionSealed() {
 		// rotate is refused meanwhile (sessionKeyLost); after the new
 		// login, show offers it for a copy the new key does not open.
-		hint = "restore the key file from a backup, or run pcb logout, then pcb login"
+		hint = restore + ", or run pcb logout, then pcb login"
 	}
 	return mustAct(fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s", name, why), hint)
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,12 +23,13 @@ import (
 // fakeKeyring is an in-memory service.Keyring: absent stands for no Secret
 // Service on the bus, locked for a locked default collection.
 type fakeKeyring struct {
-	mu     sync.Mutex
-	absent bool
-	locked bool
-	items  map[string][]byte
-	asked  int // calls of any method
-	sets   int
+	mu      sync.Mutex
+	absent  bool
+	locked  bool
+	items   map[string][]byte
+	failSet error // Set's error when it is not locked or absent
+	asked   int   // calls of any method
+	sets    int
 }
 
 func (k *fakeKeyring) setLocked(v bool) {
@@ -79,6 +81,9 @@ func (k *fakeKeyring) Set(_ context.Context, _ string, attrs map[string]string, 
 	}
 	if k.items == nil {
 		k.items = map[string][]byte{}
+	}
+	if k.failSet != nil {
+		return k.failSet
 	}
 	k.sets++
 	k.items[attrKey(attrs)] = bytes.Clone(secret)
@@ -222,9 +227,8 @@ func TestBackendSecretServiceWithoutKeyringIsMustAct(t *testing.T) {
 	if got := exitcode.From(err); got != exitcode.MustAct {
 		t.Fatalf("OpenHub = %v (exit %d), want exit %d", err, got, exitcode.MustAct)
 	}
-	if !errors.Is(err, seal.ErrNoService) && !bytes.Contains([]byte(err.Error()), []byte("Secret Service")) &&
-		!bytes.Contains([]byte(err.Error()), []byte("keyring")) {
-		t.Errorf("error %q does not name the keyring", err)
+	if !strings.Contains(err.Error(), seal.ErrNoService.Error()) {
+		t.Errorf("error %q does not name the probe's error %q", err, seal.ErrNoService)
 	}
 	if _, serr := os.Stat(filepath.Join(e.dirs.State, "layout.json")); !errors.Is(serr, os.ErrNotExist) {
 		t.Errorf("a refused creation left layout.json (%v)", serr)
@@ -451,5 +455,189 @@ func TestSecretServiceStateNamesTheKeyring(t *testing.T) {
 		} else if got := exitcode.From(err); got != exitcode.MustAct || err.Error() != tc.msg || exitcode.HintOf(err) != "pcb logout then pcb login" {
 			t.Errorf("%s: %v (exit %d, hint %q), want exit 10, %q, hint %q", tc.name, err, got, exitcode.HintOf(err), tc.msg, "pcb logout then pcb login")
 		}
+	}
+}
+
+func serveUntilWaiting(t *testing.T, h *service.Hub, a string, waitForLogin bool, waiting chan struct{}) (*serveRig, chan error) {
+	t.Helper()
+	r := newServeRig(h)
+	done, _ := r.serve(t, r.options(waitForLogin))
+	select {
+	case <-waiting:
+	case <-time.After(waitLimit):
+		t.Fatal("the loop never waited for the keyring")
+	}
+	r.waitFor(t, "a waiting", func() bool { return r.last(a) == service.ServeWaitingForLogin })
+	return r, done
+}
+
+// Without WaitForLogin (pcb serve's own exit rule) a locked keyring is no
+// reason to refuse to start or to exit: Serve keeps running, and the
+// account serves once the keyring is unlocked.
+func TestLockedKeyringDoesNotEndServeWithoutWaitForLogin(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	waiting, retry := make(chan struct{}, 1), make(chan struct{})
+	e.sleep = func(ctx context.Context, d time.Duration) error {
+		if d == service.KeyringRetry {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+			select {
+			case <-retry:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return blockSleep(ctx, d)
+	}
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	kr.setLocked(true)
+	r, done := serveUntilWaiting(t, h, a, false, waiting)
+	running(t, done) // neither anyLoggedIn at the start nor allStopped afterwards ended it
+	kr.setLocked(false)
+	retry <- struct{}{}
+	r.waitPassed(t, a, 0)
+	running(t, done)
+}
+
+// pcb sync --watch keeps retrying with its back-off when the keyring locks
+// mid-watch: it neither ends nor claims that pcb retries every 30 s.
+func TestWatchSyncSurvivesALockedKeyring(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	sleeping, release := make(chan struct{}, 8), make(chan struct{})
+	e.sleep = func(ctx context.Context, d time.Duration) error {
+		select {
+		case sleeping <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	passes := make(chan service.WatchPass, 8)
+	done := make(chan error, 1)
+	go func() {
+		done <- api.WatchSync(ctx, service.SyncRequest{}, 0, func(p service.WatchPass) { passes <- p })
+	}()
+	wait := func(c chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-c:
+		case err := <-done:
+			t.Fatalf("WatchSync returned %v before %s", err, what)
+		case <-time.After(waitLimit):
+			t.Fatal("timeout: " + what)
+		}
+	}
+	wait(sleeping, "its first sleep")
+	if p := <-passes; p.Err != nil {
+		t.Fatalf("first pass: %v", p.Err)
+	}
+	kr.setLocked(true)
+	release <- struct{}{} // the next pass meets the locked keyring
+	wait(sleeping, "backing off after the locked pass")
+	if p := <-passes; p.Err == nil {
+		t.Fatal("the pass under a locked keyring succeeded")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("WatchSync returned %v on a locked keyring, want it to keep retrying", err)
+	default:
+	}
+	kr.setLocked(false)
+	release <- struct{}{}
+	if p := <-passes; p.Err != nil {
+		t.Errorf("pass after the unlock: %v", p.Err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("WatchSync after cancel = %v, want nil", err)
+	}
+}
+
+// The wording of the other failures of a secret-service state names the
+// desktop keyring, not a key file.
+func TestSecretServiceStateWordsNameTheKeyring(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noKeyFile := func(what string, err error) {
+		t.Helper()
+		if strings.Contains(err.Error(), "key file") || strings.Contains(exitcode.HintOf(err), "key file") {
+			t.Errorf("%s: %q, hint %q name a key file", what, err, exitcode.HintOf(err))
+		}
+	}
+	// A client's password that cannot be sealed.
+	kr.mu.Lock()
+	kr.items = nil // sealing then has to create the key, which the keyring refuses
+	kr.failSet = errors.New("the keyring refused")
+	kr.mu.Unlock()
+	_, err = api.AddClient(t.Context(), "phone")
+	if err == nil || !strings.Contains(err.Error(), "sealed with the desktop keyring") || exitcode.HintOf(err) != "check that the desktop keyring is running and unlocked (pcb doctor)" {
+		t.Errorf("AddClient = %v, hint %q", err, exitcode.HintOf(err))
+	}
+	kr.mu.Lock()
+	kr.failSet = nil
+	kr.mu.Unlock()
+	if _, err := api.AddClient(t.Context(), "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	// Its copy no longer opens: the key was replaced.
+	kr.mu.Lock()
+	for k := range kr.items {
+		kr.items[k] = bytes.Repeat([]byte{9}, 32)
+	}
+	kr.mu.Unlock()
+	_, err = api.ShowClient(t.Context(), "laptop")
+	if err == nil || !strings.Contains(err.Error(), "does not open with the desktop keyring") ||
+		!strings.Contains(exitcode.HintOf(err), "pcb client rotate") {
+		t.Errorf("ShowClient (key replaced) = %v, hint %q", err, exitcode.HintOf(err))
+	} else {
+		noKeyFile("show, key replaced", err)
+	}
+	st := accountStatus(t, h, a)
+	if st.Secrets != "unreadable" || !strings.Contains(st.Reason, "desktop keyring") || strings.Contains(st.Reason, "key file") {
+		t.Errorf("Status = %q / %q, want unreadable naming the desktop keyring", st.Secrets, st.Reason)
+	}
+	// The key is gone altogether.
+	kr.mu.Lock()
+	kr.items = nil
+	kr.mu.Unlock()
+	_, err = api.ShowClient(t.Context(), "laptop")
+	if err == nil || !strings.Contains(err.Error(), "the desktop keyring has no key for it") ||
+		!strings.Contains(exitcode.HintOf(err), "run pcb logout, then pcb login") {
+		t.Errorf("ShowClient (key gone) = %v, hint %q", err, exitcode.HintOf(err))
+	} else {
+		noKeyFile("show, key gone", err)
 	}
 }
