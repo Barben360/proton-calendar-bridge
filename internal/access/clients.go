@@ -231,20 +231,11 @@ func (s *Store) save(clients []record) error {
 // mutate runs fn on a fresh copy of the file under both locks and writes
 // the result when fn returns true.
 func (s *Store) mutate(ctx context.Context, fn func(clients []record) ([]record, bool, error)) error {
-	processMu.Lock()
-	defer processMu.Unlock()
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	unlock, err := lockDir(ctx, s.dir, lockName)
+	if err != nil {
 		return err
 	}
-	unlock, err := filelock.Lock(ctx, filepath.Join(s.dir, lockName))
-	switch {
-	case errors.Is(err, filelock.ErrUnsupported):
-		// No file lock here: processMu is all there is.
-	case err != nil:
-		return err
-	default:
-		defer unlock()
-	}
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refresh(true); err != nil {
@@ -260,23 +251,54 @@ func (s *Store) mutate(ctx context.Context, fn func(clients []record) ([]record,
 	return s.refresh(true)
 }
 
+// lockDir creates dir (0700) and takes processMu and the file lock
+// dir/name, which unlock releases.
+func lockDir(ctx context.Context, dir, name string) (unlock func(), err error) {
+	processMu.Lock()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		processMu.Unlock()
+		return nil, err
+	}
+	release, err := filelock.Lock(ctx, filepath.Join(dir, name))
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+		// No file lock here: processMu is all there is.
+		return processMu.Unlock, nil
+	case err != nil:
+		processMu.Unlock()
+		return nil, err
+	}
+	return func() { release(); processMu.Unlock() }, nil
+}
+
 // ValidateName checks a client name: 1 to 64 characters, no control
 // character, no leading or trailing space.
 func ValidateName(name string) error {
+	if err := checkName(name, ErrInvalidName); err != nil {
+		return err
+	}
+	if idShape.MatchString(name) {
+		return fmt.Errorf("%w: it looks like a client ID, which remove would take for one", ErrInvalidName)
+	}
+	return nil
+}
+
+// checkName is the rule client and MCP token names share: 1 to 64
+// characters of valid UTF-8, no control character, no leading or trailing
+// space. Its errors wrap invalid.
+func checkName(name string, invalid error) error {
 	n := utf8.RuneCountInString(name)
 	switch {
 	case n == 0:
-		return fmt.Errorf("%w: it is empty", ErrInvalidName)
+		return fmt.Errorf("%w: it is empty", invalid)
 	case n > maxNameLen:
-		return fmt.Errorf("%w: %d characters, at most %d", ErrInvalidName, n, maxNameLen)
+		return fmt.Errorf("%w: %d characters, at most %d", invalid, n, maxNameLen)
 	case !utf8.ValidString(name):
-		return fmt.Errorf("%w: not valid UTF-8", ErrInvalidName)
+		return fmt.Errorf("%w: not valid UTF-8", invalid)
 	case strings.IndexFunc(name, unicode.IsControl) >= 0:
-		return fmt.Errorf("%w: it holds a control character", ErrInvalidName)
-	case idShape.MatchString(name):
-		return fmt.Errorf("%w: it looks like a client ID, which remove would take for one", ErrInvalidName)
+		return fmt.Errorf("%w: it holds a control character", invalid)
 	case strings.TrimSpace(name) != name:
-		return fmt.Errorf("%w: it starts or ends with a space", ErrInvalidName)
+		return fmt.Errorf("%w: it starts or ends with a space", invalid)
 	}
 	return nil
 }
