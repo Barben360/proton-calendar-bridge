@@ -352,10 +352,11 @@ text` (never a 409 naming itself), and the same UID at another name is a 409
 an omitted one is live check L.4 #10; a DELETE is unaffected [verified:
 `TestARowWithAPersonalPartIsNotUpdated`].
 
-The full fix (`OPEN.md`): fresh session keys and their key packets on every
-update, once live check L.4 #3 (research L.4) shows Proton accepts new key
-packets on an update. That removes the reuse, so residuals 1 to 5 go, and
-pinning with residuals 6 to 8 can go with it.
+The full fix (`OPEN.md`) would be fresh session keys and their key packets on
+every update, but live check L.4 #3 found that Proton refuses new key packets
+on an update (2000 "SharedKeyPacket is not allowed", the row keeps its packet
+[verified: live 2026-11-13, `spec/experiments/raw/L4/write-matrix.json`]), so
+the reuse and pinning stay until another way to rotate a row's keys is found.
 
 UID escaping: Proton stores a UID by its TEXT value, unescaped (RFC 5545
 §3.3.11: `\\`, `\;`, `\,`, `\n`): a create whose parts carry
@@ -405,8 +406,9 @@ the key proof would find it; a DELETE is unaffected.
   live 2026-11-13]: an exception of a master without SEQUENCE, so every
   master pcb writes carries one (`spec/mapping.md` §6; `HUMAN-CHECKS.md`
   6.3 D7, the create and its bisection); an RRULE with `COUNT=50`, `UNTIL`
-  in 2038, `FREQ=HOURLY` or `INTERVAL=1000`, a floating time, a non-IANA
-  TZID (6.7 write matrix; pcb refuses all of them before sending). 2001
+  in 2038, `FREQ=HOURLY` or a daily `INTERVAL=1000`, a floating time, a
+  non-IANA TZID (6.7 write matrix, `spec/experiments/raw/L4/write-matrix.json`;
+  pcb refuses all of them before sending). 2001
   assumed: a part signed with another address's key and an exception
   SEQUENCE below its master's [claim: research A.4]; an exception update
   or delete under a master without SEQUENCE [assumed from the create's,
