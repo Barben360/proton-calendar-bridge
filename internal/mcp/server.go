@@ -26,14 +26,17 @@ const (
 	EntryStdio  Entry = "stdio"  // pcb mcp's own stdin and stdout
 )
 
-// Hub is what the tools need of service.Hub.
+// Hub is what the tools need of service.Hub. Login, SubmitTOTP, SignOut
+// and Remove are the login page's (loginflow.Hub); logout signs out.
 type Hub interface {
 	Accounts() []service.AccountInfo
 	Agenda(selector string) (service.Agenda, service.AccountInfo, error)
 	Account(selector string) (service.API, service.AccountInfo, error)
 	Health(ctx context.Context, selector string) (service.Health, error)
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
+	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
+	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 }
 
 var _ Hub = (*service.Hub)(nil)
@@ -41,10 +44,13 @@ var _ Hub = (*service.Hub)(nil)
 // Options build a Server. Now defaults to time.Now, Zone to the process's
 // zone, Logger to discarding, Version to "dev".
 type Options struct {
-	Hub       Hub
-	Now       func() time.Time
-	Zone      *time.Location // [mcp] timezone, else the process's zone
-	Logger    *slog.Logger   // audit lines go here
+	Hub    Hub
+	Now    func() time.Time
+	Zone   *time.Location // [mcp] timezone, else the process's zone
+	Logger *slog.Logger   // audit lines go here
+	// ShowLogin, when set, raises pcb-ui's add-account wizard with the
+	// username filled in (the login tool then opens no page). It must not
+	// block.
 	ShowLogin func(username string) error
 	// LoginGuard, when set, is asked before a login that would create
 	// the state: an error refuses the login (pcb mcp's sealer guard,
@@ -59,6 +65,8 @@ type Server struct {
 
 	mu      sync.Mutex
 	servers map[string]*sdkmcp.Server // by entry and grant
+
+	logins logins // the login tool's state per MCP session
 }
 
 // maxServers bounds the cache of SDK servers: past it, the cache starts
@@ -79,7 +87,7 @@ func NewServer(o Options) *Server {
 	if o.Version == "" {
 		o.Version = "dev"
 	}
-	return &Server{o: o, servers: map[string]*sdkmcp.Server{}}
+	return &Server{o: o, servers: map[string]*sdkmcp.Server{}, logins: logins{bySession: map[*sdkmcp.ServerSession]*sessionLogin{}}}
 }
 
 // Session returns the SDK server for one MCP session: only the tools g
@@ -132,7 +140,7 @@ func (s *Server) build(g Grant, e Entry) *sdkmcp.Server {
 		Instructions: instructions,
 		Capabilities: &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}},
 	})
-	for _, t := range append(readTools(), writeTools()...) {
+	for _, t := range slices.Concat(readTools(), writeTools(), accountTools()) {
 		if g.has(t.cap) && (!t.stdioOnly || e != EntryRemote) {
 			t.add(ss)
 			ss.tools = append(ss.tools, t.name)

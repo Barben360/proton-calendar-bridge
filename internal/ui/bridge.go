@@ -42,6 +42,10 @@ type BridgeOptions struct {
 	// socket has no ui/show). It never blocks the daemon: each call runs on
 	// its own goroutine.
 	ShowUI func(account string)
+	// ShowLogin raises the window's add-account wizard with username filled
+	// in, for an agent's login tool (nil: the tool opens a loopback page
+	// instead). It runs on its own goroutine, like ShowUI.
+	ShowLogin func(username string)
 	// Listen opens the CalDAV listener (nil: net.Listen).
 	Listen func(network, addr string) (net.Listener, error)
 	// Keyring is the desktop keyring a state sealed with it uses (nil: the
@@ -200,11 +204,17 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		// callback runs on a goroutine of its own and the answer is "shown".
 		showUI = func(account string) error { go b.o.ShowUI(account); return nil } //nolint:unparam // daemon.Options.ShowUI has an error to return
 	}
+	var showLogin func(string) error
+	if b.o.ShowLogin != nil {
+		// The MCP tool's handler must not wait for the window.
+		showLogin = func(username string) error { go b.o.ShowLogin(username); return nil } //nolint:unparam // mcp.Options.ShowLogin has an error to return
+	}
 	go func() {
 		defer cancel()
 		err := daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
-			MCP:    mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version}),
+			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
+				ShowLogin: showLogin}),
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI,
 			OnState: func(string, service.ServeState) { b.poke() },
 			// The same records as pcb serve's, for the same log file content.

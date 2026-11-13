@@ -1,15 +1,23 @@
 package ui_test
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
+	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
 // The desktop app's daemon serves /mcp like pcb serve's when [mcp] remote
@@ -44,5 +52,68 @@ func TestBridgeServesRemoteMCP(t *testing.T) {
 	_ = res.Body.Close()
 	if res.StatusCode != http.StatusOK || res.Header.Get("Mcp-Session-Id") == "" {
 		t.Fatalf("initialize on /mcp: %d, session %q, want 200 and a session", res.StatusCode, res.Header.Get("Mcp-Session-Id"))
+	}
+}
+
+// grantHeader sends a relay's grant on every request to the control socket.
+type grantHeader struct {
+	base  http.RoundTripper
+	grant string
+}
+
+func (g grantHeader) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set(mcp.RelayGrantHeader, g.grant)
+	return g.base.RoundTrip(req)
+}
+
+// An agent's login reaching pcb-ui (a pcb mcp relaying to it) raises the
+// window's add-account wizard with the username: no page, no URL.
+func TestBridgeRaisesTheWizardForAnAgentLogin(t *testing.T) {
+	l := newLab(t)
+	var (
+		mu    sync.Mutex
+		names []string
+		got   = make(chan struct{}, 1)
+	)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, ShowLogin: func(u string) {
+		mu.Lock()
+		names = append(names, u)
+		mu.Unlock()
+		got <- struct{}{}
+	}})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	socket := l.dirs.Socket()
+	hc := &http.Client{Transport: grantHeader{grant: `{"Caps":["freebusy","login"]}`, base: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		},
+	}}}
+	cs, err := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).
+		Connect(t.Context(), &sdkmcp.StreamableClientTransport{Endpoint: "http://pcb/mcp", HTTPClient: hc, MaxRetries: -1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+	res, err := cs.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: "login", Arguments: map[string]any{"username": "carol@example.org"}})
+	if err != nil || res.IsError {
+		t.Fatalf("login: %v %+v", err, res)
+	}
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ShowLogin was not called")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(names) != 1 || names[0] != "carol@example.org" {
+		t.Errorf("ShowLogin got %q", names)
+	}
+	if out, _ := res.StructuredContent.(map[string]any); out["where"] != "pcb-ui" || out["url"] != nil {
+		t.Errorf("login = %v, want the wizard and no URL", out)
 	}
 }

@@ -9,15 +9,17 @@ import (
 const module = "github.com/Barben360/proton-calendar-bridge"
 
 // internal/mcp is an adapter on the service (Global Constraints): the
-// standard library, the service, exit codes, the UI's wizard, the token
+// standard library, the service, exit codes, its login page, the token
 // types and the MCP SDK; never Proton, the store, the iCalendar codec or the
-// CLI. Test files are not checked (sdk_e19_test.go).
+// CLI, and never internal/ui (ruling R18: ui → daemon → mcp → ui is a
+// cycle; the page and pcb-ui share internal/loginflow). Test files are not
+// checked (sdk_e19_test.go).
 func TestMCPArch(t *testing.T) {
 	allowed := map[string]bool{
-		module + "/internal/service":  true,
-		module + "/internal/exitcode": true,
-		module + "/internal/ui":       true,
-		module + "/internal/access":   true,
+		module + "/internal/service":       true,
+		module + "/internal/exitcode":      true,
+		module + "/internal/mcp/loginpage": true,
+		module + "/internal/access":        true,
 	}
 	const sdk = "github.com/modelcontextprotocol/go-sdk/"
 	for _, goos := range []string{"linux", "darwin", "windows"} {

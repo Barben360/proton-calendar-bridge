@@ -30,6 +30,7 @@ type stubHub struct {
 	cals     map[string][]service.Calendar
 	health   map[string]service.Health
 	calErr   map[string]error // Calendars fails for these accounts
+	signOuts []string         // the accounts SignOut signed out
 }
 
 func noAccount(sel string) error {
@@ -89,8 +90,29 @@ func (h *stubHub) Login(context.Context, service.LoginRequest) (service.LoginRes
 	return service.LoginResult{}, errors.New("not in this test")
 }
 
-func (h *stubHub) SignOut(context.Context, string, service.LogoutRequest) (service.LogoutResult, error) {
-	return service.LogoutResult{}, errors.New("not in this test")
+func (h *stubHub) SubmitTOTP(context.Context, string, string) (service.LoginResult, error) {
+	return service.LoginResult{}, errors.New("not in this test")
+}
+
+func (h *stubHub) Remove(context.Context, string, service.LogoutRequest) (service.AccountInfo, error) {
+	return service.AccountInfo{}, errors.New("not in this test")
+}
+
+func (h *stubHub) SignOut(_ context.Context, sel string, _ service.LogoutRequest) (service.LogoutResult, error) {
+	a, ok := h.pick(sel)
+	if !ok {
+		return service.LogoutResult{}, noAccount(sel)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.signOuts = append(h.signOuts, a.ID)
+	return service.LogoutResult{WasLoggedIn: true, Revoked: true}, nil
+}
+
+func (h *stubHub) signedOut() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.signOuts)
 }
 
 // set replaces the account id's info (MCP switched off, signed out...).

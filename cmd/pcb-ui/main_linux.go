@@ -69,7 +69,8 @@ func run(args []string) int {
 
 	var win *desktop.Window
 	show := func(account string) { fyne.Do(func() { win.Show(account) }) }
-	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show})
+	showLogin := func(username string) { fyne.Do(func() { win.ShowLogin(username) }) }
+	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin})
 	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: a.OpenURL, exe: executable}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
 
