@@ -150,6 +150,50 @@ func (ss *session) withCalendars(ctx context.Context, ts []target, asked []strin
 	return out, nil
 }
 
+// eventTarget is the event an event_id names, its account and agenda.
+type eventTarget struct {
+	info service.AccountInfo
+	ref  service.EventRef
+	ag   service.Agenda
+}
+
+// event resolves an event_id for every tool taking one (ruling R15): its
+// account must be visible to the grant and, under a calendar grant, hold
+// one of them (holdsGrantedCalendar), and its calendar be granted. Anything
+// else is noEvent, the answer to a garbage id, before any agenda is asked:
+// a hidden account reads as a missing one whatever its agenda would say.
+func (ss *session) event(ctx context.Context, id string) (eventTarget, error) {
+	localID, ref, err := decodeEventID(id)
+	if err != nil {
+		return eventTarget{}, noEvent(id)
+	}
+	if !slices.ContainsFunc(ss.visible(), func(a service.AccountInfo) bool { return a.ID == localID }) ||
+		!ss.grant.seesCalendar(ref.CalendarID) || !ss.holdsGrantedCalendar(ctx, localID) {
+		return eventTarget{}, noEvent(id)
+	}
+	rec := auditOf(ctx)
+	rec.account(localID)
+	rec.calendar(ref.CalendarID)
+	rec.uid = ref.UID
+	ag, info, err := ss.srv.o.Hub.Agenda(localID)
+	if errors.Is(err, service.ErrNoAccount) || (err == nil && !ss.grant.seesAccount(info)) {
+		return eventTarget{}, noEvent(id)
+	}
+	if err != nil {
+		return eventTarget{}, err
+	}
+	return eventTarget{info: info, ref: ref, ag: ag}, nil
+}
+
+// eventGone maps an agenda's "no such event or calendar" to noEvent, the
+// same answer as for an id that never named anything; other errors stay.
+func eventGone(err error, id string) error {
+	if errors.Is(err, service.ErrNoSuchObject) || errors.Is(err, service.ErrNoSuchCalendar) {
+		return noEvent(id)
+	}
+	return err
+}
+
 // agenda is the target's agenda, refused as not-found when the account is
 // gone or no longer visible since the call began.
 func (ss *session) agenda(t target) (service.Agenda, error) {

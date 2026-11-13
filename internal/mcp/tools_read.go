@@ -688,31 +688,14 @@ func addEventGet(ss *session) {
 		Description: "One event in full by its event_id: times, recurrence, exceptions, alarms, status, its overridden occurrences, and its etag; text and people under untrusted.",
 		Annotations: readOnly("Get an event"),
 	}, func(ctx context.Context, in eventGetIn) (eventOut, string, error) {
-		localID, ref, err := decodeEventID(in.EventID)
-		if err != nil {
-			return eventOut{}, "", noEvent(in.EventID)
-		}
-		i := slices.IndexFunc(ss.visible(), func(a service.AccountInfo) bool { return a.ID == localID })
-		if i < 0 || !ss.grant.seesCalendar(ref.CalendarID) {
-			return eventOut{}, "", noEvent(in.EventID)
-		}
-		rec := auditOf(ctx)
-		rec.account(localID)
-		rec.calendar(ref.CalendarID)
-		rec.uid = ref.UID
-		ag, info, err := ss.srv.o.Hub.Agenda(localID)
-		if errors.Is(err, service.ErrNoAccount) || (err == nil && !ss.grant.seesAccount(info)) {
-			return eventOut{}, "", noEvent(in.EventID)
-		}
-		var d service.EventDetail
-		if err == nil {
-			d, err = ag.Event(ctx, ref)
-		}
-		if errors.Is(err, service.ErrNoSuchObject) || errors.Is(err, service.ErrNoSuchCalendar) {
-			return eventOut{}, "", noEvent(in.EventID)
-		}
+		tgt, err := ss.event(ctx, in.EventID)
 		if err != nil {
 			return eventOut{}, "", err
+		}
+		ref, info := tgt.ref, tgt.info
+		d, err := tgt.ag.Event(ctx, ref)
+		if err != nil {
+			return eventOut{}, "", eventGone(err, in.EventID)
 		}
 		external := d.ExternalOrganizer // the service's judgement, as the lists'
 		out := eventOut{

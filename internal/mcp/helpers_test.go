@@ -120,6 +120,7 @@ type stubAgenda struct {
 	err     error
 	reqs    []service.OccurrencesRequest
 	refs    []service.EventRef
+	w       writeStub // the writes (tools_write_test.go)
 }
 
 func (a *stubAgenda) record(req service.OccurrencesRequest) {

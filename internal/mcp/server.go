@@ -128,7 +128,7 @@ func (s *Server) build(g Grant, e Entry) *sdkmcp.Server {
 		Instructions: instructions,
 		Capabilities: &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}},
 	})
-	for _, t := range readTools() {
+	for _, t := range append(readTools(), writeTools()...) {
 		if g.has(t.cap) && (!t.stdioOnly || e != EntryRemote) {
 			t.add(ss)
 			ss.tools = append(ss.tools, t.name)

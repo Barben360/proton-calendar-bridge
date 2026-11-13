@@ -46,6 +46,10 @@ func (a *audit) calendar(id string) {
 
 // auditCalls is the session server's middleware writing the audit line of
 // every tools/call, those the SDK refuses before a handler runs included.
+// A run that only asks the person (InputRequests, protocol 2026-07-28)
+// writes none: its retry with the answer writes the call's one line. On
+// older protocols the SDK asks and re-runs the handler inside this
+// middleware, which sees the call once.
 func (ss *session) auditCalls(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
 	return func(ctx context.Context, method string, req sdkmcp.Request) (sdkmcp.Result, error) {
 		if method != "tools/call" {
@@ -58,6 +62,9 @@ func (ss *session) auditCalls(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
 		rec := &audit{}
 		began := time.Now()
 		res, err := next(context.WithValue(ctx, auditKey{}, rec), method, req)
+		if r, ok := res.(*sdkmcp.CallToolResult); err == nil && ok && r != nil && r.InputRequests != nil {
+			return res, err // a question to the person: the call completes when retried with the answer
+		}
 		outcome := "ok"
 		if r, ok := res.(*sdkmcp.CallToolResult); err != nil || (ok && r != nil && r.IsError) {
 			outcome = classRefused // the SDK's own refusals: unknown tool, invalid arguments
