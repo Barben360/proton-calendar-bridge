@@ -470,7 +470,7 @@ func TestSyncRefusesKeyPacketsToARetiredKey(t *testing.T) {
 	w.mustCreate(t, w.create(t, c, k)) // to the primary key only
 }
 
-func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
+func TestSyncUpdateReplacesAndResetsAbsentNotifications(t *testing.T) {
 	t.Parallel()
 	w := newWriter(t, protontest.Options{})
 	k := newKeys(t)
@@ -483,8 +483,8 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 	id := w.mustCreate(t, ev)
 	before := w.row(t, id)
 
-	// Absent Notifications and null Color keep the row's; the omitted
-	// calendar encrypted part goes (full replace); no key packets are sent.
+	// Absent Notifications reset to null (live L.4 #10); null Color keeps
+	// the row's; the omitted calendar encrypted part goes (full replace); no key packets are sent.
 	c.calEnc, c.sharedEnc = nil, []string{"SUMMARY:After"}
 	upd := w.update(t, c, k)
 	delete(upd, "Notifications")
@@ -492,8 +492,9 @@ func TestSyncUpdateReplacesAndKeepsAbsentNotifications(t *testing.T) {
 		t.Fatalf("update: code %d, want 1000", code)
 	}
 	after := w.row(t, id)
-	if n, _ := json.Marshal(after["Notifications"]); string(n) != `[{"Trigger":"-PT15M","Type":1}]` {
-		t.Errorf("absent Notifications: %s, want the row's [-PT15M]", n)
+	if after["Notifications"] != nil {
+		n, _ := json.Marshal(after["Notifications"])
+		t.Errorf("absent Notifications on update: %s, want null (live L.4 #10), not the row's", n)
 	}
 	if after["Color"] != "#3CBB3A" {
 		t.Errorf("null Color on update: %v, want the row's #3CBB3A", after["Color"])

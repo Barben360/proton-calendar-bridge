@@ -538,7 +538,7 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys, lenient b
 	if cols.Color, err = colorOf(ev.Color, old); err != nil {
 		return nil, failed(codeNotAllowed, "Not a valid Proton color")
 	}
-	if cols.Notifications, err = notificationsOf(ev.Notifications, old); err != nil {
+	if cols.Notifications, err = notificationsOf(ev.Notifications); err != nil {
 		return nil, failed(codeInvalid, "fake: Notifications: %v", err)
 	}
 	cols.Permissions, cols.IsOrganizer = *ev.Permissions, 1
@@ -966,15 +966,12 @@ func colorOf(raw json.RawMessage, old *eventRec) (string, error) {
 	return c, nil
 }
 
-// notificationsOf reads an entry's Notifications (research D): absent keeps
-// the row's on update and is null on create; null is null (the calendar's
-// defaults), [] none, a list is checked (Type 0 email or 1 device, Trigger a
-// duration).
-func notificationsOf(raw json.RawMessage, old *eventRec) ([]Notification, error) {
-	switch s := string(bytes.TrimSpace(raw)); {
-	case s == "" && old != nil:
-		return old.cols.Notifications, nil
-	case s == "" || s == "null":
+// notificationsOf reads an entry's Notifications (research D): absent is
+// null (the calendar's defaults) on an update as on create, never the
+// row's own [verified: live 2026-11-13, L.4 #10]; null is null, [] none, a
+// list is checked (Type 0 email or 1 device, Trigger a duration).
+func notificationsOf(raw json.RawMessage) ([]Notification, error) {
+	if s := string(bytes.TrimSpace(raw)); s == "" || s == "null" {
 		return nil, nil
 	}
 	var list []Notification

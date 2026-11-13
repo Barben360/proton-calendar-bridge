@@ -148,7 +148,7 @@ func TestWriteMatrixReportsWhatProtonDid(t *testing.T) {
 				"duration":      func(_ string, _ bool, row map[string]any) { row["EndTime"] = parisEnd },
 				"notifications-absent": func(_ string, update bool, row map[string]any) {
 					if update {
-						row["Notifications"] = nil
+						row["Notifications"] = []any{} // neither the row's own nor null
 					}
 				},
 				"personal-part-left-out": func(_ string, update bool, row map[string]any) {
@@ -183,7 +183,7 @@ func TestWriteMatrixReportsWhatProtonDid(t *testing.T) {
 			"non-iana-tzid":          {`StartTimezone "Mars/Olympus"`},
 			"duration":               {"EndTime - StartTime 0 s, DURATION PT45M, DTEND absent in the shared signed part, parts as sent"},
 			"unbumped-time-edit":     {"time edit, SEQUENCE unchanged: HTTP 200, code 1000", "StartTime moved +1800 s by the update, parts as sent"},
-			"notifications-absent":   {`after the create [{"Type":1,"Trigger":"-PT15M"}], after the update [{"Type":1,"Trigger":"-PT15M"}], parts as sent`},
+			"notifications-absent":   {`after the create [{"Type":1,"Trigger":"-PT15M"}], after the update null, parts as sent`},
 			"personal-part-left-out": {"create with a personal part: HTTP 200, code 1000", "personal parts after the create 1, after the update 1, parts as sent"},
 		},
 		"refused": {
@@ -209,7 +209,7 @@ func TestWriteMatrixReportsWhatProtonDid(t *testing.T) {
 			"non-iana-tzid":          {`StartTimezone "Europe/Paris"`},
 			"duration":               {"EndTime - StartTime 2700 s"},
 			"unbumped-time-edit":     {"time edit, SEQUENCE unchanged: HTTP 200, code 1000", "StartTime unchanged by the update, parts differ: shared signed part"},
-			"notifications-absent":   {"after the update null"},
+			"notifications-absent":   {"after the update []"},
 			"personal-part-left-out": {"personal parts after the create 1, after the update 0"},
 		},
 	}

@@ -568,7 +568,7 @@ func TestSyncAgainstTheFake(t *testing.T) {
 		t.Errorf("created Color = %s", got)
 	}
 
-	// Update: no key packet; Notifications absent keeps, [] clears, null is null.
+	// Update: no key packet; Notifications absent is null (live L.4 #10), [] clears, null is null.
 	upd := func(n events.Optional[events.NotificationList]) events.Row {
 		t.Helper()
 		b := r.body(t, "u1@pcb.test", "Second", sk, false)
@@ -588,7 +588,7 @@ func TestSyncAgainstTheFake(t *testing.T) {
 		n    events.Optional[events.NotificationList]
 		want string
 	}{
-		{"absent keeps", events.Optional[events.NotificationList]{}, `[{"Type":1,"Trigger":"-PT15M"}]`},
+		{"absent resets to null", events.Optional[events.NotificationList]{}, `null`},
 		{"empty clears", events.Value(events.NotificationList{}), `[]`},
 		{"null is the defaults", events.Null[events.NotificationList](), `null`},
 		{"array sets", events.Value(events.NotificationList{{Type: 0, Trigger: "-P1D"}}), `[{"Type":0,"Trigger":"-P1D"}]`},
