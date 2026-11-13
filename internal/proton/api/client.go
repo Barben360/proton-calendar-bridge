@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -88,6 +89,8 @@ type Options struct {
 	Refresh func(ctx context.Context, stale Tokens) (Tokens, error)
 	Limiter *rate.Limiter // default: one request per 250 ms, burst 8
 	Sleep   func(ctx context.Context, d time.Duration) error
+	// Logger gets one debug record per retry wait (retried); default: none.
+	Logger *slog.Logger
 }
 
 // Client sends authenticated requests. It is safe for concurrent use.
@@ -122,6 +125,9 @@ func New(t Tokens, o Options) *Client {
 	}
 	if o.Sleep == nil {
 		o.Sleep = sleep
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	o.BaseURL = strings.TrimRight(o.BaseURL, "/")
 	return &Client{o: o, tk: t}
@@ -219,7 +225,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			}
 			failed++
 			if method == http.MethodGet && failed < maxAttempts && !errors.Is(err, errTooLarge) {
-				if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+				if err := c.wait(ctx, method, path, 0, backoff(failed)); err != nil {
 					return fmt.Errorf("%s: %w", where, err)
 				}
 				continue
@@ -257,7 +263,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			if wait > maxRetryAfter || limited >= maxAttempts {
 				return perr
 			}
-			if err := c.o.Sleep(ctx, wait); err != nil {
+			if err := c.wait(ctx, method, path, status, wait); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
 			}
 		case status >= 500 && method == http.MethodGet:
@@ -265,13 +271,24 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			if failed >= maxAttempts {
 				return perr
 			}
-			if err := c.o.Sleep(ctx, backoff(failed)); err != nil {
+			if err := c.wait(ctx, method, path, status, backoff(failed)); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
 			}
 		default:
 			return perr
 		}
 	}
+}
+
+// wait sleeps d before a retry and logs it at debug level (observation
+// O1: a login's retries were silent for seconds): the method, the path
+// (without its query), the status that made it wait (0: no answer, a
+// network error or timeout) and the wait. Never a token, the session UID, a
+// body, a query or a header.
+func (c *Client) wait(ctx context.Context, method, path string, status int, d time.Duration) error {
+	c.o.Logger.LogAttrs(ctx, slog.LevelDebug, "retrying a Proton request",
+		slog.String("method", method), slog.String("path", path), slog.Int("status", status), slog.Duration("wait", d))
+	return c.o.Sleep(ctx, d)
 }
 
 // dropIdle closes the idle connections of the client's transport after a

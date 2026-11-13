@@ -138,6 +138,9 @@ endpoint we use gets a recorded, redacted fixture and a contract test (§16).
   none; a login 429 names the wait ("retry in 2m0s") instead of "a few minutes"
   [verified: `TestParseRetryAfter`, `TestRetryAfterDateHonoured`,
   `TestBeginKeepsRetryAfter`, `TestLoginRateLimitedNamesRetryAfter`].
+  Each retry wait is logged at debug level ("retrying a Proton request": method, path without its query, status, 0 when
+  nothing answered, and wait), never a token, the session UID, a body, a query or a header (observation O1)
+  [verified: `TestARetryIsLoggedAtDebugWithoutSecrets`, `TestARetriedRequestIsLoggedAtDebug`].
 
 ### 5.2 Authentication
 State machine (persisted in C2):
@@ -154,7 +157,9 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
   login retried with it [verified: interactive login 2026-11-10]. Whether the
   solved token survives across processes and for how long [assumed → E02];
-  the design relies on it for `pcb login resume --captcha-token`. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session").
+  the design relies on it for `pcb login resume --captcha-token`. After "Press Enter once solved" an interactive login
+  prints "Checking the CAPTCHA with Proton…" while Proton checks the token (seconds, observation O1; never with
+  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session").
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies

@@ -234,6 +234,7 @@ func (l *Local) newClient(tokens api.Tokens, refresh func(context.Context, api.T
 		HTTP:       l.o.HTTP,
 		Sleep:      l.o.Sleep,
 		Refresh:    refresh,
+		Logger:     l.log(),
 	})
 }
 

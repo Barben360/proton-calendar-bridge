@@ -237,12 +237,15 @@ func withHint(err error, hint string) error {
 	return &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: hint}
 }
 
-// waitForCaptcha shows the CAPTCHA URL and waits for Enter.
+// waitForCaptcha shows the CAPTCHA URL and waits for Enter, then says the
+// check is under way: Proton can take seconds to answer the retried login
+// (observation O1).
 func (a *app) waitForCaptcha(ctx context.Context, res service.LoginResult) error {
 	fmt.Fprintf(a.Stderr, "Proton asks for a CAPTCHA. Solve it in a browser:\n  %s\n", res.CaptchaURL)
 	if _, err := a.Term.ReadLine(ctx, "Press Enter once solved: "); err != nil {
 		return noAnswer(ctx, "answer to the CAPTCHA prompt", err)
 	}
+	fmt.Fprintln(a.Stderr, "Checking the CAPTCHA with Proton…")
 	return nil
 }
 

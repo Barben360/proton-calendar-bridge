@@ -1,6 +1,8 @@
 package service_test
 
 import (
+	"bytes"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -128,6 +130,49 @@ func TestCalendarsTransientBootstrapFailureIsBlocked(t *testing.T) {
 				t.Errorf("a partial list was returned: %+v", cals)
 			}
 		})
+	}
+}
+
+// Observation O1: a request Proton makes wait is retried silently, so the
+// service's logger gets one debug record per wait: the method, the path, the
+// status and the wait, never a token, the session UID or the key passphrase.
+func TestARetriedRequestIsLoggedAtDebug(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	b := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "B"})
+	e.signIn(t)
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	path := "/calendar/v2/" + b + "/bootstrap"
+	e.f.FailNext("GET", path, 429, 85131, 7)
+	if _, err := svc.Calendars(t.Context()); err != nil {
+		t.Fatalf("Calendars: %v", err)
+	}
+	var retries []string
+	for l := range strings.SplitSeq(buf.String(), "\n") {
+		if strings.Contains(l, "retrying a Proton request") {
+			retries = append(retries, l)
+		}
+	}
+	want := "level=DEBUG msg=\"retrying a Proton request\" method=GET path=\"" + path + "\" status=429 wait=7s"
+	if len(retries) != 1 || !strings.Contains(retries[0], want) {
+		t.Fatalf("retry records %q, want one with %q", retries, want)
+	}
+	accs := e.accounts(t)
+	if len(accs) != 1 {
+		t.Fatalf("%d stored sessions, want 1", len(accs))
+	}
+	for _, acc := range accs {
+		for _, bad := range []string{acc.AccessToken, acc.RefreshToken, acc.UID, string(acc.KeyPass), "Bearer"} {
+			if bad == "" || strings.Contains(buf.String(), bad) {
+				t.Errorf("the log holds a secret, or the session one is empty (%d bytes): %s", len(bad), retries[0])
+			}
+		}
 	}
 }
 

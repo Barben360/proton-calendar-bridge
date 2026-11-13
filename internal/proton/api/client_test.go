@@ -1,11 +1,13 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -793,4 +795,76 @@ func TestRetryAfterDateHonoured(t *testing.T) {
 	if n.Load() != 2 || len(s.d) != 1 || s.d[0] < 25*time.Second || s.d[0] > 30*time.Second {
 		t.Fatalf("requests=%d sleeps=%v; want one wait of about 30 s", n.Load(), s.d)
 	}
+}
+
+// A retried request is logged at debug level, once per wait: the method,
+// the path without its query, the status that made it wait and the wait;
+// never a token, the session UID, a body, a query value or a header.
+func TestARetryIsLoggedAtDebugWithoutSecrets(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status int
+		header string
+		want   time.Duration
+	}{
+		{"429 with Retry-After", 429, "3", 3 * time.Second},
+		{"503 on a GET", 503, "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var n atomic.Int32
+			var buf bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			cl, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if n.Add(1) == 1 {
+					w.Header().Set("Set-Cookie", "Session-Id=cookie-secret")
+					if c.header != "" {
+						w.Header().Set("Retry-After", c.header)
+					}
+					reply(w, c.status, `{"Code":85131,"Error":"body-secret"}`)
+					return
+				}
+				reply(w, 200, `{"Code":1000}`)
+			}, api.Options{Logger: log})
+			if err := cl.Get(t.Context(), "/core/v4/x", url.Values{"Email": {"hunter2@example.com"}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.d) != 1 {
+				t.Fatalf("sleeps = %v, want one", s.d)
+			}
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 1 || lines[0] == "" {
+				t.Fatalf("log = %q, want one record", buf.String())
+			}
+			var rec struct {
+				Level, Method, Path string
+				Status              int
+				Wait                time.Duration
+			}
+			if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Level != "DEBUG" || rec.Method != "GET" || rec.Path != "/core/v4/x" || rec.Status != c.status || rec.Wait != s.d[0] {
+				t.Errorf("record %s; want DEBUG GET /core/v4/x, status %d, wait %v", lines[0], c.status, s.d[0])
+			}
+			if c.want != 0 && rec.Wait != c.want {
+				t.Errorf("wait %v, want Retry-After's %v", rec.Wait, c.want)
+			}
+			for _, bad := range []string{"access-secret", "refresh-secret", "uid-1", "hunter2", "Email", "body-secret", "cookie-secret", "Bearer", "85131"} {
+				if strings.Contains(buf.String(), bad) {
+					t.Errorf("the record holds %q: %s", bad, lines[0])
+				}
+			}
+		})
+	}
+	t.Run("a request answered at once logs nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		cl, _ := newClient(t, func(w http.ResponseWriter, r *http.Request) { reply(w, 200, `{"Code":1000}`) }, api.Options{Logger: log})
+		if err := cl.Get(t.Context(), "/p", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if buf.Len() != 0 {
+			t.Errorf("log = %q, want nothing", buf.String())
+		}
+	})
 }

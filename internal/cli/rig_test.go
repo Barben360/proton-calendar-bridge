@@ -31,6 +31,8 @@ type fakeTerm struct {
 	block bool
 	// onBlock runs when a read starts waiting (the test cancels there).
 	onBlock func()
+	// onLine runs when a ReadLine is answered, before it returns.
+	onLine func()
 }
 
 func (f *fakeTerm) Interactive() bool { return f.interactive }
@@ -49,6 +51,9 @@ func (f *fakeTerm) ReadLine(ctx context.Context, prompt string) (string, error) 
 	}
 	l := f.lines[0]
 	f.lines = f.lines[1:]
+	if f.onLine != nil {
+		f.onLine()
+	}
 	return l, nil
 }
 
