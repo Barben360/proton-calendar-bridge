@@ -16,7 +16,6 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
-	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -104,27 +103,10 @@ func (o IO) withDefaults() IO {
 	return o
 }
 
-// resolveDirs resolves the config and state directories.
-func resolveDirs(env func(string) string) (paths.Dirs, error) {
-	dirs, err := paths.Resolve(env)
-	if err != nil {
-		return paths.Dirs{}, &exitcode.Error{Code: exitcode.Blocked, Err: err,
-			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
-	}
-	return dirs, nil
-}
+func resolveDirs(env func(string) string) (paths.Dirs, error) { return daemon.ResolveDirs(env) }
 
-// loadConfig resolves the directories and loads config.toml.
 func loadConfig(env func(string) string) (paths.Dirs, config.Config, error) {
-	dirs, err := resolveDirs(env)
-	if err != nil {
-		return paths.Dirs{}, config.Config{}, err
-	}
-	cfg, err := config.Load(config.Path(dirs), dirs)
-	if err != nil {
-		return paths.Dirs{}, config.Config{}, err
-	}
-	return dirs, cfg, nil
+	return daemon.LoadConfig(env)
 }
 
 // Hub is the accounts of a state directory (*service.Hub): what daemon.Run

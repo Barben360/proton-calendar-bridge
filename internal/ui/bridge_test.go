@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -187,8 +189,14 @@ func (s *shown) show(account string) {
 func TestSecondInstanceShowsTheFirst(t *testing.T) {
 	l := newLab(t)
 	rec := newShown()
-	b := l.start(t, rec.show)
+	buf := new(logBuf)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, ShowUI: rec.show, Logger: slog.New(slog.NewTextHandler(buf, nil))})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	l.login(t, b)
+	buf.waitFor(t, "sync pass") // the first pass is over: it is not a call of the probe
 	calls := func() int {
 		return l.f.Calls("GET", "/calendar/v1") + l.f.Calls("POST", "/auth/v4") + l.f.Calls("POST", "/auth/v4/info")
 	}
@@ -319,4 +327,145 @@ func TestChangesFireOnLogin(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Changes did not fire on a login")
 	}
+}
+
+// logBuf is a log sink safe for the daemon's goroutines.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func (l *logBuf) waitFor(t *testing.T, sub string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(l.String(), sub) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the log never held %q:\n%s", sub, l.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return l.String()
+}
+
+func TestBridgeLogsPassesLikeServe(t *testing.T) {
+	l := newLab(t)
+	buf := new(logBuf)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Logger: slog.New(slog.NewTextHandler(buf, nil))})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	id := l.login(t, b)
+	out := buf.waitFor(t, "sync pass")
+	if !strings.Contains(out, "account="+id) {
+		t.Errorf("the pass record does not name the account %s:\n%s", id, out)
+	}
+}
+
+func TestBridgeLogsTheCertificateWarning(t *testing.T) {
+	l := newLab(t)
+	tlsDir := filepath.Join(l.dirs.State, "tls")
+	if _, err := tlsutil.SelfSigned(tlsutil.Options{Dir: tlsDir, BindIP: net.IPv4(127, 0, 0, 1),
+		Now: func() time.Time { return time.Now().Add(-1000 * 24 * time.Hour) }}); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = \"127.0.0.1:0\"\ntls_cert = %q\ntls_key = %q\n",
+		l.f.URL, filepath.Join(tlsDir, "cert.pem"), filepath.Join(tlsDir, "key.pem"))
+	if err := os.WriteFile(config.Path(l.dirs), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf := new(logBuf)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Logger: slog.New(slog.NewTextHandler(buf, nil))})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.waitFor(t, "expired on")
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("the certificate warning is not at warn level:\n%s", out)
+	}
+}
+
+// dyingListener accepts nothing and fails its Accept when kill closes: the
+// CalDAV listener of the daemon fails.
+type dyingListener struct {
+	net.Listener
+	kill   chan struct{}
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (d *dyingListener) Accept() (net.Conn, error) {
+	select {
+	case <-d.kill:
+		return nil, errors.New("listener broke")
+	case <-d.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (d *dyingListener) Close() error {
+	d.once.Do(func() { close(d.closed) })
+	return d.Listener.Close()
+}
+
+func TestBridgeNoticesTheDaemonEnding(t *testing.T) {
+	l := newLab(t)
+	kill := make(chan struct{})
+	var calls int
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Listen: func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		if calls++; err != nil || calls > 1 {
+			return ln, err
+		}
+		return &dyingListener{Listener: ln, kill: kill, closed: make(chan struct{})}, nil
+	}})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Err(); err != nil {
+		t.Fatalf("Err while running = %v, want nil", err)
+	}
+	select {
+	case <-b.Changes():
+	default:
+	}
+	close(kill)
+	select {
+	case <-b.Changes():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Changes did not fire when the daemon ended")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for b.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	err := b.Err()
+	if err == nil || !strings.Contains(err.Error(), "listener failed") {
+		t.Fatalf("Err = %v, want the listener failure", err)
+	}
+	if err := b.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart after the daemon ended: %v", err)
+	}
+	if err := b.Err(); err != nil {
+		t.Errorf("Err after the Restart = %v, want nil", err)
+	}
+	conn, err := net.DialTimeout("tcp", b.Info().Addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("nothing serves after the Restart: %v", err)
+	}
+	_ = conn.Close()
 }

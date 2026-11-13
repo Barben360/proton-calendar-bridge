@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -172,7 +171,7 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 		case <-runCtx.Done():
 		}
 	}()
-	var counters renderLog
+	var counters daemon.RenderLog
 	notice := &waitNotice{w: cmd.OutOrStdout()}
 	return daemon.Run(runCtx, daemon.Options{
 		Dirs: dirs, Config: cfg, Hub: hub, Kind: "serve", LogLevel: cfg.Log.Level,
@@ -180,8 +179,8 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 		OnState: notice.state,
 		OnPass: func(id string, p service.WatchPass) {
 			l := log.With("account", id)
-			logPass(l, p)
-			counters.log(l, p.Render)
+			daemon.LogPass(l, p)
+			counters.Log(l, p.Render)
 		},
 		Ready: func(info daemon.Info) {
 			n := a.printIntro(cmd, hub, log, info)
@@ -241,56 +240,4 @@ func accountLabel(ac service.AccountInfo) string {
 		return ac.Address
 	}
 	return ac.ID
-}
-
-// renderLog logs the render counters of each pass (ruling M3-R34) while one
-// is non-zero, and once when they change (so a return to zero is logged);
-// counts and calendar IDs only. Serve calls OnPass from one goroutine.
-type renderLog struct {
-	last service.RenderCounts
-}
-
-func (rl *renderLog) log(log *slog.Logger, c *service.RenderCounts) {
-	if c == nil || c.Zero() && rl.last.Zero() {
-		return
-	}
-	rl.last = *c
-	attrs := []any{"undecryptable", c.Undecryptable, "unverified", c.Unverified, "duplicate_masters", c.DuplicateMasters, "dropped_alarms", c.DroppedAlarms}
-	if len(c.KeysErrors) > 0 {
-		attrs = append(attrs, "keys_error_ids", c.KeysErrors)
-	}
-	if c.Zero() {
-		log.Info("render counters", attrs...)
-		return
-	}
-	log.Warn("render counters", attrs...)
-}
-
-// logPass logs one sync pass: counts and calendar IDs, never names or
-// content; a failed pass at warning level with its (secret-free) error.
-func logPass(log *slog.Logger, p service.WatchPass) {
-	var added, updated, deleted int
-	var failed []string
-	for _, c := range p.Result.Calendars {
-		added, updated, deleted = added+c.Added, updated+c.Updated, deleted+c.Deleted
-		if c.Error != "" {
-			failed = append(failed, c.ID)
-		}
-	}
-	attrs := []any{"calendars", len(p.Result.Calendars), "added", added, "updated", updated, "deleted", deleted}
-	if len(failed) > 0 {
-		attrs = append(attrs, "failed_ids", failed)
-	}
-	if p.Next > 0 {
-		attrs = append(attrs, "next", p.Next.Round(time.Second).String())
-	}
-	if p.Err != nil {
-		attrs = append(attrs, "error", p.Err.Error())
-		if h := exitcode.HintOf(p.Err); h != "" {
-			attrs = append(attrs, "hint", h)
-		}
-		log.Warn("sync pass failed", attrs...)
-		return
-	}
-	log.Info("sync pass", attrs...)
 }

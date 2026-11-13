@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
-	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -65,6 +65,33 @@ type run struct {
 	cancel context.CancelFunc
 	done   chan struct{} // closed when Run returned and the Hub is closed
 	err    error         // Run's result and the Hub's Close, set before done closes
+}
+
+// ended says whether Run returned (and the Hub is closed).
+func (r *run) ended() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// failure is the error of a run that ended by itself: never nil.
+func (r *run) failure() error {
+	if r.err == nil {
+		return errors.New("the daemon stopped on its own")
+	}
+	return r.err
+}
+
+// warnWriter sends the lines daemon.Run writes for a person (certificate
+// warnings) to the log at warn level.
+type warnWriter struct{ log *slog.Logger }
+
+func (w warnWriter) Write(p []byte) (int, error) {
+	w.log.Warn(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(p)), "Warning: ")))
+	return len(p), nil
 }
 
 // NewBridge returns a stopped Bridge.
@@ -117,15 +144,13 @@ func (b *Bridge) Start(ctx context.Context) error {
 }
 
 func (b *Bridge) start(ctx context.Context) error {
-	if b.current() != nil {
-		return errors.New("the daemon already runs")
+	if r := b.current(); r != nil {
+		if !r.ended() {
+			return errors.New("the daemon already runs")
+		}
+		b.clear(r) // it ended by itself: this Start replaces it
 	}
-	dirs, err := paths.Resolve(b.o.Env)
-	if err != nil {
-		return &exitcode.Error{Code: exitcode.Blocked, Err: err,
-			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
-	}
-	cfg, err := config.Load(config.Path(dirs), dirs)
+	dirs, cfg, err := daemon.LoadConfig(b.o.Env)
 	if err != nil {
 		return err
 	}
@@ -146,6 +171,7 @@ func (b *Bridge) start(ctx context.Context) error {
 		return err
 	}
 	hub.OnChange(b.poke)
+	var counters daemon.RenderLog
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	r := &run{cancel: cancel, done: make(chan struct{})}
@@ -157,18 +183,26 @@ func (b *Bridge) start(ctx context.Context) error {
 		showUI = func(account string) error { go b.o.ShowUI(account); return nil } //nolint:unparam // daemon.Options.ShowUI has an error to return
 	}
 	go func() {
-		defer close(r.done)
 		defer cancel()
 		err := daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI,
 			OnState: func(string, service.ServeState) { b.poke() },
-			OnPass:  func(string, service.WatchPass) { b.poke() },
-			Ready:   func(i daemon.Info) { ready <- i },
+			// The same records as pcb serve's, for the same log file content.
+			OnPass: func(id string, p service.WatchPass) {
+				l := log.With("account", id)
+				daemon.LogPass(l, p)
+				counters.Log(l, p.Render)
+				b.poke()
+			},
+			Warn:  warnWriter{log},
+			Ready: func(i daemon.Info) { ready <- i },
 		})
 		// The caller opened the Hub, so this goroutine closes it, whichever
 		// way Run ended (a failed Start included).
 		r.err = errors.Join(err, hub.Close())
+		close(r.done)
+		b.poke() // the UI learns that the daemon ended, by itself or not
 	}()
 
 	select {
@@ -176,6 +210,10 @@ func (b *Bridge) start(ctx context.Context) error {
 		b.mu.Lock()
 		b.run, b.hub, b.info = r, hub, info
 		b.mu.Unlock()
+		if r.ended() { // Run ended as it became ready: not a running daemon
+			b.clear(r)
+			return r.failure()
+		}
 		go b.ticker(r)
 		b.poke()
 		return nil
@@ -183,10 +221,7 @@ func (b *Bridge) start(ctx context.Context) error {
 		b.mu.Lock()
 		b.hub = hub
 		b.mu.Unlock()
-		if r.err == nil {
-			return errors.New("the daemon ended before it was ready")
-		}
-		return r.err
+		return r.failure()
 	case <-ctx.Done():
 		cancel()
 		<-r.done
@@ -231,10 +266,28 @@ func (b *Bridge) stop() error {
 	}
 	r.cancel()
 	<-r.done
-	b.mu.Lock()
-	b.run, b.info = nil, daemon.Info{}
-	b.mu.Unlock()
+	b.clear(r)
 	return r.err
+}
+
+// clear forgets r (an ended or stopped run).
+func (b *Bridge) clear(r *run) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.run == r {
+		b.run, b.info = nil, daemon.Info{}
+	}
+}
+
+// Err is why the daemon ended by itself (Hub.Serve returned, the listener
+// failed): nil while it runs, after a Stop and before the first Start. It
+// stays until the next Start or Restart; Changes fires when it is set.
+func (b *Bridge) Err() error {
+	r := b.current()
+	if r == nil || !r.ended() {
+		return nil
+	}
+	return r.failure()
 }
 
 // Restart is Stop then Start: config.toml is read again, so a new listen
@@ -242,8 +295,10 @@ func (b *Bridge) stop() error {
 func (b *Bridge) Restart(ctx context.Context) error {
 	b.lmu.Lock()
 	defer b.lmu.Unlock()
-	if err := b.stop(); err != nil {
-		return err
+	if r := b.current(); r != nil && !r.ended() {
+		if err := b.stop(); err != nil {
+			return err
+		}
 	}
 	return b.start(ctx)
 }
@@ -272,10 +327,9 @@ func (e *ServeRunningError) Unwrap() error {
 // daemon. It is a fast path: Start still fails on serve.lock when another
 // process wins the race.
 func Probe(ctx context.Context, env func(string) string, account string) error {
-	dirs, err := paths.Resolve(env)
+	dirs, err := daemon.ResolveDirs(env)
 	if err != nil {
-		return &exitcode.Error{Code: exitcode.Blocked, Err: err,
-			Hint: "set HOME, or PCB_CONFIG_DIR and PCB_STATE_DIR, or XDG_CONFIG_HOME and XDG_STATE_HOME, to absolute paths"}
+		return err
 	}
 	c, err := ctl.Dial(ctx, dirs.Socket())
 	if errors.Is(err, ctl.ErrNoDaemon) {
