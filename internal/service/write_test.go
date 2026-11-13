@@ -2266,14 +2266,65 @@ func TestRefreshSeesTheGateMoveBetweenUndecidedAndClosed(t *testing.T) {
 	s.stop(t)
 }
 
-// UIDs are compared unescaped (write-I2; SPEC §5.3, the parked
-// UID-escaping item): an event whose UID column holds its text unescaped
-// (`pcb-a,b` for `UID:pcb-a\,b`) is the same object as a body carrying the
-// text, never a 409 naming its own name. pcb cannot rewrite it while the
-// two forms diverge, so its edit is unavailable (503), nothing sent; the
-// same UID at another name is a 409 naming the object's name, as for any
-// UID. The other direction too (ruling A9): a column holding the escaped
-// text (`pcb-c\,d`) and a client sending the UID unescaped (`UID:pcb-c,d`).
+// A UID with a TEXT escape is the event's unescaped value (RFC 5545
+// §3.3.11), which is what Proton stores (`pcb-m4-a,b` for
+// `UID:pcb-m4-a\,b`, HUMAN-CHECKS W10, live 2026-11-13): its create is
+// confirmed by the rows read back (201), served with the UID as written,
+// then edited at its served name (204) with read-back; the same UID at
+// another name is a 409 naming the object. A create at the UID's canonical
+// name is served there.
+func TestAnEscapedUIDIsCreatedConfirmedAndEdited(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil).start(t)
+	for _, c := range []struct{ text, value, name string }{
+		{`pcb-m4-a\,b`, "pcb-m4-a,b", "pcb-m4-escaped.ics"},
+		{`pcb-m4-c\;d\\e`, `pcb-m4-c;d\e`, service.ObjectName(`pcb-m4-c;d\e`)},
+	} {
+		res, err := r.put(t, c.name, newEvent(c.text, "Escaped"), service.Precondition{IfNoneMatchAny: true})
+		if err != nil || !res.Created {
+			t.Fatalf("%s: create = %+v, %v; want created", c.text, res, err)
+		}
+		rows := r.proton(t, c.value)
+		if len(rows) != 1 || rows[0].UID != c.value {
+			t.Fatalf("%s: Proton holds %d rows of %q", c.text, len(rows), c.value)
+		}
+		obj := r.object(t, c.value)
+		if obj.Name != c.name {
+			t.Errorf("%s: served at %q, want %q", c.text, obj.Name, c.name)
+		}
+		contains(t, c.text+": the object", obj.Data, "UID:"+c.text+"\r\n")
+
+		res, err = r.put(t, obj.Name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
+		if err != nil || res.Created {
+			t.Fatalf("%s: edit at %q = %+v, %v; want updated", c.text, obj.Name, res, err)
+		}
+		edited := r.object(t, c.value)
+		contains(t, c.text+": the edited object", edited.Data, "SUMMARY:Edited")
+		contains(t, c.text+": the edited object", edited.Data, "UID:"+c.text+"\r\n")
+		if rows := r.proton(t, c.value); len(rows) != 1 {
+			t.Errorf("%s: Proton holds %d rows after the edit, want 1", c.text, len(rows))
+		}
+
+		_, err = r.put(t, "elsewhere.ics", edited.Data, service.Precondition{IfNoneMatchAny: true})
+		_ = wantExit(t, err, exitcode.Usage)
+		var ce *service.UIDConflictError
+		if !errors.As(err, &ce) || ce.Href != obj.Name {
+			t.Errorf("%s at another name: %v, want a UID conflict naming %q", c.text, err, obj.Name)
+		}
+	}
+	if n := r.sendCalls(); n != 4 {
+		t.Errorf("%d sync calls, want 4 (two creates, two edits)", n)
+	}
+}
+
+// An event Proton holds under its unescaped UID (`pcb-a,b`, its parts
+// carrying `UID:pcb-a\,b`, as Proton stores any UID, SPEC §5.3) is edited at
+// its own name like any other; the same UID at another name is a 409 naming
+// it. A row whose column holds an escaped form (`pcb-c\,d`, which Proton
+// itself never writes) while the body's UID is that form's value
+// (`UID:pcb-c,d`) is the same object at its own name: never a 409 naming
+// itself, and not rewritten while the forms diverge (503), nothing sent
+// (write-I2).
 func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
 	t.Parallel()
 	const column, text = "pcb-a,b", `pcb-a\,b`
@@ -2286,37 +2337,37 @@ func TestAnEscapedUIDIsNeverItsOwnConflict(t *testing.T) {
 		obj := r.object(t, escapedColumn)
 		body := edit(t, edit(t, obj.Data, "UID:"+escapedColumn+"\r\n", "UID:pcb-c,d\r\n"), "SUMMARY:Kept", "SUMMARY:Edited")
 		_, err := r.put(t, service.ObjectName(escapedColumn), body, service.Precondition{IfMatch: obj.ETag})
-		_ = wantExit(t, err, exitcode.Blocked)
+		e := wantExit(t, err, exitcode.Blocked)
 		wantIs(t, err, service.ErrUIDStoredOtherwise)
+		if got, want := e.Hint, "edit the event in the Proton web app"; got != want {
+			t.Errorf("hint %q, want %q", got, want)
+		}
+		var ce *service.UIDConflictError
+		if errors.As(err, &ce) {
+			t.Errorf("the object's own edit is a UID conflict naming %q", ce.Href)
+		}
 		contains(t, "the object after the refusal", r.object(t, escapedColumn).Data, "SUMMARY:Kept")
+		if n := r.sendCalls(); n != 0 {
+			t.Errorf("%d requests reached the sync endpoint, want none", n)
+		}
 	})
 	obj := r.object(t, column)
 	name := service.ObjectName(column)
+	if obj.Name != name {
+		t.Fatalf("served at %q, want %q", obj.Name, name)
+	}
 	contains(t, "the object", obj.Data, "UID:"+text+"\r\n")
 
-	_, err := r.put(t, name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag})
-	e := wantExit(t, err, exitcode.Blocked)
-	wantIs(t, err, service.ErrUIDStoredOtherwise)
-	if got, want := e.Err.Error(), "the event's UID is stored by Proton in another form than its text, so pcb cannot rewrite it yet"; got != want {
-		t.Errorf("error %q, want %q", got, want)
-	}
-	if got, want := e.Hint, "edit the event in the Proton web app"; got != want {
-		t.Errorf("hint %q, want %q", got, want)
-	}
-	var ce *service.UIDConflictError
-	if errors.As(err, &ce) {
-		t.Errorf("the object's own edit is a UID conflict naming %q", ce.Href)
-	}
-
-	_, err = r.put(t, "elsewhere.ics", obj.Data, service.Precondition{IfNoneMatchAny: true})
+	_, err := r.put(t, "elsewhere.ics", obj.Data, service.Precondition{IfNoneMatchAny: true})
 	_ = wantExit(t, err, exitcode.Usage)
+	var ce *service.UIDConflictError
 	if !errors.As(err, &ce) || ce.Href != name {
 		t.Errorf("the same UID at another name: %v, want a UID conflict naming %q", err, name)
 	}
-	if n := r.sendCalls(); n != 0 {
-		t.Errorf("%d requests reached the sync endpoint, want none", n)
+	if res, err := r.put(t, name, edit(t, obj.Data, "SUMMARY:Escaped", "SUMMARY:Edited"), service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the edit at its own name = %+v, %v; want updated", res, err)
 	}
-	contains(t, "the object after the refusals", r.object(t, column).Data, "SUMMARY:Escaped")
+	contains(t, "the edited object", r.object(t, column).Data, "SUMMARY:Edited")
 }
 
 // A row holding a personal part (alarms from before they moved to

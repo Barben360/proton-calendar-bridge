@@ -336,9 +336,9 @@ untitled event), a calendar encrypted part holding only lines routed
 elsewhere, a fragment carrying a VCALENDAR-level line other than VERSION,
 PRODID or CALSCALE, a misrouted line stored in a signed part, a change that
 needs a session key the row lacks (a first COMMENT on a row without a
-calendar part, 403 `pcb:unsupported-change`, M4-R13), and (to be confirmed
-live, `HUMAN-CHECKS.md` §6 W10) a UID containing `,`, `;` or `\` if Proton's
-column holds it unescaped: the write path then compares UIDs unescaped, so such an
+calendar part, 403 `pcb:unsupported-change`, M4-R13), a row whose UID
+column holds an escaped form (`a\,b`, another client's data: Proton itself
+stores the unescaped value, below) of the UID its body carries: such an
 event's own edit is 503 `the event's UID is stored by Proton in another form than its
 text` (never a 409 naming itself), and the same UID at another name is a 409
 [verified: `TestAnEscapedUIDIsNeverItsOwnConflict`]; and a row that holds a personal part
@@ -351,6 +351,20 @@ The full fix (`OPEN.md`): fresh session keys and their key packets on every
 update, once live check L.4 #3 (research L.4) shows Proton accepts new key
 packets on an update. That removes the reuse, so residuals 1 to 5 go, and
 pinning with residuals 6 to 8 can go with it.
+
+UID escaping: Proton stores a UID by its TEXT value, unescaped (RFC 5545
+§3.3.11: `\\`, `\;`, `\,`, `\n`): a create whose parts carry
+`UID:pcb-m4-a\,b` is the row `pcb-m4-a,b` [verified: live 2026-11-13,
+`HUMAN-CHECKS.md` W10]. pcb identifies an event by that value everywhere:
+`ical.ParseWrite` unescapes the body's UID (its VEVENTs keep the line as
+written, so the parts and what pcb serves carry `UID:pcb-m4-a\,b`), and the
+`?UID=` lookup, the read-back, the planner's row check, the conflict checks
+and the cache use the value; `ical.ProvesKey` compares the parts' UID by its
+value with the column [verified: `TestAnEscapedUIDIsCreatedConfirmedAndEdited`,
+`TestAnEscapedUIDIsCreatedAndEditedAtItsName`]. Such an event is served at the
+client's name when it was created there, else at the canonical name of the
+value (`~` + base64url of `pcb-m4-a,b`, §9): the name an event synced from
+Proton gets, so an href does not depend on which client wrote the event.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings
@@ -697,9 +711,10 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
      are stored (`ApplyWrite`: the change counter moves, the feed cursor does
      not).
   5. Conflicts and the precondition, on that fresh state: the UID served at
-     another name, or the name serving another live UID → 409 (UIDs compared
-     unescaped: the same event at its own name is never a 409 against itself, it is
-     503 `ErrUIDStoredOtherwise`, §5.3); `If-Match` (`*`, or a comma-separated
+     another name, or the name serving another live UID → 409 (UIDs by their
+     unescaped value, §5.3; a row whose column holds an escaped form of the
+     body's UID is never a 409 against itself at its own name, it is
+     503 `ErrUIDStoredOtherwise`); `If-Match` (`*`, or a comma-separated
      list, several headers being one list, compared strongly: a weak `W/` tag never
      matches; present but blank → 412 before the service is asked) and
      `If-None-Match` (`*`, or ETags compared weakly) on the fresh object ETag → 412

@@ -79,7 +79,7 @@ For the final audit (parked minors):
 ## Parked by M4
 
 For the live session (step 6), each a code change test first if Proton differs:
-- UID escaping: if Proton's UID column holds `pcb-m4-a,b` for `UID:pcb-m4-a\,b`, compare unescaped UIDs in the write path (`ical.ProvesKey`, the planner's row check, `ListByUID`); until then such an event is not confirmed (503) and not editable through pcb (step 6.2 W10). Since the audit fix write-I2 the conflict check compares unescaped UIDs (an edit at the object's own name is 503 `the event's UID is stored by Proton in another form than its text`, never a 409 naming itself; the same UID at another name is a 409): a stop-gap. The full fix (rewriting such an event) stays here, behind W10, because `ical.ProvesKey` binds the parts' UID text to the column byte for byte.
+- UID escaping: closed 2026-11-13. Proton stores `pcb-m4-a,b` for `UID:pcb-m4-a\,b` (live, W10); pcb identifies an event by its unescaped UID throughout the write path (SPEC §5.3). What stays of write-I2: a row whose column holds an escaped form of the body's UID (another client's data) is 503 at its own name, never a 409 naming itself.
 - R4: if Proton drops an unbumped text edit, bump SEQUENCE on every edit (every title edit would otherwise answer 503).
 - R5/R12: if the web app shows a rewritten RRULE differently, refuse that form instead (E12).
 - Personal parts (M4-R29): never re-sent on update; what Proton does to one is L.4 #10. Since the audit fix write-I3 an update of a row that holds one is refused (403 `pcb:personal-part`) until L.4 #10 is observed (`spec/HUMAN-CHECKS.md` 6.7, case `personal-part-left-out`); then lift `RefusePersonalPart` (`internal/service/writeplan.go`) or re-send the part.

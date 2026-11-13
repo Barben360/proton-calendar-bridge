@@ -443,6 +443,32 @@ func TestAnAliasIsWrittenAndDeletedThere(t *testing.T) {
 	}
 }
 
+// HUMAN-CHECKS W10 as Thunderbird meets it: a new event whose UID holds an
+// escaped comma (`UID:pcb-m4-a\,b`, which Proton stores as pcb-m4-a,b) is
+// created (201, confirmed by the read-back), served at the client's name
+// with the UID as written, edited there (204), and a pass later is still
+// served there. The same UID at another name is a 409.
+func TestAnEscapedUIDIsCreatedAndEditedAtItsName(t *testing.T) {
+	t.Parallel()
+	var cal string
+	r := newServingRig(t, func(f *protontest.Fake) { cal = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"}) })
+	const uid = `pcb-m4-a\,b`
+	name := calPath(cal) + "pcb-m4-escaped.ics"
+	wantStatus(t, r.put(name, thunderbird(uid, "Escaped"), "If-None-Match", "*"), http.StatusCreated)
+	if b := r.body(t, name); !strings.Contains(b, "UID:"+uid+"\r\n") || !strings.Contains(b, "SUMMARY:Escaped\r\n") {
+		t.Fatalf("GET after the create:\n%s", b)
+	}
+	wantStatus(t, r.put(name, thunderbird(uid, "Edited"), "If-Match", r.etag(t, name)), http.StatusNoContent)
+	r.next(t)
+	if b := r.body(t, name); !strings.Contains(b, "UID:"+uid+"\r\n") || !strings.Contains(b, "SUMMARY:Edited\r\n") {
+		t.Errorf("GET after the edit and a pass:\n%s", b)
+	}
+	wantStatus(t, r.put(calPath(cal)+"elsewhere.ics", thunderbird(uid, "Again"), "If-None-Match", "*"), http.StatusConflict)
+	if n := r.sent(); n != 2 {
+		t.Errorf("%d requests reached Proton's write endpoint, want 2", n)
+	}
+}
+
 // A UID that lives at another name is a 409 naming that name, the href the
 // client must use (E08 MUST 10, RFC 4791 §5.3.2.1); so is a name that holds
 // another UID. Nothing is sent.

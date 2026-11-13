@@ -83,6 +83,10 @@ type WriteEvent struct {
 // holds exceptions only) and its exceptions keyed by RECURRENCE-ID in Unix
 // seconds (a DATE is midnight UTC, as Proton stores it).
 type Incoming struct {
+	// UID is the event's UID by its TEXT value, unescaped (UnescapeText):
+	// what Proton stores and lists (`a,b` for `UID:a\,b`; SPEC §5.3,
+	// HUMAN-CHECKS W10) and so what identifies the event in pcb. The
+	// VEVENTs keep the UID line as written.
 	UID        string
 	Master     *WriteEvent
 	Exceptions map[int64]WriteEvent
@@ -103,7 +107,7 @@ func (n *notes) add(s string) {
 }
 
 // ParseWrite reads what a CalDAV client PUTs: one VCALENDAR whose VEVENTs
-// share one UID (at most MaxEvents, at most one master, no two exceptions
+// share one UID, compared unescaped (at most MaxEvents, at most one master, no two exceptions
 // at the same RECURRENCE-ID). VCALENDAR-level properties and VTIMEZONEs are
 // dropped (TZIDs are resolved by name); any other component is refused.
 // Each VEVENT is validated and normalised (see WriteEvent). Errors are
@@ -159,8 +163,8 @@ func ParseWrite(body []byte) (Incoming, error) {
 			return Incoming{}, refuse(BadData, "a VEVENT without exactly one non-empty UID")
 		}
 		if i == 0 {
-			in.UID = uids[0]
-		} else if uids[0] != in.UID {
+			in.UID = UnescapeText(uids[0])
+		} else if UnescapeText(uids[0]) != in.UID {
 			return Incoming{}, refuse(NotOneUID, "VEVENTs of more than one UID")
 		}
 	}

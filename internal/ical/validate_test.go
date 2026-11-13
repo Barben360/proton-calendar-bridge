@@ -523,3 +523,33 @@ func TestDailyBydayIsRewritten(t *testing.T) {
 		})
 	}
 }
+
+// The body's UID is its TEXT value, unescaped (what Proton stores, SPEC
+// §5.3); the VEVENT keeps the line as written, and VEVENTs whose UIDs are
+// the same value in other spellings are one event.
+func TestParseWriteUnescapesTheUID(t *testing.T) {
+	t.Parallel()
+	esc := func(uid string, extra ...string) string {
+		return wev(slices.Concat([]string{"UID:" + uid, "DTSTAMP:20261101T080000Z"}, extra)...)
+	}
+	in := mustParseWrite(t, wcal(esc(`pcb-m4-a\,b`, "DTSTART;TZID=Europe/Paris:20261105T100000", "RRULE:FREQ=DAILY"),
+		esc("pcb-m4-a,b", "RECURRENCE-ID;TZID=Europe/Paris:20261106T100000", "DTSTART;TZID=Europe/Paris:20261106T100000")))
+	if in.UID != "pcb-m4-a,b" {
+		t.Errorf("UID %q, want the value pcb-m4-a,b", in.UID)
+	}
+	if p, _ := in.Master.Comp.Get("UID"); p.Value != `pcb-m4-a\,b` {
+		t.Errorf("the master's UID line holds %q, want it as written", p.Value)
+	}
+	if len(in.Exceptions) != 1 {
+		t.Errorf("%d exceptions, want the one of the same UID value", len(in.Exceptions))
+	}
+	// A series as Thunderbird sends it: every VEVENT spells the UID alike.
+	series := mustParseWrite(t, wcal(esc(`s\,t`, "DTSTART:20261105T100000Z", "RRULE:FREQ=DAILY"),
+		esc(`s\,t`, "RECURRENCE-ID:20261106T100000Z", "DTSTART:20261106T100000Z")))
+	if series.UID != "s,t" || series.Master == nil || len(series.Exceptions) != 1 {
+		t.Errorf("a series with an escaped UID: UID %q, master %v, %d exceptions", series.UID, series.Master != nil, len(series.Exceptions))
+	}
+	if _, err := ParseWrite(wcal(esc(`a\,b`, "DTSTART:20261105T100000Z"), esc(`a\;b`, "RECURRENCE-ID:20261106T100000Z", "DTSTART:20261106T100000Z"))); err == nil {
+		t.Error("VEVENTs of two UID values parsed as one event")
+	}
+}
