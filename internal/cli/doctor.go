@@ -187,9 +187,9 @@ func (a *app) doctorChecks(live *doctor.Live) []doctor.Check {
 	}
 	layout, lerr := doctor.Accounts(dirs.State)
 	if layout.Sealer != "" { // the layout is readable
-		checks = append(checks, doctor.SealerCheck{Sealer: layout.Sealer})
+		checks = append(checks, doctor.SealerCheck{Sealer: layout.Sealer, Fresh: layout.Fresh, Backend: cfg.Secrets.Backend})
 	}
-	if layout.Sealer == doctor.SealerSecretService {
+	if layout.Sealer == service.SealerSecretService {
 		checks = append(checks, doctor.KeyringCheck{Keyring: a.Keyring})
 	} else { // the key file, also while the layout cannot be read
 		checks = append(checks, doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile})
@@ -209,7 +209,10 @@ func (a *app) doctorChecks(live *doctor.Live) []doctor.Check {
 		checks = append(checks, warnCheck{label: "accounts", message: "no account: nothing can sign in to pcb serve",
 			fix: "pcb login (it creates the client default), then pcb client show"})
 	}
-	sealer := doctor.NewSealer(layout.Sealer, cfg.Secrets.KeyFile, dirs.State, a.Keyring)
+	sealer, err := service.NewSealer(dirs.State, layout.Sealer, cfg.Secrets.KeyFile, a.Keyring)
+	if err != nil {
+		return append(checks, doctor.FailedCheck{Label: "sealer", Message: err.Error(), Fix: exitcode.HintOf(err)})
+	}
 	for _, acct := range layout.Accounts {
 		prefix := ""
 		if acct.Label != "" {

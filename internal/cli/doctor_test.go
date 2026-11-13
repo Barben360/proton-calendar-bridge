@@ -100,7 +100,7 @@ func TestDoctorTextOK(t *testing.T) {
 	if want := "–  daemon: not running: offline checks only"; lines[11] != want {
 		t.Errorf("line 11 = %q, want %q", lines[11], want)
 	}
-	if want := "✓  sealer: keyfile"; lines[4] != want {
+	if want := "✓  sealer: not chosen yet: the first login picks it ([secrets] backend = auto)"; lines[4] != want {
 		t.Errorf("line 4 = %q, want %q", lines[4], want)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {

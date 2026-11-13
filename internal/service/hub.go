@@ -222,7 +222,7 @@ func OpenHub(o HubOptions) (*Hub, error) {
 		return nil, layoutError(err, root, info.Legacy)
 	}
 	if base.Sealer == nil {
-		if base.Sealer, err = newSealer(info.Sealer, base.Config.Secrets.KeyFile, root, kr); err != nil {
+		if base.Sealer, err = NewSealer(root, info.Sealer, base.Config.Secrets.KeyFile, kr); err != nil {
 			return nil, err
 		}
 	}
@@ -312,35 +312,37 @@ func newState(info store.LayoutInfo) bool {
 	return info.Version == 0 && len(info.Accounts) == 0 && len(info.Legacy) == 0 && info.Migrating == ""
 }
 
-// probeTimeout is how long a new state waits for the desktop keyring to
+// ProbeTimeout is how long a new state waits for the desktop keyring to
 // answer before it counts as absent.
-const probeTimeout = 2 * time.Second
+const ProbeTimeout = 2 * time.Second
 
 // chooseSealer is the sealer a new state records, by [secrets] backend:
 // keyfile, secret-service (refused, exit 10, when the keyring cannot be
 // used) or auto (secret-service when the keyring answers within
-// probeTimeout and is unlocked, else keyfile).
+// ProbeTimeout and is unlocked, else keyfile).
 func chooseSealer(backend string, kr Keyring) (string, error) {
 	if backend == "keyfile" {
-		return keyFileSealer, nil
+		return SealerKeyFile, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
 	defer cancel()
 	err := seal.Probe(ctx, kr)
 	switch {
 	case err == nil:
-		return secretServiceSealer, nil
+		return SealerSecretService, nil
 	case backend == "secret-service":
 		return "", mustAct("[secrets] backend is secret-service but the desktop keyring cannot be used: "+err.Error(),
 			"unlock the keyring and start a Secret Service (GNOME Keyring, KWallet), or set [secrets] backend to keyfile")
 	}
-	return keyFileSealer, nil
+	return SealerKeyFile, nil
 }
 
-// newSealer is the sealer layout.json names: the key file's, or the
-// desktop keyring's with its one key for the whole state root.
-func newSealer(name, keyFile, root string, kr Keyring) (seal.Sealer, error) {
-	if name != secretServiceSealer {
+// NewSealer is the sealer layout.json names for the state root: the key
+// file's, or the desktop keyring's with its one key for the whole root
+// (its absolute path names the keyring item). pcb doctor builds the
+// sealer through it too.
+func NewSealer(root, name, keyFile string, kr Keyring) (seal.Sealer, error) {
+	if name != SealerSecretService {
 		return &seal.KeyFile{Path: keyFile}, nil
 	}
 	abs, err := filepath.Abs(root)

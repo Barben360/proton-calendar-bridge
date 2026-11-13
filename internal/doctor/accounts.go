@@ -25,8 +25,13 @@ type Layout struct {
 	// it. No account is listed meanwhile.
 	Interrupted string
 	// Sealer is the sealer layout.json records ("keyfile" when it names
-	// none or there is no layout.json); "" when the layout cannot be read.
+	// none, as an older pcb's state does); "" when the layout cannot be
+	// read.
 	Sealer string
+	// Fresh marks a state with no layout.json, no account and nothing of
+	// an older pcb: no sealer is recorded yet (Sealer says "keyfile"), the
+	// first login chooses it.
+	Fresh bool
 }
 
 // LayoutError is why the layout of a state directory cannot be read, with
@@ -66,7 +71,7 @@ func Accounts(stateDir string) (Layout, error) {
 		case len(info.Legacy) > 0:
 			return Layout{Accounts: []Account{{Dir: stateDir, Label: address(stateDir)}}, Sealer: sealer}, nil
 		}
-		return Layout{Sealer: sealer}, nil
+		return Layout{Sealer: sealer, Fresh: true}, nil
 	}
 	out := Layout{Accounts: make([]Account, 0, len(info.Accounts)), Sealer: info.Sealer}
 	for _, id := range info.Accounts {

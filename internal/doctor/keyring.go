@@ -5,56 +5,38 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
-// Keyring is the desktop keyring, as seal.Keyring.
-type Keyring interface {
-	Get(ctx context.Context, attrs map[string]string) ([]byte, error)
-	Set(ctx context.Context, label string, attrs map[string]string, secret []byte) error
-	Locked(ctx context.Context) (bool, error)
-}
-
 // SystemKeyring is the keyring of the session bus.
-func SystemKeyring() Keyring { return seal.DBusKeyring("") }
+func SystemKeyring() service.Keyring { return seal.DBusKeyring("") }
 
-// Sealer names layout.json records.
-const (
-	SealerKeyFile       = "keyfile"
-	SealerSecretService = "secret-service"
-)
-
-// NewSealer is the sealer layout.json names: the desktop keyring's for
-// secret-service (one key for stateRoot, shared by every account), else
-// the key file's.
-func NewSealer(name, keyFile, stateRoot string, kr Keyring) seal.Sealer {
-	if name == SealerSecretService {
-		return &seal.SecretService{Keyring: kr, StateDir: stateRoot}
-	}
-	return &seal.KeyFile{Path: keyFile}
+// SealerCheck reports the sealer layout.json records. On a fresh state
+// (no layout.json) none is recorded: the first login picks it by [secrets]
+// backend, which is all that can be said (the keyring is not probed here).
+type SealerCheck struct {
+	Sealer  string
+	Fresh   bool
+	Backend string // [secrets] backend, for a fresh state
 }
-
-// SealerCheck reports the sealer layout.json records.
-type SealerCheck struct{ Sealer string }
 
 // Name implements Check.
 func (SealerCheck) Name() string { return "sealer" }
 
 // Run implements Check.
 func (c SealerCheck) Run(context.Context) Result {
-	return Result{Name: c.Name(), Status: StatusOK, Message: c.Sealer}
+	r := Result{Name: c.Name(), Status: StatusOK, Message: c.Sealer}
+	if c.Fresh && c.Backend != service.SealerKeyFile {
+		r.Message = "not chosen yet: the first login picks it ([secrets] backend = " + c.Backend + ")"
+	}
+	return r
 }
-
-// probeTimeout bounds the keyring probe: a Secret Service that does not
-// answer is an error, not a hang.
-const probeTimeout = 5 * time.Second
 
 // KeyringCheck probes the desktop keyring a secret-service state seals
 // with. A locked one is a warning: pcb retries it by itself.
-type KeyringCheck struct{ Keyring Keyring }
+type KeyringCheck struct{ Keyring service.Keyring }
 
 // Name implements Check.
 func (KeyringCheck) Name() string { return "keyring" }
@@ -62,7 +44,7 @@ func (KeyringCheck) Name() string { return "keyring" }
 // Run implements Check.
 func (c KeyringCheck) Run(ctx context.Context) Result {
 	r := Result{Name: c.Name()}
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, service.ProbeTimeout)
 	defer cancel()
 	err := seal.Probe(ctx, c.Keyring)
 	switch {

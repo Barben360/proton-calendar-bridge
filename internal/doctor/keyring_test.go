@@ -91,8 +91,11 @@ func keyringState(t *testing.T, kr *memKeyring) (root, acct string, sealer seal.
 	if err := os.MkdirAll(acct, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sealer = doctor.NewSealer("secret-service", filepath.Join(root, "no.key"), root, kr)
-	err := store.NewSecrets(acct, sealer).Update(t.Context(), func(a map[string]store.Account) error {
+	sealer, err := service.NewSealer(root, "secret-service", filepath.Join(root, "no.key"), kr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.NewSecrets(acct, sealer).Update(t.Context(), func(a map[string]store.Account) error {
 		a["u"] = store.Account{}
 		return nil
 	})
@@ -105,15 +108,42 @@ func keyringState(t *testing.T, kr *memKeyring) (root, acct string, sealer seal.
 	return root, acct, sealer
 }
 
-func TestNewSealerIsTheRecordedOne(t *testing.T) {
+// A relative state root names the same keyring item as its absolute path:
+// doctor builds its sealer through service.NewSealer, as the daemon does.
+func TestDoctorSealerForARelativeStateDirUsesTheAbsoluteKeyringItem(t *testing.T) {
 	kr := &memKeyring{}
-	if got := doctor.NewSealer("secret-service", "/k", t.TempDir(), kr).Name(); got != "secret-service" {
-		t.Errorf("secret-service: %q", got)
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("state", 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{"keyfile", ""} {
-		if got := doctor.NewSealer(name, "/k", t.TempDir(), kr).Name(); got != "keyfile" {
-			t.Errorf("%q: %q, want keyfile", name, got)
+	s, err := service.NewSealer("state", "secret-service", "/k", kr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Seal([]byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs("state")
+	want := attrKey(map[string]string{"application": "pcb", "state": abs})
+	if _, ok := kr.items[want]; len(kr.items) != 1 || !ok {
+		t.Errorf("keyring items = %v, want one for %s", kr.items, abs)
+	}
+}
+
+func TestSealerCheckOnAFreshStateDoesNotClaimTheKeyFile(t *testing.T) {
+	ctx := t.Context()
+	for _, backend := range []string{"auto", "secret-service"} {
+		got := doctor.SealerCheck{Sealer: "keyfile", Fresh: true, Backend: backend}.Run(ctx)
+		want := "not chosen yet: the first login picks it ([secrets] backend = " + backend + ")"
+		if got.Status != doctor.StatusOK || got.Message != want {
+			t.Errorf("%s: %+v, want ok %q", backend, got, want)
 		}
+	}
+	if got := (doctor.SealerCheck{Sealer: "keyfile", Fresh: true, Backend: "keyfile"}).Run(ctx); got.Message != "keyfile" {
+		t.Errorf("backend keyfile: %+v", got)
+	}
+	if got := (doctor.SealerCheck{Sealer: "secret-service"}).Run(ctx); got.Message != "secret-service" {
+		t.Errorf("recorded: %+v", got)
 	}
 }
 
@@ -144,7 +174,7 @@ func TestSecretsCheckWithTheKeyringNeedsNoKeyFile(t *testing.T) {
 func TestSecretsCheckWithAKeyringMissingItsKeyErrors(t *testing.T) {
 	kr := &memKeyring{}
 	_, acct, _ := keyringState(t, kr)
-	empty := doctor.NewSealer("secret-service", "/k", t.TempDir(), kr) // another state root: another item
+	empty, _ := service.NewSealer(t.TempDir(), "secret-service", "/k", kr) // another state root: another item
 	got := doctor.SecretsCheck{StateDir: acct, Sealer: empty}.Run(t.Context())
 	if got.Status != doctor.StatusError || !strings.Contains(got.Message, "desktop keyring") || got.Fix != "pcb logout" {
 		t.Fatalf("got %+v", got)
@@ -180,7 +210,7 @@ func TestSealedClientsCheckWithTheKeyring(t *testing.T) {
 	}
 	kr.setLocked(false)
 	// A new key in the keyring: the sealed copy no longer opens.
-	other := doctor.NewSealer("secret-service", "/k", root, kr)
+	other, _ := service.NewSealer(root, "secret-service", "/k", kr)
 	if err := kr.Set(ctx, "x", map[string]string{"application": "pcb", "state": root}, make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +249,11 @@ func TestAccountsReportsTheRecordedSealer(t *testing.T) {
 	if l, err = doctor.Accounts(root); err != nil || l.Sealer != "keyfile" {
 		t.Fatalf("no sealer named: got %q, %v; want keyfile", l.Sealer, err)
 	}
-	if l, err = doctor.Accounts(t.TempDir()); err != nil || l.Sealer != "keyfile" {
-		t.Fatalf("no layout: got %q, %v; want keyfile", l.Sealer, err)
+	if l.Fresh {
+		t.Error("a recorded layout is not fresh")
+	}
+	if l, err = doctor.Accounts(t.TempDir()); err != nil || l.Sealer != "keyfile" || !l.Fresh {
+		t.Fatalf("no layout: got %q fresh=%v, %v; want keyfile, fresh", l.Sealer, l.Fresh, err)
 	}
 }
 

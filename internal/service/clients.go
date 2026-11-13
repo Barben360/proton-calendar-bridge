@@ -371,7 +371,7 @@ func (l *Local) sessionSealed() bool {
 // (rotate). Only an absent key file counts: any other key error is the
 // sealer's to report. A login's own sealing still creates the key.
 func (l *Local) sessionKeyLost() error {
-	if l.o.Sealer.Name() == secretServiceSealer { // its key is not a file
+	if l.o.Sealer.Name() == SealerSecretService { // its key is not a file
 		return nil
 	}
 	if _, err := os.Stat(l.keyFile()); !errors.Is(err, fs.ErrNotExist) || !l.sessionSealed() {

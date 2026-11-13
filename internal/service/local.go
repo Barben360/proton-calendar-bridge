@@ -231,8 +231,8 @@ func (l *Local) log() *slog.Logger {
 // keyFile is the path named in store errors.
 // The sealers' names (seal.Sealer.Name, layout.json's "sealer").
 const (
-	keyFileSealer       = "keyfile"
-	secretServiceSealer = "secret-service"
+	SealerKeyFile       = "keyfile"
+	SealerSecretService = "secret-service"
 )
 
 // keyringRef stands for the desktop keyring where the error mappers take a
@@ -242,7 +242,7 @@ const keyringRef = "<the desktop keyring>"
 // keyFile is the key file's path, or keyringRef for a secret-service state;
 // it is only a name for the messages (Status.KeyFile reads the config).
 func (l *Local) keyFile() string {
-	if l.o.Sealer.Name() == secretServiceSealer {
+	if l.o.Sealer.Name() == SealerSecretService {
 		return keyringRef
 	}
 	return l.o.Config.Secrets.KeyFile
@@ -447,7 +447,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Unattended: st.Unattended,
 		Address:    st.Address,
 	}
-	if s.Sealer == keyFileSealer {
+	if s.Sealer == SealerKeyFile {
 		s.KeyFile = l.o.Config.Secrets.KeyFile
 	}
 	if st.Captcha != nil {

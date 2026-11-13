@@ -306,18 +306,17 @@ func (c ClientsCheck) Run(context.Context) Result {
 	return r
 }
 
-// SealedClientsCheck warns, per CalDAV client, when the sealer (the key
-// file, or the desktop keyring's key) no longer opens the sealed copy of its password (a new key file, an edited
-// clients.json): pcb client show cannot give it, and only a rotation does
-// (ux Minor, parked M5). A key file that cannot be read at all is the key
-// file check's to report, and a missing one beside secrets.sealed the
-// secrets check's (a rotation is refused then): no warning here.
+// SealedClientsCheck warns, per CalDAV client, when the sealer no longer
+// opens the sealed copy of its password (a new key file or keyring key, an
+// edited clients.json): pcb client show cannot give it, and only a
+// rotation does (ux Minor, parked M5). Left to other checks, so no warning
+// here: a key file that cannot be read, one missing beside secrets.sealed
+// (the secrets check's: a rotation is refused then), and a keyring that is
+// locked or absent (the keyring check's).
 type SealedClientsCheck struct {
 	StateDir string
 	KeyFile  string
-	// Sealer opens the sealed copies; nil is the key file's. A keyring
-	// that is locked or absent is the keyring check's to report: no
-	// warning here.
+	// Sealer opens the sealed copies; nil is the key file's.
 	Sealer seal.Sealer
 }
 

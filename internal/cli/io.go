@@ -45,7 +45,7 @@ type IO struct {
 	Host install.Host
 	// Keyring is the desktop keyring pcb doctor probes for a state sealed
 	// with it (nil: the session bus's, doctor.SystemKeyring).
-	Keyring doctor.Keyring
+	Keyring service.Keyring
 	// Signals subscribes to SIGINT and SIGTERM (signal.Notify) and returns
 	// the function that unsubscribes: pcb serve exits at once on a second
 	// one while it stops (ruling M5-P22).
