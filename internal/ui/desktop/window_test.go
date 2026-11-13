@@ -562,6 +562,26 @@ func TestBridgeStoppedBanner(t *testing.T) {
 	}
 }
 
+// A stopped bridge (a failed Restart) has no accounts to show: the pane
+// says the bridge is stopped and where to restart it, never "Add an
+// account" (review I1).
+func TestBridgeStoppedPaneDoesNotOfferAnAdd(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	f.w.Update(ui.View{Tray: ui.TrayAttention, Bridge: "bridge stopped: log.level must be one of debug, info, warn, error", Accounts: []ui.AccountView{}})
+	if f.has("Add an account to start.") {
+		t.Errorf("a stopped bridge's pane offers an add: %v", f.texts())
+	}
+	if !f.has("Settings → Restart bridge") {
+		t.Errorf("the pane does not say where to restart the bridge: %v", f.texts())
+	}
+	f.w.Update(ui.View{Accounts: []ui.AccountView{}})
+	if !f.has("Add an account to start.") {
+		t.Errorf("a running bridge with no account does not offer an add: %v", f.texts())
+	}
+}
+
 func TestCalDAVFailureRevertsOnlyTheSameAccount(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts()) // a1 has CalDAV on, b2 off

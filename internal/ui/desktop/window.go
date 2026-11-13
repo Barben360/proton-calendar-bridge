@@ -332,9 +332,18 @@ func (w *Window) showDefault() {
 	} else {
 		w.leave(paneEmpty)
 		w.mode, w.selected = paneEmpty, ""
-		w.setRight(widget.NewLabel("Add an account to start."))
+		if w.view.Bridge != "" {
+			// A stopped bridge has no accounts to show, not none to have.
+			w.setRight(wrapped(stoppedPane))
+		} else {
+			w.setRight(widget.NewLabel("Add an account to start."))
+		}
 	}
 }
+
+// stoppedPane is the right pane while the bridge is stopped (the banner says
+// why).
+const stoppedPane = "The bridge is stopped. Fix what the banner above says, then Settings → Restart bridge."
 
 func (w *Window) selectAccount(id string) {
 	av, ok := w.account(id)

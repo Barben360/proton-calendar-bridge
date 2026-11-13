@@ -469,3 +469,49 @@ func TestBridgeNoticesTheDaemonEnding(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+// A Restart that fails (here a config.toml edited with an invalid log
+// level, the Settings flow) shows the bridge stopped with its reason and the
+// attention tray, and the actions refuse; a Restart with a fixed config
+// clears it (review I1, ruling R7: never a dead bridge shown alive).
+func TestFailedRestartShowsTheBridgeStopped(t *testing.T) {
+	l := newLab(t)
+	b := l.start(t)
+	l.login(t, b)
+	good, err := os.ReadFile(config.Path(l.dirs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append(append([]byte{}, good...), "[log]\nlevel = \"loud\"\n"...)
+	if err := os.WriteFile(config.Path(l.dirs), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rerr := b.Restart(t.Context())
+	if rerr == nil {
+		t.Fatal("Restart with an invalid config.toml succeeded")
+	}
+	if b.Err() == nil {
+		t.Error("Err() = nil after a failed Restart")
+	}
+	v := b.View(t.Context(), time.Now())
+	if want := "bridge stopped: " + rerr.Error(); v.Bridge != want {
+		t.Errorf("View.Bridge = %q, want %q", v.Bridge, want)
+	}
+	if v.Tray != ui.TrayAttention {
+		t.Errorf("View.Tray = %q, want attention", v.Tray)
+	}
+	refused(t, ui.NewActions(b))
+
+	if err := os.WriteFile(config.Path(l.dirs), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Restart(t.Context()); err != nil {
+		t.Fatalf("Restart with the fixed config: %v", err)
+	}
+	if b.Err() != nil {
+		t.Errorf("Err() = %v after a good Restart, want nil", b.Err())
+	}
+	if v := b.View(t.Context(), time.Now()); v.Bridge != "" || len(v.Accounts) != 1 {
+		t.Errorf("after a good Restart: Bridge = %q, %d accounts; want none and the one account", v.Bridge, len(v.Accounts))
+	}
+}

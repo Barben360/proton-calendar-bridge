@@ -58,6 +58,9 @@ type Bridge struct {
 	run  *run       // nil while stopped
 	hub  *service.Hub
 	info daemon.Info
+	// startErr is why the last Start (or Restart's) failed, nil once one
+	// succeeded or after a Stop: Err reports it while no run is live.
+	startErr error
 }
 
 // run is one Start..Stop of the daemon.
@@ -143,7 +146,20 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return b.start(ctx)
 }
 
+// start is startRun, its failure kept for Err (review I1: a failed Restart
+// must not read as a healthy bridge with no account).
 func (b *Bridge) start(ctx context.Context) error {
+	err := b.startRun(ctx)
+	b.mu.Lock()
+	b.startErr = err
+	b.mu.Unlock()
+	if err != nil {
+		b.poke() // the UI learns that the bridge is stopped
+	}
+	return err
+}
+
+func (b *Bridge) startRun(ctx context.Context) error {
 	if r := b.current(); r != nil {
 		if !r.ended() {
 			return errors.New("the daemon already runs")
@@ -256,6 +272,7 @@ func (b *Bridge) current() *run {
 func (b *Bridge) Stop() error {
 	b.lmu.Lock()
 	defer b.lmu.Unlock()
+	b.forgetStartErr()
 	return b.stop()
 }
 
@@ -270,6 +287,13 @@ func (b *Bridge) stop() error {
 	return r.err
 }
 
+// forgetStartErr drops a failed Start's error: a Stop is not a failure.
+func (b *Bridge) forgetStartErr() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.startErr = nil
+}
+
 // clear forgets r (an ended or stopped run).
 func (b *Bridge) clear(r *run) {
 	b.mu.Lock()
@@ -280,11 +304,18 @@ func (b *Bridge) clear(r *run) {
 }
 
 // Err is why the daemon ended by itself (Hub.Serve returned, the listener
-// failed): nil while it runs, after a Stop and before the first Start. It
-// stays until the next Start or Restart; Changes fires when it is set.
+// failed) or why the last Start or Restart failed (config.toml invalid, the
+// Hub cannot open, serve.lock held): nil while it runs, after a Stop and
+// before the first Start. It stays until the next Start or Restart; Changes
+// fires when it is set.
 func (b *Bridge) Err() error {
-	r := b.current()
-	if r == nil || !r.ended() {
+	b.mu.Lock()
+	r, startErr := b.run, b.startErr
+	b.mu.Unlock()
+	if r == nil {
+		return startErr
+	}
+	if !r.ended() {
 		return nil
 	}
 	return r.failure()
