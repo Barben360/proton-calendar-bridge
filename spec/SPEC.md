@@ -1384,6 +1384,11 @@ step 10, not run yet.
     the URL is in the result. Every result carries the CLI fallback `pcb login --username U` (the `cli_fallback` field, and
     the hint of a refusal), for a `pcb mcp` in a container whose loopback the browser cannot reach [verified:
     `TestLoginToolResultHasNoSecret`, `TestLoginToolRaisesTheWizardInPcbUI`].
+  - An account already `ready` (and not stopped) is refused before anything opens (`refused`: "already logged in";
+    the hint names `pcb logout` then `pcb login`), and does not start the cooldown [verified:
+    `TestLoginToolRefusesAReadyAccount`]. A login flow (the page or pcb-ui's wizard) abandoned on its 2FA step for an
+    account that was ready before it started only drops the login waiting for the code: the stored session keeps
+    serving, never signed out [verified: `TestFlowCancelKeepsAnAccountThatWasReady`, `TestAbandonLoginKeepsTheStoredSession`].
   - One `login` per 60 s per MCP session (`retry`, with `retry_after_s`), on top of the Hub's login guard and its one
     login at a time; a later login of the same session replaces its page [verified: `TestLoginToolCooldown`,
     `TestLoginToolReplacesTheSessionsPage`]. A session daemon asks its sealer guard (§13) first [verified: `TestLoginToolAsksTheGuard`].
@@ -1610,7 +1615,7 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   [verified: `TestSecondInstanceShowsTheFirst`, `TestProbeNoDaemon`, `TestProbeNamesARunningServe`, `TestStartBlockedByAServeLeaksNothing`, `TestQuitDrainsAndReleases`, `TestRestartReadsTheConfig`, `TestBridgeNoticesTheDaemonEnding`;
   the dialog and the X `[assumed → step 9]`: Fyne's source says a master window's close quits, no test driver can show it].
 - The window never holds a secret longer than a call: the wizard's password lives in the `Wizard` until the login ends (ready, an error or a 2FA step) and is then zeroed, except while a CAPTCHA waits (its retry needs it); Cancel zeroes it and removes an account the wizard created
-  (an existing account is only signed out); a shown CalDAV password is hidden again when the account pane changes or the window hides, and one that arrives after that is dropped; a notification never carries a password or a URL (the CAPTCHA link is replaced by `the link in the pcb-ui window`)
+  (an existing account is only signed out, and one that was ready before the wizard started keeps its session: only the login waiting for its code is dropped, `TestFlowCancelKeepsAnAccountThatWasReady`); a shown CalDAV password is hidden again when the account pane changes or the window hides, and one that arrives after that is dropped; a notification never carries a password or a URL (the CAPTCHA link is replaced by `the link in the pcb-ui window`)
   [verified: `TestWizardPlainLogin`, `TestWizardTOTP`, `TestWizardKeepsPasswordForCaptchaThenZeroes`, `TestWizardZeroesOnError`, `TestWizardZeroesTheBufferWhenTheCaptchaRetryFails`, `TestWizardCopiesThePassword`,
   `TestWizardCancelDuringTOTPLeavesNoAccount`, `TestWizardCancelDuringCaptchaLeavesNoAccountAndZeroes`, `TestWizardCancelKeepsAnExistingAccount`, `TestWizardErrorIsTheCLIText`, `TestWizardRefusesWhileTheBridgeIsNotRunning`,
   `TestWizardCancelAfterTheBridgeRestarted`, `TestShownPasswordHidesOnAccountChange`, `TestShownPasswordHidesOnHide`, `TestPasswordArrivingAfterPaneChangeStaysHidden`, `TestWizardClearsPasswordEntryOnSubmit`,

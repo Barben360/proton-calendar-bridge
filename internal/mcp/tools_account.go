@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,7 +136,7 @@ func addLogin(ss *session) {
 	destructive := false
 	t := &sdkmcp.Tool{
 		Name: "login",
-		Description: "Start a Proton login for an account (new, pending or signed out). It never takes a password, code or token: " +
+		Description: "Start a Proton login for an account (new, pending or signed out; an account already ready is refused). It never takes a password, code or token: " +
 			"the person types them in pcb-ui's window or on a single-use page of this machine, never through you. " +
 			"Give the person the URL when the result has one; call status to follow the account. One call a minute.",
 		Annotations: &sdkmcp.ToolAnnotations{Title: "Log in to Proton", DestructiveHint: &destructive},
@@ -177,6 +178,10 @@ func (ss *session) login(ctx context.Context, req *sdkmcp.CallToolRequest, in lo
 		out.Where, out.ExpiresInS = "page", int(loginpage.DefaultTTL.Seconds())
 		return out, "The person was offered the login page for " + in.Username + " (single use, open 5 min): they type the password there, never here. " +
 			"Call status to follow the account. If their browser cannot reach this machine's 127.0.0.1, they run: " + cli, nil, nil
+	}
+	if a, ok := ss.readyAccount(in.Username); ok {
+		return loginOut{}, "", nil, refusedErr(a.Address+" is already logged in to Proton: nothing was started",
+			"no login is needed; to replace the session, the person runs pcb logout then pcb login")
 	}
 	if g := ss.srv.o.LoginGuard; g != nil {
 		if err := g(ctx); err != nil {
@@ -224,6 +229,21 @@ func (ss *session) login(ctx context.Context, req *sdkmcp.CallToolRequest, in lo
 	out.Where, out.URL, out.ExpiresInS = "page", url, int(loginpage.DefaultTTL.Seconds())
 	return out, "Give the person this link to log in to Proton as " + in.Username + " (this machine only, single use, open 5 min): " + url +
 		" They type the password there, never here. Call status to follow the account. If their browser cannot reach this machine's 127.0.0.1, they run: " + cli, nil, nil
+}
+
+// readyAccount is the account username names (its local ID, its address,
+// or a bare username its address starts with) when that account is ready
+// and serving: login refuses it, since a relogin abandoned on its 2FA step
+// would only disturb a working session (review C I1).
+func (ss *session) readyAccount(username string) (service.AccountInfo, bool) {
+	for _, a := range ss.srv.o.Hub.Accounts() {
+		local, _, _ := strings.Cut(a.Address, "@")
+		named := namesAccount(username, a) || !strings.Contains(username, "@") && strings.EqualFold(username, local)
+		if named && a.Phase == string(service.StateReady) && a.Stopped == nil {
+			return a, true
+		}
+	}
+	return service.AccountInfo{}, false
 }
 
 // asksURL: the client declared URL-mode elicitation on this request.

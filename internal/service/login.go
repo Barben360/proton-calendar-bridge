@@ -235,6 +235,19 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	return l.finish(ctx, pl, totp, l.o.Now())
 }
 
+// AbandonLogin drops the login waiting for the 2FA code (its half session
+// revoked) and changes nothing else: a stored session stays and serves.
+// Nothing waiting, nothing happens.
+func (l *Local) AbandonLogin(ctx context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return
+	}
+	l.dropPending(ctx)
+	l.expired = false
+}
+
 // dropPending aborts a login waiting for its code. It holds mu.
 func (l *Local) dropPending(ctx context.Context) {
 	if l.pending == nil {

@@ -139,6 +139,32 @@ func TestFlowCancelRemovesThePendingAdd(t *testing.T) {
 	}
 }
 
+// Review C I1: a login started again for an account that is ready, then
+// abandoned at the 2FA step (a page's TTL, a page replaced, Cancel), never
+// signs that account out: its stored session keeps working.
+func TestFlowCancelKeepsAnAccountThatWasReady(t *testing.T) {
+	l := newLab(t)
+	first := l.flow()
+	if err := first.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || first.Step() != loginflow.StepDone {
+		t.Fatalf("first login: %v, Step %q", err, first.Step())
+	}
+	id := first.Account()
+	l.f.SetTwoFA(l.f.Username, true)
+	l.forgetLastLogin(t)
+	f := l.flow()
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepTOTP {
+		t.Fatalf("second login: %v, Step %q", err, f.Step())
+	}
+	f.Cancel()
+	a := l.hub.Accounts()
+	if len(a) != 1 || a[0].ID != id || a[0].Phase != "ready" {
+		t.Errorf("accounts after Cancel %+v, want %s still ready", a, id)
+	}
+	if f.Step() != loginflow.StepCredentials || f.Account() != "" {
+		t.Errorf("Step %q, account %q after Cancel", f.Step(), f.Account())
+	}
+}
+
 // Report records an error without moving the flow.
 func TestFlowReportKeepsTheStep(t *testing.T) {
 	f := loginflow.New(func() (loginflow.Hub, error) { return nil, errors.New("unused") })

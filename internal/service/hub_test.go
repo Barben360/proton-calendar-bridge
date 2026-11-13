@@ -1254,3 +1254,35 @@ func TestCallDuringRemoveFindsNoAccount(t *testing.T) {
 		t.Errorf("a's directory is there after Remove: %v", err)
 	}
 }
+
+// AbandonLogin drops the login waiting for an account's 2FA code and
+// nothing else: a ready account's stored session stays (review C I1).
+func TestAbandonLoginKeepsTheStoredSession(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	e.f.SetTwoFA(userA, true)
+	h.SkipSRP(nil)
+	e.clk.advance(2 * time.Minute) // past the one-login-a-minute guard
+	if res := e.mustLogin(t, h, userA); res.State != service.StateNeedsTOTP || res.Account != ra.Account {
+		t.Fatalf("relogin = %+v, want needs-totp on %s", res, ra.Account)
+	}
+	if err := h.AbandonLogin(t.Context(), ra.Account); err != nil {
+		t.Fatalf("AbandonLogin: %v", err)
+	}
+	if info := find(h.Accounts(), ra.Account); info == nil || info.Phase != string(service.StateReady) {
+		t.Fatalf("after AbandonLogin: %+v, want ready", info)
+	}
+	if _, err := h.SubmitTOTP(t.Context(), ra.Account, "123456"); err == nil {
+		t.Error("a code was taken after the login was abandoned")
+	}
+	// Nothing waiting: nothing changes.
+	if err := h.AbandonLogin(t.Context(), ra.Account); err != nil {
+		t.Errorf("AbandonLogin with nothing waiting: %v", err)
+	}
+	if info := find(h.Accounts(), ra.Account); info == nil || info.Phase != string(service.StateReady) {
+		t.Errorf("after a second AbandonLogin: %+v, want ready", info)
+	}
+}

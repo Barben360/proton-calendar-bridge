@@ -98,6 +98,10 @@ func (h *stubHub) Remove(context.Context, string, service.LogoutRequest) (servic
 	return service.AccountInfo{}, errors.New("not in this test")
 }
 
+func (h *stubHub) AbandonLogin(context.Context, string) error {
+	return errors.New("not in this test")
+}
+
 func (h *stubHub) SignOut(_ context.Context, sel string, _ service.LogoutRequest) (service.LogoutResult, error) {
 	a, ok := h.pick(sel)
 	if !ok {

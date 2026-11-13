@@ -26,8 +26,9 @@ const (
 	EntryStdio  Entry = "stdio"  // pcb mcp's own stdin and stdout
 )
 
-// Hub is what the tools need of service.Hub. Login, SubmitTOTP, SignOut
-// and Remove are the login page's (loginflow.Hub); logout signs out.
+// Hub is what the tools need of service.Hub. Login, SubmitTOTP, SignOut,
+// Remove and AbandonLogin are the login page's (loginflow.Hub); logout
+// signs out.
 type Hub interface {
 	Accounts() []service.AccountInfo
 	Agenda(selector string) (service.Agenda, service.AccountInfo, error)
@@ -37,6 +38,7 @@ type Hub interface {
 	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
+	AbandonLogin(ctx context.Context, selector string) error
 }
 
 var _ Hub = (*service.Hub)(nil)

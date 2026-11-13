@@ -20,6 +20,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // The login and logout tools (design §5.5): login raises pcb-ui's wizard
@@ -246,6 +247,50 @@ func TestLoginToolRefusesWhatIsNoUsername(t *testing.T) {
 		slices.Sort(names)
 		if !slices.Equal(names, []string{"unattended_relogin", "username"}) {
 			t.Errorf("login's arguments %v, want username and unattended_relogin only", names)
+		}
+	}
+}
+
+// Review C I1: login refuses an account that is already ready, before it
+// raises pcb-ui's wizard or opens a page (an abandoned relogin must not be
+// able to sign a working account out); one that needs a login is served.
+func TestLoginToolRefusesAReadyAccount(t *testing.T) {
+	for _, viaUI := range []bool{true, false} {
+		s := &shown{}
+		hub := newHub()
+		r := newRigWith(t, hub, func(o *mcp.Options) {
+			if viaUI {
+				o.ShowLogin = s.show
+			}
+		})
+		cs := r.connect(t, loginGrant, mcp.EntryStdio)
+		for _, u := range []string{"alice@example.com", "Alice@Example.com", "a1", "alice"} {
+			res, text := loginText(t, cs, map[string]any{"username": u})
+			if !res.IsError || !strings.Contains(text, `"class":"refused"`) || !strings.Contains(text, "already logged in") ||
+				!strings.Contains(text, "pcb logout") {
+				t.Errorf("pcb-ui %t, login %s: %s, want refused: already logged in, naming pcb logout", viaUI, u, text)
+			}
+			if loginURL.MatchString(text) {
+				t.Errorf("login %s opened a page: %s", u, text)
+			}
+		}
+		if got := s.got(); len(got) != 0 {
+			t.Errorf("ShowLogin got %q for a ready account", got)
+		}
+		if got := hub.signedOut(); len(got) != 0 {
+			t.Errorf("signed out %q", got)
+		}
+		// The refusal does not start the cooldown, and an account that needs
+		// a login (or a stopped one) is served.
+		hub.set("a1", func(a *service.AccountInfo) { a.Phase = "needs-login" })
+		res, text := loginText(t, cs, map[string]any{"username": "alice@example.com"})
+		if res.IsError {
+			t.Errorf("pcb-ui %t: login of an account that needs one: %s", viaUI, text)
+		}
+		hub.set("b2", func(a *service.AccountInfo) { a.Stopped = &service.StopInfo{Code: 10, Message: "the session ended"} })
+		res, text = loginText(t, r.connect(t, loginGrant, mcp.EntryStdio), map[string]any{"username": "bob@example.com"})
+		if res.IsError {
+			t.Errorf("pcb-ui %t: login of a stopped account: %s", viaUI, text)
 		}
 	}
 }

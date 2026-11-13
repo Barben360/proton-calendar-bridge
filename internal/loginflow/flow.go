@@ -21,13 +21,15 @@ import (
 // Accounts (which accounts existed before, and whether a login still waits
 // for its 2FA code), Login (credentials, and the CAPTCHA retry), SubmitTOTP,
 // and, when the flow is cancelled mid-way, Remove (an account this flow
-// added) or SignOut (one that existed before).
+// added), AbandonLogin (one that was ready before) or SignOut (another one
+// that existed before).
 type Hub interface {
 	Accounts() []service.AccountInfo
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
 	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
+	AbandonLogin(ctx context.Context, selector string) error
 }
 
 var _ Hub = (*service.Hub)(nil)
@@ -68,6 +70,7 @@ type Flow struct {
 	captchaTok string // the token of the CAPTCHA challenge, for the retry
 	account    string // the local ID of the account being added
 	created    bool   // Submit made that account (it did not exist)
+	wasReady   bool   // that account was ready before Submit: Cancel leaves it be
 }
 
 // New returns a flow on its first step. hub gives the accounts at each
@@ -145,7 +148,7 @@ func (f *Flow) refuse(err error) error {
 
 func (f *Flow) failLocked(err error) error {
 	f.wipe()
-	f.step, f.captchaURL, f.captchaTok, f.account, f.created = StepCredentials, "", "", "", false
+	f.step, f.captchaURL, f.captchaTok, f.account, f.created, f.wasReady = StepCredentials, "", "", "", false, false
 	f.err = asExitError(err)
 	return f.err
 }
@@ -187,12 +190,18 @@ func (f *Flow) Submit(ctx context.Context, address string, password []byte, unat
 	f.err = nil
 	f.mu.Unlock()
 
-	known := map[string]bool{}
+	known := map[string]string{} // local ID → phase
 	for _, a := range h.Accounts() {
-		known[a.ID] = true
+		known[a.ID] = a.Phase
 	}
 	res, err := h.Login(ctx, service.LoginRequest{Username: address, Password: string(password), UnattendedRelogin: unattended})
-	return f.settle(res.Account != "" && !known[res.Account], res, err)
+	phase, existed := known[res.Account]
+	if err == nil && res.Account != "" {
+		f.mu.Lock()
+		f.wasReady = existed && phase == string(service.StateReady)
+		f.mu.Unlock()
+	}
+	return f.settle(res.Account != "" && !existed, res, err)
 }
 
 // CaptchaSolved logs in again with the CAPTCHA token the challenge returned
@@ -290,16 +299,18 @@ func heldForCode(h Hub, id string) bool {
 // Cancel abandons the flow: the password is zeroed, and an account this
 // flow added that never finished its first login is removed (a pending 2FA
 // or CAPTCHA add, with its directory); an account that existed before is
-// only signed out, which drops the login the Hub holds for it. It waits for
+// only signed out, which drops the login the Hub holds for it, unless it
+// was ready before Submit: its stored session still works, so only the
+// login the Hub holds for it is dropped (AbandonLogin). It waits for
 // a call in flight (bounded by that call's ctx), so a UI must call it off the
 // UI thread.
 func (f *Flow) Cancel() {
 	f.op.Lock()
 	defer f.op.Unlock()
 	f.mu.Lock()
-	step, id, created := f.step, f.account, f.created
+	step, id, created, wasReady := f.step, f.account, f.created, f.wasReady
 	f.wipe()
-	f.step, f.err, f.captchaURL, f.captchaTok, f.account, f.created = StepCredentials, nil, "", "", "", false
+	f.step, f.err, f.captchaURL, f.captchaTok, f.account, f.created, f.wasReady = StepCredentials, nil, "", "", "", false, false
 	f.mu.Unlock()
 	if id == "" || (step != StepTOTP && step != StepCaptcha) {
 		return
@@ -310,9 +321,12 @@ func (f *Flow) Cancel() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cancelTimeout)
 	defer cancel()
-	if created {
+	switch {
+	case wasReady:
+		_ = h.AbandonLogin(ctx, id)
+	case created:
 		_, _ = h.Remove(ctx, id, service.LogoutRequest{})
-		return
+	default:
+		_, _ = h.SignOut(ctx, id, service.LogoutRequest{})
 	}
-	_, _ = h.SignOut(ctx, id, service.LogoutRequest{})
 }

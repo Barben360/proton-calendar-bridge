@@ -1017,6 +1017,20 @@ func (h *Hub) signOut(ctx context.Context, selector string, req LogoutRequest) (
 	return a.local.Logout(ctx, req)
 }
 
+// AbandonLogin drops the login waiting for the account's 2FA code, if one
+// does, and changes nothing else: an account that was ready keeps its
+// stored session (a login flow abandoned on its 2FA step, review C I1).
+func (h *Hub) AbandonLogin(ctx context.Context, selector string) error {
+	h.ops.Lock()
+	a, err := h.pick(selector)
+	if err == nil {
+		a.local.AbandonLogin(ctx)
+	}
+	h.ops.Unlock()
+	h.notify(err == nil)
+	return err
+}
+
 // Remove stops the account's serve loop and waits for its end (ruling
 // R18), signs the account out, then deletes its directory. A sign-out it
 // refuses leaves the account as it was, its loop started again.
