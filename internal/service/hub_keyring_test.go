@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,5 +336,120 @@ func TestLockedKeyringWaitsAndRecovers(t *testing.T) {
 	}
 	if info := accountInfo(t, h, a); info.Stopped != nil {
 		t.Errorf("a.Stopped = %+v once served, want nil", info.Stopped)
+	}
+}
+
+// A keyring that locks while an account serves is waited for too: the next
+// pass fails, the account waits (no park, no Restart), and it serves again
+// 30 s later without a new login.
+func TestKeyringLockedWhileServingWaitsAndRecovers(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	passSleep, nextPass := make(chan struct{}, 8), make(chan struct{})
+	waiting, retry := make(chan struct{}, 1), make(chan struct{})
+	var retrying atomic.Bool
+	e.sleep = func(ctx context.Context, d time.Duration) error {
+		gate, signal := nextPass, passSleep
+		if retrying.Load() { // the pass interval may equal the retry: tell them apart by phase
+			if d != service.KeyringRetry {
+				t.Errorf("sleep of %v while waiting for the keyring", d)
+			}
+			gate, signal = retry, waiting
+		}
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+		select {
+		case <-gate:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	r := newServeRig(h)
+	done, _ := r.serve(t, r.options(true))
+	r.waitPassed(t, a, 0)
+	select {
+	case <-passSleep: // the loop now sleeps until the next pass
+	case <-time.After(waitLimit):
+		t.Fatal("the loop never slept between passes")
+	}
+	authBefore := e.f.Calls("", "/auth/v4")
+	kr.setLocked(true)
+	retrying.Store(true)
+	nextPass <- struct{}{}
+	select {
+	case <-waiting:
+	case <-time.After(waitLimit):
+		t.Fatal("the loop never waited for the keyring after a failed pass")
+	}
+	r.waitFor(t, "a waiting", func() bool { return r.last(a) == service.ServeWaitingForLogin })
+	if info := accountInfo(t, h, a); info.Stopped != nil {
+		t.Fatalf("a.Stopped = %+v, want waiting (not parked)", info.Stopped)
+	}
+	running(t, done)
+	st := accountStatus(t, h, a)
+	if st.Secrets != "locked" {
+		t.Errorf("Status.Secrets = %q, want locked", st.Secrets)
+	}
+	var found bool
+	for _, al := range ctl.Alerts(ctl.AlertInput{Account: a, Login: st, Now: e.clk.Now()}) {
+		found = found || al.Code == ctl.CodeKeyringLocked
+	}
+	if !found {
+		t.Errorf("no %s alert", ctl.CodeKeyringLocked)
+	}
+	kr.setLocked(false)
+	passes := r.passCount(a)
+	retrying.Store(false)
+	retry <- struct{}{}
+	r.waitPassed(t, a, passes)
+	if n := e.f.Calls("", "/auth/v4") - authBefore; n != 0 {
+		t.Errorf("Proton saw %d /auth/v4 calls across the lock, want 0", n)
+	}
+	if info := accountInfo(t, h, a); info.Stopped != nil {
+		t.Errorf("a.Stopped = %+v once served, want nil", info.Stopped)
+	}
+}
+
+// What a lost or foreign key says depends on where the key lives.
+func TestSecretServiceStateNamesTheKeyring(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	kr := &fakeKeyring{}
+	e.keyring = kr
+	h := e.open(t)
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		tamper func()
+		msg    string
+	}{
+		{"key replaced", func() {
+			kr.mu.Lock()
+			for k := range kr.items {
+				kr.items[k] = bytes.Repeat([]byte{7}, 32)
+			}
+			kr.mu.Unlock()
+		}, "the stored secrets cannot be opened with the key in the desktop keyring"},
+		{"key gone", func() { kr.mu.Lock(); kr.items = nil; kr.mu.Unlock() }, "the sealing key is not in the desktop keyring"},
+	} {
+		tc.tamper()
+		if _, err := api.Sync(t.Context(), service.SyncRequest{}); err == nil {
+			t.Fatalf("%s: Sync succeeded", tc.name)
+		} else if got := exitcode.From(err); got != exitcode.MustAct || err.Error() != tc.msg || exitcode.HintOf(err) != "pcb logout then pcb login" {
+			t.Errorf("%s: %v (exit %d, hint %q), want exit 10, %q, hint %q", tc.name, err, got, exitcode.HintOf(err), tc.msg, "pcb logout then pcb login")
+		}
 	}
 }

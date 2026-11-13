@@ -235,7 +235,27 @@ const (
 	secretServiceSealer = "secret-service"
 )
 
-func (l *Local) keyFile() string { return l.o.Config.Secrets.KeyFile }
+// keyringRef stands for the desktop keyring where the error mappers take a
+// key file's path: the key of a secret-service state is no file.
+const keyringRef = "<the desktop keyring>"
+
+// keyFile is the key file's path, or keyringRef for a secret-service state;
+// it is only a name for the messages (Status.KeyFile reads the config).
+func (l *Local) keyFile() string {
+	if l.o.Sealer.Name() == secretServiceSealer {
+		return keyringRef
+	}
+	return l.o.Config.Secrets.KeyFile
+}
+
+// keyWhat names where the sealing key lives, for a message: "the key file
+// <path>" or "the desktop keyring".
+func (l *Local) keyWhat() string {
+	if f := l.keyFile(); f != keyringRef {
+		return "the key file " + f
+	}
+	return "the desktop keyring"
+}
 
 func (l *Local) fail(err error) error { return mapError(err, l.keyFile()) }
 
@@ -420,7 +440,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Address:    st.Address,
 	}
 	if s.Sealer == keyFileSealer {
-		s.KeyFile = l.keyFile()
+		s.KeyFile = l.o.Config.Secrets.KeyFile
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL

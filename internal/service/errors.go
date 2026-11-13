@@ -137,7 +137,8 @@ func stopsWatch(err error) bool {
 		ee *exitcode.Error
 		d  *detail
 	)
-	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && d.final)
+	// A locked keyring is no stop for good: the caller waits for it (keyringLocked).
+	return (errors.As(err, &ee) && ee.Code == exitcode.MustAct) || (errors.As(err, &d) && (d.final || d.locked))
 }
 
 // retryAfter is how long err asks a watch to wait before the next pass.
@@ -241,6 +242,10 @@ func mapError(err error, keyFile string) error {
 		return unsupportedStore(use)
 	case errors.Is(err, seal.ErrLocked):
 		return keyringLockedError()
+	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
+		return mustAct("the sealing key is not in the desktop keyring", "pcb logout then pcb login")
+	case errors.Is(err, seal.ErrCorrupt) && keyFile == keyringRef:
+		return mustAct("the stored secrets cannot be opened with the key in the desktop keyring", "pcb logout then pcb login")
 	case errors.Is(err, seal.ErrNoKey):
 		return mustAct("the sealing key file "+keyFile+" is missing", "restore it from a backup, or run pcb logout to discard the stored session and log in again")
 	case errors.Is(err, seal.ErrCorrupt):

@@ -124,7 +124,7 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 // after the stop err: one a login fixes (ruling M5-R8), or another
 // process logged in to another account (ruling M5-R10: the next login
 // check serves it).
-func waitsAfter(err error) bool { return loginFixes(err) || accountSwitched(err) }
+func waitsAfter(err error) bool { return loginFixes(err) || accountSwitched(err) || keyringLocked(err) }
 
 // errLoggedOut ends a serving phase that a Logout stops (ruling M5-P10).
 var errLoggedOut = errors.New("logged out during serve")
@@ -261,7 +261,7 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 		poll = DefaultLoginPoll
 	}
 	logged := false
-	locked := false // the last check found the desktop keyring locked
+	locked := keyringLocked(stopped) // the last check found the desktop keyring locked
 	wait := stopped != nil
 	if stopped != nil {
 		o.Logger.Warn("waiting for a login", "reason", stopped.Error(), "hint", exitcode.HintOf(stopped))

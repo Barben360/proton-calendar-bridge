@@ -64,7 +64,7 @@ func (l *Local) clientsError(err error) error {
 	case errors.Is(err, access.ErrNotFound):
 		return usage(err.Error(), "run pcb client list to see the clients")
 	case errors.Is(err, access.ErrSeal):
-		msg := "the client's password could not be sealed with the key file " + l.keyFile()
+		msg := "the client's password could not be sealed with " + l.keyWhat()
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
@@ -332,14 +332,17 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 // is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: the key file %s cannot be used (%s)", name, l.keyFile(), cause), keyFix)
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), keyFix)
 	}
-	why := "its sealed copy does not open with the key file " + l.keyFile()
+	why := "its sealed copy does not open with " + l.keyWhat()
 	switch {
 	case errors.Is(err, access.ErrStale):
 		why = "its sealed copy does not match its password (clients.json was edited)"
 	case errors.Is(err, seal.ErrNoKey):
-		why = "the key file " + l.keyFile() + " is missing"
+		why = l.keyWhat() + " is missing"
+		if l.keyFile() == keyringRef {
+			why = "the desktop keyring has no key for it"
+		}
 	}
 	hint := "restore the key file from a backup, or run pcb client rotate " + shellquote.Quote(name) + " for a new password"
 	if errors.Is(err, seal.ErrNoKey) && l.sessionSealed() {
