@@ -90,23 +90,27 @@ func (ss *session) calendarIDs(ctx context.Context, id string) (ids []string, ok
 	return ids, true
 }
 
-// holdsGrantedCalendar: the grant names no calendar, or the account holds
-// one of them, or its calendars are unknown (its agenda answers for them,
-// as withCalendars passes them on). An account it is false for is outside
-// the scope: status and calendars_list leave it out as the range tools do.
+// holdsGrantedCalendar: the grant names no calendar, or the account is
+// known to hold one of them. An account whose calendars are unknown (not
+// synced yet, Serve not serving) holds none: a calendar grant fails closed
+// (ruling R14), and the account appears once its first sync lists them.
+// Every tool leaves out an account it is false for, never naming it, not
+// even under unavailable.
 func (ss *session) holdsGrantedCalendar(ctx context.Context, id string) bool {
 	if len(ss.grant.Calendars) == 0 {
 		return true
 	}
 	owned, known := ss.calendarIDs(ctx, id)
-	return !known || slices.ContainsFunc(owned, ss.grant.seesCalendar)
+	return known && slices.ContainsFunc(owned, ss.grant.seesCalendar)
 }
 
 // withCalendars chooses each target's calendars: those asked (each
 // visible to the grant), else the grant's, else every calendar (nil). A
 // target with none of them is dropped; an asked calendar no account holds
-// is not-found, as one outside the grant. An account whose calendars are
-// unknown is given them all, for its agenda to answer.
+// is not-found, as one outside the grant. Under a calendar grant an
+// account must hold one of them (holdsGrantedCalendar); without one, an
+// account whose calendars are unknown is given those asked, for its agenda
+// to answer.
 func (ss *session) withCalendars(ctx context.Context, ts []target, asked []string) ([]target, error) {
 	for _, id := range asked {
 		if !ss.grant.seesCalendar(id) {
@@ -123,7 +127,10 @@ func (ss *session) withCalendars(ctx context.Context, ts []target, asked []strin
 	held := map[string]bool{}
 	var out []target
 	for _, t := range ts {
-		owned, known := ss.calendarIDs(ctx, t.info.ID)
+		if !ss.holdsGrantedCalendar(ctx, t.info.ID) {
+			continue
+		}
+		owned, known := ss.calendarIDs(ctx, t.info.ID) // unknown only without a calendar grant
 		t.cals = nil
 		for _, id := range want {
 			if !known || slices.Contains(owned, id) {

@@ -304,10 +304,43 @@ func TestCalendarGrantHidesAccountsWithoutThem(t *testing.T) {
 	if got := accountsOf(mustCall(t, cs, "status", nil)); !slices.Equal(got, []string{"alice@example.com"}) {
 		t.Errorf("status accounts %v, want alice only", got)
 	}
-	// An account whose calendars are unknown (its Serve does not serve) is
-	// kept: its agenda answers for the calendar, as the range tools do.
+	// Ruling R14: an account whose calendars are unknown (not synced yet,
+	// Serve not serving) holds none for a calendar grant: fail closed, in
+	// every tool, never named under unavailable either.
 	hub.health["b2"] = service.Health{Serve: service.ServeStopped}
-	if got := accountsOf(mustCall(t, cs, "status", nil)); !slices.Equal(got, []string{"alice@example.com", "bob@example.com"}) {
-		t.Errorf("status accounts %v with bob's calendars unknown, want both", got)
+	hub.agendas["b2"].err = errWaiting
+	for _, tool := range []string{"status", "calendars_list", "free_busy", "events_list"} {
+		out := mustCall(t, cs, tool, argsFor(tool, monday()))
+		walkStrings(out, "", func(path, s string) {
+			if strings.Contains(s, "bob") || s == "b2" {
+				t.Errorf("bob's calendars unknown: %s names bob at %s: %q", tool, path, s)
+			}
+		})
+	}
+	if n := len(hub.agendas["b2"].requests()); n != 0 {
+		t.Errorf("bob's agenda was asked %d times", n)
+	}
+
+	// An account that holds the granted calendar appears once its calendars
+	// are known (its first sync).
+	hub = newHub()
+	g.Calendars = []string{"cal-b"}
+	hub.health["b2"] = service.Health{Serve: service.ServeStopped}
+	cs = newRig(t, hub).connect(t, g, mcp.EntryRemote)
+	if got := accountsOf(mustCall(t, cs, "status", nil)); len(got) != 0 {
+		t.Errorf("status accounts %v before bob's first sync, want none", got)
+	}
+	synced := fixedNow
+	hub.health["b2"] = service.Health{Serve: service.ServeServing,
+		Calendars: []service.CalendarHealth{{ID: "cal-b", Name: "Home", SyncedAt: &synced, Gate: "open"}}}
+	if got := accountsOf(mustCall(t, cs, "status", nil)); !slices.Equal(got, []string{"bob@example.com"}) {
+		t.Errorf("status accounts %v after bob's sync, want bob", got)
+	}
+	cals := mustCall(t, cs, "calendars_list", nil)
+	if n := len(list(cals["calendars"])); n != 1 || field(cals, "calendars.0.id") != "cal-b" {
+		t.Errorf("calendars after bob's sync %v, want cal-b", cals["calendars"])
+	}
+	if out := mustCall(t, cs, "events_list", monday()); len(list(out["events"])) != 1 {
+		t.Errorf("events after bob's sync %v, want his lunch", out["events"])
 	}
 }
