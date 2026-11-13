@@ -240,9 +240,7 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, keys.ErrKeysLocked):
 		return mustAct("the password does not unlock the account keys", "check the password; accounts in two-password mode are not supported")
 	case errors.Is(err, api.ErrSessionEnded):
-		ee := sessionEndedBy(err, "run pcb login")
-		ee.Err.(*detail).login = true
-		return ee
+		return asLoginNeeded(sessionEndedBy(err, "run pcb login"))
 	case errors.As(err, &uve):
 		return blocked(uve.Error(), "complete the verification once in a browser on this network, then retry later")
 	case errors.Is(err, auth.ErrServerProof):
