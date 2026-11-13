@@ -732,6 +732,51 @@ func TestApplyEditShiftMovesUntil(t *testing.T) {
 	}
 }
 
+// A client that sends the whole view back echoes the stored RRULE with the
+// shift: the rule is the same, so its UNTIL still moves.
+func TestApplyEditShiftWithTheRuleEchoedMovesUntil(t *testing.T) {
+	out, err := ApplyEdit(untilSeries("UNTIL=20261207T090000Z"), ScopeSeries, nil, Fields{
+		Start: new(paris(t, "20261116T110000")),
+		End:   new(paris(t, "20261116T120000")),
+		RRule: new("FREQ=WEEKLY;BYDAY=MO;UNTIL=20261207T090000Z"),
+	}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decoded(t, out); d.RRule != "FREQ=WEEKLY;BYDAY=MO;UNTIL=20261207T100000Z" {
+		t.Errorf("RRULE = %q, want UNTIL moved by the shift", d.RRule)
+	}
+	if n := occurrenceCount(t, out); n != 4 {
+		t.Errorf("%d occurrences after the shift, want the 4 kept", n)
+	}
+}
+
+// A UTC UNTIL on an all-day series (its UTC date is the last day) moves by
+// the days the start moved.
+func TestApplyEditAllDayShiftMovesUTCUntil(t *testing.T) {
+	vcal := calendar("BEGIN:VEVENT", "UID:allday@pcb", "DTSTAMP:20261101T090000Z",
+		"DTSTART;VALUE=DATE:20261116", "DTEND;VALUE=DATE:20261117",
+		"RRULE:FREQ=WEEKLY;UNTIL=20261207T235959Z", "SUMMARY:x", "END:VEVENT")
+	if n := occurrenceCount(t, vcal); n != 4 {
+		t.Fatalf("the fixture has %d occurrences, want 4", n)
+	}
+	out, err := ApplyEdit(vcal, ScopeSeries, nil, Fields{
+		Start: &Time{Date: "2026-11-17"}, End: &Time{Date: "2026-11-18"},
+	}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decoded(t, out); d.RRule != "FREQ=WEEKLY;UNTIL=20261208T235959Z" {
+		t.Errorf("RRULE = %q", d.RRule)
+	}
+	if n := occurrenceCount(t, out); n != 4 {
+		t.Errorf("%d occurrences after the shift, want the 4 kept", n)
+	}
+	if _, err := ParseWrite(out); err != nil {
+		t.Errorf("ParseWrite: %v", err)
+	}
+}
+
 func TestApplyEditRuleChangedWithTheStart(t *testing.T) {
 	d := decoded(t, runEditCase(t, "shift-with-its-rule"))
 	if d.RRule != "FREQ=WEEKLY;BYDAY=TU;COUNT=10" || !sameInstant(d.Start, paris(t, "20261117T100000")) {

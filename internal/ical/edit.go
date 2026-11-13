@@ -110,6 +110,11 @@ func ApplyEdit(vcal []byte, scope Scope, recurrenceID *Time, f Fields, now time.
 		if master == nil {
 			return nil, refuse(BadData, "the object holds one occurrence and no series: edit the occurrence")
 		}
+		if stored, ok := master.Get("RRULE"); ok && f.RRule != nil && sameRule(stored.Value, *f.RRule) {
+			// The stored rule echoed back (a client sending the whole view):
+			// kept as stored, so moveSeries' shifted UNTIL is what is written.
+			f.RRule = nil
+		}
 		moved, r := moveSeries(cal, master, f, now)
 		if r != nil {
 			return nil, r
