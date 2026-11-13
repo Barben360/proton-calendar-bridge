@@ -106,12 +106,38 @@ func (n *notes) add(s string) {
 	n.list = append(n.list, s)
 }
 
+// uidTextProblem says why pcb cannot name an event by the UID text v, ""
+// when it can: an escape RFC 5545 §3.3.11 does not define (`\x`, or a
+// trailing backslash: what Proton stores for it is unknown, and guessing
+// would leave the write unconfirmed), or a control character in the
+// unescaped value (a newline included: a UID is an identifier, and a
+// newline would reach the ?UID= lookup and the object name). Every UID
+// Thunderbird, Proton or Outlook generates passes.
+func uidTextProblem(v string) string {
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			continue
+		}
+		if i+1 == len(v) || !strings.ContainsRune(`\;,nN`, rune(v[i+1])) {
+			return `holds a backslash that is not a TEXT escape (\\, \;, \, or \n)`
+		}
+		i++
+	}
+	for _, r := range UnescapeText(v) {
+		if r < 0x20 || r == 0x7f {
+			return "holds a control character, a newline included"
+		}
+	}
+	return ""
+}
+
 // ParseWrite reads what a CalDAV client PUTs: one VCALENDAR whose VEVENTs
-// share one UID, compared unescaped (at most MaxEvents, at most one master, no two exceptions
-// at the same RECURRENCE-ID). VCALENDAR-level properties and VTIMEZONEs are
-// dropped (TZIDs are resolved by name); any other component is refused.
-// Each VEVENT is validated and normalised (see WriteEvent). Errors are
-// *Refusal.
+// share one UID, compared unescaped (at most MaxEvents, at most one master,
+// no two exceptions at the same RECURRENCE-ID); a UID pcb cannot name an
+// event by (uidTextProblem) is refused. VCALENDAR-level properties and
+// VTIMEZONEs are dropped (TZIDs are resolved by name); any other component
+// is refused. Each VEVENT is validated and normalised (see WriteEvent).
+// Errors are *Refusal.
 func ParseWrite(body []byte) (Incoming, error) {
 	if !utf8.Valid(body) {
 		return Incoming{}, refuse(BadData, "not valid UTF-8")
@@ -161,6 +187,9 @@ func ParseWrite(body []byte) (Incoming, error) {
 		}
 		if len(uids) != 1 || uids[0] == "" {
 			return Incoming{}, refuse(BadData, "a VEVENT without exactly one non-empty UID")
+		}
+		if reason := uidTextProblem(uids[0]); reason != "" {
+			return Incoming{}, refuse(BadData, "the UID "+reason)
 		}
 		if i == 0 {
 			in.UID = UnescapeText(uids[0])

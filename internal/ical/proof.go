@@ -49,10 +49,10 @@ func HoldsEncryptedOnly(text []byte) bool {
 // attendees part's plaintext (UID, DTSTAMP, ATTENDEE with tokens) is known to
 // the server. The text must be in Proton's fragment form (one VCALENDAR
 // holding exactly one VEVENT, and no property of its own but VERSION, PRODID
-// or CALSCALE, which carbonate and caloxide write, M4-R20), the
-// VEVENT must have exactly one UID whose TEXT value (UnescapeText) is the
-// row's uid byte for byte, uid being the UID as Proton stores it, unescaped
-// (SPEC §5.3; so a proof made for another event cannot serve), and hold an EncryptedOnly
+// or CALSCALE, which carbonate and caloxide write, M4-R20), the VEVENT must
+// have exactly one UID whose TEXT value (UnescapeText) is the row's uid byte
+// for byte, uid being the UID as Proton stores it, unescaped (SPEC §5.3; so
+// a proof made for another event cannot serve), and hold an EncryptedOnly
 // property of its own that the routing table puts in k itself (so an
 // attendees text replayed into the shared encrypted slot proves nothing).
 //

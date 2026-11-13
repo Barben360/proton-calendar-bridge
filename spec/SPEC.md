@@ -364,7 +364,21 @@ value with the column [verified: `TestAnEscapedUIDIsCreatedConfirmedAndEdited`,
 `TestAnEscapedUIDIsCreatedAndEditedAtItsName`]. Such an event is served at the
 client's name when it was created there, else at the canonical name of the
 value (`~` + base64url of `pcb-m4-a,b`, §9): the name an event synced from
-Proton gets, so an href does not depend on which client wrote the event.
+Proton gets, so an href does not depend on which client wrote the event. A
+placeholder (an event that does not decrypt) serves the column escaped
+again (`ical.EscapeText`), as the parts would. Only `\,` was measured live;
+`\;`, `\\` and `\n` are taken to follow the same RFC rule. A body's UID
+holding an escape RFC 5545 does not define (`\x`, a trailing backslash) or a
+control character in its value (a newline included) is refused, 403
+`bad-data` with the reason: what Proton stores for it is not known, and a
+guess would leave the write unconfirmed; no client pcb targets writes one
+[verified: `TestParseWriteRefusesAUIDItCannotName`]. A row whose column
+holds an escaped form (`pcb-c\,d`, which Proton never writes; another
+client's data could) is never rewritten through pcb: any edit at its name,
+even one whose body repeats the column's exact text, is 503
+`ErrUIDStoredOtherwise`, because pcb names the event by the body's value
+(`pcb-c,d`), which is not the column, so neither the `?UID=` read-back nor
+the key proof would find it; a DELETE is unaffected.
 
 ### 5.4 Calendar API surface (v1)
 - Calendars: list, bootstrap (keys, passphrase, settings), user settings

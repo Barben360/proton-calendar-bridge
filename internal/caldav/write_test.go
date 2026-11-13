@@ -286,6 +286,8 @@ func TestRefusedWritesNeverReachProton(t *testing.T) {
 		{"RDATE", r.put(calPath(work)+"rd@x.ics", thunderbird("rd@x", "Odd", "RDATE:20270120T080000Z")), http.StatusForbidden, "rdate"},
 		{"two UIDs", r.put(calPath(work)+"two@x.ics", strings.Replace(ok, "END:VCALENDAR", "BEGIN:VEVENT\r\nUID:other@x\r\nDTSTAMP:20270101T090000Z\r\nDTSTART:20270101T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR", 1)), http.StatusForbidden, "not-one-uid"},
 		{"not iCalendar", r.put(calPath(work)+"junk.ics", "hello"), http.StatusForbidden, "bad-data"},
+		{"a UID holding a newline", r.put(calPath(work)+"nl.ics", thunderbird(`nl\nx@x`, "Newline")), http.StatusForbidden, "bad-data"},
+		{"a UID with an unknown escape", r.put(calPath(work)+"esc.ics", thunderbird(`esc\x@x`, "Escape")), http.StatusForbidden, "bad-data"},
 		{"floating time", r.put(calPath(work)+"fl@x.ics", strings.ReplaceAll(thunderbird("fl@x", "Floating"), "00Z\r\n", "00\r\n")), http.StatusForbidden, "floating-time"},
 		{"PUT on the calendar", r.put(calPath(work), ok), http.StatusMethodNotAllowed, ""},
 		{"DELETE the calendar", r.do(http.MethodDelete, calPath(work), ""), http.StatusMethodNotAllowed, ""},

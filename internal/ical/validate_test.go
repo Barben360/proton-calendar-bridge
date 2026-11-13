@@ -553,3 +553,22 @@ func TestParseWriteUnescapesTheUID(t *testing.T) {
 		t.Error("VEVENTs of two UID values parsed as one event")
 	}
 }
+
+// A UID is refused (bad-data) when its text holds an escape RFC 5545 does
+// not define (pcb would have to guess what Proton stores) or its value holds
+// a control character, a newline included.
+func TestParseWriteRefusesAUIDItCannotName(t *testing.T) {
+	t.Parallel()
+	for _, uid := range []string{`a\nb`, `a\Nb`, `a\xb`, `a\:b`, `trailing\`, `a\\\x`} {
+		body := wcal(wev("UID:"+uid, "DTSTAMP:20261101T080000Z", "DTSTART:20261105T100000Z"))
+		r := refusalOf(t, body)
+		if r.Code != BadData || !strings.Contains(r.Reason, "UID") {
+			t.Errorf("UID:%s: code %q (%s), want bad-data naming the UID", uid, r.Code, r.Reason)
+		}
+	}
+	for _, uid := range []string{`a\\x`, `a\,b`, `a\;b`, "{0f5c-uuid}@thunderbird", "040000008200E00074C5B7101A82E008"} {
+		if _, err := ParseWrite(wcal(wev("UID:"+uid, "DTSTAMP:20261101T080000Z", "DTSTART:20261105T100000Z"))); err != nil {
+			t.Errorf("UID:%s refused: %v", uid, err)
+		}
+	}
+}
