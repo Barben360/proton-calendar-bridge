@@ -29,9 +29,7 @@ against a fake Proton only, and M5 adds the daemon around them: a control
 socket behind a live `pcb status` and `pcb doctor`, `pcb serve --wait-for-login`,
 `pcb install`, `uninstall` and `service` (systemd, user or system), a container image,
 and CalDAV passwords you can show again (`pcb client show`). Both smoke tests (the image,
-and a Debian container with systemd as PID 1) passed locally, and CI publishes the image from main (below). The live sessions against the test account (M1, M2 for the change feed, step 6
-for Thunderbird and the M4 writes, then step 7 for the M5 daemon, service and container) are deferred until the author can solve a
-CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", steps 6 and 7); until then the cache, sync, write and daemon rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before steps 6 and 7 have run. The design is in
+and a Debian container with systemd as PID 1) passed locally, and CI publishes the image from main (below). The live sessions against a test account ran on 2026-11-13 (M1, M2 for the change feed, step 6 for Thunderbird and the M4 writes, step 7 for the M5 daemon, service and container; `spec/HUMAN-CHECKS.md`). The step 7 results are in `spec/experiments/M5-live.md`; the other write-ups are still to come. This is still an early version: do not point pcb at an account you care about yet. The design is in
 `spec/SPEC.md`.
 
 ## Usage

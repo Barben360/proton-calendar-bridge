@@ -644,7 +644,7 @@ M5 verified the generation and the lock: [verified: `TestGenerationIncrementsAnd
 `TestEditedVersionFieldDoesNotDowngrade`, `TestUpdateStateWaitsForTheLock`, `TestHumanNeededDoesNotOverwriteAFinishedLogin`,
 `TestRolledBackSecretsNeedALogin`, `TestLogoutWipesRolledBackSecrets`]. On a rollback the session pcb holds in memory
 is revoked best effort before it is dropped (M5-R3). Inside a systemd service and a container: the smoke tests never log in,
-so no sealed session was exercised there; that is the live step 7 (`spec/experiments/E15-secret-sealing.md`) [assumed → step 7].
+so no sealed session was exercised there; the live step 7 did: a sealed session survived in a systemd user service (the VM ran with a key file, `secrets: sealed with a key file (headless fallback)`, and came back after a reboot with no login) and in a container (the compose secret `/run/secrets/pcb_key`, no same-volume warning) [verified: live 2026-11-13, spec/experiments/M5-live.md].
 
 ## 8. C3/C4 — Service and sync
 
@@ -688,8 +688,8 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   show in `pcb status` and as `sync-stalled` alerts; `pcb sync --watch` shares the back-off rule (it raises no alert: `sync-stalled` is a `pcb serve` health alert) [verified:
   `TestIdleServeSlowsToFiveMinutes`, `TestAuthenticatedRequestWakesAnIdleLoop`, `TestRefusedPasswordIsNotActivity`,
   `TestWakeCutsOnlyASuccessSleep`, `TestWakeDuringBackOffDoesNotShortenIt`, `TestPartialPassKeepsTheCadence`,
-  `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: that Thunderbird at its
-  default settings keeps the active cadence and that reopening it brings a pass within seconds [assumed → step 7.4].
+  `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: the idle cadence (300 s after 35 minutes without a request) and the wake (an authenticated request brings a pass within about a second, cadence back to 30 s) [verified: live 2026-11-13, spec/experiments/M5-live.md], driven by curl. That Thunderbird at its
+  default settings keeps the active cadence was **not** verified live (7.4.4 skipped; E08 §3.7 stays the expectation) [assumed → step 7.4.4].
   The standby idea is caloxide's (README, Credits).
 - Waiting for a login (M5, `pcb serve --wait-for-login`, the default of the units and the image; M5-Rpre3, R8, R9,
   R10, P8, P9, P22): CTL and the CalDAV listener bind at once, and while there is no usable session every
@@ -1164,7 +1164,7 @@ M5 behaviour (`internal/install`, `internal/cli`; rulings M5-Rpre5 to Rpre7, R4 
 `TestClientShowNamesRotateForAnUnrecoverablePassword`; `make systemd-smoke` (a Debian container with systemd as
 PID 1, both scopes, install, active, 503 with a client, uninstall) and `make container-smoke` passed locally on
 commit e5faeb8; the CI jobs have not run until the branch is pushed. Real systemd on a real host, linger across a
-reboot and a real login are [assumed → step 7].]
+reboot and a real login are [verified: live 2026-11-13, spec/experiments/M5-live.md] (7.1.3, 7.1.8, 7.1.5).]
 
 Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
 the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
