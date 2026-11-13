@@ -1299,8 +1299,10 @@ step 10, not run yet.
   `TestMCPOffAccountIsInvisible`, `TestAccountRemovedMidSessionIsNotFound`, `TestEventIDOfAnotherAccountOutsideGrant`,
   `TestEventIDToolsHideAccountsLikeMissing`]. An account that needs a login stays visible, so `status` can name the
   step. Under a calendar grant an account counts only when it holds a granted calendar, and one whose calendars are
-  not known yet (before its first sync) counts as holding none (ruling R14: fail closed) [verified:
-  `TestCalendarGrantHidesAccountsWithoutThem`]. Over stdio the grant is a guard rail, not a boundary (§19).
+  not known yet (before its first sync) counts as holding none (ruling R14: fail closed); named in a call's `accounts`
+  or `account`, such an account answers `not-found` exactly as an account pcb does not have, so a calendar-scoped token
+  cannot probe which accounts exist [verified: `TestCalendarGrantHidesAccountsWithoutThem`,
+  `TestCalendarGrantNamedAccountAnswersAsUnknown`]. Over stdio the grant is a guard rail, not a boundary (§19).
 - **Ids, times, paging.** `event_id` is opaque (base64url of the account's local ID, calendar ID, UID and
   RECURRENCE-ID); an occurrence's part keeps the series' own form (a date, a floating wall clock or a zoned
   instant), so an id does not depend on the zone a call reads in (ruling R10) [verified: `TestEventIDRoundTrip`,

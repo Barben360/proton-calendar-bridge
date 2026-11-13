@@ -2,6 +2,7 @@ package mcp_test
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -342,5 +343,42 @@ func TestCalendarGrantHidesAccountsWithoutThem(t *testing.T) {
 	}
 	if out := mustCall(t, cs, "events_list", monday()); len(list(out["events"])) != 1 {
 		t.Errorf("events after bob's sync %v, want his lunch", out["events"])
+	}
+}
+
+// Under a calendar grant, naming an account that holds none of the
+// granted calendars answers exactly as naming an account pcb does not
+// have: the token cannot probe which accounts exist.
+func TestCalendarGrantNamedAccountAnswersAsUnknown(t *testing.T) {
+	hub := newHub()
+	r := newRig(t, hub)
+	g := readGrant
+	g.Calendars = []string{"cal-a"}
+	cs := r.connect(t, g, mcp.EntryRemote)
+	answer := func(tool, name string) string {
+		t.Helper()
+		res, err := cs.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: tool,
+			Arguments: argsFor(tool, with(monday(), "accounts", []string{name}))})
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		b, err := json.Marshal(res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.ReplaceAll(string(b), name, "NAME")
+	}
+	for _, tool := range []string{"calendars_list", "free_busy", "events_list", "events_search"} {
+		bob, zed := answer(tool, "bob@example.com"), answer(tool, "zed@example.com")
+		if bob != zed {
+			t.Errorf("%s: bob (exists, holds no granted calendar) answers\n%s\nan unknown account answers\n%s", tool, bob, zed)
+		}
+		if !strings.Contains(zed, "not-found") {
+			t.Errorf("%s: an unknown account answers %s, want not-found", tool, zed)
+		}
+	}
+	// The account that holds the calendar is still served by name.
+	if out := mustCall(t, cs, "events_list", with(monday(), "accounts", []string{"alice@example.com"})); len(list(out["events"])) == 0 {
+		t.Errorf("alice by name: %v, want her events", out)
 	}
 }

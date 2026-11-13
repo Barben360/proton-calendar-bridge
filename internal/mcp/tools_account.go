@@ -280,7 +280,7 @@ func (ss *session) logout(ctx context.Context, req *sdkmcp.CallToolRequest, in l
 	if in.Account == "" {
 		return logoutOut{}, nil, refusedErr("account is required", "the status tool lists the accounts this session can see")
 	}
-	ts, err := ss.accounts([]string{in.Account})
+	ts, err := ss.accounts(ctx, []string{in.Account})
 	if err != nil {
 		return logoutOut{}, nil, err
 	}

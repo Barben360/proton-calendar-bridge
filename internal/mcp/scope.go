@@ -48,8 +48,10 @@ func (ss *session) visible() []service.AccountInfo {
 
 // accounts resolves a call's accounts argument: every visible account when
 // empty, else those named (local ID or address), in the Hub's order. A
-// name that is no visible account is not-found, the same as an unknown one.
-func (ss *session) accounts(names []string) ([]target, error) {
+// name that is no visible account is not-found, the same as an unknown one;
+// so is, under a calendar grant, an account holding none of the granted
+// calendars (holdsGrantedCalendar), lest a name probe which accounts exist.
+func (ss *session) accounts(ctx context.Context, names []string) ([]target, error) {
 	vis := ss.visible()
 	var out []target
 	if len(names) == 0 {
@@ -61,7 +63,7 @@ func (ss *session) accounts(names []string) ([]target, error) {
 	asked := map[string]string{} // local ID → the name given
 	for _, n := range names {
 		i := slices.IndexFunc(vis, func(a service.AccountInfo) bool { return namesAccount(n, a) })
-		if i < 0 {
+		if i < 0 || !ss.holdsGrantedCalendar(ctx, vis[i].ID) {
 			return nil, noAccount(n)
 		}
 		if _, dup := asked[vis[i].ID]; !dup {

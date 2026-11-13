@@ -209,7 +209,7 @@ func addCalendarsList(ss *session) {
 		Description: "The calendars of the accounts this session can see: ID, account, colour, type, whether pcb writes to it, and the default one.",
 		Annotations: readOnly("List calendars"),
 	}, func(ctx context.Context, in accountsIn) (calendarsOut, string, error) {
-		ts, err := ss.accounts(in.Accounts)
+		ts, err := ss.accounts(ctx, in.Accounts)
 		if err != nil {
 			return calendarsOut{}, "", err
 		}
@@ -290,7 +290,7 @@ func addFreeBusy(ss *session) {
 		if err != nil {
 			return freeBusyOut{}, "", err
 		}
-		ts, err := ss.accounts(in.Accounts)
+		ts, err := ss.accounts(ctx, in.Accounts)
 		if err == nil {
 			ts, err = ss.withCalendars(ctx, ts, in.Calendars)
 		}
@@ -482,7 +482,7 @@ func (ss *session) listEvents(ctx context.Context, q listQuery) (eventsOut, stri
 	case limit < 0 || limit > service.MaxAgendaLimit:
 		return eventsOut{}, "", refusedErr(fmt.Sprintf("limit must be between 1 and %d", service.MaxAgendaLimit), "ask for fewer occurrences per page")
 	}
-	ts, err := ss.accounts(q.Accounts)
+	ts, err := ss.accounts(ctx, q.Accounts)
 	if err == nil {
 		ts, err = ss.withCalendars(ctx, ts, q.Calendars)
 	}

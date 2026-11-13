@@ -252,14 +252,11 @@ func addEventCreate(ss *session) {
 		case in.Calendar == "":
 			return writeOut{}, "", refusedErr("calendar is empty", "give a calendar's ID (calendars_list lists them)")
 		}
-		ts, err := ss.accounts([]string{in.Account})
+		ts, err := ss.accounts(ctx, []string{in.Account})
 		if err != nil {
 			return writeOut{}, "", err
 		}
-		t := ts[0]
-		if !ss.holdsGrantedCalendar(ctx, t.info.ID) {
-			return writeOut{}, "", noAccount(in.Account)
-		}
+		t := ts[0] // holds a granted calendar, else accounts answered noAccount
 		if !ss.grant.seesCalendar(in.Calendar) {
 			return writeOut{}, "", noCalendar(in.Calendar)
 		}
