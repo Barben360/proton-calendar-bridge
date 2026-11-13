@@ -451,7 +451,7 @@ func parseWhen(p *Property, value string, n *notes) (when, *Refusal) {
 		p.Params = setParam(p.Params, "TZID", name)
 		n.add(noteMozilla)
 	}
-	t, err := time.ParseInLocation(localLayout, value, loc)
+	t, err := parseWall(value, loc)
 	if err != nil {
 		return when{}, refuse(BadData, "a malformed DATE-TIME")
 	}

@@ -762,3 +762,60 @@ func TestHubAgendaSelects(t *testing.T) {
 		t.Errorf("removed account: %q", ee.Error())
 	}
 }
+
+// Review A finding 1: a weekly 02:30 Europe/Paris series with an override
+// on 2026-10-25, the day 02:30 happens twice. Its RECURRENCE-ID is the
+// first 02:30 (RFC 5545 §3.3.5), as Expand reads it: the list shows the
+// override's own fields, an occurrence update edits that override (one
+// RECURRENCE-ID, DTEND after DTSTART), an occurrence delete removes it.
+func TestDSTOverlapOverrideIsTheOccurrence(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 10, 11, 0, 30, 0, 0, time.UTC).Unix() // 02:30 CEST
+	rid := time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC).Unix()   // the first 02:30
+	moved := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC).Unix()  // 10:00 CET
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "dst@x", Start: first, End: first + 3600, RRule: "FREQ=WEEKLY", Color: green,
+			Card: eventCard("dst@x", "DTSTART;TZID=Europe/Paris:20261011T023000", "DTEND;TZID=Europe/Paris:20261011T033000",
+				"SUMMARY:Night shift", "RRULE:FREQ=WEEKLY")})
+		f.AddEvent(cal, protontest.Event{UID: "dst@x", Start: moved, End: moved + 3600, RecurrenceID: &rid, Color: green,
+			Card: eventCard("dst@x", "RECURRENCE-ID;TZID=Europe/Paris:20261025T023000", "DTSTART;TZID=Europe/Paris:20261025T100000",
+				"DTEND;TZID=Europe/Paris:20261025T110000", "SUMMARY:Moved shift")})
+	}).start(t)
+	req := service.OccurrencesRequest{From: at(rid - day), To: at(rid + 2*day)}
+	p := occurrences(t, r.svc, req)
+	if len(p.Items) != 1 {
+		t.Fatalf("%d occurrences on 2026-10-25, want the override: %v", len(p.Items), summaries(p.Items))
+	}
+	ov := p.Items[0]
+	if ov.Summary != "Moved shift" || !ov.Occurrence.Start.Equal(at(moved)) {
+		t.Fatalf("2026-10-25: %q at %s, want the override's own summary at %s", ov.Summary, ov.Occurrence.Start.UTC(), at(moved))
+	}
+
+	if _, err := r.svc.UpdateEvent(t.Context(), ov.Ref, ov.ETag, service.ScopeOccurrence, service.EventFields{Summary: ptr("Renamed shift")}, false); err != nil {
+		t.Fatalf("UpdateEvent(occurrence): %v", err)
+	}
+	data := string(r.object(t, "dst@x").Data)
+	if n := strings.Count(data, "RECURRENCE-ID;TZID=Europe/Paris:20261025T023000"); n != 1 {
+		t.Errorf("%d overrides at 2026-10-25 02:30 after the update, want 1:\n%s", n, data)
+	}
+	contains(t, "the override", []byte(data), "SUMMARY:Renamed shift", "DTSTART;TZID=Europe/Paris:20261025T100000", "DTEND;TZID=Europe/Paris:20261025T110000")
+	if strings.Contains(data, "Moved shift") {
+		t.Errorf("the old override is still there:\n%s", data)
+	}
+	p = occurrences(t, r.svc, req)
+	if got := summaries(p.Items); !slices.Equal(got, []string{"Renamed shift"}) {
+		t.Fatalf("after the update: %v", got)
+	}
+
+	if err := r.svc.DeleteEvent(t.Context(), p.Items[0].Ref, p.Items[0].ETag, service.ScopeOccurrence); err != nil {
+		t.Fatalf("DeleteEvent(occurrence): %v", err)
+	}
+	if got := summaries(occurrences(t, r.svc, req).Items); len(got) != 0 {
+		t.Errorf("after the delete, 2026-10-25 still shows %v", got)
+	}
+	data = string(r.object(t, "dst@x").Data)
+	if strings.Contains(data, "RECURRENCE-ID") || strings.Contains(data, "Renamed shift") {
+		t.Errorf("the override is still stored:\n%s", data)
+	}
+	contains(t, "the series", []byte(data), "EXDATE;TZID=Europe/Paris:20261025T023000")
+}

@@ -628,7 +628,8 @@ func shiftOf(a, b Time) time.Duration {
 
 // shiftException moves t, an exception of the series starting at start, by
 // delta on the series' wall clock: the occurrence it names moves as the
-// series' occurrences do. false when t is not of start's value type.
+// series' occurrences do (a wall clock in a DST overlap or gap resolved as
+// Expand does). false when t is not of start's value type.
 func shiftException(t, start Time, delta time.Duration) (Time, bool) {
 	if (t.Date != "") != (start.Date != "") || t.Floating != start.Floating {
 		return Time{}, false
@@ -642,7 +643,7 @@ func shiftException(t, start Time, delta time.Duration) (Time, bool) {
 	}
 	loc := wallZone(start)
 	w := wallAsUTC(t.At, loc).Add(delta)
-	t.At = time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), w.Nanosecond(), loc)
+	t.At = resolve(w, loc)
 	return t, true
 }
 

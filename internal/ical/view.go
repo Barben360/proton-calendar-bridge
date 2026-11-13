@@ -251,7 +251,7 @@ func decodeTime(p Property, value string) (Time, error) {
 	if !ok {
 		return Time{}, errors.New("a TZID that is not a known time zone")
 	}
-	t, err := time.ParseInLocation(localLayout, value, loc)
+	t, err := parseWall(value, loc)
 	if err != nil {
 		return Time{}, errors.New("a malformed DATE-TIME")
 	}

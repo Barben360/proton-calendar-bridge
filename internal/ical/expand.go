@@ -603,6 +603,18 @@ func (ru *rule) dayIn(y int, m time.Month, dflt int) int {
 	return d
 }
 
+// parseWall reads value, a local DATE-TIME (no Z), as a wall clock of loc
+// by resolve's rule: every reader of a TZID time (the view, the edits, the
+// CalDAV write path) gives the instant Expand gives, DST overlaps and gaps
+// included.
+func parseWall(value string, loc *time.Location) (time.Time, error) {
+	w, err := time.Parse(localLayout, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return resolve(w, loc), nil
+}
+
 // resolve is the instant of wall clock w (its fields read as a local time of
 // loc), by RFC 5545 §3.3.5, which §3.3.10 applies to recurrence instances: a
 // local time that occurs twice is the first of the two; one that does not

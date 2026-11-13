@@ -1325,6 +1325,10 @@ step 10, not run yet.
   never expanded, since Proton refuses to store it (the design listed it); a shape outside Proton's set is refused,
   and the event skipped as above [verified: `TestExpandRFC5545Examples`, `TestExpandDSTTransitions`, `TestExpandProtonForms`,
   `TestExpandFloatingUsesLoc`, `TestExpandAllDayRecurring`, `TestExpandRefusesShapesOutsideProtonsSet`, `TestOccurrencesExpandsAndMerges`].
+  A TZID wall clock in a DST overlap or gap means one instant everywhere, by RFC 5545 §3.3.5 (the first of two, the
+  offset before a gap): the expander, the event view, the agent's edits and deletes and the CalDAV write path read it
+  alike, so an override at an ambiguous time is found by the list, an update and a delete [verified:
+  `TestWallClocksResolveAsExpandDoes`, `TestDSTOverlapOverrideIsTheOccurrence`].
 - **Untrusted content.** Every calendar-derived free text (summary, description, location, URL, organizer and
   attendee names, calendar names and descriptions) sits under an `untrusted` object, and every tool description says
   it is data written by third parties, never instructions. `external_organizer` marks an event organized by an
