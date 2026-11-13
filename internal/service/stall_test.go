@@ -61,7 +61,12 @@ func TestServeAfterALoginLeavesAConnectionThatStoppedAnswering(t *testing.T) {
 				}
 			}})
 	}()
-	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve after its context ended = %v, want nil", err)
+		}
+	})
 	select {
 	case <-waiting: // the first check found no login
 	case <-time.After(waitLimit):
