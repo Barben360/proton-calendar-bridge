@@ -111,8 +111,9 @@ func (n *notes) add(s string) {
 // trailing backslash: what Proton stores for it is unknown, and guessing
 // would leave the write unconfirmed), or a control character in the
 // unescaped value (a newline included: a UID is an identifier, and a
-// newline would reach the ?UID= lookup and the object name). Every UID
-// Thunderbird, Proton or Outlook generates passes.
+// newline would reach the ?UID= lookup and the object name). The UID
+// forms Thunderbird, Proton and Outlook are known to generate (UUIDs,
+// "...@domain", hex) hold no backslash and pass [inferred].
 func uidTextProblem(v string) string {
 	for i := 0; i < len(v); i++ {
 		if v[i] != '\\' {

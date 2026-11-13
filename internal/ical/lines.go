@@ -56,9 +56,9 @@ func UnescapeText(v string) string {
 }
 
 // EscapeText writes v as a TEXT value (RFC 5545 §3.3.11): a backslash,
-// ";", "," and a newline are escaped; UnescapeText undoes it. pcb serves
-// Proton's unescaped UID column so where no part carries the UID line
-// (a placeholder).
+// ";", "," and a newline are escaped; UnescapeText undoes it. pcb uses it
+// to serve Proton's unescaped UID column where no part carries the UID
+// line (a placeholder).
 func EscapeText(v string) string {
 	if !strings.ContainsAny(v, "\\;,\n") {
 		return v
