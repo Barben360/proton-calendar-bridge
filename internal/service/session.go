@@ -166,12 +166,13 @@ func (l *Local) withSession(ctx context.Context, op func(context.Context, *api.C
 	if !errors.Is(err, api.ErrSessionEnded) {
 		return l.opError(ctx, st, err)
 	}
-	if c, acc, st, err = l.relogin(ctx, c.Tokens()); err != nil {
+	ended := err
+	if c, acc, st, err = l.relogin(ctx, c.Tokens(), ended); err != nil {
 		return err
 	}
 	err = op(ctx, c, acc)
 	if errors.Is(err, api.ErrSessionEnded) {
-		return l.humanNeeded(ctx, st, mustAct(sessionEnded, "run pcb login"))
+		return l.humanNeeded(ctx, st, sessionEndedBy(err, "run pcb login"))
 	}
 	return l.opError(ctx, st, err)
 }
@@ -189,7 +190,7 @@ func (l *Local) opError(ctx context.Context, st store.State, err error) error {
 // already holds another session (another process relogged in), that one is
 // used. Otherwise, with unattended relogin, it logs in once with the sealed
 // credentials; without, the login is marked needs-login.
-func (l *Local) relogin(ctx context.Context, ended api.Tokens) (*api.Client, store.Account, store.State, error) {
+func (l *Local) relogin(ctx context.Context, ended api.Tokens, cause error) (*api.Client, store.Account, store.State, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed.Load() {
@@ -203,7 +204,7 @@ func (l *Local) relogin(ctx context.Context, ended api.Tokens) (*api.Client, sto
 		return l.session(ctx)
 	}
 	if !st.Unattended || acc.Relogin == nil {
-		return nil, store.Account{}, store.State{}, l.humanNeeded(ctx, st, mustAct(sessionEnded, "run pcb login"))
+		return nil, store.Account{}, store.State{}, l.humanNeeded(ctx, st, sessionEndedBy(cause, "run pcb login"))
 	}
 	if err := l.reloginOnce(ctx, st, acc); err != nil {
 		return nil, store.Account{}, store.State{}, err

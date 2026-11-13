@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // startTestServer serves h on 127.0.0.1:0; entered gets a value when a
@@ -234,5 +236,20 @@ func TestListenNetworkIsTCP4OnlyForIPv4Literals(t *testing.T) {
 		if got := listenNetwork(listen); got != want {
 			t.Errorf("listenNetwork(%q) = %q, want %q", listen, got, want)
 		}
+	}
+}
+
+// A session that ended with no Proton answer to read (no refresh available)
+// logs without a status or code: none is invented.
+func TestLogPassInventsNoProtonAnswer(t *testing.T) {
+	var b bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&b, nil))
+	logPass(log, service.WatchPass{Err: &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the Proton session has ended"), Hint: "run pcb login"}})
+	got := b.String()
+	if !strings.Contains(got, `msg="sync pass failed"`) || !strings.Contains(got, "run pcb login") {
+		t.Fatalf("the failed pass is not logged:\n%s", got)
+	}
+	if strings.Contains(got, "proton_status") || strings.Contains(got, "proton_code") {
+		t.Errorf("a status or code was invented:\n%s", got)
 	}
 }

@@ -43,6 +43,9 @@ type detail struct {
 	class      string        // the error class Health reports (errorClass), "" when the code says enough
 	login      bool          // a MustAct a login fixes (loginFixes)
 	switched   bool          // another account is logged in than Serve serves (accountSwitched)
+	// protonStatus and protonCode are what Proton answered when it ended the
+	// session (sessionEndedBy); 0 when it answered nothing.
+	protonStatus, protonCode int
 }
 
 func (d *detail) Error() string { return d.msg }
@@ -69,6 +72,31 @@ func withClass(ee *exitcode.Error, class string) *exitcode.Error {
 // sealed secrets rolled back.
 func loginNeeded(msg, hint string) *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.MustAct, Err: &detail{msg: msg, login: true}, Hint: hint}
+}
+
+// sessionEndedBy is the MustAct for a session Proton ended, cause being what
+// ended it. When Proton's refusal is in cause's chain (a refresh refused, or
+// a 401 after the refresh), its HTTP status and code ride on the error for
+// ProtonRefusal; nothing else of it is kept (not its text, not a token).
+func sessionEndedBy(cause error, hint string) *exitcode.Error {
+	d := &detail{msg: sessionEnded}
+	var ae *api.Error
+	if errors.As(cause, &ae) {
+		d.protonStatus, d.protonCode = ae.Status, ae.Code
+	}
+	return &exitcode.Error{Code: exitcode.MustAct, Err: d, Hint: hint}
+}
+
+// ProtonRefusal returns the HTTP status and Proton code of the answer that
+// ended the session, when err says the session ended because Proton refused;
+// ok is false when Proton answered nothing (no refresh available) or err is
+// of another kind. For logs: nothing but two numbers.
+func ProtonRefusal(err error) (status, code int, ok bool) {
+	var d *detail
+	if errors.As(err, &d) && d.protonStatus != 0 {
+		return d.protonStatus, d.protonCode, true
+	}
+	return 0, 0, false
 }
 
 // asLoginNeeded is ee, a MustAct, marked as one a login fixes, its message,
@@ -212,7 +240,9 @@ func mapError(err error, keyFile string) error {
 	case errors.Is(err, keys.ErrKeysLocked):
 		return mustAct("the password does not unlock the account keys", "check the password; accounts in two-password mode are not supported")
 	case errors.Is(err, api.ErrSessionEnded):
-		return loginNeeded("the Proton session has ended", "run pcb login")
+		ee := sessionEndedBy(err, "run pcb login")
+		ee.Err.(*detail).login = true
+		return ee
 	case errors.As(err, &uve):
 		return blocked(uve.Error(), "complete the verification once in a browser on this network, then retry later")
 	case errors.Is(err, auth.ErrServerProof):

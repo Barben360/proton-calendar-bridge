@@ -1372,3 +1372,71 @@ func TestServePortInUseSaysWhyOnce(t *testing.T) {
 		t.Errorf("stderr = %q, want it to end with %q", got, want)
 	}
 }
+
+// HUMAN-CHECKS 7.3.4 (live 2026-11-13): when Proton refuses the refresh and
+// the session ends, the "sync pass failed" line carries the HTTP status and
+// the Proton code of the refusal, so a live run can confirm the signal. The
+// message and hint stay the generic ones; nothing else of Proton's answer
+// (its text, the tokens) is logged.
+func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		end        func(*protontest.Fake)
+		wantStatus string
+		wantCode   string
+	}{
+		{"revoked session", func(f *protontest.Fake) { f.RevokeSessions() }, "proton_status=422", "proton_code=10013"},
+		{"refresh refused with another status and code", func(f *protontest.Fake) {
+			f.ExpireAccessTokens()
+			f.FailNext("POST", "/auth/v4/refresh", http.StatusUnauthorized, 4242, 0)
+		}, "proton_status=401", "proton_code=4242"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{})
+			r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
+			r.want(exitcode.OK, "login", "--non-interactive", "--json")
+			fp := &fastPoll{states: make(chan service.ServeState, 16), passes: make(chan service.WatchPass, 16)}
+			r.mk = func() (service.API, error) {
+				cfg, err := config.Load(config.Path(r.dirs), r.dirs)
+				if err != nil {
+					return nil, err
+				}
+				l, err := service.NewLocal(service.Options{Dirs: r.dirs, Config: cfg, Now: func() time.Time { return t0 },
+					Sleep: func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }})
+				fp.Local = l
+				return fp, err
+			}
+			tc.end(r.f)
+			s := startServe(t, r, nil, "--wait-for-login", "--listen", "127.0.0.1:0")
+			select {
+			case p := <-fp.passes:
+				if p.Err == nil {
+					t.Fatal("the pass after the session ended did not fail")
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("no pass")
+			}
+			var line string
+			for _, l := range strings.Split(s.errb.String(), "\n") {
+				if strings.Contains(l, `msg="sync pass failed"`) {
+					line = l
+				}
+			}
+			if line == "" {
+				t.Fatalf("no sync pass failed line:\n%s", s.errb.String())
+			}
+			for _, want := range []string{tc.wantStatus, tc.wantCode, "the Proton session has ended", "hint=\"run pcb login\""} {
+				if !strings.Contains(line, want) {
+					t.Errorf("log line lacks %q:\n%s", want, line)
+				}
+			}
+			for _, secret := range []string{"Invalid refresh token", "fakeacc", "fakeref"} {
+				if strings.Contains(s.errb.String(), secret) {
+					t.Errorf("logs carry %q:\n%s", secret, s.errb.String())
+				}
+			}
+		})
+	}
+}
