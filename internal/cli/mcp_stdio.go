@@ -51,9 +51,14 @@ func (l *lostRace) Unwrap() error { return l.err }
 // start, and again whenever the daemon it relays to goes away:
 //  1. a daemon answers on the control socket: relay the session to it;
 //  2. else, with a system-scope pcb unit installed: exit 20;
-//  3. else become the session daemon (kind mcp, no listener) and serve
+//  3. else, with a pcb user unit that systemd reports active or starting
+//     (its Restart= gap included): wait for its daemon (IO.UnitWait, 30 s)
+//     and relay to it, else exit 20 naming pcb service start; never take
+//     the state from the unit, which would fail its restarts until it
+//     gives up;
+//  4. else become the session daemon (kind mcp, no listener) and serve
 //     the session in process;
-//  4. another pcb won the state meanwhile, or the daemon refused the
+//  5. another pcb won the state meanwhile, or the daemon refused the
 //     relay: wait (lockBackoff) and probe again; the waits spent, exit 20.
 //
 // The end of stdin ends it with exit 0, as does a signal.
@@ -104,6 +109,26 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 				return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("pcb runs as a system service here"),
 					Hint: "use its remote /mcp with a token ([mcp] remote = true; a loopback listen is enough)"}
 			}
+			if userUnitUp(ctx, a.Host) {
+				wait := a.UnitWait
+				if wait <= 0 {
+					wait = defaultUnitWait
+				}
+				log.Info("the pcb user service is active or starting: waiting for its daemon", "for", wait.String())
+				up, err := a.waitForDaemon(ctx, socket, wait)
+				switch {
+				case err != nil:
+					return err
+				case ctx.Err() != nil:
+					return nil
+				case up:
+					waits = lockBackoff()
+					continue
+				}
+				return &exitcode.Error{Code: exitcode.Blocked,
+					Err:  errors.New("the pcb user service is installed and active or starting, but its daemon did not answer within " + wait.String()),
+					Hint: "pcb mcp never takes the state from the service: see pcb service status, and run pcb service start if it is down"}
+			}
 			err = a.serveSession(ctx, st, g, dirs, cfg, log)
 			var lost *lostRace
 			if !errors.As(err, &lost) {
@@ -146,6 +171,56 @@ func (a *app) daemonAnswers(ctx context.Context, socket string) (bool, error) {
 		return false, nil //nolint:nilerr // stopping: the race decides
 	}
 	return true, nil
+}
+
+// defaultUnitWait is how long pcb mcp waits for a starting user unit's
+// daemon: longer than the unit's RestartSec (10 s) and its start.
+const defaultUnitWait = 30 * time.Second
+
+// unitPoll is how often that wait probes the control socket.
+const unitPoll = 250 * time.Millisecond
+
+// userUnitUp reports whether a pcb user unit is installed and systemd
+// reports it active, starting (activating, its Restart= gap included),
+// reloading or stopping on its way to a restart. A unit inactive, failed or
+// that systemctl cannot tell about counts as down: the person stopped it,
+// or there is no systemd user manager to ask.
+func userUnitUp(ctx context.Context, h install.Host) bool {
+	if scope, _, err := install.Detect(h); err != nil || scope != install.ScopeUser {
+		return false
+	}
+	st, err := install.Show(ctx, h, install.ScopeUser)
+	if err != nil {
+		return false
+	}
+	switch st.ActiveState {
+	case "active", "activating", "reloading", "refreshing", "deactivating":
+		return true
+	}
+	return false
+}
+
+// waitForDaemon probes the control socket every unitPoll until a daemon
+// answers (true) or wait has passed (false); ctx's end ends it (false).
+func (a *app) waitForDaemon(ctx context.Context, socket string, wait time.Duration) (bool, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		up, err := a.daemonAnswers(ctx, socket)
+		if err != nil || up {
+			return up, err
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return false, nil
+		}
+		timer := time.NewTimer(min(unitPoll, left))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, nil
+		}
+	}
 }
 
 // systemUnit reports whether a system-scope pcb unit is installed (as pcb

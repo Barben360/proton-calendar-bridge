@@ -1644,8 +1644,13 @@ M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal
 - At start, and whenever the daemon it relays to goes away: a daemon answering on the control socket gets the session
   relayed (a stopping one counts as none); else, with a system-scope pcb unit installed (detected as `pcb uninstall` does),
   exit 20 `pcb runs as a system service here`, hint `use its remote /mcp with a token ([mcp] remote = true; a loopback listen
-  is enough)`, so a second state never serves the same Proton account unseen; else `pcb mcp` becomes the session daemon
-  (kind `mcp`, §4.1). Two started together end as one session daemon and one relay. A start another pcb blocks (the
+  is enough)`, so a second state never serves the same Proton account unseen; else, with a pcb user unit installed that
+  systemd reports active or starting (`activating`, the `Restart=` gap included, or `reloading`/`deactivating`), `pcb mcp`
+  never takes the state from it: it probes the control socket for 30 s and relays once the unit's daemon answers, else
+  exit 20 with the hint to run `pcb service start` (final review C I2: a session daemon there made the unit fail its
+  restarts until `StartLimitBurst` left it `failed`) [verified: `TestMCPStdioWaitsForARestartingUserUnit`]; a user unit
+  inactive, failed or disabled changes nothing [verified: `TestMCPStdioServesNextToAStoppedUserUnit`]; else `pcb mcp`
+  becomes the session daemon (kind `mcp`, §4.1). Two started together end as one session daemon and one relay. A start another pcb blocks (the
   state's locks) or a daemon that refuses the relay is retried after 250 ms, doubling, 10 s in all, then exit 20
   [verified: `TestMCPStdioRelaysToARunningDaemon`, `TestMCPStdioRefusesNextToASystemUnit`, `TestMCPStdioBecomesTheDaemon`,
   `TestTwoMCPStdioEndAsDaemonAndRelay`, `TestMCPLockRaceBacksOffAtMostTenSeconds`, `TestRelayRefusedIsNotADaemonGone`].

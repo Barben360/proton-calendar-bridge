@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -49,6 +50,10 @@ type IO struct {
 	// Keyring is the desktop keyring pcb doctor probes for a state sealed
 	// with it (nil: the session bus's, doctor.SystemKeyring).
 	Keyring service.Keyring
+	// UnitWait is how long pcb mcp waits for the daemon of a pcb user unit
+	// that systemd reports active or starting (0: 30 s, longer than the
+	// unit's RestartSec).
+	UnitWait time.Duration
 	// Signals subscribes to SIGINT and SIGTERM (signal.Notify) and returns
 	// the function that unsubscribes: pcb serve exits at once on a second
 	// one while it stops (ruling M5-P22).

@@ -49,6 +49,12 @@ type readCloser struct {
 // probes (IO.Keyring).
 func startMCP(t *testing.T, r *rig, kr service.Keyring, args ...string) *mcpRun {
 	t.Helper()
+	return startMCPWith(t, r, kr, nil, args...)
+}
+
+// startMCPWith is startMCP with mod, when set, changing its IO last.
+func startMCPWith(t *testing.T, r *rig, kr service.Keyring, mod func(*cli.IO), args ...string) *mcpRun {
+	t.Helper()
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +70,9 @@ func startMCP(t *testing.T, r *rig, kr service.Keyring, args ...string) *mcpRun 
 	}
 	if kr != nil {
 		pio.Keyring = kr
+	}
+	if mod != nil {
+		mod(&pio)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	m.stop = cancel
@@ -309,6 +318,107 @@ func TestMCPStdioRefusesNextToASystemUnit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.dirs.State, "layout.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("layout.json exists (%v): pcb mcp created the state", err)
+	}
+}
+
+// unitRunner answers systemctl --user show for a pcb user unit in state
+// (ActiveState/SubState) and runs nothing else.
+type unitRunner struct{ active, sub string }
+
+func (u unitRunner) Output(context.Context, string, ...string) ([]byte, int, error) {
+	return nil, -1, errors.New("tests run no other system command")
+}
+
+func (u unitRunner) Stream(_ context.Context, stdout, _ io.Writer, name string, args ...string) (int, error) {
+	if name != "systemctl" || len(args) < 2 || args[0] != "--user" || args[1] != "show" {
+		return -1, errors.New("tests run no other system command")
+	}
+	_, err := io.WriteString(stdout, "ActiveState="+u.active+"\nSubState="+u.sub+"\nUnitFileState=enabled\nMainPID=0\n")
+	return 0, err
+}
+
+// userUnitHost is a host with a pcb user unit installed (its file under
+// r's XDG_CONFIG_HOME) that systemctl reports in active/sub; wait is how
+// long pcb mcp waits for that unit's daemon (IO.UnitWait).
+func userUnitHost(t *testing.T, r *rig, active, sub string, wait time.Duration) func(*cli.IO) {
+	t.Helper()
+	root := t.TempDir()
+	unit := filepath.Join(root, r.env["XDG_CONFIG_HOME"], "systemd", "user", "pcb.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func(o *cli.IO) {
+		o.Host.Root, o.Host.Run = root, unitRunner{active: active, sub: sub}
+		o.Host.Env = func(k string) string { return r.env[k] }
+		o.UnitWait = wait
+	}
+}
+
+// Review C I2: with a pcb user unit installed and active or activating
+// (its restart gap: SubState auto-restart), pcb mcp never takes the state
+// from it. It waits for the unit's daemon and relays once its socket
+// answers; when none does in time, exit 20 with the hint pcb service
+// start, and serve.lock was never taken.
+func TestMCPStdioWaitsForARestartingUserUnit(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	lock := filepath.Join(r.dirs.State, "serve.lock")
+	for _, st := range [][2]string{{"activating", "auto-restart"}, {"active", "running"}} {
+		m := startMCPWith(t, r, nil, userUnitHost(t, r, st[0], st[1], 700*time.Millisecond))
+		if code := m.exit(); code != exitcode.Blocked {
+			t.Fatalf("%s/%s: exit %d, want 20\nstderr: %s", st[0], st[1], code, m.errb.String())
+		}
+		if !strings.Contains(m.errb.String(), "Hint: ") || !strings.Contains(m.errb.String(), "pcb service start") {
+			t.Errorf("%s/%s: stderr %q, want a hint naming pcb service start", st[0], st[1], m.errb.String())
+		}
+		if strings.Contains(m.errb.String(), "serving this agent session") {
+			t.Errorf("%s/%s: pcb mcp served the session itself:\n%s", st[0], st[1], m.errb.String())
+		}
+		if b, err := os.ReadFile(lock); err == nil && strings.HasSuffix(strings.TrimSpace(string(b)), " mcp") {
+			t.Errorf("%s/%s: serve.lock = %q: pcb mcp took the state from the unit", st[0], st[1], b)
+		}
+		if m.stdout.String() != "" {
+			t.Errorf("stdout = %q, want nothing", m.stdout.String())
+		}
+	}
+
+	// The unit's daemon comes up during the wait: pcb mcp relays to it.
+	m := startMCPWith(t, r, nil, userUnitHost(t, r, "activating", "auto-restart", 30*time.Second))
+	time.Sleep(300 * time.Millisecond)
+	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
+	s.listening()
+	cs := m.connect("2025-11-25")
+	if got := mcpStatus(t, cs); !slices.Equal(got, []string{r.f.Username}) {
+		t.Errorf("status accounts = %v", got)
+	}
+	if st := socketStatus(t, r); st.Daemon == nil || st.Daemon.Kind != "serve" || st.MCP == nil || st.MCP.Sessions["relay"] != 1 {
+		t.Errorf("daemon %+v mcp %+v, want the unit's daemon serving one relay session", st.Daemon, st.MCP)
+	}
+}
+
+// A pcb user unit installed but stopped, failed or disabled (the person
+// stopped it): pcb mcp serves the session itself, as without a unit.
+func TestMCPStdioServesNextToAStoppedUserUnit(t *testing.T) {
+	t.Parallel()
+	for _, st := range [][2]string{{"inactive", "dead"}, {"failed", "failed"}} {
+		r := newRig(t, &protontest.Options{})
+		r.want(exitcode.OK, "login", "--non-interactive", "--json")
+		m := startMCPWith(t, r, nil, userUnitHost(t, r, st[0], st[1], 30*time.Second))
+		cs := m.connect("2025-11-25")
+		if got := mcpStatus(t, cs); !slices.Equal(got, []string{r.f.Username}) {
+			t.Errorf("%s: status accounts = %v", st[0], got)
+		}
+		if s := socketStatus(t, r); s.Daemon == nil || s.Daemon.Kind != "mcp" {
+			t.Errorf("%s: daemon %+v, want the session daemon (kind mcp)", st[0], s.Daemon)
+		}
+		_ = cs.Close()
+		if code := m.exit(); code != exitcode.OK {
+			t.Errorf("%s: exit %d\nstderr: %s", st[0], code, m.errb.String())
+		}
 	}
 }
 
