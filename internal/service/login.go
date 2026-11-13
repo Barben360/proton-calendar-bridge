@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // pendingLogin is a login that passed SRP and waits for its 2FA code. It
@@ -128,6 +129,9 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 			return LoginResult{}, usage(unattendedHint, "pass the otpauth:// URI instead of a one-time code")
 		}
 	}
+	if err := l.sealerUsable(ctx); err != nil {
+		return LoginResult{}, err
+	}
 	l.dropPending(ctx)
 	l.expired = false
 
@@ -174,6 +178,24 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{State: StateNeedsTOTP, Username: req.Username, AccountID: p.UserID, LoginExpires: &exp}, nil
 	}
 	return l.finish(ctx, pl, totp, now)
+}
+
+// sealerUsable checks, on a state sealed with the desktop keyring, that the
+// keyring answers and is unlocked before a login spends anything: the SRP
+// call, Proton's login and the guard's 60 s would be lost on a seal that
+// cannot succeed (ruling R16). It is the locked or the unavailable error
+// then; nil on a key-file state, which has nothing to ask.
+func (l *Local) sealerUsable(ctx context.Context) error {
+	ss, ok := l.o.Sealer.(*seal.SecretService)
+	if !ok {
+		return nil
+	}
+	pctx, cancel := context.WithTimeout(ctx, ProbeTimeout)
+	defer cancel()
+	if err := seal.Probe(pctx, ss.Keyring); err != nil {
+		return l.fail(err)
+	}
+	return nil
 }
 
 // begin runs Login's SRP step, unless a test replaced it (skipSRP).

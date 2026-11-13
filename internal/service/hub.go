@@ -36,6 +36,20 @@ const (
 // Sealer are one for every account.
 type HubOptions struct {
 	Options
+	// Keyring is the desktop keyring a new state may seal with and an
+	// existing secret-service state does; nil means seal.DBusKeyring("").
+	Keyring Keyring
+}
+
+// Keyring is the desktop keyring (freedesktop Secret Service) the Hub
+// seals with when the state's layout says secret-service: the same method
+// set as seal.Keyring, so a seal.Keyring value is one, and callers that
+// may not import the store (internal/ui) can pass one.
+type Keyring interface {
+	Get(ctx context.Context, attrs map[string]string) ([]byte, error)
+	Set(ctx context.Context, label string, attrs map[string]string, secret []byte) error
+	Locked(ctx context.Context) (bool, error)
+	Delete(ctx context.Context, attrs map[string]string) error
 }
 
 // Hub holds every account of a state directory, one Local per account
@@ -169,9 +183,12 @@ func (a *hubAccount) retire(before func() error) (gone bool, err error) {
 // (M5's, or a new one) is first moved to the per-account layout, under the
 // root's layout.lock and sync.lock, both taken without waiting: an M5 pcb
 // holding sync.lock is Blocked (ruling R2: with the layout in place neither
-// is touched). It removes the pending adds older than pendingExpiry and
-// the abandoned adds older than abandonedAge, and opens a Local per other
-// account directory.
+// is touched). A new state (no layout.json, no account, no legacy file, no
+// interrupted migration) instead gets its sealer chosen (chooseSealer)
+// and recorded in layout.json under the same locks; an existing layout is
+// never probed, and o.Sealer, when set, wins. It removes the pending adds
+// older than pendingExpiry and the abandoned adds older than abandonedAge,
+// and opens a Local per other account directory.
 func OpenHub(o HubOptions) (*Hub, error) {
 	base := o.Options
 	if base.Dirs.State == "" || base.Config.Proton.BaseURL == "" || base.Config.Secrets.KeyFile == "" {
@@ -179,9 +196,6 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	}
 	if base.Now == nil {
 		base.Now = time.Now
-	}
-	if base.Sealer == nil {
-		base.Sealer = &seal.KeyFile{Path: base.Config.Secrets.KeyFile}
 	}
 	if base.Limiter == nil {
 		base.Limiter = access.NewLimiter(base.Now)
@@ -191,14 +205,27 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, blocked("cannot create the state directory "+root, "make sure its parent directory is writable by this user")
 	}
+	kr := o.Keyring
+	if kr == nil {
+		kr = seal.DBusKeyring("")
+	}
+	var choose func() (string, error)
+	if base.Sealer == nil {
+		choose = func() (string, error) { return chooseSealer(base.Config.Secrets.Backend, kr) }
+	}
 	info, err := store.ReadLayout(root)
 	if err == nil && info.Version != store.LayoutVersion {
-		if err = migrateLayout(root); err == nil {
+		if err = migrateLayout(root, choose); err == nil {
 			info, err = store.ReadLayout(root)
 		}
 	}
 	if err != nil {
 		return nil, layoutError(err, root, info.Legacy)
+	}
+	if base.Sealer == nil {
+		if base.Sealer, err = NewSealer(root, info.Sealer, base.Config.Secrets.KeyFile, kr); err != nil {
+			return nil, err
+		}
 	}
 	h := &Hub{o: base, root: root, accounts: map[string]*hubAccount{}}
 	now := base.Now()
@@ -249,8 +276,10 @@ func backfillAddress(l *Local) {
 }
 
 // migrateLayout moves root to the per-account layout under its layout.lock
-// and its sync.lock, neither waited for.
-func migrateLayout(root string) error {
+// and its sync.lock, neither waited for. A new state (see OpenHub) is
+// instead created with the sealer choose names, when choose is not nil
+// (ruling P2); Migrate then finds version 2 and does nothing.
+func migrateLayout(root string, choose func() (string, error)) error {
 	unlockLayout, err := tryLock(root, layoutLockName, "another pcb is moving the state to the per-account layout", "run the command again in a moment")
 	if err != nil {
 		return err
@@ -261,10 +290,83 @@ func migrateLayout(root string) error {
 		return err
 	}
 	defer unlockSync()
+	if choose != nil {
+		// Read again under the lock: another pcb may have created it.
+		if info, err := store.ReadLayout(root); err == nil && newState(info) {
+			name, err := choose()
+			if err != nil {
+				return err
+			}
+			if err := store.CreateLayout(root, name); err != nil {
+				return blocked("cannot create the state layout in "+root, "make sure "+root+" is writable by this user")
+			}
+		}
+	}
 	_, _, err = store.Migrate(root, func() (string, error) {
 		return store.NewLocalID(func(id string) bool { return exists(store.AccountDir(root, id)) })
 	})
 	return err
+}
+
+// newState reports whether info is a state nothing was ever written to.
+func newState(info store.LayoutInfo) bool {
+	return info.Version == 0 && len(info.Accounts) == 0 && len(info.Legacy) == 0 && info.Migrating == ""
+}
+
+// ProbeTimeout is how long a new state waits for the desktop keyring to
+// answer before it counts as absent.
+const ProbeTimeout = 2 * time.Second
+
+// chooseSealer is the sealer a new state records, by [secrets] backend:
+// keyfile, secret-service (refused, exit 10, when the keyring cannot be
+// used) or auto (secret-service when the keyring answers within
+// ProbeTimeout and is unlocked, else keyfile).
+func chooseSealer(backend string, kr Keyring) (string, error) {
+	if backend == "keyfile" {
+		return SealerKeyFile, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
+	defer cancel()
+	err := seal.Probe(ctx, kr)
+	switch {
+	case err == nil:
+		return SealerSecretService, nil
+	case backend == "secret-service":
+		return "", mustAct("[secrets] backend is secret-service but the desktop keyring cannot be used: "+err.Error(),
+			"unlock the keyring and start a Secret Service (GNOME Keyring, KWallet), or set [secrets] backend to keyfile")
+	}
+	return SealerKeyFile, nil
+}
+
+// NewSealer is the sealer layout.json names for the state root: the key
+// file's, or the desktop keyring's with its one key for the whole root
+// (its absolute path names the keyring item). pcb doctor builds the
+// sealer through it too.
+func NewSealer(root, name, keyFile string, kr Keyring) (seal.Sealer, error) {
+	if name != SealerSecretService {
+		return &seal.KeyFile{Path: keyFile}, nil
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
+	}
+	return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
+}
+
+// DeleteSealingKey deletes the desktop keyring item ("pcb sealing key") of
+// the state root, for pcb uninstall --delete-data (ruling R13): nothing to
+// delete is no error. A locked keyring or none answering is the error the
+// commands give for it ("the desktop keyring is locked", "... is not
+// available"). pcb account remove never calls it: the key is the state's.
+func DeleteSealingKey(ctx context.Context, root string, kr Keyring) error {
+	s, err := NewSealer(root, SealerSecretService, "", kr)
+	if err != nil {
+		return err
+	}
+	if err := s.(*seal.SecretService).DeleteKey(ctx); err != nil {
+		return mapError(err, keyringRef)
+	}
+	return nil
 }
 
 // tryLock takes dir/name without waiting; held, it is Blocked with msg and

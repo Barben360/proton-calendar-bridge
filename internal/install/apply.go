@@ -22,6 +22,10 @@ type Hooks struct {
 	// the plan resolved (a logout step). Its failure becomes the step's
 	// note: the uninstall goes on (M5-P19).
 	Logout func(ctx context.Context, dirs paths.Dirs) error
+	// Keyring deletes the desktop keyring item of the state directory
+	// stateDir (a keyring step, ruling R13). Its failure becomes the step's
+	// note, with how to delete the item by hand: the uninstall goes on.
+	Keyring func(ctx context.Context, stateDir string) error
 }
 
 // StepError is the step Apply stopped at. The steps before it are done and
@@ -75,6 +79,15 @@ func apply(ctx context.Context, h Host, s *Step, hooks Hooks) error {
 		}
 		if err := hooks.Logout(ctx, s.dirs); err != nil {
 			s.Note = "logout failed (" + err.Error() + "): revoke the session in the Proton account settings"
+		}
+		return nil
+	case s.Action == ActionRemove && s.Kind == KindKeyring:
+		if hooks.Keyring == nil {
+			s.Note = "not removed: " + keyringByHand(h.Path(s.Path))
+			return nil
+		}
+		if err := hooks.Keyring(ctx, h.Path(s.Path)); err != nil {
+			s.Note = "not removed (" + err.Error() + "): " + keyringByHand(h.Path(s.Path))
 		}
 		return nil
 	case s.Action == ActionRemove && s.Kind == KindFile:

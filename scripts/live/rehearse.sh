@@ -142,7 +142,7 @@ step 2 "isolate every directory in the run root and fence the network"
 # No credential or directory of the caller's reaches pcb: everything below
 # is the run root's, and HTTP to anything but loopback goes to a closed
 # port (Go and curl never proxy 127.0.0.1 or localhost).
-unset PCB_USERNAME PCB_PASSWORD PCB_TOTP PCB_LAB_USERNAME PCB_LAB_PASSWORD PCB_LAB_TOTP XDG_RUNTIME_DIR
+unset PCB_USERNAME PCB_PASSWORD PCB_TOTP PCB_LAB_USERNAME PCB_LAB_PASSWORD PCB_LAB_TOTP XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 export HOME=$RUN/home
 export XDG_CONFIG_HOME=$RUN/home/.config XDG_STATE_HOME=$RUN/home/.local/state
 export PCB_CONFIG_DIR=$RUN/config PCB_STATE_DIR=$RUN/state
@@ -193,9 +193,11 @@ step 4 "point pcb at the fake ([proton] base_url) before any login"
 PORT=$(free_port)
 (
 	umask 077
-	printf '[proton]\nbase_url = "%s"\n\n[caldav]\nlisten = "127.0.0.1:%s"\n' "$BASE" "$PORT" >"$PCB_CONFIG_DIR/config.toml"
+	printf '[proton]\nbase_url = "%s"\n\n[caldav]\nlisten = "127.0.0.1:%s"\n\n[secrets]\nbackend = "keyfile"\n' "$BASE" "$PORT" >"$PCB_CONFIG_DIR/config.toml"
 )
 has "$PCB_CONFIG_DIR/config.toml" "base_url = \"http://127.0.0.1:" "config.toml points at loopback"
+# Never the desktop keyring of whoever runs the rehearsal: the key is the run root's file.
+has "$PCB_CONFIG_DIR/config.toml" 'backend = "keyfile"' "config.toml seals with the key file"
 run 0 "$PCB" status --json
 equal "$(jq -c '[(.data.accounts | length), [.data.alerts[].code]]' "$RUN/out")" '[0,["needs-login"]]' "before login: no account, the process needs a login"
 URL=http://localhost:$PORT

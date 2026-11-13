@@ -229,7 +229,41 @@ func (l *Local) log() *slog.Logger {
 }
 
 // keyFile is the path named in store errors.
-func (l *Local) keyFile() string { return l.o.Config.Secrets.KeyFile }
+// The sealers' names (seal.Sealer.Name, layout.json's "sealer").
+const (
+	SealerKeyFile       = "keyfile"
+	SealerSecretService = "secret-service"
+)
+
+// keyringRef stands for the desktop keyring where the error mappers take a
+// key file's path: the key of a secret-service state is no file.
+const keyringRef = "<the desktop keyring>"
+
+// keyFile is the key file's path, or keyringRef for a secret-service state;
+// it is only a name for the messages (Status.KeyFile reads the config).
+func (l *Local) keyFile() string {
+	if l.o.Sealer.Name() == SealerSecretService {
+		return keyringRef
+	}
+	return l.o.Config.Secrets.KeyFile
+}
+
+// keyFix is the hint for a key that cannot be used, by where it lives.
+func (l *Local) keyFix() string {
+	if l.keyFile() == keyringRef {
+		return keyringFailFix
+	}
+	return keyFix
+}
+
+// keyWhat names where the sealing key lives, for a message: "the key file
+// <path>" or "the desktop keyring".
+func (l *Local) keyWhat() string {
+	if f := l.keyFile(); f != keyringRef {
+		return "the key file " + f
+	}
+	return "the desktop keyring"
+}
 
 func (l *Local) fail(err error) error { return mapError(err, l.keyFile()) }
 
@@ -409,9 +443,12 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Reason:     st.Reason,
 		AccountID:  st.AccountID,
 		Secrets:    "none",
-		KeyFile:    l.keyFile(),
+		Sealer:     l.o.Sealer.Name(),
 		Unattended: st.Unattended,
 		Address:    st.Address,
+	}
+	if s.Sealer == SealerKeyFile {
+		s.KeyFile = l.o.Config.Secrets.KeyFile
 	}
 	if st.Captcha != nil {
 		s.CaptchaURL = st.Captcha.URL
@@ -428,13 +465,21 @@ func (l *Local) Status(context.Context) (Status, error) {
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
 		)
+		unreadable := "the stored secrets cannot be opened; see the key file"
+		if l.keyFile() == keyringRef {
+			unreadable = "the stored secrets cannot be opened with the key in the desktop keyring"
+		}
 		switch {
 		case errors.As(err, &rb):
 			s.Secrets, s.Phase, s.Reason = "rolled-back", string(store.PhaseNeedsLogin), rb.Explain()
 		case errors.As(err, &ue):
 			s.Secrets, s.Phase, s.Reason = SecretsUnsupported, string(store.PhaseNeedsLogin), ue.Explain()
+		case errors.Is(err, seal.ErrLocked):
+			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
+		case errors.Is(err, seal.ErrNoService):
+			s.Secrets = SecretsKeyringUnavailable // no keyring answers here: nothing is lost either (R15)
 		case err != nil:
-			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), "the stored secrets cannot be opened; see the key file"
+			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:
 			s.Secrets = "sealed"
 			s.Username = accounts[st.AccountID].Username

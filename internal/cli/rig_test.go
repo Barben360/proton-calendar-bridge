@@ -191,6 +191,9 @@ type rig struct {
 	// hostRoot, when set, is the root of the host's files (systemd,
 	// container markers) instead of a root that does not exist.
 	hostRoot string
+	// keyring, when set, is the desktop keyring the accounts and pcb
+	// doctor use (nil: none is reached, as TestMain unsets the session bus).
+	keyring *memKeyring
 	// asRoot makes the host's effective UID 0; userName, when set, names
 	// the host's users.
 	asRoot   bool
@@ -279,7 +282,7 @@ func (r *rig) openHub(serve bool) func(context.Context, func(string) string) (cl
 			return nil, err
 		}
 		h, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: r.dirs, Config: cfg, Now: r.now, Sleep: sleep,
-			Logger: cli.LoggerFrom(ctx)}})
+			Logger: cli.LoggerFrom(ctx)}, Keyring: r.keyringOrNil()})
 		if err != nil {
 			return nil, err
 		}
@@ -305,6 +308,15 @@ func realHub(t *testing.T, r *rig) *service.Hub {
 	return h
 }
 
+// keyringOrNil is the rig's keyring as the Hub's option: a nil interface
+// (not a typed nil) without one.
+func (r *rig) keyringOrNil() service.Keyring {
+	if r.keyring == nil {
+		return nil
+	}
+	return r.keyring
+}
+
 func (r *rig) run(args ...string) exitcode.Code {
 	r.t.Helper()
 	r.out.Reset()
@@ -313,6 +325,9 @@ func (r *rig) run(args ...string) exitcode.Code {
 	io := cli.IO{Stdout: &r.out, Stderr: &r.errb, Term: r.term, Env: func(k string) string { return r.env[k] }}
 	io.OpenHub = r.openHub(false)
 	io.DialDaemon = r.dial
+	if r.keyring != nil {
+		io.Keyring = r.keyring
+	}
 	io.Host = noSystemHost()
 	if r.hostRoot != "" {
 		io.Host.Root = r.hostRoot

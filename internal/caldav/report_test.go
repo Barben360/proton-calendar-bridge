@@ -236,6 +236,7 @@ var shared struct {
 }
 
 func TestMain(m *testing.M) {
+	_ = os.Unsetenv("DBUS_SESSION_BUS_ADDRESS") // a new state never reaches the developer's keyring
 	code := m.Run()
 	if !shared.tb.teardown() && code == 0 {
 		code = 1

@@ -178,7 +178,7 @@ func TestFreshStateHasNoLayout(t *testing.T) {
 	if err != nil || migrated || id != "" {
 		t.Fatalf("Migrate = %q, %v, %v; want nothing migrated", id, migrated, err)
 	}
-	sameTree(t, tree(t, root), map[string]string{"accounts": isDir, "layout.json": "{\"version\":2}\n"})
+	sameTree(t, tree(t, root), map[string]string{"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"keyfile\"}\n"})
 	if v := layoutVersion(t, root); v != 2 {
 		t.Errorf("layout.json version %d", v)
 	}
@@ -368,7 +368,7 @@ func TestLayoutRootLockFilesAreNoAccount(t *testing.T) {
 	if err != nil || migrated || id != "" {
 		t.Fatalf("Migrate = %q, %v, %v", id, migrated, err)
 	}
-	want := map[string]string{"accounts": isDir, "layout.json": "{\"version\":2}\n"}
+	want := map[string]string{"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"keyfile\"}\n"}
 	for _, name := range locks {
 		want[name] = ""
 	}
@@ -573,5 +573,127 @@ func TestMigrateLeavesTheRootSyncLock(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(store.AccountDir(root, id), "sync.lock")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("accounts/%s/sync.lock: %v; want none", id, err)
+	}
+}
+
+// layoutSealer is the sealer layout.json names under root ("" when none).
+func layoutSealer(t *testing.T, root string) string {
+	t.Helper()
+	var l struct {
+		Sealer string `json:"sealer"`
+	}
+	if err := json.Unmarshal(readFile(t, filepath.Join(root, "layout.json")), &l); err != nil {
+		t.Fatal(err)
+	}
+	return l.Sealer
+}
+
+func TestLayoutWithoutSealerIsKeyFile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2}`+"\n")) // M6's
+	info, err := store.ReadLayout(root)
+	if err != nil || info.Version != 2 || info.Sealer != "keyfile" {
+		t.Fatalf("ReadLayout(M6 layout) = %+v, %v; want sealer keyfile", info, err)
+	}
+	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2,"sealer":"secret-service"}`))
+	if info, err := store.ReadLayout(root); err != nil || info.Sealer != "secret-service" {
+		t.Fatalf("ReadLayout(secret-service) = %+v, %v", info, err)
+	}
+}
+
+func TestCreateLayoutWritesTheLayoutAndAccounts(t *testing.T) {
+	root := t.TempDir()
+	if err := store.CreateLayout(root, "secret-service"); err != nil {
+		t.Fatal(err)
+	}
+	sameTree(t, tree(t, root), map[string]string{
+		"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"secret-service\"}\n"})
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(store.AccountsDir(root)); err != nil || info.Mode().Perm() != 0o700 {
+			t.Errorf("accounts/: %v, %v; want mode 0700", info, err)
+		}
+		if info, err := os.Stat(filepath.Join(root, "layout.json")); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("layout.json: %v, %v; want mode 0600", info, err)
+		}
+	}
+	var synced []string
+	defer store.OnSyncDir(func(dir string) { synced = append(synced, dir) })()
+	root2 := t.TempDir()
+	if err := store.CreateLayout(root2, "keyfile"); err != nil {
+		t.Fatal(err)
+	}
+	// Once after accounts/ is made, once after layout.json is created.
+	if n := slices.DeleteFunc(slices.Clone(synced), func(d string) bool { return d != root2 }); len(n) < 2 {
+		t.Errorf("directories synced = %v; want the state directory twice", synced)
+	}
+	// Migrate then sees version 2 and leaves it, sealer included.
+	if id, migrated, err := store.Migrate(root, noNewID(t)); err != nil || migrated || id != "" {
+		t.Fatalf("Migrate after CreateLayout = %q, %v, %v", id, migrated, err)
+	}
+	if got := layoutSealer(t, root); got != "secret-service" {
+		t.Errorf("sealer after Migrate = %q", got)
+	}
+}
+
+func TestCreateLayoutNeverOverwrites(t *testing.T) {
+	root := t.TempDir()
+	if err := store.CreateLayout(root, "secret-service"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLayout(root, "keyfile"); err != nil {
+		t.Fatalf("second CreateLayout = %v; a racing creator is harmless", err)
+	}
+	if got := layoutSealer(t, root); got != "secret-service" {
+		t.Fatalf("sealer = %q; the first creator's must stay", got)
+	}
+}
+
+func TestCreateLayoutRefusesAnUnknownSealer(t *testing.T) {
+	root := t.TempDir()
+	for _, s := range []string{"", "tpm", "KeyFile"} {
+		if err := store.CreateLayout(root, s); !errors.Is(err, store.ErrUnknownSealer) {
+			t.Errorf("CreateLayout(%q) = %v; want ErrUnknownSealer", s, err)
+		}
+	}
+	if got := tree(t, root); len(got) != 0 {
+		t.Fatalf("a refused CreateLayout wrote %v", got)
+	}
+}
+
+func TestUnknownSealerIsRefused(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2,"sealer":"tpm"}`))
+	if _, err := store.ReadLayout(root); !errors.Is(err, store.ErrUnknownSealer) {
+		t.Fatalf("ReadLayout = %v; want ErrUnknownSealer", err)
+	}
+	if _, _, err := store.Migrate(root, noNewID(t)); !errors.Is(err, store.ErrUnknownSealer) {
+		t.Fatalf("Migrate = %v; want ErrUnknownSealer", err)
+	}
+	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2,"sealer":""}`))
+	if _, err := store.ReadLayout(root); !errors.Is(err, store.ErrUnknownSealer) {
+		t.Fatalf("empty sealer: ReadLayout = %v; want ErrUnknownSealer", err)
+	}
+}
+
+func TestMigrationRecordsKeyFile(t *testing.T) {
+	root := t.TempDir()
+	writeM5State(t, root)
+	if _, _, err := store.Migrate(root, fixedID("0a1b2c3d")); err != nil {
+		t.Fatal(err)
+	}
+	if got := layoutSealer(t, root); got != "keyfile" {
+		t.Errorf("M5 state migrated with sealer %q", got)
+	}
+	// A new state, and a state whose only account moved with layout.json missing.
+	fresh := t.TempDir()
+	if _, _, err := store.Migrate(fresh, noNewID(t)); err != nil || layoutSealer(t, fresh) != "keyfile" {
+		t.Errorf("new state: %v, sealer %q", err, layoutSealer(t, fresh))
+	}
+	moved := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(moved, "accounts", "0a1b2c3d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Migrate(moved, noNewID(t)); err != nil || layoutSealer(t, moved) != "keyfile" {
+		t.Errorf("moved account: %v, sealer %q", err, layoutSealer(t, moved))
 	}
 }

@@ -69,12 +69,12 @@ func TestDoctorExitCode(t *testing.T) {
 	}
 	// No account yet: the process checks, then "accounts" in place of the
 	// account checks (design §4.6).
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
+	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,skip,ok,skip,warn,skip,skip"; got != want {
+	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,skip,ok,skip,warn,skip,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -91,14 +91,17 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 11 { // 8 checks, the accounts warning with its fix line, the service, the daemon
-		t.Fatalf("stdout = %q, want 11 lines", out)
+	if len(lines) != 12 { // 9 checks, the accounts warning with its fix line, the service, the daemon
+		t.Fatalf("stdout = %q, want 12 lines", out)
 	}
-	if want := "–  service: no systemd here"; lines[9] != want {
-		t.Errorf("line 9 = %q, want %q", lines[9], want)
-	}
-	if want := "–  daemon: not running: offline checks only"; lines[10] != want {
+	if want := "–  service: no systemd here"; lines[10] != want {
 		t.Errorf("line 10 = %q, want %q", lines[10], want)
+	}
+	if want := "–  daemon: not running: offline checks only"; lines[11] != want {
+		t.Errorf("line 11 = %q, want %q", lines[11], want)
+	}
+	if want := "✓  sealer: not chosen yet: the first login picks it ([secrets] backend = auto)"; lines[4] != want {
+		t.Errorf("line 4 = %q, want %q", lines[4], want)
 	}
 	if want := "ok  platform: " + runtime.GOOS + "/" + runtime.GOARCH; !strings.HasPrefix(lines[0], "✓  platform: "+runtime.GOOS+"/"+runtime.GOARCH) {
 		t.Errorf("line 0 = %q, want %q (or a warning on an unsupported host)", lines[0], want)
@@ -112,14 +115,14 @@ func TestDoctorTextOK(t *testing.T) {
 	if want := "✓  config file: defaults, no file"; lines[3] != want {
 		t.Errorf("line 3 = %q, want %q", lines[3], want)
 	}
-	if want := "✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)"; lines[5] != want {
-		t.Errorf("line 5 = %q, want %q", lines[5], want)
-	}
-	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[6] != want {
+	if want := "✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)"; lines[6] != want {
 		t.Errorf("line 6 = %q, want %q", lines[6], want)
 	}
-	if want := "!  accounts: no account: nothing can sign in to pcb serve"; lines[7] != want || lines[8] != "   fix: pcb login (it creates the client default), then pcb client show" {
-		t.Errorf("lines 7-8 = %q, want %q and its fix", lines[7:9], want)
+	if want := "–  tls certificate: plain HTTP on loopback: no certificate needed"; lines[7] != want {
+		t.Errorf("line 7 = %q, want %q", lines[7], want)
+	}
+	if want := "!  accounts: no account: nothing can sign in to pcb serve"; lines[8] != want || lines[9] != "   fix: pcb login (it creates the client default), then pcb client show" {
+		t.Errorf("lines 8-9 = %q, want %q and its fix", lines[8:10], want)
 	}
 }
 

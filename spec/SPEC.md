@@ -34,10 +34,10 @@ Success means:
 
 ## 2. Principles
 
-- **Headless first** [decided]. One Go binary. No GUI in v1; a desktop app
-  (`pcb-ui`, a separate cgo binary running the same daemon in process) is planned
-  in M7 (`spec/designs/2026-11-12-multi-account-and-ui-design.md`), and `pcb` never
-  gains a GUI dependency.
+- **Headless first** [decided]. One Go binary. No GUI in `pcb`; the desktop app
+  (`pcb-ui`, a separate cgo binary running the same daemon in process) was built in M7
+  (decision 0015, `spec/designs/2026-11-12-multi-account-and-ui-design.md`), and `pcb` never
+  gains a GUI dependency [verified: `TestPcbHasNoGUIDependency`].
 - **Blocks** [decided]. Each block (§4) has a narrow interface, its own
   tests, and can be built, reviewed and replaced alone.
 - **No unverified assumptions** [decided]. Facts about Proton or clients come
@@ -63,14 +63,14 @@ Goals: CalDAV read/write for owned calendars; read-only for subscribed and
 holidays calendars; login with password, or password + TOTP [decided
 0010]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); several Proton
-accounts in one process (M6, decision 0014); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
+accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
 Windows only build, and the CLI there runs offline (§13, "Platforms").
 
 Not planned (not designed here): REST API, MCP, `.ics` feeds, event
 commands in the CLI (Thunderbird is the client), updates/signed
 releases (while private), shared calendars, invitations, two-password mode,
-FIDO2, CardDAV, macOS/Windows service management. A desktop UI is planned as M7
-(not built; M6 amends the earlier "GUIs not planned"), designed in
+FIDO2, CardDAV, macOS/Windows service management, a GUI on Windows or macOS (`pcb-ui` is Linux only; Windows is next, macOS is not planned). The desktop app
+`pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
 `spec/designs/2026-11-12-multi-account-and-ui-design.md`.
 
 Anti-goals (failure even if it works):
@@ -610,7 +610,7 @@ Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.
 
 ```
 <state>/
-  serve.lock  sync.lock  layout.lock  login.lock  last-login  layout.json  pcb.sock  tls/  logs/
+  serve.lock  sync.lock  layout.lock  sealer.lock  login.lock  last-login  layout.json  pcb.sock  tls/  logs/
   accounts/<local-id>/
     state.json  state.lock  secrets.sealed  secrets.lock  clients.json  clients.lock  pcb.db (+ -wal, -shm)  sync.lock
 ```
@@ -618,13 +618,20 @@ Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.
 - `<local-id>`: 8 random lowercase hex characters, drawn when an account is added and never reused
   or renamed (it is a directory name and appears in the CalDAV URL, §9). Proton's user ID stays inside
   (`state.json`, the cache's `meta`) and is checked as before [verified: `TestLocalIDShape`].
-- `layout.json` is `{"version": 2}`; anything else is refused (malformed or an unknown version: damaged,
+- `layout.json` is `{"version": 2, "sealer": "keyfile" | "secret-service"}` since M7 (the sealer §7.3 chose when the state was created); a missing `sealer` (every M6 file) means
+  `keyfile`, and any other value (an empty one included) is `ErrUnknownSealer`: exit 10, hint `upgrade pcb`, like a newer layout
+  [verified: `TestLayoutWithoutSealerIsKeyFile`, `TestUnknownSealerIsRefused`, `TestUnknownSealerIsMustActUpgrade`, `TestAccountsOfAnUnreadableLayout`].
+  `store.CreateLayout` writes it (with `accounts/`) for a new state, exclusively (O_EXCL, fsynced): an existing `layout.json` is never overwritten, so the first sealer stays;
+  every `Migrate` path (a moved M5 state, a moved account) writes `keyfile`, since an existing state was sealed by a key file (ruling P2)
+  [verified: `TestCreateLayoutWritesTheLayoutAndAccounts`, `TestCreateLayoutNeverOverwrites`, `TestCreateLayoutRefusesAnUnknownSealer`, `TestMigrationRecordsKeyFile`, `TestFreshStateHasNoLayout`].
+  Anything else is refused (malformed or an unknown version: damaged,
   exit 10 `run pcb doctor`; a version above 2: `ErrNewerLayout`, exit 10 `upgrade pcb`, ruling R9; a layout pcb
   cannot read, exit 10 naming the file: a person must act, so a unit that does not restart on 10 stops instead of
   looping, ruling R36) [verified: `TestOpenHubRefusesDamagedLayout`, `TestOpenHubRefusesUnreadableLayout`].
   Root files: `serve.lock` (the serving process, holds its PID, §4.1), `sync.lock` (the root lock, kept
   under its M5 name, ruling R7: held by the serving process, and by `OpenHub` while it migrates), `layout.lock`
-  (serialises migrations), `login.lock` and `last-login` (the login guard, shared by every account).
+  (serialises migrations), `sealer.lock` (M7: held while the first seal creates the keyring item, §7.3), `login.lock` and `last-login` (the login guard, shared by every account).
+  `logs/pcb-ui.log` and `logs/pcb-ui.log.1` are `pcb-ui`'s own log (§15).
 - **Migration.** A state with no `layout.json` and account data at the root (`state.json`, `secrets.sealed`,
   `clients.json`, `pcb.db`, `-wal`, `-shm`: data files only, locks do not count, R6) is the M5 layout. The first
   command that opens the state (`pcb doctor` does not: it reads both layouts and never writes)
@@ -655,7 +662,7 @@ Layout v2 (M6, decision 0014; `internal/store/layout.go`, `internal/service/hub.
   keeps its name; not a secret; the design wrote `username`, ruling R8), `caldav` (the CalDAV switch, §4.1; absent
   is on) and `created` (when the add began, for the 24 h pending expiry) [verified: `TestStateKeepsAddressAndSwitch`].
 - The sealer is shared: every account's `secrets.sealed` and `clients.json` are sealed with the one key
-  (`[secrets] key_file`); `secrets.sealed` keeps its v2 format and its generation mirror in the account's own
+  (`[secrets] key_file`, or the one keyring item since M7, §7.3); `secrets.sealed` keeps its v2 format and its generation mirror in the account's own
   `state.json` (§7.3).
 
 ### 7.2 What is cached [call]
@@ -720,17 +727,61 @@ cache records its account in `meta` and is emptied when opened for another):
 Sealed with a data key held by, in order, per environment (what each backend
 protects against: `spec/experiments/E15-secret-sealing.md`):
 - Desktop user service: 1. Secret Service (unlocked keyring of an interactive
-  login); 2. user-scope `systemd-creds`; 3. key file 0600.
+  login; built in M7); 2. user-scope `systemd-creds` (not built); 3. key file 0600.
 - Server system service: 1. system-scope `systemd-creds` (host key); 2. key
   file 0600 on a separate path, `doctor` warns.
 - Container: 1. compose secret file at `/run/secrets/<name>`; 2. key file 0600
   on a volume separate from the data.
-Built in M5: the key file only (`[secrets] key_file`, default `<config>/secrets.key`, exactly 32 random bytes,
-refused when group or other can read it); Secret Service and `systemd-creds` are not built, and in a container the
-compose secret is just the path `key_file` points at (README, "Run in a container"). `doctor` reports the backend chosen. Host-key `systemd-creds` is no stronger than
+Built: the key file since M5 (`[secrets] key_file`, default `<config>/secrets.key`, exactly 32 random bytes,
+refused when group or other can read it) and the Secret Service sealer since M7 (below); `systemd-creds` is not built, and in a container the
+compose secret is just the path `key_file` points at (README, "Run in a container"). `doctor` reports the backend chosen (`sealer:` line, §15). Host-key `systemd-creds` is no stronger than
 a key file against root or a same-user process; only TPM2 binding, or a keyring encrypted
 under a strong login password (untested), helps against offline theft. [verified: E15 for user-scope systemd-creds, Secret Service presence
 (interactive session), key file; TPM2 and desktop system scope untested]
+**The Secret Service sealer (M7, decision 0015; `internal/store/seal`, pure Go over D-Bus with godbus).**
+- Name `secret-service`. The key is one item of the default collection (the `default` alias): label `pcb sealing key`, attributes `application=pcb` and
+  `state=<absolute path of the state directory>`, secret 32 random bytes, content type `application/octet-stream`, D-Bus session algorithm `plain` (the session bus is local).
+  One item per state directory serves every account in it; two state directories get two items, and a blob sealed under one is `ErrCorrupt` under the other. The key file's format is unchanged
+  [verified: `TestDBusKeyringStoresOneItemPerStateDir`, `TestSecretServiceRoundTrip`, `TestSecretServiceRefusesAShortKey`, `TestDBusKeyringSetReplacesTheSameAttributes`, `TestKeyFileUnchangedByTheHelper`].
+  Its name is in the AAD of `secrets.sealed` and `clients.json` like the key file's, so a file sealed by one sealer is not opened by the other even with the same key bytes [verified: `TestSecretServiceBindsItsName`].
+- **Choice, once.** `[secrets] backend` (§14) is `auto` (default), `keyfile` or `secret-service`. It is read only when a state is created (`OpenHub` finds no `layout.json`, no account, no M5 file and no `.migrating`
+  directory): `keyfile` never asks the keyring; `auto` picks `secret-service` when `DBUS_SESSION_BUS_ADDRESS` is set, a Secret Service answers within 2 s and the default collection is unlocked, else `keyfile`
+  (no bus, no service, a hung service or a locked keyring at that moment all give `keyfile`); `secret-service` refuses the creation, exit 10 `[secrets] backend is secret-service but the desktop keyring cannot be used: <cause>`,
+  hint `unlock the keyring and start a Secret Service (GNOME Keyring, KWallet), or set [secrets] backend to keyfile`. The choice is recorded in `layout.json` (§7.1) and never probed again: an existing state keeps its sealer whatever `backend` says,
+  and an M5 or M6 state keeps its key file. An invalid `backend` is exit 10 `[secrets] backend must be auto, keyfile or secret-service`, hint `fix <config path>` (ruling R2: the plan said 2, but every config fault is 10)
+  [verified: `TestBackendDefaultsToAuto`, `TestBadBackendIsRefused`, `TestFreshStatePicksTheUnlockedKeyring`, `TestFreshStateWithoutKeyringUsesKeyFile`, `TestFreshStateWithLockedKeyringUsesKeyFile`,
+  `TestBackendKeyFileNeverAsksTheKeyring`, `TestBackendSecretServiceWithoutKeyringIsMustAct`, `TestExistingStateKeepsItsKeyFile`; the real GNOME keyring `[assumed → step 9]`].
+  The first command that opens a fresh state decides for good: a `pcb status` over SSH without a session bus fixes `keyfile`, and `pcb doctor` (which never writes) says `not chosen yet` until then (§15).
+  Moving a keyring-sealed state to a host without that keyring leaves `secrets.sealed` unopenable (the messages name the keyring); no command re-seals from one sealer to the other.
+- **`sealer.lock`.** The keyring's `CreateItem` replaces an item with the same attributes, so two processes creating the key at once could overwrite a key the first had already sealed with, losing its data.
+  The first seal therefore runs under an exclusive lock on `<state>/sealer.lock` (30 s wait; a no-op off Unix, where the first-seal race remains), re-reads the stored item after writing and uses what stands
+  [verified: `TestSecretServiceFirstSealsAgreeOnOneKey`: without the lock it failed 5 runs in 5].
+- **pcb never prompts.** It reads the collection's `Locked` property first and never calls `Unlock` or a prompt; a prompt path the service returns is `ErrLocked` too. A missing service, a connection failure or no answer within 2 s is `ErrNoService`;
+  an unset bus address is `ErrNoService` as well (godbus's `dbus-launch` fallback is never used)
+  [verified: `TestSecretServiceLockedIsErrLocked`, `TestDBusKeyringLockedNeverPrompts`, `TestSecretServiceMissingItemIsErrNoKey`, `TestDBusKeyringMissingItemIsErrNoKey`, `TestProbeSucceedsOnAnUnlockedService`,
+  `TestProbeFailsWithoutService`, `TestDBusKeyringHungServiceIsErrNoServiceWithinTheBound`].
+- **A locked keyring waits.** A keyring that is locked (a user service started before the desktop login, or a lock in Seahorse) is neither a park nor a login failure: `Status.Secrets` is `locked`, the command that needs the secrets says
+  `the desktop keyring is locked` (exit 20, hint `unlock it (log in to the desktop session), pcb retries every 30 s`; the hint also shows on a one-shot command, which does not retry), and the account's serve loop waits and asks again every 30 s,
+  also when the lock comes mid-serve (a token refresh that must seal), with the account alert `keyring-locked` (§15). While it waits pcb makes **no Proton login** (the stored login is unreadable, so neither a relogin nor an unattended
+  relogin can start), re-seals nothing with another backend, and recovers by itself, with no Restart, when the keyring unlocks. A locked wait does not end `pcb serve` (with or without `--wait-for-login`) or `pcb sync --watch`
+  [verified: `TestLockedKeyringWaitsAndRecovers`, `TestKeyringLockedWhileServingWaitsAndRecovers`, `TestLockedKeyringDoesNotEndServeWithoutWaitForLogin`, `TestWatchSyncSurvivesALockedKeyring`, `TestKeyringLockedAlert`;
+  a real lock in Seahorse `[assumed → step 9]`].
+- **No keyring answering is not a lost session** (ruling R15). On a keyring state with no Secret Service on the session bus (or no bus: `pcb` over SSH, a service outside the desktop session), `ErrNoService` is
+  `the desktop keyring is not available` (exit 20, hint `run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state`), never a logout or permissions hint;
+  `Status.Secrets` is `keyring-unavailable`, the phase is kept (no `needs-login`), the account alert is `keyring-unavailable` (§15) and `pcb-ui` shows `keyring unavailable`. Unlike a locked keyring, the serve loop does not wait on it
+  [verified: `TestKeyringUnavailableIsNotANeedsLogin`, `TestNoKeyringServiceIsNotANeedsLogin`, `TestShortTexts`, `TestNotifyCodes`].
+- **A login checks the keyring before SRP** (ruling R16): on a keyring state (a new state's sealer is chosen when it is created, so this covers it too) `Login` asks the keyring first (`Locked`, the service present, 2 s) and returns
+  `the desktop keyring is locked` or `the desktop keyring is not available` without any Proton call: no SRP, no Proton login and no login-guard slot is spent on a seal that cannot succeed, and an add leaves no account
+  [verified: `TestLoginChecksTheKeyringBeforeSRP`].
+- **Messages name the keyring, not a key file**, on a keyring state: `the sealing key is not in the desktop keyring` and `the stored secrets cannot be opened with the key in the desktop keyring` (both hint `pcb logout then pcb login`);
+  `pcb client add` and `rotate` hint `check that the desktop keyring is running and unlocked (pcb doctor)`; `pcb client show` says `the desktop keyring has no key for it` with a restore hint; a file error on the state is
+  `cannot use the stored secrets: <cause>`; `Status.Sealer` is `secret-service` and `Status.KeyFile` is empty. The key-file wording is unchanged on a key-file state
+  [verified: `TestSecretServiceStateNamesTheKeyring`, `TestSecretServiceStateWordsNameTheKeyring`, `TestStoreErrorPathErrorWording`].
+- What it protects (E15): the key is not on disk beside the data, so a copied state directory, a backup or a stolen disk is useless without the user's keyring. A process of the same login session can read the item (Secret Service has no per-application access control),
+  so against a same-user process it is no stronger than the key file; against offline theft it relies on the keyring being encrypted under the login password (untested). `pcb uninstall --delete-data` removes the item when `layout.json` records `secret-service` (ruling R13): a step `remove keyring <state>` after the state directory deletes that state's item and no other; a locked or absent keyring
+  does not fail the deletion, the step's note names the cause and how to delete the item by hand in Seahorse (`pcb sealing key`, attributes `application=pcb`, `state=<dir>`), and a state directory that is kept keeps its item
+  [verified: `TestUninstallDeleteDataRemovesTheKeyringItem`, `TestUninstallDeleteDataWithoutTheKeyringSaysHowToRemoveTheItem`, `TestDBusKeyringDeleteKeyRemovesOnlyThisState`; the real keyring `[assumed → step 9]`];
+  `pcb account remove` keeps it, since the key belongs to the state, not to one account [verified: `TestAccountRemoveKeepsTheKeyringItem`].
 Restoring an older `secrets.sealed` is detected (M5, R3m): format version 2 seals a monotonic generation with the accounts under AAD `pcb-secrets/v2/<sealer>`, mirrored as `secrets_generation` in `state.json`; a sealed generation below the mirror is refused (`pcb status` shows `rolled-back`, `pcb logout` wipes it without revoking, then `pcb login`). Removing the file (logout) moves the mirror one above, so a removed file is refused if restored. A file ahead of the mirror is accepted (a crash between the two writes). Restoring the whole state directory, `state.json` included, is not detected. A v1 file reads as generation 0 and is rewritten as v2 at the next write. Every writer of `state.json` holds the leaf lock `state.lock` (R10m; an in-process mutex off Unix).
 Keys and tokens opened in M1 are exercised offline only: whether a real Proton session accepts them stays `[assumed]` until the live run.
 Sealed content: session tokens, salted key passphrase, optional unattended
@@ -1341,6 +1392,47 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   `AccountInfo` fields flat plus `login` (the former flat fields), `health`, `url`, `alerts`; the former top-level fields moved into `accounts[].login`); a consumer of version 1
   reads `schema_version` first, and there is no compatibility shim (private, pre-release) [verified: `TestSchemaVersionIs2`].
 
+M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`, `internal/logfile`, `internal/doctor`; rulings in §18):
+- `pcb-ui [--background] [--version]`: the desktop app, Linux only (other systems get a stub that says so). It needs a graphical session: with neither `DISPLAY` nor `WAYLAND_DISPLAY` it prints
+  `pcb-ui needs a graphical session (no DISPLAY or WAYLAND_DISPLAY)`, exit 2, and touches no state; `--version` and `--help` exit 0 before any toolkit starts
+  [verified: `TestParseArgs`, `TestCheckDisplay`; the same three runs by hand, R11]. It runs the daemon in process (`ui.Bridge`, kind `ui`, wait for login, the same listener, control socket and `serve.lock` as `pcb serve`), shows
+  a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 800 x 550 window (accounts on the left; per account the CalDAV switch, the CalDAV connection with the password masked behind Show and Copy, New password, Sign out or Sign in,
+  Remove, the calendars and the alerts; "+ Add account" opens the wizard: address and password, an unattended-relogin opt-in with the one-line warning `pcb doctor` gives, the 2FA code, the CAPTCHA with "Open verification", then the CalDAV connection to copy;
+  Settings: start at login, log level, open the logs folder or `config.toml`, Restart bridge, the doctor report). The logs folder opens as a `file://` URL with spaces and specials escaped [verified: `TestSettingsOpenFiles`, `TestFileURLEscapesSpacesAndSpecials`]. Closing the window hides it; Quit in the tray menu drains (5 s) and stops everything, after which `pcb status` says offline.
+  `--background` starts in the tray only; when no tray host answers (GNOME without the AppIndicator extension) the window opens anyway and says once `your desktop shows no tray icons; on GNOME install the AppIndicator extension`,
+  and closing it quits through the same drain as the tray's Quit, since nothing could bring a hidden window back (ruling R14) [verified: `TestCloseQuitsOnlyWithoutATray`].
+  A Restart (or Start) that fails, for example on a `config.toml` edited with an error, shows `bridge stopped: <error>` with the `attention` tray, the actions refuse with the hint `restart the bridge (Settings → Restart bridge), then try again`,
+  and the right pane says the bridge is stopped instead of offering an add; a later good Restart clears it [verified: `TestFailedRestartShowsTheBridgeStopped`, `TestBridgeStoppedPaneDoesNotOfferAnAdd`, `TestActionsRefuseWhenTheBridgeIsNotRunning`].
+  What the window shows is a view model with no toolkit (`internal/ui`, the `cli` import rule, never `fyne.io`); the Fyne layer (`internal/ui/desktop`) only draws it and calls `ui.Actions` and `ui.Wizard`
+  [verified: `TestUIArch`, `TestDesktopArch`, `TestTrayAttentionOnErrorAlert`, `TestTraySyncingBeforeFirstPass`, `TestTrayOK`, `TestShortTexts`, `TestAccountFields`, `TestCalendarBadgeFromGate`, `TestAccountListRendersView`,
+  `TestTrayMenuFromView`, `TestTrayMenuWithoutAccounts`, `TestTrayIconFollowsState`, `TestIconsAreValidOwnArtwork`, `TestWindowSizeAndNoBranding`, `TestCloseHides`, `TestNoTrayLineShownOnce`; the real window, tray and Quit `[assumed → step 9]`].
+- Single instance: `serve.lock` held. A second `pcb-ui` facing a `pcb-ui` sends `POST /v2/ui/show` (§15) and exits 0, and the first raises its window; facing `pcb serve` (or the service) it shows a dialog, then exits 20 with
+  `pcb serve (PID <pid>) already serves this state directory`, hint `stop it (pcb service stop when installed as a service) and start pcb-ui again`. A failed start (this, a bad config, a listener that cannot bind) is a dialog
+  with the error's message and hint; closing it, by its button or by the title bar's X, quits the app with the error's exit code
+  [verified: `TestSecondInstanceShowsTheFirst`, `TestProbeNoDaemon`, `TestProbeNamesARunningServe`, `TestStartBlockedByAServeLeaksNothing`, `TestQuitDrainsAndReleases`, `TestRestartReadsTheConfig`, `TestBridgeNoticesTheDaemonEnding`;
+  the dialog and the X `[assumed → step 9]`: Fyne's source says a master window's close quits, no test driver can show it].
+- The window never holds a secret longer than a call: the wizard's password lives in the `Wizard` until the login ends (ready, an error or a 2FA step) and is then zeroed, except while a CAPTCHA waits (its retry needs it); Cancel zeroes it and removes an account the wizard created
+  (an existing account is only signed out); a shown CalDAV password is hidden again when the account pane changes or the window hides, and one that arrives after that is dropped; a notification never carries a password or a URL (the CAPTCHA link is replaced by `the link in the pcb-ui window`)
+  [verified: `TestWizardPlainLogin`, `TestWizardTOTP`, `TestWizardKeepsPasswordForCaptchaThenZeroes`, `TestWizardZeroesOnError`, `TestWizardZeroesTheBufferWhenTheCaptchaRetryFails`, `TestWizardCopiesThePassword`,
+  `TestWizardCancelDuringTOTPLeavesNoAccount`, `TestWizardCancelDuringCaptchaLeavesNoAccountAndZeroes`, `TestWizardCancelKeepsAnExistingAccount`, `TestWizardErrorIsTheCLIText`, `TestWizardRefusesWhileTheBridgeIsNotRunning`,
+  `TestWizardCancelAfterTheBridgeRestarted`, `TestShownPasswordHidesOnAccountChange`, `TestShownPasswordHidesOnHide`, `TestPasswordArrivingAfterPaneChangeStaysHidden`, `TestWizardClearsPasswordEntryOnSubmit`,
+  `TestNotificationCarriesNoSecret`]. The wizard is the CLI's login (`Hub.Login`, `SubmitTOTP`; its errors are the CLI's message and hint); a CAPTCHA retry logs in again with the token Proton returned (ruling P4) and may wait up to 60 s on the login guard, which the window shows
+  [verified: `TestWizardShowsWaitingAfterCaptcha`]. Account changes go through the Hub's own methods and are refused (`the bridge is not running`) once the daemon has ended [verified: `TestAccountActionsGoThroughTheHub`,
+  `TestActionsRefuseWhenTheBridgeIsNotRunning`, `TestActionsRefuseAfterTheDaemonEnded`, `TestPasswordCreatesDefaultWhenMissing`, `TestNewPasswordStopsTheOldOne`].
+- Notifications (the desktop's `org.freedesktop.Notifications`, over the session bus): one per occurrence of `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked` and `keyring-unavailable` (R15), whatever the alert's severity (ruling R9: `sync-stalled` is a warning, the code list is
+  the contract); an alert that clears and comes back notifies again; the title is the account's address, the body the alert's message and fix. A click opens the window on that account; only the notification server's own signals count (the bus owner is checked, a forged click opens nothing)
+  [verified: `TestNotifyOncePerOccurrence`, `TestNotifyTitleAndBody`, `TestNotifyCodes`, `TestNotifyStalledSyncWarning`, `TestNotifyIgnoresOtherCodes`, `TestNotifierIsSafeConcurrently`, `TestNotifyClickOpensAccount`, `TestNotifyIgnoresForgedSignals`,
+  `TestNotifyForgetsIdsWhenServerChanges`, `TestNotifyNilOnClick`, `TestNotifyWithoutBus`; a real notification daemon `[assumed → step 9]`].
+- Autostart (Settings, "Start at login"): `$XDG_CONFIG_HOME/autostart/pcb-ui.desktop` (default `~/.config/autostart`, the directory 0700) with `Exec=<absolute path of the running pcb-ui> --background`; off deletes only that file. A `%` in the path is escaped, a path with a space is quoted, a newline is refused
+  [verified: `TestAutostartWritesDesktopFile`, `TestAutostartDefaultDirAndQuoting`, `TestAutostartExecEscaping`, `TestAutostartDirPrivateAndOffKeepsOthers`, `TestSettingsAutostartWritesTheResolvedExecutable`, `TestExecutableIsAbsoluteAndResolved`; a real login `[assumed → step 9]`].
+- Build and install: `make ui` builds `bin/pcb-ui` (cgo, `CGO_ENABLED=1`; the GL and X development headers are build dependencies, README "Build"; it is not part of `make build` or the image, but `make lint test` compiles it: `go vet ./...`, golangci-lint and `go test -race ./...` build `cmd/pcb-ui` with cgo, so the gate needs a C compiler and the GL/X headers). `make install-ui` installs `$(PREFIX)/bin/pcb-ui`,
+  `$(PREFIX)/share/applications/pcb-ui.desktop` and `$(PREFIX)/share/icons/hicolor/scalable/apps/pcb-ui.svg` (our own artwork, `internal/ui/desktop/icons/app.svg`; `packaging/` holds only the desktop file, ruling P7). The installed entry's `Exec=` is the absolute
+  `$(PREFIX)/bin/pcb-ui`, written by `sed` from the template's `Exec=pcb-ui`, because launchers often lack `~/.local/bin` on their `PATH`; a `PREFIX` with spaces or `|` is not supported. `DESTDIR` is honoured.
+  [verified: `make install-ui DESTDIR=<tmp> PREFIX=/usr` by hand: `Exec=/usr/bin/pcb-ui`, mode 644; CI builds `pcb-ui`, runs `--version` under `xvfb-run`, and its tests under `dbus-run-session`].
+- `pcb doctor` (and the window's doctor report) warns `pcb-ui and the pcb service are both installed: only one can serve this state directory` (fix `uninstall one (pcb uninstall, or remove pcb-ui.desktop)`) when a pcb systemd unit is installed and `pcb-ui.desktop`
+  lies in `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), `/usr/local/share/applications` or `/usr/share/applications` (ruling P3: a custom `PREFIX` install is missed, it is a warning only); quiet otherwise
+  [verified: `TestDesktopCheckWarnsWhenBothAreInstalled`, `TestDesktopCheckIsQuietWithOnlyOne`, `TestDoctorWarnsBothInstalled`, `TestDoctorQuietWithOnlyOne`, `TestDoctorChecksShared`].
+
 Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
 the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
 and `:sha-<12 hex>`, first success 2026-11-12) and stays private, confirmed Private by the author on 2026-11-12 (`HUMAN-CHECKS.md` 7.8): pulling it needs
@@ -1370,6 +1462,9 @@ neither; when set, TLS on any bind).
 echoing the value); `pcb serve --log-level` overrides it [verified: `TestLogLevelDefaultsToInfo`,
 `TestUnknownLogLevelIsRefused`, `TestServeHonoursTheLogLevel`, `TestServeRefusesABadLogLevel`].
 `[secrets] key_file` (M1) is the path the container's compose secret is mounted at (§7.3).
+`[secrets] backend` (M7): `auto` (default), `keyfile` or `secret-service`: which sealer a state gets when it is created (§7.3). `auto` takes the desktop keyring when an unlocked
+one answers and the key file otherwise; it is never read again once `layout.json` records the sealer. Any other value is refused at load, exit 10, hint `fix <config path>`, without echoing it
+[verified: `TestBackendDefaultsToAuto`, `TestBadBackendIsRefused`]. `pcb-ui` re-reads `[log] level` at each start of its bridge and does not write it back: the level chosen in its Settings lasts until the bridge restarts.
 
 ## 15. Observability
 
@@ -1412,7 +1507,7 @@ Render counters and the read path (initial-version audit; `internal/service/rend
 Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - `pcb serve` listens on `<state>/pcb.sock` (§7.1). The API is HTTP/1.1 under `/v2/` since M6 (`/v1/` is gone and answers 404, as does any unclean path), internal and versioned:
   `GET /v2/accounts`, `GET /v2/status` (every account; one account that cannot be read still gets its entry, with an `account-unreadable` alert, instead of failing the others),
-  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` (body `{"on": bool}`) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7). Each answer is one `output.Envelope`:
+  `POST /v2/login` (the username decides, §4.1), and per account, `{id}` being its local ID: `POST /v2/accounts/{id}/login/totp`, `/logout` (an optional body `{"discard": true}` is the confirmed discard of a store pcb cannot read, §7.3; an empty body is the zero request), `/remove`, `/caldav` (body `{"on": bool}`) and `/restart`. Each of them goes through the Hub (ruling R14), so its rules apply. `Daemon` carries `kind`, `serve` or `ui` (M7), and a `pcb-ui` daemon adds `POST /v2/ui/show` (below). Each answer is one `output.Envelope`:
   200 ok, 422 a command error (its exit code, message and hint), 400, 403, 404, 405 or 413 a transport error. Request bodies
   are at most 64 KiB and never logged (the log line holds method, path, status and exit). Client timeouts: 2 s to
   dial, 10 s for status, 180 s for login. Secrets travel only in request bodies.
@@ -1467,6 +1562,28 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
   and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error; these two are the process's alone, `ProcessAlerts`)
   [verified: `TestAlerts`, `TestAlertsAreOrdered`, `TestProcessAlerts`, `TestCertificateAlertIsTheProcesss`, `TestStatusNamesAClientsFileThatCannotBeLoaded`].
+- `keyring-locked` (M7; error, per account): the desktop keyring that seals the account is locked; message `the desktop keyring is locked`, fix `unlock it (log in to the desktop session), pcb retries every 30 s`; it clears by itself once the
+  keyring unlocks (§7.3) [verified: `TestKeyringLockedAlert`].
+- `keyring-unavailable` (M7; error, per account): no Secret Service answers for a keyring state (ruling R15); message `the desktop keyring is not available`, fix `run pcb inside the desktop session that holds the keyring (pcb doctor checks it); [secrets] backend only chooses for a new state`;
+  the phase is kept, so no `needs-login` comes with it; it notifies in `pcb-ui` like `keyring-locked` (§7.3) [verified: `TestKeyringUnavailableIsNotANeedsLogin`, `TestNotifyCodes`].
+- M7 additions (`internal/ctl`, `internal/daemon`, `internal/ui`, `internal/logfile`, `internal/doctor`):
+  - `POST /v2/ui/show`, body `{"account": "<local-id>"}` (optional), answers `{"shown": true}`: the window raises itself, on that account when named. It is registered only when the daemon has a UI to show (`pcb-ui`; the callback runs on its own goroutine and never blocks the daemon).
+    On `pcb serve` there is no such route, so the answer is the existing 404 envelope for any unknown path, `no such control endpoint: /v2/ui/show` (exit 20, hint `use the pcb of the same version as the daemon`; the plan said `unknown endpoint`, ruling R5: one wording for every unknown path).
+    The peer-UID rule of this section applies like for every route [verified: `TestShowUIRoute`, `TestShowUIWithoutCallbackIsAnUnknownEndpoint`, `TestDaemonPassesShowUI`, `TestDaemonWithoutShowUIHasNoRoute`, `TestSecondInstanceShowsTheFirst`].
+  - `ctl.BuildStatus` is the one implementation of the status the socket answers; `pcb-ui` calls it in process, so the window and `pcb status` cannot differ [verified: `TestStatusIsBuildStatus`].
+  - `Status.Sealer` (`sealer` in the login block of `pcb status --json`): `keyfile` or `secret-service`; `secrets` may be `locked` or `keyring-unavailable` (R15); `key_file` is empty on a keyring state (§7.3).
+  - `pcb-ui` logs to `<state>/logs/pcb-ui.log` (no terminal): files 0600 in a 0700 directory, rotated to `pcb-ui.log.1` once the file would pass 10 MiB, one rotation kept (10 MiB x 2), the same content and levels as `pcb serve`'s stderr (the sync pass lines, the
+    certificate warnings, the render counters). A write that would pass the cap rotates first; one write larger than the cap is kept whole; a failed rename of the rotated file is retried only after another cap's worth of writes, so no line is lost
+    [verified: `TestLogfileRotatesAtMax`, `TestLogfileKeepsOneRotation`, `TestLogfileOversizeWriteIsKeptWhole`, `TestLogfileReopenAppendsAndCountsExistingBytes`, `TestLogfileTightensAnExistingFile`, `TestLogfileConcurrentWritesAreWhole`,
+    `TestLogfileWriteAfterCloseFails`, `TestLogfileOpenRefusesBadArguments`, `TestLogfileFailedRenameLosesNothing`, `TestLogfileImportsOnlyTheStandardLibrary`, `TestBridgeLogsPassesLikeServe`, `TestBridgeLogsTheCertificateWarning`].
+  - `pcb doctor` gains a `sealer:` result (`sealer: keyfile` or `sealer: secret-service`, from `layout.json`). On a state not created yet it says `sealer: not chosen yet: the first login picks it ([secrets] backend = auto)` (just `keyfile` when `backend` is `keyfile`),
+    and never probes the keyring then. For a keyring state it adds a `keyring` check (`the desktop keyring is unlocked`; locked is a warning with the alert's fix; no Secret Service on the bus is an error), the per-account secrets checks open the keyring item instead of a key file,
+    and the `pcb-ui` check above. The state's sealer is built by the one `service.NewSealer`, with the absolute state path
+    [verified: `TestSealerCheckOnAFreshStateDoesNotClaimTheKeyFile`, `TestAccountsReportsTheRecordedSealer`, `TestKeyringCheck`, `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`, `TestSecretsCheckWithAKeyringMissingItsKeyErrors`,
+    `TestSecretsCheckWithALockedKeyringLeavesItToTheKeyringCheck`, `TestSealedClientsCheckWithTheKeyring`, `TestDoctorSealerForARelativeStateDirUsesTheAbsoluteKeyringItem`, `TestDoctorChecksSecretsWithTheKeyring`, `TestDoctorWarnsLockedKeyring`,
+    `TestDoctorReportsAKeyFileStateAsKeyFile`, `TestDoctorTextOK`].
+  - The unattended-relogin warning is built by `doctor.UnattendedKeyringWarning(sealedPath)` (ruling R10; the plan wanted one shared constant, but `pcb doctor` names the full `secrets.sealed` path and the wizard, which does not know it, names `secrets.sealed`)
+    [verified: `TestWizardUnattendedWarningIsDoctors`, `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`].
 - Prometheus endpoint: deferred (M5-Rpre11); status over the socket covers sync lag, Proton error classes and login state.
 
 ## 16. How it is tested
@@ -1484,6 +1601,16 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - **Live**: only against the dedicated test account [decided]; never the
   author's real account in automated runs.
 - CI: GitHub Actions, lint (golangci-lint), `go test -race`, fuzz smoke.
+- **M7 (the keyring and `pcb-ui`).** No test touches the developer's keyring, bus or display:
+  - *Secret Service*: a fake service (`internal/store/seal/sstest`) answers on a private `dbus-daemon` started by `internal/dbustest` with its own minimal configuration and no service directory, so activation can never start a real keyring daemon
+    (the test skips when `dbus-daemon` is missing and fails when `CI` is set). It records the calls, so a test can assert that no `Unlock` or prompt was made and that the session algorithm was `plain`. The service, cli, daemon and caldav tests unset
+    `DBUS_SESSION_BUS_ADDRESS` and `scripts/live/rehearse.sh` pins `[secrets] backend = "keyfile"`, so a developer's own keyring is never read.
+  - *UI logic*: `internal/ui` is tested against the fake Proton through `service.Hub`, like the rest, with `-race`.
+  - *Fyne layer*: `internal/ui/desktop` runs on Fyne's headless test driver (a widget changes on the main goroutine only; tests replace the window's dispatcher by a queue they drain, because the driver runs `fyne.Do` inline). The notification and autostart code runs on a private bus against a fake notification server.
+  - *Why the GUI itself is a human step* (ruling R11): the agent that builds this has no display, and a real run would open a window on the author's desktop and could reach the author's real keyring. So it checks only `bin/pcb-ui --version` and a start with no display (exit 2, nothing created);
+    CI runs the same under `xvfb-run`. What no test can show (the tray, a real notification and its click, the keyring prompt, closing the startup error dialog, autostart, a lock in Seahorse) is `spec/HUMAN-CHECKS.md` step 9 and carries `[assumed → step 9]` where it is claimed.
+  - *No GUI dependency in `pcb`*: `cmd/pcb/arch_test.go` builds `./cmd/pcb` with `CGO_ENABLED=0` and fails when its dependencies include `fyne.io/` [verified: `TestPcbHasNoGUIDependency`]; `internal/ui` and `internal/ui/desktop` follow the `cli` import rule, `internal/logfile` imports only the standard library
+    [verified: `TestUIArch`, `TestDesktopArch`, `TestLogfileImportsOnlyTheStandardLibrary`].
 
 ## 17. Experiments (assumptions to settle before the code that needs them)
 
@@ -1550,9 +1677,9 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M5 Daemon and ops (built, live session pending) | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only: smoke-tested in CI (a Debian container with systemd as PID 1, the image); the live run is `spec/HUMAN-CHECKS.md` step 7 |
 
 | M6 Several accounts per process (built 2026-11-12, live session pending) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run is `spec/HUMAN-CHECKS.md` step 8, on the one test account |
-| M7 `pcb-ui` desktop app (planned, not designed in detail, not built) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard; Secret Service sealer (§7.3) | to be planned after M6 merges (`spec/designs/2026-11-12-multi-account-and-ui-design.md` §5) |
+| M7 `pcb-ui` desktop app (built 2026-11-13, live session pending) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard, notifications, autostart; the Secret Service sealer (§7.3); `pcb-ui` log file; `make ui` and `make install-ui` | the UI logic and the keyring sealer are tested against the fake Proton, a fake Secret Service and Fyne's headless driver; the GUI itself is `spec/HUMAN-CHECKS.md` step 9, in the step 8 throwaway VM with a GNOME session, the test account only (decision 0015) |
 
-Nothing else is planned [decided 0007]; M7 is planned, not yet in a plan file.
+Nothing else is planned [decided 0007].
 
 Initial-version audit (2026-11-12, main at 557fe84): six read-only auditors, 0 Critical, 17 Important, about 48 Minor findings; the Important ones and the Minors worth their cost are fixed on branch `audit-fixes`, the rest parked in `OPEN.md` ("Parked by the initial-version audit") or accepted, each with its reason in `spec/audits/2026-11-12-initial-version.md`.
 
@@ -1618,6 +1745,36 @@ M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMA
 
 Where the built behaviour differs from the design (§4 of the design document, each marked there): the `state.json` key `address`, not `username` (R8); one `caldav` boolean, not an `adapters` object (§7.1); the root `sync.lock` stays at the root and is held by the serving process and the migration (R7); a held per-account sync lock is retried, not parked (R23); a damaged cache parks with exit 10 (R21); root `serve.lock` and `layout.lock` are new; stale root `state.lock`, `secrets.lock` and `clients.lock` an old binary recreates are never cleaned (§7.1).
 
+M7 delivered (2026-11-13, branch m7-pcb-ui; the live checks of `spec/HUMAN-CHECKS.md` step 9 are pending, test account only, in the throwaway VM (a GNOME session)): the Secret Service sealer (`internal/store/seal`, `internal/dbustest`), the sealer recorded in `layout.json` and chosen once when a state is created (`store.CreateLayout`, `service.OpenHub`, `[secrets] backend`), the locked-keyring wait and alert, the doctor's `sealer`, `keyring` and `pcb-ui` results, `/v2/ui/show` and `ctl.BuildStatus`, `internal/logfile`, `ui.Bridge` (the daemon in process), the view model, actions, wizard and notification rules (`internal/ui`), the Fyne window, tray, notifications and autostart (`internal/ui/desktop`), `cmd/pcb-ui`, `make ui` and `make install-ui`, and the CI job that builds and tests it. Deferred: the GUI session (step 9); a Windows build; the minors in `OPEN.md` ("Parked by M7"). Rulings recorded (`.superpowers/sdd/2026-11-13-m7-pcb-ui/progress.md`, kept out of the repository; the plan `spec/plans/2026-11-13-m7-pcb-ui.md` is left as written):
+
+| Ruling | Decision |
+|---|---|
+| P1 | `TestSecretServiceBindsItsName` lives in an external test package (`package seal_test`): `internal/store` imports `seal`, so a store test inside `seal` would be an import cycle |
+| P2 | `Migrate` writes `sealer: keyfile` whenever it writes `layout.json`; `OpenHub` on a new state chooses the sealer and calls `CreateLayout` (which also creates `accounts/`) under the layout lock before `Migrate`, which then sees version 2 |
+| P3 | the doctor looks for `pcb-ui.desktop` in `$XDG_DATA_HOME/applications` (default `~/.local/share/applications`), `/usr/local/share/applications` and `/usr/share/applications`; a custom `PREFIX` install is missed (a warning only) |
+| P4 | `Wizard.CaptchaSolved(ctx)` logs in again with the `LoginResult`'s CAPTCHA token, as `pcb login` does; the plan's `CaptchaSolved(ctx, token)` misread the CLI, which reads no token from the user |
+| P5, P6 | the desktop package defines `WizardModel` (the wizard's methods; `*ui.Wizard` satisfies it, so tests fake it) and the tray takes a two-method interface (`SetSystemTrayMenu`, `SetSystemTrayIcon`) |
+| P7 | no packaging copy of the icon: `make install-ui` installs `internal/ui/desktop/icons/app.svg` as `pcb-ui.svg`; `packaging/` holds only the desktop file |
+| P8 | the GL and X headers are installed in the CI jobs that need them: `check` (the linter type-checks `cmd/pcb-ui` with cgo) and the new `ui` job (builds `pcb-ui`, runs `--version` under `xvfb-run`, and its tests under `dbus-run-session`); the `rest` test shard leaves `cmd/pcb-ui` out but still compiles `internal/ui/desktop` without the headers installed, and the first CI run decides whether it needs them (not run yet) |
+| R1 | the keyring's `CreateItem` replaces, so two first sealers could overwrite each other's key: the first seal runs under `<state>/sealer.lock` and re-reads the stored item |
+| R2 | an invalid `[secrets] backend` is exit 10 (a person must fix the file), like `[log] level` and every config fault, not 2 as the plan wrote |
+| R3 | a mid-serve locked keyring also waits, retries every 30 s and shows `keyring-locked` (the design says accounts wait), and the errors name the keyring on a keyring state |
+| R4 | `scripts/live/rehearse.sh` pins `[secrets] backend = "keyfile"` and unsets the bus address, so a rehearsal never touches the developer's keyring |
+| R5 | a daemon without `ui/show` answers the existing `no such control endpoint: <path>` 404, not a new `unknown endpoint` |
+| R6 | a daemon that ends by itself after Ready pokes `Changes`, and the next Restart starts a new one (the tray must not show a dead bridge as alive); the pass lines and warnings `pcb serve` logs also go to `pcb-ui.log` (`daemon.LogPass`, `RenderLog`) |
+| R7 | the view carries `Bridge` (`bridge stopped: <err>`, tray `attention`) and the actions refuse while the bridge is not running |
+| R8 | the one-line state precedence is: stopped, keyring locked, keyring unavailable (R15), login phase, CalDAV off, syncing, synced; a loop that reports no interval is shown against the 5 min idle cadence |
+| R9 | the notifier notifies the listed codes (six since R15: `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked`, `keyring-unavailable`) whatever their severity, so the `sync-stalled` warning notifies (the plan's "error-severity alerts" would have skipped it) |
+| R10 | the unattended-relogin warning is a format function, `doctor.UnattendedKeyringWarning(sealedPath)`, not one shared constant, so `pcb doctor` keeps the full path |
+| R11 | the plan's manual run of `pcb-ui` against `pcb-fake` is not done by the agent (no display; a real run would open a window on the author's desktop and could probe the author's real keyring): `--version`, a no-display start and CI under `xvfb-run` instead, and the GUI session is step 9 |
+| R12 | `spec/HUMAN-CHECKS.md` step 9 runs in the throwaway VM with a GNOME session, not on the author's workstation |
+| R13 | `pcb uninstall --delete-data` deletes the state's `pcb sealing key` item when `layout.json` records `secret-service`; a locked or absent keyring is a note with the Seahorse fix, not a failure; `pcb account remove` keeps it |
+| R14 | with no tray host, closing the window quits through the tray Quit's drain instead of hiding (a hidden bridge with no icon and no Quit would hold `serve.lock` unseen) |
+| R15 | `seal.ErrNoService` is Blocked `the desktop keyring is not available` with a desktop-session hint; `pcb status` shows secrets `keyring-unavailable` with its own alert and keeps the phase, never `needs-login` |
+| R16 | a login on a keyring state checks the keyring (locked, service present) before SRP, so a doomed seal spends no Proton login and no login-guard slot |
+
+Where the built behaviour differs from the design (§5 of the design document, each marked there): the sealer is chosen when the state is created, by `[secrets] backend`, and the key file stays for every existing state; the 404 wording (R5); `sync-stalled` notifies although it is a warning (R9); the unattended-relogin warning is a function (R10); `CaptchaSolved` takes no token (P4); the log level chosen in Settings is not written to `config.toml`; no Proton login is made while the keyring is locked; the GUI is a human step (R11).
+
 ## 19. Security model (summary)
 
 Assets: Proton session and key passphrase (account takeover), decrypted
@@ -1678,6 +1835,9 @@ piece of logic is reused:
 - emersion/go-webdav (MIT): audited in E17; used as a test client only (M3-R5).
 - Thunderbird's CalDAV provider (mozilla/releases-comm-central, MPL-2.0): read for
   understanding only (E08), no code copied.
+- Fyne v2.8.2 (fyne.io/fyne/v2, BSD-3-Clause) and godbus/dbus v5.2.4 (BSD-2-Clause): used as dependencies in M7 (the toolkit of `pcb-ui`; the D-Bus
+  client of the Secret Service sealer and of the notifications), credited in `README.md`; nothing copied. Our own Secret Service client was written from the
+  freedesktop Secret Service specification, with no other implementation consulted.
 - ProtonMail/WebClients (GPL-3.0 [verified: GitHub licence 2026-11-10]:
   read for understanding only, never copy code), go-proton-api, gopenpgp,
   go-srp, rrule-go (MIT, candidate dependencies),

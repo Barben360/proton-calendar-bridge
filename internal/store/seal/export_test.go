@@ -6,3 +6,6 @@ func SetLink(f func(oldname, newname string) error) (restore func()) {
 	link = f
 	return func() { link = old }
 }
+
+// Bounded is the error mapping run applies once fn returns.
+var Bounded = bounded

@@ -124,7 +124,7 @@ func (l *Local) Serve(ctx context.Context, o ServeOptions) error {
 // after the stop err: one a login fixes (ruling M5-R8), or another
 // process logged in to another account (ruling M5-R10: the next login
 // check serves it).
-func waitsAfter(err error) bool { return loginFixes(err) || accountSwitched(err) }
+func waitsAfter(err error) bool { return loginFixes(err) || accountSwitched(err) || keyringLocked(err) }
 
 // errLoggedOut ends a serving phase that a Logout stops (ruling M5-P10).
 var errLoggedOut = errors.New("logged out during serve")
@@ -239,7 +239,7 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 			}
 		}
 		return res, err
-	}, pace)
+	}, pace, stopsServe)
 	if err == nil && ctx.Err() == nil && errors.Is(context.Cause(pctx), errLoggedOut) {
 		return loggedOut()
 	}
@@ -261,13 +261,20 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 		poll = DefaultLoginPoll
 	}
 	logged := false
+	locked := keyringLocked(stopped) // the last check found the desktop keyring locked
 	wait := stopped != nil
 	if stopped != nil {
 		o.Logger.Warn("waiting for a login", "reason", stopped.Error(), "hint", exitcode.HintOf(stopped))
 		logged = true
 	}
 	for {
-		if wait {
+		if wait && locked {
+			// Not a poll of state.json: the keyring unlocks with the desktop
+			// session. Asked again every keyringRetry.
+			if l.o.Sleep(ctx, keyringRetry) != nil {
+				return store.Account{}, 0, ctx.Err()
+			}
+		} else if wait {
 			tick, stop := l.pollTimer(poll)
 			select {
 			case <-ctx.Done():
@@ -286,12 +293,16 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 		halted, gen := l.halts > 0, l.logouts
 		l.gmu.Unlock()
 		var err error
+		locked = false
 		if !halted {
 			var acc store.Account
 			_, acc, err = l.stored()
 			switch {
 			case err == nil:
 				return acc, gen, nil
+			case keyringLocked(err):
+				locked = true
+				o.Logger.Warn("waiting for the desktop keyring", "reason", err.Error(), "hint", exitcode.HintOf(err), "retry", keyringRetry.String())
 			case !loginFixes(err):
 				return store.Account{}, 0, persistent(err)
 			}
@@ -304,7 +315,7 @@ func (l *Local) awaitLogin(ctx context.Context, o ServeOptions, stopped error) (
 			cause = loggedOut() // a logout is wiping
 		}
 		l.enterWaiting(o, cause)
-		if !logged && err != nil {
+		if !logged && err != nil && !locked { // a locked keyring is logged at each retry
 			o.Logger.Warn("waiting for a login", "reason", err.Error(), "hint", exitcode.HintOf(err))
 			logged = true
 		}

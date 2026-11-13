@@ -23,6 +23,8 @@ const (
 	CodeClientsUnreadable  = "clients-file-unreadable"
 	CodeTLSExpiring        = "tls-certificate-expiring"
 	CodeTLSExpired         = "tls-certificate-expired"
+	CodeKeyringLocked      = "keyring-locked"
+	CodeKeyringUnavailable = "keyring-unavailable"
 
 	SeverityError   = "error"
 	SeverityWarning = "warning"
@@ -72,6 +74,12 @@ func Alerts(in AlertInput) []Alert {
 	case "needs-captcha":
 		add(CodeNeedsCaptcha, SeverityError, "Proton asks for a CAPTCHA: solve it at "+in.Login.CaptchaURL,
 			"pcb login resume --captcha-token TOKEN (the token parameter of that URL)", "")
+	}
+	if in.Login.Secrets == "locked" {
+		add(CodeKeyringLocked, SeverityError, "the desktop keyring is locked", service.KeyringFix, "")
+	}
+	if in.Login.Secrets == service.SecretsKeyringUnavailable {
+		add(CodeKeyringUnavailable, SeverityError, "the desktop keyring is not available", service.KeyringUnavailableFix, "")
 	}
 	if f := in.Login.ClientsFile; f != "" {
 		add(CodeClientsUnreadable, SeverityError, "the CalDAV clients file cannot be loaded: every CalDAV request answers 503",

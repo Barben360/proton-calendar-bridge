@@ -94,7 +94,7 @@ fi
 for w in "$@"; do
   w=${w//@RUN@/$PCB_LIVE_RUN}
   case ${w##*/} in
-    pcb | pcb-lab | proton-cal)
+    pcb | pcb-ui | pcb-lab | proton-cal)
       if [[ $w == */* && $w != "$PCB_LIVE_RUN/bin/${w##*/}" ]]; then
         echo "run.sh: $w is not the run root's build ($PCB_LIVE_RUN/bin/${w##*/}): refused" >&2; exit 1
       fi

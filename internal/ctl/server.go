@@ -56,6 +56,11 @@ type Server struct {
 	Now      func() time.Time
 	Logger   *slog.Logger
 	PeerUID  func(net.Conn) (uid int, ok bool)
+	// ShowUI raises the desktop app's window (on the account's pane when
+	// named). nil: this process has no window, and POST /v2/ui/show is an
+	// unknown endpoint. It runs on the HTTP handler goroutine and must
+	// return quickly, for example by posting to the UI loop.
+	ShowUI func(account string) error
 
 	once, initOnce sync.Once
 	srv            *http.Server
@@ -167,6 +172,10 @@ func (s *Server) init() {
 	for _, rt := range routes {
 		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
 	}
+	if s.ShowUI != nil {
+		rt := route{"/v2/ui/show", http.MethodPost, "ui show", (*Server).showUI}
+		s.mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) { s.answer(w, r, rt) })
+	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		record(r, transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon"))
 	})
@@ -256,8 +265,7 @@ func (s *Server) accounts(context.Context, string, []byte) (any, error) {
 	return Accounts{Accounts: s.Hub.Accounts()}, nil
 }
 
-// status is GET /v2/status: the process, and per account its login, Serve's
-// health, its CalDAV URL and its alerts.
+// status is GET /v2/status: BuildStatus of this server's own state.
 func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	var ln *Listener
 	if s.Listener != nil {
@@ -267,14 +275,22 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
+	return BuildStatus(ctx, s.Hub, s.Daemon, ln, now()), nil
+}
+
+// BuildStatus is what GET /v2/status answers, built in-process (the desktop
+// app reads its own status through it, with no socket): the process, and
+// per account its login, Serve's health, its CalDAV URL and its alerts. ln
+// is the CalDAV listener (nil before it is bound).
+func BuildStatus(ctx context.Context, h Hub, d Daemon, ln *Listener, now time.Time) Status {
 	base := ""
 	if ln != nil {
 		base = strings.TrimRight(ln.URL, "/")
 	}
-	infos := s.Hub.Accounts()
+	infos := h.Accounts()
 	accounts := make([]AccountStatus, 0, len(infos))
 	for _, info := range infos {
-		as, err := s.accountStatus(ctx, info, now())
+		as, err := accountStatus(ctx, h, info, now)
 		if errors.Is(err, service.ErrNoAccount) {
 			continue // removed since Accounts listed it
 		}
@@ -283,23 +299,22 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 		}
 		accounts = append(accounts, as)
 	}
-	d := s.Daemon
-	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, accounts, now())}, nil
+	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, accounts, now)}
 }
 
 // accountStatus is info's entry of Status. An account that cannot be read
 // still has its entry, with an account-unreadable alert saying why (err
 // is then set, for the caller to tell a vanished account), so one account
 // never takes the others' status down.
-func (s *Server) accountStatus(ctx context.Context, info service.AccountInfo, now time.Time) (AccountStatus, error) {
+func accountStatus(ctx context.Context, hub Hub, info service.AccountInfo, now time.Time) (AccountStatus, error) {
 	as := AccountStatus{AccountInfo: info}
-	api, _, err := s.Hub.Account(info.ID)
+	api, _, err := hub.Account(info.ID)
 	if err == nil {
 		as.Login, err = api.Status(ctx)
 	}
 	if err == nil {
 		var h service.Health
-		if h, err = s.Hub.Health(ctx, info.ID); err == nil {
+		if h, err = hub.Health(ctx, info.ID); err == nil {
 			as.Health = &h
 		}
 	}
@@ -310,6 +325,20 @@ func (s *Server) accountStatus(ctx context.Context, info service.AccountInfo, no
 		SortAlerts(as.Alerts)
 	}
 	return as, err
+}
+
+// showUI is POST /v2/ui/show: ShowUI on the body's account (none: the window).
+func (s *Server) showUI(_ context.Context, _ string, body []byte) (any, error) {
+	var req ShowUIRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, errBadBody
+		}
+	}
+	if err := s.ShowUI(req.Account); err != nil {
+		return nil, err
+	}
+	return ShowUI{Shown: true}, nil
 }
 
 // login is POST /v2/login: Hub.Login on the body, a service.LoginRequest.

@@ -20,6 +20,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // noSystemHost is the host of the tests that are not about the system: a
@@ -68,6 +69,8 @@ type sysRig struct {
 	openHub func(env func(string) string) (cli.Hub, error)
 	// logoutEnv is the directories the hook's accounts were opened on.
 	logoutEnv [2]string
+	// keyring, when set, is the desktop keyring of pcb uninstall.
+	keyring *memKeyring
 	// ids are the uid and gid LookupUser gives a user (default: the test
 	// process's, so a rerun finds its own files owned right).
 	ids map[string][2]int
@@ -215,6 +218,9 @@ func (s *sysRig) run(args ...string) exitcode.Code {
 			}
 			return newStubHub(&logoutAPI{s: s}), nil
 		}}
+	if s.keyring != nil {
+		io.Keyring = s.keyring
+	}
 	return cli.Main(s.t.Context(), args, io)
 }
 
@@ -1017,5 +1023,96 @@ func TestInstallPlanRefusesAPathAUnitCannotHoldWithExit10(t *testing.T) {
 		if got := s.errb.String(); got != want {
 			t.Errorf("HOME=%q: stderr %q, want %q", c.home, got, want)
 		}
+	}
+}
+
+// keyringState makes the unit's state one sealed with the desktop keyring:
+// layout.json records secret-service and kr holds its item and another
+// state's. It returns the item's attributes.
+func keyringState(t *testing.T, s *sysRig, kr *memKeyring) map[string]string {
+	t.Helper()
+	s.write(userStateDir+"/layout.json", `{"version":2,"sealer":"secret-service"}`+"\n", 0o600)
+	s.mkdir(userStateDir + "/accounts")
+	attrs := map[string]string{"application": "pcb", "state": filepath.Join(s.root, userStateDir)}
+	for _, a := range []map[string]string{attrs, {"application": "pcb", "state": "/elsewhere/other-state"}} {
+		if err := kr.Set(t.Context(), "pcb sealing key", a, make([]byte, 32)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return attrs
+}
+
+// Ruling R13: pcb uninstall --delete-data deletes the state's "pcb sealing
+// key" item when layout.json records secret-service, and only that one; a
+// key-file state plans no keyring step.
+func TestUninstallDeleteDataRemovesTheKeyringItem(t *testing.T) {
+	t.Parallel()
+	s := newSysRig(t)
+	s.want(exitcode.OK, "install")
+	s.keyring = &memKeyring{}
+	attrs := keyringState(t, s, s.keyring)
+	s.want(exitcode.OK, "uninstall", "--delete-data", "--yes", "--non-interactive")
+	if _, err := s.keyring.Get(t.Context(), attrs); !errors.Is(err, seal.ErrNoKey) {
+		t.Errorf("the state's keyring item survived --delete-data: %v", err)
+	}
+	if _, err := s.keyring.Get(t.Context(), map[string]string{"application": "pcb", "state": "/elsewhere/other-state"}); err != nil {
+		t.Errorf("another state's item was deleted: %v", err)
+	}
+	if want := "remove keyring " + userStateDir; !strings.Contains(s.stdout.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, s.stdout.String())
+	}
+	if s.exists(userStateDir) {
+		t.Error("the state survived --delete-data")
+	}
+
+	k := newSysRig(t)
+	k.want(exitcode.OK, "install")
+	k.keyring = &memKeyring{}
+	k.write(userStateDir+"/layout.json", `{"version":2,"sealer":"keyfile"}`+"\n", 0o600)
+	k.want(exitcode.OK, "uninstall", "--delete-data", "--plan")
+	if strings.Contains(k.stdout.String(), "keyring") {
+		t.Errorf("a key-file state plans a keyring step:\n%s", k.stdout.String())
+	}
+}
+
+// A locked or absent keyring does not fail --delete-data: the data goes,
+// the item stays, and the output says so with how to delete it by hand.
+func TestUninstallDeleteDataWithoutTheKeyringSaysHowToRemoveTheItem(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		set   func(*memKeyring)
+		cause string
+	}{
+		{"locked", func(k *memKeyring) { k.locked = true }, "the desktop keyring is locked"},
+		{"no service", func(k *memKeyring) { k.absent = true }, "the desktop keyring is not available"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSysRig(t)
+			s.want(exitcode.OK, "install")
+			s.keyring = &memKeyring{}
+			attrs := keyringState(t, s, s.keyring)
+			tc.set(s.keyring)
+			s.want(exitcode.OK, "uninstall", "--delete-data", "--yes", "--non-interactive", "--json")
+			var line string
+			for _, st := range s.data().Steps {
+				if st.Kind == "keyring" {
+					line = st.String()
+				}
+			}
+			if !strings.Contains(line, tc.cause) || !strings.Contains(line, "Seahorse") || !strings.Contains(line, attrs["state"]) {
+				t.Errorf("keyring step = %q, want the cause %q, Seahorse and the state %s", line, tc.cause, attrs["state"])
+			}
+			if s.exists(userStateDir) || s.exists(userConfigDir) {
+				t.Error("the data was not deleted")
+			}
+			s.keyring.mu.Lock()
+			s.keyring.locked, s.keyring.absent = false, false
+			s.keyring.mu.Unlock()
+			if _, err := s.keyring.Get(t.Context(), attrs); err != nil {
+				t.Errorf("the item is gone though the keyring could not be used: %v", err)
+			}
+		})
 	}
 }

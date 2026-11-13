@@ -1,9 +1,9 @@
 # Multi-account core (M6) and desktop UI `pcb-ui` (M7) — design
 
 - **Date**: 2026-11-12
-- **Status**: M6 built 2026-11-12; M7 not planned yet. Where the built M6 differs from §4, the paragraph says so, marked "Built:" with the controller ruling (`.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`, summarised in SPEC §18)
+- **Status**: M6 built 2026-11-12; M7 built 2026-11-13 (live session pending, `spec/HUMAN-CHECKS.md` step 9). Where the built M6 differs from §4 and the built M7 from §5, the paragraph says so, marked "Built:" with the controller ruling (M6: `.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`; M7: `.superpowers/sdd/2026-11-13-m7-pcb-ui/progress.md`; both summarised in SPEC §18, which holds each ruling as plain text)
 - **Decided by**: author (choices marked "author"); the rest is the agent's call, marked [call]
-- **Amends**: decision 0001 (GUIs as clients of the local API), 0013 (the CalDAV username; done, by 0014), SPEC §3 (GUIs not planned), §4 and §13 (one account per daemon), §18 (nothing after M5): M6 part done, see decision 0014
+- **Amends**: decision 0001 (GUIs as clients of the local API; done for M7, by 0015), 0013 (the CalDAV username; done, by 0014), SPEC §3 (GUIs not planned), §4 and §13 (one account per daemon), §18 (nothing after M5): M6 part done, see decision 0014; M7 part done, see decision 0015
 
 ## 1. Intent
 
@@ -138,6 +138,8 @@ Anti-goals (failure even if it works):
 - Single instance: a second `pcb-ui` that finds `serve.lock` held asks the owner over CTL; if the owner is a `pcb-ui`, it asks it to show its window (`POST /v2/ui/show`, served only by a UI owner) and exits 0; if the owner is `pcb serve`, it shows a dialog naming the PID and how to stop it (`pcb service stop` when installed as a service, otherwise "stop the `pcb serve` process") and exits 20.
 - Logs: no terminal, so `<state>/logs/pcb-ui.log`, size-capped with one rotated file [call: 10 MiB × 2]. Same content and levels as `pcb serve`.
 
+*Built (M7): `ui.Bridge` wraps `daemon.Run` with kind `ui` and the same wiring as `pcb serve`; the second-instance probe asks `POST /v2/ui/show` (served only when the daemon has a window to show), and a daemon without it, `pcb serve`, answers the existing 404 envelope `no such control endpoint: <path>`, not a new `unknown endpoint` (R5). The log carries the pass lines and the certificate warnings `pcb serve` prints to stderr, which moved into `internal/daemon` for both (R6); a daemon that ends by itself after Ready wakes the UI, which shows `bridge stopped: <error>` with the attention tray, and the next Restart starts a new one (R6, R7). Closing the startup error dialog with the title bar's X quits the app (the dialog window is the master window); that is read from Fyne's source and checked at the human step (R11).*
+
 ### 5.2 Toolkit [call]
 
 - **Fyne v2** (Go only, tray built in through StatusNotifierItem over D-Bus, notifications, runs on Windows later; cgo for OpenGL). Wails was considered: closer to Bridge's look (HTML/CSS), but brings a JavaScript toolchain. The author may overrule.
@@ -161,6 +163,8 @@ Window (single, about 800 × 550 [call]):
 - **Add-account wizard**: address + password, "Repair the session without me" (unattended relogin, off by default, with the one-line warning `doctor` gives) → TOTP code if asked → CAPTCHA if asked ("Open verification" launches `https://verify.proton.me/...` in the browser, then "I solved it, continue") → done: the CalDAV connection block for the new account, ready to copy. Errors as the CLI words them (`exitcode.Error` message and hint).
 - **Settings** (gear): start at login (writes or deletes `~/.config/autostart/pcb-ui.desktop`), log level, open the logs folder, open `config.toml` in the default editor, "Restart bridge" (to apply a hand-edited config), the `pcb doctor` report. Listen address and TLS are shown read-only.
 
+*Built (M7): the unattended-relogin line in the wizard is `ui.UnattendedWarning`, built by `doctor.UnattendedKeyringWarning(sealedPath)`: the plan wanted one shared constant, but `pcb doctor` names the full `secrets.sealed` path and the wizard cannot, so one format function takes the path (R10). The plan's `CaptchaSolved(ctx, token)` took a token the CLI never reads: `Wizard.CaptchaSolved(ctx)` logs in again with the `LoginResult`'s CAPTCHA token, as `pcb login resume` does, and keeps the password until the retry ends (P4); the retry may wait up to 60 s on the login guard, so the window shows `Waiting for Proton (up to a minute)…`. The log level chosen in Settings is not written to `config.toml`: it lasts until the bridge restarts, which re-reads `[log] level` (the window says so). The tray states and one-line account states follow a fixed precedence: stopped, keyring locked, login phase, CalDAV off, syncing, synced (R8). The wizard and the account actions refuse, with the CLI's error shape, while the bridge is not running (R7).*
+
 ### 5.4 Secrets on the desktop [call; details settled when M7 is planned]
 
 - The Secret Service sealer (SPEC §7.3, planned, not built) is built in M7 in `internal/store`, pure Go over D-Bus (a vetted library, audited), so both `pcb` and `pcb-ui` can open what the other sealed (the sealer name is in the AAD of `secrets.sealed` and `clients.json`).
@@ -168,13 +172,19 @@ Window (single, about 800 × 550 [call]):
 - A locked keyring (a user service started before the desktop login): accounts wait with an alert `keyring-locked` and retry every 30 s; nothing is re-sealed with another backend.
 - The UI never holds a secret longer than a call: the password field is cleared once `Login` returns; a shown CalDAV password is hidden again when the account pane changes.
 
+*Built (M7): the sealer is chosen once, when the state is created, by the new `[secrets] backend` (`auto`, the default, `keyfile`, `secret-service`; an invalid value is exit 10, R2), under the layout lock, before the first migration code runs, and is recorded in `layout.json` (`store.CreateLayout`; `Migrate` keeps writing `keyfile` for every existing state, P2); `auto` probes the keyring only then, with a 2 s bound, and an existing state is never probed again; `secret-service` fails the creation (exit 10) instead of falling back. The first seal runs under `<state>/sealer.lock`, because the keyring's `CreateItem` replaces, so two first sealers could overwrite each other's key (R1). A locked keyring waits at every stage, also in the middle of serving (R3): the account shows `keyring-locked`, retries every 30 s, makes no Proton login while it is locked (the stored login is unreadable, so nothing can relogin) and recovers by itself. The errors on a keyring state name the keyring (R3). `pcb doctor` shows `sealer:` (`not chosen yet` on a fresh state, never probing it) and a `keyring` check. Removing an account keeps the keyring item `pcb sealing key` (the key belongs to the state); `pcb uninstall --delete-data` removes it (R13) `[verified: TestUninstallDeleteDataRemovesTheKeyringItem]`. No keyring answering on a keyring state is `the desktop keyring is not available` and `keyring-unavailable`, not a needs-login (R15), and a login checks the keyring before SRP (R16).*
+
 ### 5.5 Notifications
 
 A desktop notification when an account gains an error-severity alert (`needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`), once per alert occurrence, naming the account and the fix. Clicking it opens the window on that account.
 
+*Built (M7): the six codes `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked` and `keyring-unavailable` (R15) notify whatever their severity, because `sync-stalled` is a warning and the design names it explicitly (R9); an alert that clears and comes back notifies again. A body never carries a URL (the CAPTCHA message embeds a tokenised link, replaced by `the link in the pcb-ui window`) or a password. The click is matched to the notification server's own signals (the bus owner is checked), so a forged click opens nothing.*
+
 ### 5.6 Install
 
 `make ui` builds `pcb-ui`; `make install-ui` puts it in `~/.local/bin`, with `pcb-ui.desktop` in `~/.local/share/applications` and an icon of our own (not Proton's) in `~/.local/share/icons`. A user who also installed the systemd service gets the §5.1 conflict dialog; `pcb doctor` warns when both are installed.
+
+*Built (M7): the three directories follow `PREFIX` (`~/.local` by default): `$(PREFIX)/bin/pcb-ui`, `$(PREFIX)/share/applications/pcb-ui.desktop`, `$(PREFIX)/share/icons/hicolor/scalable/apps/pcb-ui.svg`, and the installed desktop file's `Exec=` is the absolute `$(PREFIX)/bin/pcb-ui`, since launchers often lack `~/.local/bin` on their `PATH`. The icon is installed from `internal/ui/desktop/icons/app.svg`, with no copy under `packaging/` (P7). The doctor looks for `pcb-ui.desktop` in the user, `/usr/local` and `/usr` application directories, so a custom `PREFIX` install is missed (a warning only, P3). The GL and X headers are installed in the CI jobs that compile `pcb-ui` (P8).*
 
 ### 5.7 Tests (M7)
 
@@ -182,6 +192,8 @@ A desktop notification when an account gains an error-severity alert (`needs-log
 - The Fyne layer is thin and tested with Fyne's headless test driver: each screen renders the model and each button calls the expected action.
 - CI: a job with the cgo build dependencies builds `pcb-ui` and runs its tests; `make lint test` covers it on the workstation once the dependencies are installed (README lists them).
 - No live check needs a display in CI; the author runs one manual session on the desktop (`spec/HUMAN-CHECKS.md`, new step).
+
+*Built (M7): the Secret Service sealer is tested against a fake service on a private `dbus-daemon` (`internal/dbustest`, `internal/store/seal/sstest`); the notifications and autostart against a fake notification server on a private bus; the Fyne layer on the headless driver. The plan's manual run of `pcb-ui` against `pcb-fake` is not done by the build agent: it has no display, and a real run would open a window on the author's desktop and could probe the author's real keyring. It checks `bin/pcb-ui --version` and a start with no display (exit 2 with a message, nothing created) instead, CI runs the same under `xvfb-run`, and the GUI session is step 9 of `spec/HUMAN-CHECKS.md`, run by the author alone in the step 8 throwaway VM, in a GNOME session with the AppIndicator extension, with the test account (R11).*
 
 ## 6. Left to the builder
 

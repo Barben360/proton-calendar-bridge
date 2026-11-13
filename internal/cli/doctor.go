@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -34,7 +31,7 @@ func (a *app) newDoctor() *cobra.Command {
 				stream = func(r doctor.Result) { printResult(cmd.OutOrStdout(), r) }
 			}
 			daemon := a.askDaemon(cmd.Context())
-			results := doctor.Run(cmd.Context(), doctorChecks(a.Env, daemon.live()), stream)
+			results := doctor.Run(cmd.Context(), doctor.Checks(a.Env, a.Host, a.Keyring, daemon.live()), stream)
 			for _, r := range append([]doctor.Result{a.serviceResult(cmd.Context())}, daemon.results()...) {
 				if stream != nil {
 					stream(r)
@@ -157,102 +154,6 @@ func alertResults(prefix string, alerts []ctl.Alert, waiting bool) []doctor.Resu
 		out = append(out, r)
 	}
 	return out
-}
-
-// doctorChecks lists the checks, with one failing check per directory when
-// the user directories cannot be located: the process checks, then the
-// account checks of each account directory, named by the account (design
-// §4.6). env looks up an environment variable; live is the running
-// daemon's listener (nil: none).
-func doctorChecks(env func(string) string, live *doctor.Live) []doctor.Check {
-	checks := []doctor.Check{doctor.PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
-	dirs, err := paths.Resolve(env)
-	if err != nil {
-		fix := func(override, xdg string) string {
-			return "set HOME, " + override + " or " + xdg + " to an absolute path"
-		}
-		return append(checks,
-			doctor.FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix(paths.EnvConfigDir, "XDG_CONFIG_HOME")},
-			doctor.FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix(paths.EnvStateDir, "XDG_STATE_HOME")})
-	}
-	checks = append(checks,
-		doctor.DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
-		doctor.DirModeCheck{Label: "state dir", Path: dirs.State, Want: 0o700},
-		doctor.ConfigCheck{Path: config.Path(dirs), Dirs: dirs})
-	cfg, err := config.Load(config.Path(dirs), dirs)
-	if err != nil { // ConfigCheck already reports it
-		return checks
-	}
-	bind := &doctor.Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
-	checks = append(checks,
-		doctor.KeyFileCheck{Path: cfg.Secrets.KeyFile},
-		doctor.ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
-		doctor.CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live})
-	layout, err := doctor.Accounts(dirs.State)
-	var lerr *doctor.LayoutError
-	switch {
-	case errors.As(err, &lerr):
-		checks = append(checks, doctor.FailedCheck{Label: "accounts", Message: lerr.Error(), Fix: lerr.Fix})
-	case layout.Interrupted != "":
-		checks = append(checks, warnCheck{label: "accounts", message: "the move to the per-account layout stopped midway (" + layout.Interrupted +
-			"): the next pcb command that opens the state finishes it", fix: "pcb status"})
-	case len(layout.Accounts) == 0:
-		checks = append(checks, warnCheck{label: "accounts", message: "no account: nothing can sign in to pcb serve",
-			fix: "pcb login (it creates the client default), then pcb client show"})
-	}
-	for _, acct := range layout.Accounts {
-		prefix := ""
-		if acct.Label != "" {
-			prefix = acct.Label + ": "
-		}
-		for _, c := range []doctor.Check{
-			doctor.FileModeCheck{Label: "sealed secrets", Path: filepath.Join(acct.Dir, "secrets.sealed"), Want: 0o600},
-			doctor.SecretsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
-			doctor.CacheCheck{StateDir: acct.Dir},
-			doctor.ClientsCheck{StateDir: acct.Dir},
-			doctor.SealedClientsCheck{StateDir: acct.Dir, KeyFile: cfg.Secrets.KeyFile},
-		} {
-			checks = append(checks, named{prefix: prefix, Check: c})
-		}
-	}
-	return checks
-}
-
-// warnCheck is a warning found without a check of its own to run.
-type warnCheck struct{ label, message, fix string }
-
-func (c warnCheck) Name() string { return c.label }
-
-func (c warnCheck) Run(context.Context) doctor.Result {
-	return doctor.Result{Name: c.label, Status: doctor.StatusWarn, Message: c.message, Fix: c.fix}
-}
-
-// named is a check whose results are named with prefix first (the
-// account's).
-type named struct {
-	prefix string
-	doctor.Check
-}
-
-func (n named) Name() string { return n.prefix + n.Check.Name() }
-
-func (n named) Run(ctx context.Context) doctor.Result {
-	r := n.Check.Run(ctx)
-	r.Name = n.prefix + r.Name
-	return r
-}
-
-func (n named) RunAll(ctx context.Context) []doctor.Result {
-	var rs []doctor.Result
-	if m, ok := n.Check.(doctor.Multi); ok {
-		rs = m.RunAll(ctx)
-	} else {
-		rs = []doctor.Result{n.Check.Run(ctx)}
-	}
-	for i := range rs {
-		rs[i].Name = n.prefix + rs[i].Name
-	}
-	return rs
 }
 
 var marks = map[doctor.Status]string{

@@ -138,3 +138,14 @@ const maxPath = sunPathLen - 1
 
 // maxBody is the largest request body.
 const maxBody = 64 << 10
+
+// ShowUIRequest is the body of POST /v2/ui/show: the account whose pane to
+// show (a local ID; none: wherever the window was).
+type ShowUIRequest struct {
+	Account string `json:"account,omitempty"`
+}
+
+// ShowUI is the answer of POST /v2/ui/show.
+type ShowUI struct {
+	Shown bool `json:"shown"`
+}

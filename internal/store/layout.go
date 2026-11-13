@@ -58,6 +58,21 @@ var ErrLegacyBesideLayout = errors.New("account files of an older pcb are beside
 // (fail closed), but it is not damaged: upgrading pcb reads it.
 var ErrNewerLayout = errors.New("layout.json was written by a newer pcb")
 
+// ErrUnknownSealer is the cause of ReadLayout's (and Migrate's) error for a
+// layout.json naming a sealer this pcb does not know (a newer pcb wrote it:
+// upgrading pcb reads it), and of CreateLayout's for a sealer it cannot
+// record. Like ErrNewerLayout it fails closed.
+var ErrUnknownSealer = errors.New("layout.json names a sealer this pcb does not know")
+
+// Sealer names layout.json records; they are seal.KeyFile's and
+// seal.SecretService's Name (Task 0's Name tests pin the same strings).
+const (
+	sealerKeyFile       = "keyfile"
+	sealerSecretService = "secret-service"
+)
+
+func knownSealer(s string) bool { return s == sealerKeyFile || s == sealerSecretService }
+
 // renameHook, when set, runs after each rename Migrate makes; its error
 // stops Migrate there, as a crash right after that rename would (tests).
 var renameHook func(from, to string) error
@@ -105,6 +120,7 @@ type LayoutInfo struct {
 	Accounts  []string // the local IDs under accounts/, sorted
 	Legacy    []string // M5 account data files at the root (legacyFiles order)
 	Migrating string   // the local ID of an accounts/<id>.migrating directory
+	Sealer    string   // layout.json's sealer; "keyfile" when it names none (M6's layout, or no layout.json)
 }
 
 // ReadLayout reads what stateDir holds and writes nothing. A layout.json
@@ -113,11 +129,11 @@ type LayoutInfo struct {
 // error wrapping ErrLegacyBesideLayout.
 func ReadLayout(stateDir string) (LayoutInfo, error) {
 	var info LayoutInfo
-	v, err := readLayoutVersion(stateDir)
+	l, err := readLayoutFile(stateDir)
 	if err != nil {
 		return LayoutInfo{}, err
 	}
-	info.Version = v
+	info.Version, info.Sealer = l.Version, l.Sealer
 	entries, err := os.ReadDir(AccountsDir(stateDir))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return LayoutInfo{}, err
@@ -151,35 +167,52 @@ func ReadLayout(stateDir string) (LayoutInfo, error) {
 }
 
 type layoutFile struct {
-	Version int `json:"version"`
+	Version int    `json:"version"`
+	Sealer  string `json:"sealer,omitempty"`
 }
 
-// readLayoutVersion is layout.json's version, 0 when there is none.
-func readLayoutVersion(stateDir string) (int, error) {
+// readLayoutFile is layout.json's content: version 0 and sealer "keyfile"
+// when there is none, sealer "keyfile" when it names none.
+func readLayoutFile(stateDir string) (layoutFile, error) {
 	path := filepath.Join(stateDir, layoutName)
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return 0, nil
+		return layoutFile{Sealer: sealerKeyFile}, nil
 	}
 	if err != nil {
-		return 0, err
+		return layoutFile{}, err
 	}
 	var l layoutFile
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&l); err != nil {
-		return 0, fmt.Errorf("%s is malformed: %w", path, err)
+		return layoutFile{}, fmt.Errorf("%s is malformed: %w", path, err)
 	}
 	if dec.More() {
-		return 0, fmt.Errorf("%s is malformed: data after the JSON value", path)
+		return layoutFile{}, fmt.Errorf("%s is malformed: data after the JSON value", path)
 	}
 	switch {
 	case l.Version == LayoutVersion:
-		return l.Version, nil
+		switch {
+		case l.Sealer == "" && !sealerPresent(raw):
+			l.Sealer = sealerKeyFile
+		case !knownSealer(l.Sealer):
+			return layoutFile{}, fmt.Errorf("%s: sealer %q: %w", path, l.Sealer, ErrUnknownSealer)
+		}
+		return l, nil
 	case l.Version > LayoutVersion:
-		return 0, fmt.Errorf("%s: version %d: %w", path, l.Version, ErrNewerLayout)
+		return layoutFile{}, fmt.Errorf("%s: version %d: %w", path, l.Version, ErrNewerLayout)
 	}
-	return 0, fmt.Errorf("%s: unknown version %d", path, l.Version)
+	return layoutFile{}, fmt.Errorf("%s: unknown version %d", path, l.Version)
+}
+
+// sealerPresent reports whether raw (a valid layout.json) has a "sealer"
+// key, so that an empty value is told from an absent one.
+func sealerPresent(raw []byte) bool {
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	_, ok := m["sealer"]
+	return ok
 }
 
 func legacyError(stateDir string, names []string) error {
@@ -218,7 +251,7 @@ func Migrate(stateDir string, newID func() (string, error)) (localID string, mig
 	case len(info.Accounts) > 1:
 		return "", false, fmt.Errorf("%s holds %d accounts but no %s", AccountsDir(stateDir), len(info.Accounts), layoutName)
 	case len(info.Accounts) == 1: // moved; only layout.json is missing
-		if err := writeLayout(stateDir); err != nil {
+		if err := writeLayout(stateDir, sealerKeyFile); err != nil {
 			return "", false, err
 		}
 		return info.Accounts[0], true, nil
@@ -226,7 +259,7 @@ func Migrate(stateDir string, newID func() (string, error)) (localID string, mig
 		if err := makeDir(stateDir, AccountsDir(stateDir)); err != nil {
 			return "", false, err
 		}
-		return "", false, writeLayout(stateDir)
+		return "", false, writeLayout(stateDir, sealerKeyFile)
 	default:
 		if localID, err = freshLocalID(stateDir, newID); err != nil {
 			return "", false, err
@@ -297,7 +330,7 @@ func moveAccount(stateDir, id string) error {
 		return err
 	}
 	syncDir(accounts)
-	return writeLayout(stateDir)
+	return writeLayout(stateDir, sealerKeyFile)
 }
 
 // exists reports whether path exists; an error other than its absence
@@ -330,10 +363,50 @@ func rename(from, to string) error {
 	return nil
 }
 
-func writeLayout(stateDir string) error {
-	raw, err := json.Marshal(layoutFile{Version: LayoutVersion})
+// writeLayout replaces layout.json (Migrate's: the caller holds the locks).
+func writeLayout(stateDir, sealer string) error {
+	raw, err := json.Marshal(layoutFile{Version: LayoutVersion, Sealer: sealer})
 	if err != nil {
 		return err
 	}
 	return atomicfile.Write(filepath.Join(stateDir, layoutName), append(raw, '\n'))
+}
+
+// CreateLayout makes the layout of a new state: accounts/ (0700), then
+// layout.json recording sealer, "keyfile" or "secret-service" (otherwise
+// ErrUnknownSealer, nothing written). layout.json is created exclusively
+// and fsynced, with its directory: when one exists already, the first
+// creator's stays and CreateLayout returns nil, so a second creator that
+// raced the first is harmless. The caller holds the layout lock.
+func CreateLayout(stateDir, sealer string) error {
+	if !knownSealer(sealer) {
+		return fmt.Errorf("sealer %q: %w", sealer, ErrUnknownSealer)
+	}
+	if err := makeDir(stateDir, AccountsDir(stateDir)); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(layoutFile{Version: LayoutVersion, Sealer: sealer})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(stateDir, layoutName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(raw, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(f.Name()) // no half-written layout.json stays
+		return err
+	}
+	syncDir(stateDir)
+	return nil
 }

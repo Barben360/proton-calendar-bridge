@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Install the GL and X development headers
+        # golangci-lint type-checks cmd/pcb-ui with cgo (Fyne).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev
       - name: Install golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
@@ -53,7 +58,8 @@ jobs:
           go-version-file: go.mod
       - name: Race tests
         run: |
-          heavy='internal/(service|cli)$'
+          # cmd/pcb-ui needs cgo and the GL headers: the ui job runs it.
+          heavy='internal/(service|cli)$|cmd/pcb-ui$'
           case "${{ matrix.shard }}" in
             service) pkgs=$(go list ./internal/service) ;;
             cli) pkgs=$(go list ./internal/cli) ;;
@@ -61,6 +67,27 @@ jobs:
           esac
           test -n "$pkgs"
           make test PKGS="$pkgs"
+  # pcb-ui, the desktop app (M7): built with cgo against the GL/X headers; its
+  # tests, and the sealer's, talk to a private session bus.
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install the GL and X development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb
+      - run: make ui
+      - name: pcb-ui starts far enough to print its version
+        run: xvfb-run -a bin/pcb-ui --version
+      - name: UI and seal tests on a session bus
+        run: dbus-run-session -- make test PKGS="./cmd/pcb-ui ./internal/ui/... ./internal/store/seal/... ./internal/dbustest"
   # pcb install --user and --system in a Debian container with systemd as
   # PID 1 (M5-P21): GitHub runners allow --privileged --cgroupns=host.
   systemd-smoke:

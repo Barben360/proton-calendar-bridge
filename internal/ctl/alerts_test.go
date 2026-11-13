@@ -218,3 +218,20 @@ func TestProcessNeedsLoginWithNoAccount(t *testing.T) {
 		})
 	}
 }
+
+func TestKeyringLockedAlert(t *testing.T) {
+	t.Parallel()
+	got := ctl.Alerts(ctl.AlertInput{Account: "acc1", Login: service.Status{Phase: "ready", Secrets: "locked"}, Now: now})
+	want := []ctl.Alert{{Account: "acc1", Code: "keyring-locked", Severity: "error", Message: "the desktop keyring is locked",
+		Fix: "unlock it (log in to the desktop session), pcb retries every 30 s"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("Alerts = %+v, want %+v", got, want)
+	}
+	if ctl.CodeKeyringLocked != "keyring-locked" {
+		t.Errorf("CodeKeyringLocked = %q", ctl.CodeKeyringLocked)
+	}
+	// A sealed store raises none.
+	if got := ctl.Alerts(ctl.AlertInput{Login: service.Status{Phase: "ready", Secrets: "sealed"}, Now: now}); len(got) != 0 {
+		t.Errorf("sealed: Alerts = %+v, want none", got)
+	}
+}

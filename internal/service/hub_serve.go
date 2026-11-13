@@ -204,7 +204,7 @@ func (h *Hub) anyLoggedIn() error {
 			continue
 		}
 		_, _, err := a.local.stored()
-		if err == nil {
+		if err == nil || keyringLocked(err) { // a locked keyring is waited for
 			return nil
 		}
 		errs = append(errs, err)
@@ -235,8 +235,8 @@ func (h *Hub) allStopped() error {
 		switch {
 		case a.stopped != nil:
 			err = a.stopErr
-		case a.state == ServeWaitingForLogin:
-			err = a.waitErr
+		case a.state == ServeWaitingForLogin && !keyringLocked(a.waitErr):
+			err = a.waitErr // a locked keyring is waited for whatever the exit rule
 		}
 		when := a.stopSeq
 		h.mu.Unlock()
@@ -311,6 +311,10 @@ func (h *Hub) startLoop(sv *hubServe, a *hubAccount) {
 // holds (an offline pcb sync --account, a watch) waits before it tries
 // again (ruling R23): that is not a park.
 const syncLockRetry = 30 * time.Second
+
+// keyringRetry is how long a loop whose desktop keyring is locked waits
+// before it asks again: that is not a park either.
+const keyringRetry = 30 * time.Second
 
 // runLoop runs a's Local.Serve until ctx ends or it stops on its own; then
 // a stop its context did not cause parks a. A sync.lock held elsewhere is

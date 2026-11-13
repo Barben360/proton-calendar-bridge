@@ -96,7 +96,7 @@ func (l *Local) WatchSync(ctx context.Context, req SyncRequest, interval time.Du
 		return err
 	}
 	defer unlock()
-	return l.watch(ctx, req, interval, onPass, l.syncPass, watchPacing{})
+	return l.watch(ctx, req, interval, onPass, l.syncPass, watchPacing{}, stopsWatch)
 }
 
 // watchInterval is interval with its default, or a Usage error below the
@@ -121,7 +121,7 @@ type watchPacing struct {
 // watch runs pass every interval until ctx ends (nil) or a pass needs a
 // person (that error); the caller holds the sync lock.
 func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Duration, onPass func(WatchPass),
-	pass func(context.Context, SyncRequest) (SyncResult, error), pace watchPacing) error {
+	pass func(context.Context, SyncRequest) (SyncResult, error), pace watchPacing, stops func(error) bool) error {
 	var (
 		last    SyncResult
 		lastErr error
@@ -148,7 +148,7 @@ func (l *Local) watch(ctx context.Context, req SyncRequest, interval time.Durati
 				onPass(WatchPass{Result: last, Err: watchError(lastErr), Next: next})
 			}
 		},
-		Stop:       stopsWatch,
+		Stop:       stops,
 		RetryAfter: retryAfter,
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

@@ -24,6 +24,14 @@ type Layout struct {
 	// without layout.json): the next command that opens the state finishes
 	// it. No account is listed meanwhile.
 	Interrupted string
+	// Sealer is the sealer layout.json records ("keyfile" when it names
+	// none, as an older pcb's state does); "" when the layout cannot be
+	// read.
+	Sealer string
+	// Fresh marks a state with no layout.json, no account and nothing of
+	// an older pcb: no sealer is recorded yet (Sealer says "keyfile"), the
+	// first login chooses it.
+	Fresh bool
 }
 
 // LayoutError is why the layout of a state directory cannot be read, with
@@ -48,23 +56,24 @@ func Accounts(stateDir string) (Layout, error) {
 	switch {
 	case errors.Is(err, store.ErrLegacyBesideLayout):
 		lerr = &LayoutError{Err: err, Fix: "remove them or move the state directory aside: this pcb version cannot be downgraded"}
-	case errors.Is(err, store.ErrNewerLayout):
+	case errors.Is(err, store.ErrNewerLayout), errors.Is(err, store.ErrUnknownSealer):
 		return Layout{}, &LayoutError{Err: err, Fix: "upgrade pcb"}
 	case err != nil:
 		return Layout{}, &LayoutError{Err: err, Fix: "check " + filepath.Join(stateDir, "layout.json") + " and the accounts directory beside it"}
 	}
 	if info.Version != store.LayoutVersion {
+		sealer := info.Sealer
 		switch {
 		case info.Migrating != "":
-			return Layout{Interrupted: store.AccountDir(stateDir, info.Migrating) + ".migrating"}, nil
+			return Layout{Interrupted: store.AccountDir(stateDir, info.Migrating) + ".migrating", Sealer: sealer}, nil
 		case len(info.Accounts) > 0:
-			return Layout{Interrupted: store.AccountDir(stateDir, info.Accounts[0])}, nil
+			return Layout{Interrupted: store.AccountDir(stateDir, info.Accounts[0]), Sealer: sealer}, nil
 		case len(info.Legacy) > 0:
-			return Layout{Accounts: []Account{{Dir: stateDir, Label: address(stateDir)}}}, nil
+			return Layout{Accounts: []Account{{Dir: stateDir, Label: address(stateDir)}}, Sealer: sealer}, nil
 		}
-		return Layout{}, nil
+		return Layout{Sealer: sealer, Fresh: true}, nil
 	}
-	out := Layout{Accounts: make([]Account, 0, len(info.Accounts))}
+	out := Layout{Accounts: make([]Account, 0, len(info.Accounts)), Sealer: info.Sealer}
 	for _, id := range info.Accounts {
 		dir := store.AccountDir(stateDir, id)
 		label := address(dir)

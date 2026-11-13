@@ -356,3 +356,54 @@ func TestRunListenFailureIsExit20AndReleasesEverything(t *testing.T) {
 		t.Errorf("second Run = %v, want nil", err)
 	}
 }
+
+func TestDaemonPassesShowUI(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var mu sync.Mutex
+	var got []string
+	r := e.start(t, e.hub, func(o *daemon.Options) {
+		o.ShowUI = func(account string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, account)
+			return nil
+		}
+	})
+	c, err := ctl.Dial(t.Context(), e.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.ShowUI(t.Context(), "acc1"); err != nil {
+		t.Fatalf("ShowUI: %v", err)
+	}
+	mu.Lock()
+	if len(got) != 1 || got[0] != "acc1" {
+		t.Errorf("Options.ShowUI got %q, want [acc1]", got)
+	}
+	mu.Unlock()
+	// The listener the socket publishes is Info.CTL().
+	st, err := c.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := r.info.CTL()
+	if st.Listener == nil || st.Listener.Addr != want.Addr || st.Listener.URL != want.URL || st.Listener.TLS != want.TLS || want.URL != r.info.Base {
+		t.Errorf("published listener = %+v, want Info.CTL() = %+v", st.Listener, want)
+	}
+}
+
+func TestDaemonWithoutShowUIHasNoRoute(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.start(t, e.hub, nil)
+	c, err := ctl.Dial(t.Context(), e.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.ShowUI(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "no such control endpoint") {
+		t.Errorf("ShowUI = %v, want the unknown-endpoint refusal", err)
+	}
+}
