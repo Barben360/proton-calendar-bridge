@@ -183,6 +183,10 @@ out=$(vm deb13-vm none "$tmp/marker" 1 v1 -- true); rc=$?
 check "run.sh --vm refuses systemd-detect-virt none" "$rc" 1
 out=$(vm deb13-vm kvm "$tmp/marker" 1 v1 -- env); rc=$?
 check "run.sh --vm on a marked VM exports no pcb dir" "$rc $(grep -cE '^(PCB_CONFIG_DIR|PCB_STATE_DIR|PCB_LAB_DIR)=' <<<"$out")" "0 0"
+# Its banner shows what is in force: no PCB_*_DIR line (they are unset), pcb's default dirs and the run root's ledger.
+out=$(vm deb13-vm kvm "$tmp/marker" 1 v1 -- true); rc=$?
+check "run.sh --vm banner names no unset dir and says the defaults are in force" \
+  "$rc $(grep -cE '(PCB_CONFIG_DIR|PCB_STATE_DIR|PCB_LAB_DIR|PROTON_CAL_CONFIG_DIR)=' <<<"$out") $(grep -c "pcb's default directories" <<<"$out") $(grep -c "run root $vmhome/pcb-live-run/v1" <<<"$out")" "0 0 1 1"
 # Without PCB_LIVE_TEST the hooks are ignored: the real marker is absent here, so a VM claim is refused.
 # The hosts file is then $HOME's (the throwaway one, empty here), so the refusal is the marker's.
 mkdir -p "$vmhome/.config/pcb-live"; : > "$vmhome/.config/pcb-live/hosts"
