@@ -669,7 +669,12 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
   long) and when it retries (M2-R11). All requests go through the one per-account client and its
-  limiter. Tuning after E06 stays open; the daemon's idle slow-down is below.
+  limiter. A request that gets no answer (its timeout, a reset connection) closes the client's idle
+  connections, then and before its next request, so a retry or the next pass dials anew: an HTTP/2
+  connection that stopped answering otherwise stays in the pool and takes every later request, as live
+  after a login (`[verified: live 2026-11-13]`, HUMAN-CHECKS 7.1.5). The refresh does the same on the
+  login manager's connections. Both transports also run the HTTP/2 health check (a PING after 15 s
+  without a frame, the connection closed when it is not answered within 15 s). Tuning after E06 stays open; the daemon's idle slow-down is below.
   `--full` lists every calendar again (with `--watch`, until one pass gets
   through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).
