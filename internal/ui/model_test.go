@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,7 +218,7 @@ func TestNotifyTitleAndBody(t *testing.T) {
 func TestNotifyCodes(t *testing.T) {
 	for code, want := range map[string]bool{
 		ctl.CodeNeedsLogin: true, ctl.CodeNeedsCaptcha: true, ctl.CodeHumanVerification: true,
-		ctl.CodeSyncStalled: true, ctl.CodeKeyringLocked: true,
+		ctl.CodeKeyringLocked:  true,
 		ctl.CodeAccountStopped: false, ctl.CodeTLSExpired: false, ctl.CodeClientsUnreadable: false,
 	} {
 		var n ui.Notifier
@@ -228,12 +230,50 @@ func TestNotifyCodes(t *testing.T) {
 	}
 }
 
-func TestNotifyIgnoresWarnings(t *testing.T) {
+// A stalled sync is a warning in the ctl rules, and still notifies.
+func TestNotifyStalledSyncWarning(t *testing.T) {
+	a := ready("a", time.Minute, 30)
+	a.Health.Since = ago(time.Hour)
+	a.Health.Calendars = []service.CalendarHealth{{ID: "c1", Name: "Home", SyncedAt: ago(time.Hour)}}
+	a.Alerts = ctl.Alerts(ctl.AlertInput{Account: "a", Login: a.Login, Health: a.Health, Now: now})
+	if len(a.Alerts) != 1 || a.Alerts[0].Code != ctl.CodeSyncStalled || a.Alerts[0].Severity != ctl.SeverityWarning {
+		t.Fatalf("control: alerts = %+v, want one sync-stalled warning", a.Alerts)
+	}
+	var n ui.Notifier
+	got := n.Next(ui.Build(status(a), now))
+	if len(got) != 1 || got[0].Title != "a@proton.test" || !strings.Contains(got[0].Body, "no successful sync of Home") {
+		t.Fatalf("notifications = %+v, want the stalled sync", got)
+	}
+}
+
+func TestNotifyIgnoresOtherCodes(t *testing.T) {
 	var n ui.Notifier
 	a := ready("a", time.Minute, 300)
-	a.Alerts = []ctl.Alert{{Account: "a", Code: ctl.CodeSyncStalled, Severity: ctl.SeverityWarning, Message: "m", Fix: "f"}}
+	a.Alerts = []ctl.Alert{{Account: "a", Code: ctl.CodeWriteGateUndecided, Severity: ctl.SeverityWarning, Message: "m", Fix: "f"}}
 	if got := n.Next(ui.Build(status(a), now)); len(got) != 0 {
-		t.Fatalf("a warning notified: %+v", got)
+		t.Fatalf("an unlisted warning notified: %+v", got)
+	}
+}
+
+func TestNotifierIsSafeConcurrently(t *testing.T) {
+	var n ui.Notifier
+	a := ready("a", time.Minute, 300)
+	a.Alerts = []ctl.Alert{errAlert("a", ctl.CodeNeedsLogin)}
+	v := ui.Build(status(a), now)
+	var wg sync.WaitGroup
+	var total atomic.Int32
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				total.Add(int32(len(n.Next(v))))
+			}
+		}()
+	}
+	wg.Wait()
+	if total.Load() != 1 {
+		t.Errorf("%d notifications for one occurrence, want 1", total.Load())
 	}
 }
 
@@ -396,6 +436,39 @@ func TestActionsRefuseWhenTheBridgeIsNotRunning(t *testing.T) {
 	for name, b := range map[string]*ui.Bridge{"never started": never, "stopped": stopped} {
 		t.Run(name, func(t *testing.T) { refused(t, ui.NewActions(b)) })
 	}
+}
+
+func TestActionsRefuseAfterTheDaemonEnded(t *testing.T) {
+	l := newLab(t)
+	kill := make(chan struct{})
+	var calls int
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Listen: func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		if calls++; err != nil || calls > 1 {
+			return ln, err
+		}
+		return &dyingListener{Listener: ln, kill: kill, closed: make(chan struct{})}, nil
+	}})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	id := l.login(t, b)
+	close(kill)
+	deadline := time.Now().Add(10 * time.Second)
+	for b.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if b.Err() == nil {
+		t.Fatal("the daemon did not end")
+	}
+	act := ui.NewActions(b)
+	err := act.SetCalDAV(t.Context(), id, false)
+	var ee *exitcode.Error
+	if !errors.As(err, &ee) || ee.Code != exitcode.Blocked || !strings.Contains(err.Error(), "the bridge is not running") || ee.Hint == "" {
+		t.Errorf("SetCalDAV after the daemon ended = %v, want the Blocked not-running error with a hint", err)
+	}
+	refused(t, act)
 }
 
 func refused(t *testing.T, act ui.Actions) {
