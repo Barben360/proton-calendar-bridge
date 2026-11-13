@@ -685,3 +685,52 @@ func TestKeyringUnavailableIsNotANeedsLogin(t *testing.T) {
 		t.Errorf("alerts = %v, want %s and no %s", codes, ctl.CodeKeyringUnavailable, ctl.CodeNeedsLogin)
 	}
 }
+
+// Ruling R16: on a keyring state, a login whose seal could not succeed (the
+// keyring locked, or no Secret Service) is refused before SRP: Proton sees
+// no auth call, the login guard's slot is not spent, and the add leaves no
+// account behind.
+func TestLoginChecksTheKeyringBeforeSRP(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		set  func(k *fakeKeyring)
+		code exitcode.Code
+		msg  string
+	}{
+		{"locked", func(k *fakeKeyring) { k.locked = true }, exitcode.Blocked, "the desktop keyring is locked"},
+		{"no service", func(k *fakeKeyring) { k.absent = true }, exitcode.Blocked, "the desktop keyring is not available"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newHubEnv(t)
+			kr := &fakeKeyring{}
+			e.keyring = kr
+			h := e.open(t) // a new state: the keyring is chosen
+			if got := layoutSealer(t, e); got != "secret-service" {
+				t.Fatalf("layout sealer = %q, want secret-service", got)
+			}
+			kr.mu.Lock()
+			tc.set(kr)
+			kr.mu.Unlock()
+			_, err := e.login(t, h, userA)
+			if got := exitcode.From(err); got != tc.code || err.Error() != tc.msg {
+				t.Errorf("Login = %v (exit %d), want exit %d %q", err, got, tc.code, tc.msg)
+			}
+			if n := e.f.Calls("", "/auth/v4"); n != 0 {
+				t.Errorf("Proton saw %d /auth/v4 calls, want 0: the login must stop before SRP", n)
+			}
+			if n := len(h.Accounts()); n != 0 {
+				t.Errorf("%d accounts after the refused add, want 0", n)
+			}
+			// The keyring back, a login at once is not refused by the guard:
+			// the refused one spent no slot.
+			kr.mu.Lock()
+			kr.locked, kr.absent = false, false
+			kr.mu.Unlock()
+			if _, err := h.Login(t.Context(), service.LoginRequest{Username: userA, Password: e.password(userA)}); err != nil {
+				t.Errorf("a login right after the refused one: %v", err)
+			}
+		})
+	}
+}
