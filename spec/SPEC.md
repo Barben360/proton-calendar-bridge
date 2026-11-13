@@ -674,7 +674,8 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   connection that stopped answering otherwise stays in the pool and takes every later request, as live
   after a login (`[verified: live 2026-11-13]`, HUMAN-CHECKS 7.1.5). The refresh does the same on the
   login manager's connections. Both transports also run the HTTP/2 health check (a PING after 15 s
-  without a frame, the connection closed when it is not answered within 15 s). Tuning after E06 stays open; the daemon's idle slow-down is below.
+  without a frame, the connection closed when it is not answered within 15 s); the login calls other
+  than the refresh (SRP, the 2FA code, an unattended relogin) rely on it alone. Tuning after E06 stays open; the daemon's idle slow-down is below.
   `--full` lists every calendar again (with `--watch`, until one pass gets
   through, then the feed is read); a re-read row whose ETag is unchanged
   changes nothing (no counter bump).

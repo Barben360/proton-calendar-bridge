@@ -32,31 +32,43 @@ const (
 	maxRetryAfterHeader = time.Hour
 	refreshTimeout      = 30 * time.Second
 	defaultAppVersion   = "Other"
-	// pingAfter and pingTimeout are the HTTP/2 health check of the default
-	// transport: after pingAfter without a frame from Proton a PING is
-	// sent, and a connection whose PING is unanswered for pingTimeout is
-	// closed (its requests fail and are retried on a new one). A dead
-	// connection is so found within 30 s, the request timeout; a live one
-	// costs one PING per 15 s of silence, and a slow answer on it is not
-	// cut, since Proton answers the PING meanwhile.
-	pingAfter   = 15 * time.Second
-	pingTimeout = 15 * time.Second
 )
 
-// defaultTransport is the transport of the clients built without Options.HTTP:
-// http.DefaultTransport's settings with the HTTP/2 health check, one pool
-// for all of them and nothing else in the process.
-var defaultTransport = func() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.ForceAttemptHTTP2 = true
-	t.HTTP2 = HTTP2Health()
-	return t
-}()
+// DefaultPing is the HTTP/2 health check of pcb's transports to Proton
+// (NewTransport): after DefaultPing without a frame from Proton a PING is
+// sent, and a connection whose PING is unanswered for DefaultPing more is
+// closed (its requests fail and are retried on a new one). A dead
+// connection is so found within 30 s, the request timeout; a live one
+// costs one PING per 15 s of silence, and a slow answer on it is not cut,
+// since Proton answers the PING meanwhile.
+const DefaultPing = 15 * time.Second
 
-// HTTP2Health is the HTTP/2 health check pcb's transports to Proton use
-// (pingAfter, pingTimeout).
-func HTTP2Health() *http.HTTP2Config {
-	return &http.HTTP2Config{SendPingTimeout: pingAfter, PingTimeout: pingTimeout}
+// defaultTransport is the transport of the clients built without
+// Options.HTTP: one pool for all of them and nothing else in the process.
+var defaultTransport = NewTransport(DefaultPing)
+
+// NewTransport returns a transport to Proton: http.DefaultTransport's
+// settings (the same defaults when something replaced it with another
+// RoundTripper), HTTP/2 when the server offers it, and the HTTP/2 health
+// check with ping as both its silence and its PING timeout (DefaultPing;
+// tests shorten it).
+func NewTransport(ping time.Duration) *http.Transport {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		t = t.Clone()
+	} else {
+		t = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	}
+	t.ForceAttemptHTTP2 = true
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: ping, PingTimeout: ping}
+	return t
 }
 
 var errTooLarge = errors.New("response too large")
@@ -267,7 +279,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 // stays in the pool once the timed-out stream is reset, and every later
 // request would go to it again. A connection still carrying a request is
 // left alone. It runs before the send that follows the failure: at the
-// failure itself the reset stream still holds the connection.
+// failure itself the reset stream still holds the connection. A send that
+// comes too early (within milliseconds), or a connection another request
+// still holds, keeps the stalled connection one attempt more; the HTTP/2
+// health check (DefaultPing) closes it within 30 s in any case.
 func (c *Client) dropIdle() { c.o.HTTP.CloseIdleConnections() }
 
 // refresh rotates the tokens unless another goroutine already did.

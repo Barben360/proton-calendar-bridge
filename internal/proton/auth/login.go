@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -120,28 +119,10 @@ func newManager(baseURL, appVersion string, t *http.Transport) *gpa.Manager {
 	return m
 }
 
-// newTransport clones http.DefaultTransport, or builds the same defaults when
-// something replaced it with another RoundTripper.
-//
-// Both carry api.HTTP2Health: a connection that stops answering is closed
+// newTransport is the manager's transport: api.NewTransport's, so a
+// connection that stops answering is closed by the HTTP/2 health check
 // rather than kept for every later login call or refresh.
-func newTransport() *http.Transport {
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		t = t.Clone()
-		t.HTTP2 = api.HTTP2Health()
-		return t
-	}
-	return &http.Transport{
-		HTTP2:                 api.HTTP2Health(),
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
-}
+func newTransport() *http.Transport { return api.NewTransport(api.DefaultPing) }
 
 type silent struct{}
 
