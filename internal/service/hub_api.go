@@ -243,10 +243,10 @@ func (x accountAPI) Event(ctx context.Context, ref EventRef) (EventDetail, error
 	return x.a.local.Event(ctx, ref)
 }
 
-func (x accountAPI) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, error) {
+func (x accountAPI) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error) {
 	leave, err := x.a.enter()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer leave()
 	return x.a.local.FreeBusy(ctx, req)

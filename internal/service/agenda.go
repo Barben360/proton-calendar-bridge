@@ -32,6 +32,8 @@ type (
 	EventFields = ical.Fields
 	EventData   = ical.EventData
 	EventTime   = ical.Time
+	EventPerson = ical.Person
+	EventAlarm  = ical.Alarm
 	EditScope   = ical.Scope
 	Occurrence  = ical.Occurrence
 )
@@ -81,8 +83,8 @@ type OccurrencesRequest struct {
 }
 
 // AgendaOccurrence is one occurrence with what a list shows of it. Summary,
-// Location, ExternalOrganizer and Busy are the occurrence's own (an
-// override's when it is one). ExternalOrganizer: its ORGANIZER is not one
+// Location, Description, ExternalOrganizer and Busy are the occurrence's
+// own (an override's when it is one). ExternalOrganizer: its ORGANIZER is not one
 // of the account's addresses. Busy: TRANSP is not TRANSPARENT and STATUS is
 // not CANCELLED.
 type AgendaOccurrence struct {
@@ -90,6 +92,7 @@ type AgendaOccurrence struct {
 	ETag              string
 	Occurrence        Occurrence
 	Summary, Location string
+	Description       string
 	CalendarType      string
 	ExternalOrganizer bool
 	Busy              bool
@@ -139,8 +142,10 @@ type Agenda interface {
 	// why.
 	Event(ctx context.Context, ref EventRef) (EventDetail, error)
 	// FreeBusy returns every busy occurrence of the range (Text, Limit and
-	// Cursor are ignored), read as Occurrences reads them.
-	FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, error)
+	// Cursor are ignored), read as Occurrences reads them, and how many
+	// events of the range it skipped (OccurrencePage.Skipped summed over
+	// its pages): their times are unknown, so they may be busy (ruling R13).
+	FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error)
 	// CreateEvent creates an event with a new UID in calendar calID and
 	// returns its ref and ETag ("" when it could not be read back).
 	CreateEvent(ctx context.Context, calID string, f EventFields) (EventRef, string, error)
@@ -187,6 +192,11 @@ func (k agendaKey) compare(o agendaKey) int {
 	}
 	return cmp.Compare(*k.RID, *o.RID)
 }
+
+// Cursor is the cursor that resumes right after o, for the request whose
+// page held it: a caller merging several pages may stop in the middle of
+// one.
+func (o AgendaOccurrence) Cursor() string { return keyOf(o).cursor() }
 
 func keyOf(o AgendaOccurrence) agendaKey {
 	k := agendaKey{Start: o.Occurrence.Start.Unix(), Cal: o.Ref.CalendarID, UID: o.Ref.UID}
@@ -277,19 +287,21 @@ func (l *Local) Occurrences(ctx context.Context, req OccurrencesRequest) (Occurr
 }
 
 // FreeBusy implements Agenda: the busy occurrences of every page.
-func (l *Local) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, error) {
+func (l *Local) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error) {
 	req.Text, req.Cursor, req.Limit = "", "", MaxAgendaLimit
 	out := []Occurrence{}
+	skipped := 0
 	for {
 		p, err := l.occurrences(ctx, req, func(o *AgendaOccurrence, _ *EventData) bool { return o.Busy })
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		skipped += p.Skipped
 		for _, it := range p.Items {
 			out = append(out, it.Occurrence)
 		}
 		if !p.Truncated {
-			return out, nil
+			return out, skipped, nil
 		}
 		req.Cursor = p.Next
 	}
@@ -534,6 +546,7 @@ func expandObject(cal, calType string, obj Object, q agendaQuery, own func(strin
 			Occurrence:        o,
 			Summary:           src.Summary,
 			Location:          src.Location,
+			Description:       src.Description,
 			CalendarType:      calType,
 			ExternalOrganizer: organizer != nil && !own(organizer.Email),
 			Busy:              src.Transp != "TRANSPARENT" && src.Status != "CANCELLED",

@@ -59,7 +59,7 @@ func TestOccurrencesExpandsAndMerges(t *testing.T) {
 	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
 		home = f.AddCalendar(f.Username, protontest.Calendar{Name: "Home"})
 		f.AddEvent(cal, protontest.Event{UID: "w@x", Start: base, End: base + 3600, RRule: "FREQ=WEEKLY",
-			Card: card("w@x", "Weekly", base, "RRULE:FREQ=WEEKLY", "LOCATION:Room 1")})
+			Card: card("w@x", "Weekly", base, "RRULE:FREQ=WEEKLY", "LOCATION:Room 1", "DESCRIPTION:Agenda first")})
 		f.AddEvent(home, protontest.Event{UID: "s@x", Start: base + 2*day, End: base + 2*day + 3600,
 			Card: card("s@x", "Single", base+2*day)})
 		f.AddEvent(home, protontest.Event{UID: "late@x", Start: base + 40*day, End: base + 40*day + 3600,
@@ -82,7 +82,7 @@ func TestOccurrencesExpandsAndMerges(t *testing.T) {
 		case "w@x":
 			start := at(base + int64(weekly)*7*day)
 			weekly++
-			if o.Ref.CalendarID != r.cal || o.ETag != etags["w@x"] || !o.Occurrence.Start.Equal(start) || o.Location != "Room 1" {
+			if o.Ref.CalendarID != r.cal || o.ETag != etags["w@x"] || !o.Occurrence.Start.Equal(start) || o.Location != "Room 1" || o.Description != "Agenda first" {
 				t.Errorf("weekly occurrence %+v, want %s at %s with ETag %s", o, r.cal, start, etags["w@x"])
 			}
 			if rid := o.Ref.RecurrenceID; rid == nil || !rid.At.Equal(start) || rid.Date != "" || rid.Floating {
@@ -169,6 +169,19 @@ func TestOccurrencesPagesWithoutGapsOrRepeats(t *testing.T) {
 			t.Errorf("missing: %s", k)
 		}
 	}
+	// The cursor of any item resumes right after it: a merge of several
+	// accounts' pages stops in the middle of one.
+	for _, i := range []int{0, 199, 498} {
+		req.Cursor, req.Limit = p1.Items[i].Cursor(), 3
+		p := occurrences(t, r.svc, req)
+		var got, want []string
+		for j := range 3 {
+			got, want = append(got, itemKey(p.Items[j])), append(want, itemKey(all[i+1+j]))
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("after item %d: %v, want %v", i, got, want)
+		}
+	}
 }
 
 // The render budget cuts a page early; the cursor continues after the
@@ -245,7 +258,7 @@ func TestOccurrencesRefusesTooLongRange(t *testing.T) {
 	} {
 		_, err := r.svc.Occurrences(t.Context(), req)
 		_ = wantExit(t, err, exitcode.Usage)
-		if _, err := r.svc.FreeBusy(t.Context(), req); name == "367 days" && err == nil {
+		if _, _, err := r.svc.FreeBusy(t.Context(), req); name == "367 days" && err == nil {
 			t.Errorf("FreeBusy over %s: no error", name)
 		}
 	}
@@ -335,9 +348,9 @@ func TestOccurrencesSkipsUnreadableEvents(t *testing.T) {
 	if strings.Contains(logs, "Secret") {
 		t.Errorf("the log quotes event content:\n%s", logs)
 	}
-	fb, err := r.svc.FreeBusy(t.Context(), service.OccurrencesRequest{From: at(base - day), To: at(base + day)})
-	if err != nil || len(fb) != 1 {
-		t.Errorf("FreeBusy = %d, %v; want the one readable event", len(fb), err)
+	fb, skipped, err := r.svc.FreeBusy(t.Context(), service.OccurrencesRequest{From: at(base - day), To: at(base + day)})
+	if err != nil || len(fb) != 1 || skipped != 2 {
+		t.Errorf("FreeBusy = %d, %d skipped, %v; want the one readable event and 2 skipped", len(fb), skipped, err)
 	}
 	for uid, code := range map[string]string{"tz@x": "pcb:unknown-tzid", "hr@x": "pcb:unsupported-recurrence"} {
 		_, err := r.svc.Event(t.Context(), service.EventRef{CalendarID: r.cal, UID: uid})
@@ -429,9 +442,9 @@ func TestFreeBusySkipsTransparentAndCancelled(t *testing.T) {
 			Card: card("s@x", "Series off", rid+day, "RECURRENCE-ID:"+stamp(rid+day), "STATUS:CANCELLED")})
 	}).start(t)
 	req := service.OccurrencesRequest{From: at(base - day), To: at(base + 20*day), Text: "ignored"}
-	fb, err := r.svc.FreeBusy(t.Context(), req)
-	if err != nil {
-		t.Fatal(err)
+	fb, skipped, err := r.svc.FreeBusy(t.Context(), req)
+	if err != nil || skipped != 0 {
+		t.Fatal(skipped, err)
 	}
 	var starts []time.Time
 	for _, o := range fb {
