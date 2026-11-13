@@ -132,12 +132,12 @@ CLI as that user, as `pcb install` prints it: `sudo -u pcb env PCB_CONFIG_DIR=/e
 
 `pcb uninstall` stops the service and removes the unit, keeping your data. `pcb uninstall --delete-data` (it asks, or `--yes`) first
 logs out, which revokes the Proton session, then deletes the config and state directories (and with `--system` the `pcb` user); it
-removes only a directory named `pcb`, and keeps and names a key file kept elsewhere. It leaves `/usr/local/bin/pcb` and prints the `rm` line.
+removes only a directory named `pcb`, and keeps and names a key file kept elsewhere. A state sealed with the desktop keyring also loses its `pcb sealing key` item ("The desktop keyring" below). It leaves `/usr/local/bin/pcb` and prints the `rm` line.
 `--plan` shows the steps without running them. The live run on a fresh host is `spec/HUMAN-CHECKS.md` step 7.1, not run yet.
 
 ## Desktop app (pcb-ui, Linux)
 
-`pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge: a tray icon (ok, syncing, needs attention), a window with your Proton accounts, an add-account wizard (password, 2FA code, CAPTCHA), per account the CalDAV switch and the connection to copy into Thunderbird (URL, username, a password hidden behind Show and Copy), and desktop notifications when an account needs you. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs. Closing the window hides it; Quit in the tray menu stops the bridge.
+`pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge: a tray icon (ok, syncing, needs attention), a window with your Proton accounts, an add-account wizard (password, 2FA code, CAPTCHA), per account the CalDAV switch and the connection to copy into Thunderbird (URL, username, a password hidden behind Show and Copy), and desktop notifications when an account needs you. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs. Closing the window hides it; Quit in the tray menu stops the bridge. Without a tray, closing the window quits (the same drain as Quit).
 
 ```sh
 make ui                      # bin/pcb-ui (cgo: needs the packages below)
@@ -145,10 +145,11 @@ make install-ui              # $(PREFIX)/bin/pcb-ui, share/applications/pcb-ui.d
 pcb-ui [--background]        # --background: tray only (the window opens anyway when no tray answers)
 ```
 
-- **Build dependencies** (Fyne draws with OpenGL and X11, so `make ui` needs the C headers; `make build` and the container image do not): Debian and Ubuntu, `sudo apt-get install libgl1-mesa-dev xorg-dev` (what CI installs); Arch, `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi` (from Fyne's documented list, not run here), plus a C compiler on both.
-- **GNOME shows no tray icon** unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled. Without a tray, `pcb-ui` opens its window and says so once.
+- **Build dependencies** (Fyne draws with OpenGL and X11, so `make ui` needs the C headers; `make build` and the container image do not, but `make lint test` does, since `go vet`, golangci-lint and `go test ./...` compile `cmd/pcb-ui` with cgo): Debian and Ubuntu, `sudo apt-get install libgl1-mesa-dev xorg-dev` (what CI installs); Arch, `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi` (from Fyne's documented list, not run here), plus a C compiler on both.
+- **GNOME shows no tray icon** unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled. Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
 - **One server per state directory.** `pcb-ui` and `pcb serve` (the systemd service, the container) cannot both serve one state. A second `pcb-ui` just shows the first one's window; `pcb-ui` facing `pcb serve` says so in a dialog and exits 20 (`pcb service stop` first when it is installed as a service). `pcb doctor` warns when the desktop entry and the service are both installed.
 - **Start at login:** Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`; switching it off deletes that file.
+- **A failed restart shows.** After you edit `config.toml` (Settings, "Open config.toml") and press "Restart bridge", an error in the file stops the bridge: the window says `bridge stopped: <error>`, the tray shows attention, and the account actions refuse until a Restart succeeds.
 - **Logs:** `<state>/logs/pcb-ui.log` (10 MiB, then `pcb-ui.log.1`, one rotation). The log level in Settings lasts until the bridge restarts; set `[log] level` in `config.toml` to keep it.
 - **Linux only** for now (X11 and Wayland with a StatusNotifierItem tray). `pcb` itself stays one static binary with no GUI dependency.
 
@@ -156,7 +157,9 @@ pcb-ui [--background]        # --background: tray only (the window opens anyway 
 
 A state created on a desktop session whose keyring (GNOME Keyring, KWallet) is unlocked keeps its sealing key there, as one item named `pcb sealing key`, instead of a key file beside the data. `[secrets] backend` in `config.toml` chooses, **once, when the state is created**: `auto` (default: the keyring when an unlocked one answers within 2 s, else the key file), `keyfile`, or `secret-service` (refuses to create the state, exit 10, when the keyring cannot be used). The choice is recorded in `layout.json` and never probed again: an existing state, an M5 or M6 one included, keeps its key file. The first command that opens a new state decides, so run it where you want it (a `pcb status` over SSH, without a session bus, fixes the key file); `pcb doctor` shows `sealer:` and says `not chosen yet` before that.
 
-`pcb` and `pcb-ui` both open what the other sealed. A locked keyring (a service started before you logged in) is not an error to fix: the account waits, shows the alert `keyring-locked`, makes no Proton login and retries every 30 s until you unlock it. pcb never prompts for the keyring. Any process of your login session can read the item, so against a same-user process it is no stronger than a key file; it keeps the key off the disk beside the data. `pcb uninstall --delete-data` removes the item; `pcb account remove` keeps it, since the key belongs to the state. (`--delete-data` removing it is not built yet: `[assumed → fix wave]`.)
+`pcb` and `pcb-ui` both open what the other sealed. A locked keyring (a service started before you logged in) is not an error to fix: the account waits, shows the alert `keyring-locked`, makes no Proton login and retries every 30 s until you unlock it. pcb never prompts for the keyring. Any process of your login session can read the item, so against a same-user process it is no stronger than a key file; it keeps the key off the disk beside the data. `pcb uninstall --delete-data` removes the item (a `remove keyring` step after the state directory); when the keyring is locked or not available it deletes the data anyway and its output says how to delete the item by hand in Seahorse. `pcb account remove` keeps it, since the key belongs to the state `[verified: TestUninstallDeleteDataRemovesTheKeyringItem, TestUninstallDeleteDataWithoutTheKeyringSaysHowToRemoveTheItem, TestAccountRemoveKeepsTheKeyringItem]`.
+
+When no keyring answers at all (`pcb` over SSH, or a service started outside the desktop session), commands on a keyring state exit 20 with `the desktop keyring is not available` and the hint to run pcb inside the desktop session; `pcb status` shows `secrets: keyring-unavailable` and the alert `keyring-unavailable`, never `needs-login`: the stored session is intact, so do not log out. A login checks the keyring first and, when it is locked or not available, refuses before contacting Proton.
 
 ## Run in a container
 
@@ -291,7 +294,7 @@ when its SHA-256 fingerprint is the printed one (again after a replacement; `pcb
 
 ```sh
 make build        # bin/pcb
-make lint test    # gofmt, go vet, golangci-lint, go test -race, on JOBS CPUs (4 at most by default)
+make lint test    # gofmt, go vet, golangci-lint, go test -race, on JOBS CPUs (4 at most by default); compiles cmd/pcb-ui, so it needs a C compiler and the GL/X headers of "Desktop app"
 make install      # bin/pcb -> $(PREFIX)/bin/pcb, PREFIX ?= ~/.local
 make ui           # bin/pcb-ui, the desktop app (cgo; Debian: libgl1-mesa-dev xorg-dev, Arch: libglvnd libxcursor libxrandr libxinerama libxi; see "Desktop app")
 make install-ui   # pcb-ui, its desktop entry and its icon under $(PREFIX)
