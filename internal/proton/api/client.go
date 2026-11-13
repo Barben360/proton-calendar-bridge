@@ -201,8 +201,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 		status, hdr, data, err := c.send(ctx, method, target, payload, sent)
 		if err != nil {
-			c.failed.Store(true)
-			c.dropIdle()
+			c.failed.Store(true) // the next send drops the idle connections
 			if ctx.Err() != nil {
 				return fmt.Errorf("%s: %w", where, ctx.Err())
 			}
@@ -267,8 +266,8 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 // send failed (live 2026-11-13): an HTTP/2 connection that stops answering
 // stays in the pool once the timed-out stream is reset, and every later
 // request would go to it again. A connection still carrying a request is
-// left alone. It runs at the failure and again before the next send, as
-// the reset stream may still hold the connection at the first call.
+// left alone. It runs before the send that follows the failure: at the
+// failure itself the reset stream still holds the connection.
 func (c *Client) dropIdle() { c.o.HTTP.CloseIdleConnections() }
 
 // refresh rotates the tokens unless another goroutine already did.

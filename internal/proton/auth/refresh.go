@@ -24,8 +24,8 @@ const refreshPath = "/auth/v4/refresh"
 // without it (400, code 10013; measured live 2026-11-12, E01). Proton
 // refusing the refresh token (HTTP 401 or 422, or code 10013) wraps
 // api.ErrSessionEnded; any other failure is a plain error that leaves the
-// session alone (ruling R6m). A refresh that got no answer closes the
-// manager's idle connections, then and before the next refresh: an HTTP/2
+// session alone (ruling R6m). After a refresh that got no answer, the next
+// one first closes the manager's idle connections: an HTTP/2
 // connection that stopped answering is not used again (live 2026-11-13).
 func Refresh(ctx context.Context, m *gpa.Manager, stale api.Tokens) (api.Tokens, error) {
 	st := state(m)
@@ -39,8 +39,7 @@ func Refresh(ctx context.Context, m *gpa.Manager, stale api.Tokens) (api.Tokens,
 	c, a, err := m.NewClientWithRefresh(ctx, stale.UID, stale.RefreshToken)
 	if err != nil {
 		if _, answered := errors.AsType[*gpa.APIError](err); !answered {
-			st.failed.Store(true)
-			m.Close()
+			st.failed.Store(true) // the next refresh closes the idle connections
 		}
 		perr := protonError(ctx, http.MethodPost, refreshPath, err)
 		var ge *gpa.APIError

@@ -669,8 +669,8 @@ so no sealed session was exercised there; that is the live step 7 (`spec/experim
   5-minute fallback gap also counts as partial, and the message names the
   cause (Proton asked to refresh, refused the cursor, refused a row, feed too
   long) and when it retries (M2-R11). All requests go through the one per-account client and its
-  limiter. A request that gets no answer (its timeout, a reset connection) closes the client's idle
-  connections, then and before its next request, so a retry or the next pass dials anew: an HTTP/2
+  limiter. After a request that gets no answer (its timeout, a reset connection), the client's next
+  request first closes its idle connections, so a retry or the next pass dials anew: an HTTP/2
   connection that stopped answering otherwise stays in the pool and takes every later request, as live
   after a login (`[verified: live 2026-11-13]`, HUMAN-CHECKS 7.1.5). The refresh does the same on the
   login manager's connections. Both transports also run the HTTP/2 health check (a PING after 15 s
