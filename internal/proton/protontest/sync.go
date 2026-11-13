@@ -522,7 +522,14 @@ func (tx *syncTx) build(ev SyncEvent, old *eventRec, keys sessionKeys, lenient b
 		}
 	}
 	if cols.RecurrenceID != nil {
-		if m := tx.master(cols.UID); m != nil && cols.Sequence < m.cols.Sequence {
+		m := tx.master(cols.UID)
+		switch {
+		case m != nil && !m.cols.HasSequence:
+			// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): an exception of a
+			// master whose signed part has no SEQUENCE; the message is
+			// the fake's (pcb logged the code alone).
+			return nil, failed(codeInvalid, "fake: the main event has no SEQUENCE")
+		case m != nil && cols.Sequence < m.cols.Sequence:
 			return nil, failed(codeInvalid, "Single edits should have a Sequence greater or equal to main event")
 		}
 	}
@@ -909,6 +916,7 @@ func parseColumns(props []property, lenient bool) (columns, error) {
 				return columns{}, errors.New("SEQUENCE with parameters")
 			}
 			c.Sequence, err = strconv.Atoi(p.value)
+			c.HasSequence = true
 		}
 		if err != nil {
 			return columns{}, fmt.Errorf("%s: %w", p.name, err)

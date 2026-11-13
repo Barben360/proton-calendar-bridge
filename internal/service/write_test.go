@@ -700,7 +700,7 @@ func TestEntryRefusalIsReadBack(t *testing.T) {
 		body := edit(t, obj.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(exception, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
 		// The web app bumps the master's SEQUENCE in the window (through the
 		// write endpoint: its key packets stay).
-		bumped := edit(t, obj.Data, "RRULE:FREQ=DAILY", "RRULE:FREQ=DAILY\r\nSEQUENCE:5")
+		bumped := edit(t, obj.Data, "SEQUENCE:0\r\n", "SEQUENCE:5\r\n") // pcb wrote the master's SEQUENCE:0
 		once(func() { r.webPut(t, "pcbseries@x", bumped) })
 		defer r.tr.set(nil)
 		calls := len(r.f.SyncCalls())
@@ -2616,3 +2616,70 @@ func dropEmailAlarms(data []byte) []byte {
 }
 
 var emailAlarm = regexp.MustCompile(`(?s)BEGIN:VALARM\r\nACTION:EMAIL\r\n.*?END:VALARM\r\n`)
+
+// The live D7 regression (HUMAN-CHECKS 6.3 D7, 2026-11-13): Thunderbird
+// creates a series with no SEQUENCE on its master, then moves one
+// occurrence: it PUTs the master (still no SEQUENCE) and an exception with
+// SEQUENCE:1. Proton refuses (2001) an exception of a master whose signed
+// part has no SEQUENCE (the fake models it), so pcb writes SEQUENCE on
+// every master: the client's, or 0. The object re-sent as served, with or
+// without the master's SEQUENCE:0, changes nothing.
+func TestAMovedOccurrenceOfASeriesWithoutSequenceIsWritten(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "legacy@x", Start: base, End: base + 3600, RRule: "FREQ=DAILY;COUNT=5",
+			Card: card("legacy@x", "Legacy", base, "RRULE:FREQ=DAILY;COUNT=5")})
+	}).start(t)
+	master := []string{"UID:tbweekdays@x", "DTSTAMP:20270101T000000Z", "DTSTART;TZID=Europe/Paris:20270201T090000",
+		"DTEND;TZID=Europe/Paris:20270201T100000", "RRULE:FREQ=WEEKLY;COUNT=10;BYDAY=MO,TU,WE,TH,FR;WKST=SU",
+		"SUMMARY:pcb-m4 tb weekdays", "X-MOZ-GENERATION:1"}
+	if _, err := r.put(t, "tbweekdays.ics", vcal(master), service.Precondition{IfNoneMatchAny: true}); err != nil {
+		t.Fatalf("the series' create: %v", err)
+	}
+	obj := r.object(t, "tbweekdays@x")
+	contains(t, "the created series", obj.Data, "SEQUENCE:0\r\n")
+
+	exception := []string{"UID:tbweekdays@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID;TZID=Europe/Paris:20270203T090000",
+		"DTSTART;TZID=Europe/Paris:20270203T110000", "DTEND;TZID=Europe/Paris:20270203T120000", "SEQUENCE:1",
+		"SUMMARY:pcb-m4 tb weekdays", "X-MOZ-GENERATION:2"}
+	body := vcal(append(slices.Clone(master[:len(master)-1]), "X-MOZ-GENERATION:2"), exception)
+	if res, err := r.put(t, obj.Name, body, service.Precondition{IfMatch: obj.ETag}); err != nil || res.Created {
+		t.Fatalf("the moved occurrence = %+v, %v; want it written", res, err)
+	}
+	if n := len(r.proton(t, "tbweekdays@x")); n != 2 {
+		t.Errorf("Proton holds %d rows of the series, want the master and the exception", n)
+	}
+	obj = r.object(t, "tbweekdays@x")
+	contains(t, "the series", obj.Data, "RECURRENCE-ID;TZID=Europe/Paris:20270203T090000\r\n")
+	sent := len(r.f.SyncCalls())
+	if _, err := r.put(t, obj.Name, obj.Data, service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the object re-sent as served: %v", err)
+	}
+	if _, err := r.put(t, obj.Name, dropFirst(t, obj.Data, "SEQUENCE:0\r\n"), service.Precondition{IfMatch: obj.ETag}); err != nil {
+		t.Fatalf("the object re-sent without the master's SEQUENCE: %v", err)
+	}
+	if n := len(r.f.SyncCalls()) - sent; n != 0 {
+		t.Errorf("re-sending the object, with or without the master's SEQUENCE:0, made %d sync calls, want none", n)
+	}
+
+	// A series stored without SEQUENCE (written by another client) takes an
+	// exception: the master gets SEQUENCE:0 in the same call.
+	legacy := r.object(t, "legacy@x")
+	lacks(t, "the stored series", legacy.Data, "SEQUENCE")
+	moved := []string{"UID:legacy@x", "DTSTAMP:20270101T000000Z", "RECURRENCE-ID:" + stamp(base+86400),
+		"DTSTART:" + stamp(base+86400+1800), "DTEND:" + stamp(base+86400+5400), "SEQUENCE:1", "SUMMARY:Legacy moved"}
+	withException := edit(t, legacy.Data, "END:VCALENDAR", "BEGIN:VEVENT\r\n"+strings.Join(moved, "\r\n")+"\r\nEND:VEVENT\r\nEND:VCALENDAR")
+	if _, err := r.put(t, legacy.Name, withException, service.Precondition{IfMatch: legacy.ETag}); err != nil {
+		t.Fatalf("an exception of a series stored without SEQUENCE: %v", err)
+	}
+	if n := len(r.proton(t, "legacy@x")); n != 2 {
+		t.Errorf("Proton holds %d rows of legacy@x, want 2", n)
+	}
+	contains(t, "the legacy series", r.object(t, "legacy@x").Data, "SEQUENCE:0\r\n")
+}
+
+// dropFirst is data without its first old, which it must hold.
+func dropFirst(t *testing.T, data []byte, old string) []byte {
+	t.Helper()
+	return edit(t, data, old, "")
+}

@@ -595,6 +595,45 @@ func TestSyncExceptionNeedsSequenceAtLeastMaster(t *testing.T) {
 	}
 }
 
+// Live 2026-11-13 (HUMAN-CHECKS 6.3 D7): Proton refuses (2001) an
+// exception of a master whose shared signed part has no SEQUENCE, whatever
+// the exception's; a master with SEQUENCE:0 takes it, and so does one given
+// SEQUENCE:0 earlier in the same call.
+func TestSyncExceptionNeedsAMasterSequence(t *testing.T) {
+	t.Parallel()
+	w := newWriter(t, protontest.Options{})
+	bare := card{
+		uid:          "bare@pcb.test",
+		sharedSigned: []string{"DTSTART:20261112T090000Z", "DTEND:20261112T100000Z", "RRULE:FREQ=DAILY;COUNT=5"},
+		sharedEnc:    []string{"SUMMARY:Daily"},
+		calSigned:    []string{"STATUS:CONFIRMED"},
+	}
+	mk := newKeys(t)
+	masterID := w.mustCreate(t, w.create(t, bare, mk))
+	exception := card{
+		uid:          "bare@pcb.test",
+		sharedSigned: []string{"DTSTART:20261113T100000Z", "DTEND:20261113T110000Z", "RECURRENCE-ID:20261113T090000Z", "SEQUENCE:1"},
+		sharedEnc:    []string{"SUMMARY:Moved"},
+		calSigned:    []string{"STATUS:CONFIRMED"},
+	}
+	ek := newKeys(t)
+	if code := w.entryCode(t, map[string]any{"Event": w.create(t, exception, ek)}); code != 2001 {
+		t.Errorf("an exception of a master without SEQUENCE: code %d, want 2001", code)
+	}
+	withSeq := bare
+	withSeq.sharedSigned = append(slices.Clone(bare.sharedSigned), "SEQUENCE:0")
+	_, ans := w.sync(t,
+		map[string]any{"ID": masterID, "Event": w.update(t, withSeq, mk)},
+		map[string]any{"Event": w.create(t, exception, ek)})
+	if got := codes(ans); len(got) != 2 || got[0] != 1000 || got[1] != 1000 {
+		t.Errorf("the master given SEQUENCE:0, then the exception, in one call: codes %v, want 1000, 1000", got)
+	}
+	// A single event without SEQUENCE is taken (pcb-m4 tb new, live).
+	single := bare
+	single.uid, single.sharedSigned = "single@pcb.test", bare.sharedSigned[:2]
+	w.mustCreate(t, w.create(t, single, newKeys(t)))
+}
+
 // TestSyncRefusesWhatProtonRefuses covers the rest of research A.4 and the
 // fragment and routing rules of the constraints.
 func TestSyncRefusesWhatProtonRefuses(t *testing.T) {

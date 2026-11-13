@@ -1652,3 +1652,64 @@ func TestAnExceptionMovedOffTheRuleIsPlanned(t *testing.T) {
 	_, err := Plan(Group{UID: planUID}, parse(t, cal(offMaster)), planDefaults(t))
 	refusedWith(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
 }
+
+// Fix 5 (live 2026-11-13, HUMAN-CHECKS 6.3 D7): Proton refuses an
+// exception of a master whose signed part has no SEQUENCE, so every master
+// pcb writes carries one: the client's, or 0. A master stored without one
+// gets SEQUENCE:0 when it is written anyway, and when an exception is
+// created beside it; an unchanged body still plans nothing.
+func TestEveryWrittenMasterCarriesASequence(t *testing.T) {
+	seqOf := func(t *testing.T, o opened) string {
+		t.Helper()
+		var lines []string
+		for _, text := range o.parts {
+			for l := range strings.SplitSeq(text, "\r\n") {
+				if strings.HasPrefix(l, "SEQUENCE") {
+					lines = append(lines, l)
+				}
+			}
+		}
+		return strings.Join(lines, " ")
+	}
+	noSeq := with(t, masterBody(), map[string]string{"SEQUENCE:2": ""})
+	t.Run("a create", func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			body string
+			want string
+		}{
+			{"a single event without SEQUENCE", cal(noSeq), "SEQUENCE:0"},
+			{"a series without SEQUENCE", cal(with(t, noSeq, nil, "RRULE:FREQ=DAILY;COUNT=5")), "SEQUENCE:0"},
+			{"the client's SEQUENCE", cal(masterBody()), "SEQUENCE:2"},
+		} {
+			if got := seqOf(t, open(t, onlyCreate(t, plan(t, Group{UID: planUID}, c.body)), nil)); got != c.want {
+				t.Errorf("%s: %q, want %q", c.name, got, c.want)
+			}
+		}
+	})
+	parts := masterParts()
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "SEQUENCE:2\r\n", "", 1)
+	parts[ical.SharedSigned] = strings.Replace(parts[ical.SharedSigned], "DTEND;TZID=Europe/Paris:20261115T110000", "DTEND;TZID=Europe/Paris:20261115T110000\r\nRRULE:FREQ=DAILY;COUNT=5", 1)
+	stored := seed{id: "row-m", parts: parts}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	series := with(t, noSeq, map[string]string{"DTEND;TZID=Europe/Paris:20261115T110000": "DTEND;TZID=Europe/Paris:20261115T110000\r\nRRULE:FREQ=DAILY;COUNT=5"})
+	series = strings.Split(strings.Join(series, "\r\n"), "\r\n")
+	if p := plan(t, g, cal(series)); len(p.Ops) != 0 {
+		t.Errorf("the stored series re-sent unchanged, no SEQUENCE: ops = %s, want none", describe(p))
+	}
+	if got := seqOf(t, open(t, onlyUpdate(t, plan(t, g, cal(with(t, series, map[string]string{"SUMMARY:Standup": "SUMMARY:Planning"}))), "row-m"), &stored)); got != "SEQUENCE:0" {
+		t.Errorf("a title edit of the series stored without SEQUENCE: %q, want SEQUENCE:0", got)
+	}
+	exception := []string{"UID:" + planUID, stamp, "RECURRENCE-ID;TZID=Europe/Paris:20261116T100000",
+		"DTSTART;TZID=Europe/Paris:20261116T120000", "DTEND;TZID=Europe/Paris:20261116T130000", "SEQUENCE:1", "SUMMARY:Standup moved"}
+	p := plan(t, g, cal(series, exception))
+	if len(p.Ops) != 2 || p.Ops[0].Update == nil || p.Ops[0].Update.ID != "row-m" || p.Ops[1].Create == nil {
+		t.Fatalf("an exception beside the unchanged series: ops = %s, want the master's update, then the create", describe(p))
+	}
+	if got := seqOf(t, open(t, p.Ops[0], &stored)); got != "SEQUENCE:0" {
+		t.Errorf("the master beside the new exception: %q, want SEQUENCE:0", got)
+	}
+	if got := seqOf(t, open(t, p.Ops[1], nil)); got != "SEQUENCE:1" {
+		t.Errorf("the new exception: %q, want its SEQUENCE:1", got)
+	}
+}

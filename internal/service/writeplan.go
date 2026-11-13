@@ -346,7 +346,11 @@ func PlanDelete(current Group) (WritePlan, error) {
 // M4-R9), a new exception takes its master's attendees when it has the same
 // set and is refused otherwise (ruling M4-R28). SEQUENCE is max(incoming, stored), stored+1 when the shared signed
 // content changes and the client did not bump it, and an exception's is at
-// least its master's (ruling M4-R4). Notifications follow the tri-state
+// least its master's (ruling M4-R4). Every master written carries a SEQUENCE,
+// 0 when neither the client nor the row has one: Proton refuses an exception
+// of a master whose signed part has none (live 2026-11-13, HUMAN-CHECKS 6.3
+// D7). A master stored without one is written for that alone only beside a
+// new exception, so an unchanged body still plans nothing. Notifications follow the tri-state
 // (research D). An update re-sends the row's Color (null when it has none),
 // Attendees and IsOrganizer, reuses the row's session keys only when
 // SessionKeys trusts both, and carries no key packet; a create mints its
@@ -403,7 +407,8 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		if r := ical.StartOffRule(in.Master.Comp); r != nil && !ical.SameRecurrence(master.stored, in.Master.Comp) {
 			return WritePlan{}, asRefusal(r)
 		}
-		seq, op, err := pl.update(master, *in.Master, 0)
+		newException := slices.ContainsFunc(sortedKeys(in.Exceptions), func(rid int64) bool { return exceptions[rid] == nil })
+		seq, op, err := pl.update(master, *in.Master, 0, newException)
 		if err != nil {
 			return WritePlan{}, err
 		}
@@ -417,7 +422,7 @@ func Plan(current Group, in ical.Incoming, d Defaults) (WritePlan, error) {
 		var op *events.Op
 		switch {
 		case r != nil:
-			_, op, err = pl.update(r, we, minSeq)
+			_, op, err = pl.update(r, we, minSeq, false)
 		case master == nil && len(rows) > 0:
 			return WritePlan{}, refused(RefuseUnsupportedChange, "a new exception needs its series' master")
 		default:
@@ -528,6 +533,12 @@ func sequence(c ical.Component) (int, bool) {
 	return n, true
 }
 
+// isMaster reports whether c is a master: it has no RECURRENCE-ID.
+func isMaster(c ical.Component) bool {
+	_, ok := c.Get("RECURRENCE-ID")
+	return !ok
+}
+
 // setSequence makes c's SEQUENCE the bare value n (research A.4: a
 // parameter on it is a 500), in place, or appended.
 func setSequence(c *ical.Component, n int) {
@@ -574,7 +585,7 @@ func (pl *planner) create(we ical.WriteEvent, minSeq int, master *row) (int, eve
 		}
 	}
 	seq, has := sequence(c)
-	if seq = max(seq, minSeq); has || seq > 0 {
+	if seq = max(seq, minSeq); has || seq > 0 || isMaster(c) {
 		setSequence(&c, seq)
 	}
 	parts, _, err := ical.Patch(nil, c)
@@ -651,8 +662,10 @@ func sameAddress(a, b string) bool {
 }
 
 // update plans row r's update to we (nil when nothing changes) and returns
-// its SEQUENCE, at least minSeq.
-func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.Op, error) {
+// its SEQUENCE, at least minSeq. A master gets SEQUENCE:0 when neither we
+// nor r has one; when that is its only change, it is written only with
+// needSequence (a new exception beside it), else nothing is planned.
+func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int, needSequence bool) (int, *events.Op, error) {
 	c, err := pl.prepared(we)
 	if err != nil {
 		return 0, nil, err
@@ -671,7 +684,10 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	if bump {
 		seq = stored + 1
 	}
-	if seq = max(seq, minSeq); has || storedHas || seq > 0 {
+	bare := c.Clone() // as sent, for a master stored without SEQUENCE
+	seq = max(seq, minSeq)
+	zero := !has && !storedHas && seq == 0 && isMaster(c)
+	if has || storedHas || seq > 0 || zero {
 		setSequence(&c, seq)
 	}
 	parts, changed, err := ical.Patch(r.parts, c)
@@ -684,6 +700,11 @@ func (pl *planner) update(r *row, we ical.WriteEvent, minSeq int) (int, *events.
 	}
 	if kept && !slices.Contains(mapValues(changed), true) {
 		return seq, nil, nil
+	}
+	if zero && kept && !needSequence {
+		if _, changedBare, err := ical.Patch(r.parts, bare); err == nil && !slices.Contains(mapValues(changedBare), true) {
+			return seq, nil, nil // SEQUENCE:0 alone: not worth a write
+		}
 	}
 	shared, calendar, err := r.Event.SessionKeys()
 	if err != nil {
