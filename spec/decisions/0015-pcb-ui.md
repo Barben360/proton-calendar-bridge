@@ -2,7 +2,7 @@
 
 - **Date**: 2026-11-13
 - **Decided by**: author (a separate binary, the daemon in process, Linux first, the keyring sealer built in M7), the rest the agent's calls (M7 design, `spec/designs/2026-11-12-multi-account-and-ui-design.md` §5, and the plan `spec/plans/2026-11-13-m7-pcb-ui.md`)
-- **Status**: accepted, built in M7 (live session pending, `spec/HUMAN-CHECKS.md` step 9); amends 0001 (GUIs are no longer only "later clients of the local API": one is built, and it runs the daemon itself), SPEC §3 and §7.3 (the Secret Service sealer is built)
+- **Status**: accepted, built in M7 (live session pending, `spec/HUMAN-CHECKS.md` step 9, in the throwaway VM with a GNOME session); amends 0001 (GUIs are no longer only "later clients of the local API": one is built, and it runs the daemon itself), SPEC §3 and §7.3 (the Secret Service sealer is built)
 
 `pcb-ui` is a desktop app for Linux (X11 and Wayland with a StatusNotifierItem tray): a tray icon, a window with the accounts, an add-account wizard, desktop notifications. It is a **second binary**, `cmd/pcb-ui`, built with cgo (Fyne draws through OpenGL). `pcb` stays `CGO_ENABLED=0` and the container image stays distroless static: `cmd/pcb/arch_test.go` (`TestPcbHasNoGUIDependency`) fails when `go list -deps ./cmd/pcb` holds a `fyne.io/` package.
 
