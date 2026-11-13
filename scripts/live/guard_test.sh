@@ -158,6 +158,12 @@ runsh PCB_LIVE_NOW=2000 "$here/run.sh" --run t3 --login 2a 'first' -- pcb status
 out=$(runsh PCB_LIVE_NOW=2010 "$here/run.sh" --run t3 --login 2b 'too soon' -- pcb status 2>&1); rc=$?
 check "run.sh --login refuses a second login at once (exit 20)" "$rc" 20
 check "run.sh --login did not run the command when refused" "$(grep -c 'pcb sees' <<<"$out")" 0
+# The banners (the guard's, the ledger's) go to stderr: stdout is the command's alone,
+# so `run.sh ... -- pcb ... --json | jq` reads JSON only.
+so=$(runsh PCB_LIVE_NOW=5000 "$here/run.sh" --run t3 --login 9 'banner check' -- pcb status 2>"$tmp/banner.err"); rc=$?
+check "run.sh: stdout holds the command's output only" "$rc $(grep -vc '^pcb sees ' <<<"$so") $(grep -c '^pcb sees ' <<<"$so")" "0 0 1"
+check "run.sh: the guard and ledger banners are on stderr" \
+  "$(grep -c 'live guard ok, run root' "$tmp/banner.err") $(grep -c "PCB_STATE_DIR=$HOME/pcb-live-run/t3/pcb/state" "$tmp/banner.err") $(grep -c 'live login 2 recorded' "$tmp/banner.err")" "1 1 1"
 
 # run.sh --vm: step 7's VM keeps the host's default dirs; the fence is a marker, virt and host name.
 vmhome=$tmp/vmhome; mkdir -p "$vmhome"
@@ -183,10 +189,14 @@ out=$(vm deb13-vm none "$tmp/marker" 1 v1 -- true); rc=$?
 check "run.sh --vm refuses systemd-detect-virt none" "$rc" 1
 out=$(vm deb13-vm kvm "$tmp/marker" 1 v1 -- env); rc=$?
 check "run.sh --vm on a marked VM exports no pcb dir" "$rc $(grep -cE '^(PCB_CONFIG_DIR|PCB_STATE_DIR|PCB_LAB_DIR)=' <<<"$out")" "0 0"
-# Its banner shows what is in force: no PCB_*_DIR line (they are unset), pcb's default dirs and the run root's ledger.
-out=$(vm deb13-vm kvm "$tmp/marker" 1 v1 -- true); rc=$?
-check "run.sh --vm banner names no unset dir and says the defaults are in force" \
+# Its banner shows what is in force: no PCB_*_DIR line (they are unset), pcb's default dirs and the run root's ledger,
+# on stderr; stdout is the command's alone.
+so=$(env -i HOME="$vmhome" PATH="$PATH" PCB_LIVE_TEST=1 PCB_LIVE_HOME="$vmhome" PCB_LIVE_HOSTS="$hosts" PCB_LIVE_HOSTNAME=deb13-vm PCB_LIVE_VIRT=kvm \
+  PCB_LIVE_VM_MARKER="$tmp/marker" PCB_LIVE_NOW=1 "$here/run.sh" --vm --run v1 -- echo cmd-out 2>"$tmp/vm.err"); rc=$?
+out=$(cat "$tmp/vm.err")
+check "run.sh --vm banner names no unset dir and says the defaults are in force, on stderr" \
   "$rc $(grep -cE '(PCB_CONFIG_DIR|PCB_STATE_DIR|PCB_LAB_DIR|PROTON_CAL_CONFIG_DIR)=' <<<"$out") $(grep -c "pcb's default directories" <<<"$out") $(grep -c "run root $vmhome/pcb-live-run/v1" <<<"$out")" "0 0 1 1"
+check "run.sh --vm: stdout holds the command's output only" "$so" "cmd-out"
 # Without PCB_LIVE_TEST the hooks are ignored: the real marker is absent here, so a VM claim is refused.
 # The hosts file is then $HOME's (the throwaway one, empty here), so the refusal is the marker's.
 mkdir -p "$vmhome/.config/pcb-live"; : > "$vmhome/.config/pcb-live/hosts"

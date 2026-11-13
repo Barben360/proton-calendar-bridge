@@ -82,15 +82,16 @@ export PROTON_CAL_CONFIG_DIR=$R/seed
 (( proton )) && export PCB_GUARD_PROTON_CAL=1
 unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
 
+# Banners go to stderr: stdout is the command's alone. The guard's banner
+# lists the dirs it checked; --vm unsets them before the command, so it
+# prints what is in force instead.
+(( vm )) && live_guard_quiet=1
 # shellcheck source=guard.sh
+. "$here/guard.sh" || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
+unset live_guard_quiet
 if (( vm )); then
-  # The guard's banner lists the dirs it checked; --vm unsets them before the
-  # command, so it prints what is in force instead.
-  . "$here/guard.sh" >/dev/null || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
-  printf 'live --vm, run root %s (its bin and login ledger)\n' "$PCB_LIVE_RUN"
-  printf "  PCB_CONFIG_DIR, PCB_STATE_DIR, PCB_LAB_DIR, PROTON_CAL_CONFIG_DIR unset: pcb's default directories on this host\n"
-else
-  . "$here/guard.sh" || { echo "run.sh: the guard refused, nothing was run" >&2; exit 1; }
+  printf 'live --vm, run root %s (its bin and login ledger)\n' "$PCB_LIVE_RUN" >&2
+  printf "  PCB_CONFIG_DIR, PCB_STATE_DIR, PCB_LAB_DIR, PROTON_CAL_CONFIG_DIR unset: pcb's default directories on this host\n" >&2
 fi
 
 # --proton-cal: the proton-cal the command runs is the run root's build.
