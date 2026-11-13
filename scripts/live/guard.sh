@@ -75,8 +75,8 @@ live_guard() {
   done
   PCB_LIVE_RUN=$(realpath -m -- "$(live_home)")/pcb-live-run/$run
   export PCB_LIVE_RUN
-  printf 'live guard ok, run root %s\n' "$PCB_LIVE_RUN"
-  printf '  %s\n' "${out[@]}"
+  printf 'live guard ok, run root %s\n' "$PCB_LIVE_RUN" >&2
+  printf '  %s\n' "${out[@]}" >&2
 }
 
 live_now() { live_hook PCB_LIVE_NOW "$(date +%s)"; }
@@ -129,7 +129,7 @@ live_login() {
     row=$(printf '%s\t%s\t%s\t%s\t%s' "$now" "$(date -u -d "@$now" +%FT%TZ)" "$step" "${what:-$purpose}" "${PCB_LIVE_RUN##*/}")
     printf '%s\n' "${row%$'\t'*}" >> "$PCB_LIVE_RUN/logins.tsv"
     printf '%s\n' "$row" >> "$base/.ledger"
-    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "${what:-$purpose}"
+    printf 'live login %s recorded (%s: %s)\n' "$(grep -c . "$PCB_LIVE_RUN/logins.tsv")" "$step" "${what:-$purpose}" >&2
   )
   rc=$?
   return "$rc"

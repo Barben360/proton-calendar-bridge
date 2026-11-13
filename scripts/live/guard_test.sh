@@ -163,6 +163,12 @@ runsh PCB_LIVE_NOW=2000 "$here/run.sh" --run t3 --login 2a 'first' -- pcb status
 out=$(runsh PCB_LIVE_NOW=2010 "$here/run.sh" --run t3 --login 2b 'too soon' -- pcb status 2>&1); rc=$?
 check "run.sh --login refuses a second login at once (exit 20)" "$rc" 20
 check "run.sh --login did not run the command when refused" "$(grep -c 'pcb sees' <<<"$out")" 0
+# run.sh's stdout is the command's alone (a pcb ... --json piped to jq, pcb mcp's MCP session): the guard's
+# lines and the ledger's go to stderr, with and without --login.
+out=$(runsh "$here/run.sh" --run t3 -- pcb status 2>/dev/null)
+check "run.sh's stdout is the command's only" "$(grep -vc 'pcb sees' <<<"$out")" 0
+out=$(runsh PCB_LIVE_NOW=3000 "$here/run.sh" --run t3 --login 2d 'stdout' -- pcb status 2>/dev/null)
+check "run.sh --login's stdout is the command's only" "$(grep -vc 'pcb sees' <<<"$out")" 0
 
 # run.sh --vm: step 7's VM keeps the host's default dirs; the fence is a marker, virt and host name.
 vmhome=$tmp/vmhome; mkdir -p "$vmhome"
