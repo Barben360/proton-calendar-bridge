@@ -4,14 +4,14 @@ Private. The calendar counterpart of Proton Mail Bridge: a local
 daemon that logs into Proton, decrypts Proton Calendar (end-to-end encrypted,
 undocumented API) and serves it through standard and agent-friendly adapters.
 
-Shape (built through M6, see Status):
+Shape (built through M7, see Status):
 
 - **Core** (Go): accounts and login (as unattended as Proton allows), sync
   engine on Proton's change feed, encrypted local cache, access policy, and an
   iCalendar-native event model (decision 0012; JSCalendar deferred).
 - **Adapters**: CalDAV (Thunderbird first; read and write) and a CLI; REST and
   MCP adapters are out of scope for now (decision 0007).
-- **Runs** headless (systemd / Docker), one process for any number of Proton accounts; a desktop app is planned (M7), same daemon.
+- **Runs** headless (systemd / Docker), one process for any number of Proton accounts; on a Linux desktop the same daemon runs inside `pcb-ui`, a tray icon and a window (M7, below).
 - **Platforms**: Linux amd64 and arm64 are supported. macOS and Windows only build (`GOOS=darwin` and `GOOS=windows` compile `./cmd/pcb`), are not tested, and have no service management; off Unix there is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 on Windows (`run pcb on Linux or macOS`) and the CLI otherwise runs offline on the files (`spec/SPEC.md` §13, "Platforms").
 
 Reference material, not copied wholesale: `cheeseandcereal/proton-cal` and the
@@ -33,6 +33,8 @@ and a Debian container with systemd as PID 1) passed locally, and CI publishes t
 for Thunderbird and the M4 writes, then step 7 for the M5 daemon, service and container) are deferred until the author can solve a
 CAPTCHA (`spec/HUMAN-CHECKS.md`, "M1 live session", "M2 live session", steps 6 and 7); until then the cache, sync, write and daemon rules rest on research and tests, not on Proton itself. Do not point pcb at an account you care about before steps 6 and 7 have run. M6 is tested against the fake Proton only, with two or more accounts: there is no second Proton test account, so the live check of the migration, one account and Thunderbird on its per-account URL is `spec/HUMAN-CHECKS.md` step 8, not run yet. **No downgrade after M6**: the first M6 command moves an M5 state into `accounts/<id>/` (session, cache and CalDAV passwords come across); an M5 binary then sees no account, and if it logs in anyway M6 refuses to start (exit 10) and names the files (`account files of an older pcb are beside the per-account layout`, hint `remove them or move the state directory aside: this pcb version cannot be downgraded`). Keep a copy of the state directory before upgrading if you may go back. The design is in
 `spec/SPEC.md` and `spec/decisions/0014-several-accounts-per-process.md`.
+
+Milestone M7 adds the Linux desktop app `pcb-ui` (below) and a sealer that keeps the sealing key in the desktop keyring (Secret Service). Both are tested against the fake Proton, a fake Secret Service and Fyne's headless test driver; the GUI itself (tray, notifications, the real keyring) is `spec/HUMAN-CHECKS.md` step 9, on the author's desktop with the test account, not run yet. See `spec/decisions/0015-pcb-ui.md`.
 
 ## Usage
 
@@ -132,6 +134,29 @@ CLI as that user, as `pcb install` prints it: `sudo -u pcb env PCB_CONFIG_DIR=/e
 logs out, which revokes the Proton session, then deletes the config and state directories (and with `--system` the `pcb` user); it
 removes only a directory named `pcb`, and keeps and names a key file kept elsewhere. It leaves `/usr/local/bin/pcb` and prints the `rm` line.
 `--plan` shows the steps without running them. The live run on a fresh host is `spec/HUMAN-CHECKS.md` step 7.1, not run yet.
+
+## Desktop app (pcb-ui, Linux)
+
+`pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge: a tray icon (ok, syncing, needs attention), a window with your Proton accounts, an add-account wizard (password, 2FA code, CAPTCHA), per account the CalDAV switch and the connection to copy into Thunderbird (URL, username, a password hidden behind Show and Copy), and desktop notifications when an account needs you. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs. Closing the window hides it; Quit in the tray menu stops the bridge.
+
+```sh
+make ui                      # bin/pcb-ui (cgo: needs the packages below)
+make install-ui              # $(PREFIX)/bin/pcb-ui, share/applications/pcb-ui.desktop (Exec= the absolute path), share/icons/hicolor/scalable/apps/pcb-ui.svg; PREFIX ?= ~/.local
+pcb-ui [--background]        # --background: tray only (the window opens anyway when no tray answers)
+```
+
+- **Build dependencies** (Fyne draws with OpenGL and X11, so `make ui` needs the C headers; `make build` and the container image do not): Debian and Ubuntu, `sudo apt-get install libgl1-mesa-dev xorg-dev` (what CI installs); Arch, `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi` (from Fyne's documented list, not run here), plus a C compiler on both.
+- **GNOME shows no tray icon** unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled. Without a tray, `pcb-ui` opens its window and says so once.
+- **One server per state directory.** `pcb-ui` and `pcb serve` (the systemd service, the container) cannot both serve one state. A second `pcb-ui` just shows the first one's window; `pcb-ui` facing `pcb serve` says so in a dialog and exits 20 (`pcb service stop` first when it is installed as a service). `pcb doctor` warns when the desktop entry and the service are both installed.
+- **Start at login:** Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`; switching it off deletes that file.
+- **Logs:** `<state>/logs/pcb-ui.log` (10 MiB, then `pcb-ui.log.1`, one rotation). The log level in Settings lasts until the bridge restarts; set `[log] level` in `config.toml` to keep it.
+- **Linux only** for now (X11 and Wayland with a StatusNotifierItem tray). `pcb` itself stays one static binary with no GUI dependency.
+
+### The desktop keyring (Secret Service)
+
+A state created on a desktop session whose keyring (GNOME Keyring, KWallet) is unlocked keeps its sealing key there, as one item named `pcb sealing key`, instead of a key file beside the data. `[secrets] backend` in `config.toml` chooses, **once, when the state is created**: `auto` (default: the keyring when an unlocked one answers within 2 s, else the key file), `keyfile`, or `secret-service` (refuses to create the state, exit 10, when the keyring cannot be used). The choice is recorded in `layout.json` and never probed again: an existing state, an M5 or M6 one included, keeps its key file. The first command that opens a new state decides, so run it where you want it (a `pcb status` over SSH, without a session bus, fixes the key file); `pcb doctor` shows `sealer:` and says `not chosen yet` before that.
+
+`pcb` and `pcb-ui` both open what the other sealed. A locked keyring (a service started before you logged in) is not an error to fix: the account waits, shows the alert `keyring-locked`, makes no Proton login and retries every 30 s until you unlock it. pcb never prompts for the keyring. Any process of your login session can read the item, so against a same-user process it is no stronger than a key file; it keeps the key off the disk beside the data. `pcb uninstall --delete-data` does not remove the item: delete `pcb sealing key` in Seahorse (or KWallet) yourself.
 
 ## Run in a container
 
@@ -268,6 +293,8 @@ when its SHA-256 fingerprint is the printed one (again after a replacement; `pcb
 make build        # bin/pcb
 make lint test    # gofmt, go vet, golangci-lint, go test -race, on JOBS CPUs (4 at most by default)
 make install      # bin/pcb -> $(PREFIX)/bin/pcb, PREFIX ?= ~/.local
+make ui           # bin/pcb-ui, the desktop app (cgo; Debian: libgl1-mesa-dev xorg-dev, Arch: libglvnd libxcursor libxrandr libxinerama libxi; see "Desktop app")
+make install-ui   # pcb-ui, its desktop entry and its icon under $(PREFIX)
 make image        # the container image, pcb:local
 make container-smoke systemd-smoke   # throwaway containers; each prints PASS last
 make rehearse     # developer only: the real pcb against pcb-fake, a loopback fake Proton (never installed)
@@ -285,6 +312,8 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **go-proton-api**, **go-srp**, **gopenpgp** (MIT, used as libraries). go-proton-api's in-memory test server pattern is the model for and the engine behind our shared fake Proton (`internal/proton/protontest`, an httptest front over its server, which the lab's `internal/lab/labtest` builds on). The developer-only `pcb-lab probe sessions` takes the sessions endpoints and their auth from go-proton-api's `AuthSessions` and `AuthRevoke` (`GET /auth/v4/sessions`, `DELETE /auth/v4/sessions/{UID}`, the session's own token, no extra scope), on our own code and transport (`internal/lab/probe/sessions.go`).
 - **develonrails/carbonate**, **WentTheFox/caloxide**, **ProtonMail/WebClients** (GPL-3.0): read only for the client identity strings tried in experiment E03 (`spec/experiments/E03-client-identity.md`). No code from any of them; WebClients is never copied.
 - **emersion/go-webdav** (MIT): audited in experiment E17 (`spec/experiments/E17-go-webdav-audit.md`) and **not** used as the server; its CalDAV client, with `go-ical` (MIT), is a test-only dependency that checks our server from the outside and never reaches the binary. It moved `go-vcard` to a newer revision through module version selection (only README and an example differ).
+- **Fyne** v2.8.2 (fyne.io/fyne/v2, BSD-3-Clause): the toolkit of `pcb-ui` (window, tray, notifications, headless test driver), used as a dependency, nothing copied (`internal/ui/desktop`, `cmd/pcb-ui`).
+- **godbus/dbus** v5.2.4 (BSD-2-Clause): the D-Bus client of the Secret Service sealer and of the desktop notifications, used as a dependency, nothing copied. The Secret Service client is written from the freedesktop.org specification, with no other implementation read (`internal/store/seal`).
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
 - **develonrails/carbonate** (MIT), **jmdlab/cal-gateway** (MIT) and **WentTheFox/caloxide** (MIT; derives from hydroxide, ferroxide and protoxide, all MIT), for the M2 sync design notes (ideas audited, no code copied; the feed research is in `spec/experiments/raw/m2-feed-research.md`, citations by file and line): carbonate's measured pitfall that a cursor derived at `latest` loses events and its ID-driven re-read that ignores `Action`; jmdlab's order (read the feed head before the full listing) and its rule that a re-read row answering 404 is a delete; caloxide's feed endpoint shapes and its 30 s poll with exponential backoff. Rewritten with our own tests (`internal/syncer`, `internal/store/cache`).
 - **WentTheFox/caloxide**, **develonrails/carbonate**, **jmdlab/cal-gateway** (all MIT) and **cheeseandcereal/proton-cal** (Unlicense), for the M3 CalDAV design notes (research, no code copied): what each had to patch around go-webdav (getctag and `supported-report-set`, privileges, sync-collection, body limits), the Proton card-to-iCalendar merge and the one-object-per-UID rule, tolerance of undecryptable events. Rewritten with our own tests (`internal/caldav`, `internal/ical`, `internal/proton/cards`).
