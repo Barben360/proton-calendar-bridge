@@ -139,7 +139,7 @@ out=$(docker exec "$container" pcb sync 2>&1) || code=$?
 code=0
 out=$(docker exec "$container" pcb serve 2>&1) || code=$?
 # M6 names the serving process: the container's PID 1.
-[ "$code" = 20 ] && grep -q '^Error: pcb is already serving (pid 1)$' <<<"$out" || fail "a second pcb serve: exit $code: $out"
+[ "$code" = 20 ] && grep -q '^Error: pcb is already serving (pid 1, kind serve)$' <<<"$out" || fail "a second pcb serve: exit $code: $out"
 
 step "8. /data: config, state and accounts 0700 65532, the per-account layout, no secrets.sealed, no client"
 listing=$(docker cp "$container:/data" - | tar --numeric-owner -tvf -)
