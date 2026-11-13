@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1599,4 +1600,35 @@ func TestSeriesEdgeCases(t *testing.T) {
 			t.Error("the edit is not written")
 		}
 	})
+}
+
+// Fix 3: only a master's DTSTART must be an occurrence of its RRULE. An
+// exception moved to a day off the rule (here a Wednesday of a Mondays
+// series) carries no rule and is planned, with the series and against a
+// stored master alike; the same day as the master's start is refused.
+func TestAnExceptionMovedOffTheRuleIsPlanned(t *testing.T) {
+	master := []string{"UID:" + planUID, stamp, "DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000",
+		"RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3", "SUMMARY:Standup"}
+	exception := []string{"UID:" + planUID, stamp, "RECURRENCE-ID;TZID=Europe/Paris:20261123T100000",
+		"DTSTART;TZID=Europe/Paris:20261125T100000", "DTEND;TZID=Europe/Paris:20261125T110000", "SUMMARY:Standup moved"}
+	p := plan(t, Group{UID: planUID}, cal(master, exception))
+	if len(p.Ops) != 2 || p.Ops[0].Create == nil || p.Ops[1].Create == nil {
+		t.Errorf("the series with its exception: ops = %s, want two creates", describe(p))
+	}
+
+	stored := seed{id: "row-m", parts: map[ical.PartKind]string{
+		ical.SharedSigned:    frag("UID:"+planUID, stamp, "DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"),
+		ical.SharedEncrypted: frag("UID:"+planUID, stamp, "SUMMARY:Standup"),
+	}}.row(t)
+	g := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{stored}}, groupKeys(t))
+	if p := plan(t, g, cal(master, exception)); !slices.ContainsFunc(p.Ops, func(op events.Op) bool { return op.Create != nil }) {
+		t.Errorf("an exception added to the stored series: ops = %s, want its create", describe(p))
+	}
+
+	offMaster := with(t, master, map[string]string{
+		"DTSTART;TZID=Europe/Paris:20261116T100000": "DTSTART;TZID=Europe/Paris:20261125T100000",
+		"DTEND;TZID=Europe/Paris:20261116T110000":   "DTEND;TZID=Europe/Paris:20261125T110000",
+	})
+	_, err := Plan(Group{UID: planUID}, parse(t, cal(offMaster)), planDefaults(t))
+	refusedWith(t, err, "pcb:"+string(ical.UnsupportedRecurrence))
 }
