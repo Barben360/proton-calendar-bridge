@@ -102,6 +102,10 @@ func VerifyURL(token string) string {
 // retries: one login attempt is one request, and writes are not repeated.
 // Refresh needs a manager built here.
 func NewManager(baseURL, appVersion string) *gpa.Manager {
+	return newManager(baseURL, appVersion, newTransport())
+}
+
+func newManager(baseURL, appVersion string, t *http.Transport) *gpa.Manager {
 	if appVersion == "" {
 		appVersion = "Other"
 	}
@@ -110,7 +114,7 @@ func NewManager(baseURL, appVersion string) *gpa.Manager {
 		gpa.WithAppVersion(appVersion),
 		gpa.WithLogger(silent{}),
 		gpa.WithRetryCount(0),
-		gpa.WithTransport(userAgent{newTransport()}),
+		gpa.WithTransport(userAgent{t}),
 	)
 	hook(m) // Refresh sends the access token (refreshHook)
 	return m
@@ -118,11 +122,17 @@ func NewManager(baseURL, appVersion string) *gpa.Manager {
 
 // newTransport clones http.DefaultTransport, or builds the same defaults when
 // something replaced it with another RoundTripper.
+//
+// Both carry api.HTTP2Health: a connection that stops answering is closed
+// rather than kept for every later login call or refresh.
 func newTransport() *http.Transport {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
-		return t.Clone()
+		t = t.Clone()
+		t.HTTP2 = api.HTTP2Health()
+		return t
 	}
 	return &http.Transport{
+		HTTP2:                 api.HTTP2Health(),
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,

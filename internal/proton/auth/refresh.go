@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"weak"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -23,14 +24,24 @@ const refreshPath = "/auth/v4/refresh"
 // without it (400, code 10013; measured live 2026-11-12, E01). Proton
 // refusing the refresh token (HTTP 401 or 422, or code 10013) wraps
 // api.ErrSessionEnded; any other failure is a plain error that leaves the
-// session alone (ruling R6m).
+// session alone (ruling R6m). A refresh that got no answer closes the
+// manager's idle connections, then and before the next refresh: an HTTP/2
+// connection that stopped answering is not used again (live 2026-11-13).
 func Refresh(ctx context.Context, m *gpa.Manager, stale api.Tokens) (api.Tokens, error) {
-	if !built(m) {
+	st := state(m)
+	if st == nil {
 		return api.Tokens{}, errors.New("proton refresh: the manager does not come from auth.NewManager, nothing sent")
+	}
+	if st.failed.Swap(false) {
+		m.Close()
 	}
 	ctx = context.WithValue(ctx, refreshAccess{}, stale.AccessToken)
 	c, a, err := m.NewClientWithRefresh(ctx, stale.UID, stale.RefreshToken)
 	if err != nil {
+		if _, answered := errors.AsType[*gpa.APIError](err); !answered {
+			st.failed.Store(true)
+			m.Close()
+		}
 		perr := protonError(ctx, http.MethodPost, refreshPath, err)
 		var ge *gpa.APIError
 		if errors.As(err, &ge) && (ge.Status == http.StatusUnauthorized || ge.Status == http.StatusUnprocessableEntity || int(ge.Code) == api.CodeRefreshInvalid) {
@@ -72,16 +83,25 @@ func refreshHook(_ *resty.Client, r *resty.Request) error {
 
 // managers holds the managers NewManager built, which carry refreshHook,
 // without keeping them alive.
-var managers sync.Map // weak.Pointer[gpa.Manager] → struct{}
+var managers sync.Map // weak.Pointer[gpa.Manager] → *managerState
+
+// managerState is what Refresh keeps per manager.
+type managerState struct {
+	failed atomic.Bool // the last refresh got no answer
+}
 
 func hook(m *gpa.Manager) {
 	m.AddPreRequestHook(refreshHook)
 	p := weak.Make(m)
-	managers.Store(p, struct{}{})
+	managers.Store(p, &managerState{})
 	runtime.AddCleanup(m, func(p weak.Pointer[gpa.Manager]) { managers.Delete(p) }, p)
 }
 
-func built(m *gpa.Manager) bool {
-	_, ok := managers.Load(weak.Make(m))
-	return ok
+// state is m's managerState, nil when NewManager did not build m.
+func state(m *gpa.Manager) *managerState {
+	v, ok := managers.Load(weak.Make(m))
+	if !ok {
+		return nil
+	}
+	return v.(*managerState)
 }
