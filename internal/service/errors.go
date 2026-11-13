@@ -385,6 +385,9 @@ func storeError(err error, keyFile string) error {
 		return mapError(err, keyFile)
 	}
 	if cause := keyCause(err); cause != "" {
+		if keyFile == keyringRef { // a PathError of the sealed file or the state directory, not of a key
+			return keyFailure(err, "cannot use the stored secrets: "+cause, "make sure the state directory and its files are readable and writable by this user (pcb doctor)")
+		}
 		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
