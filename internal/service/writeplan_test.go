@@ -695,6 +695,26 @@ func TestEmailNotificationsStayProtonSide(t *testing.T) {
 			}
 		}
 	})
+	t.Run("the kept email entries count in Proton's limit of 10", func(t *testing.T) {
+		custom := seed{id: "row-c", parts: masterParts(), notifications: `[{"Type":0,"Trigger":"-PT1H"}]`}.row(t)
+		gc := OpenGroup(cache.Group{UID: planUID, Rows: []cache.StoredRow{custom}}, groupKeys(t))
+		var ten []string
+		want := make([]string, 0, 10)
+		for i := 1; i <= 10; i++ {
+			ten = append(ten, "BEGIN:VALARM", "ACTION:DISPLAY", fmt.Sprintf("TRIGGER:-PT%dM", i), "END:VALARM")
+			if i < 10 {
+				want = append(want, fmt.Sprintf(`{"Type":1,"Trigger":"-PT%dM"}`, i))
+			}
+		}
+		p := planD(t, gc, append(slices.Clone(noAlarm), ten...))
+		got := open(t, onlyUpdate(t, p, "row-c"), &custom)
+		if n, w := got.field("Notifications"), "["+strings.Join(want, ",")+`,{"Type":0,"Trigger":"-PT1H"}]`; n != w {
+			t.Errorf("ten display alarms: Notifications = %s, want the first nine and the email entry", n)
+		}
+		if !slices.Contains(p.Notes, noteAlarms) {
+			t.Errorf("notes %v lack %q", p.Notes, noteAlarms)
+		}
+	})
 	t.Run("a create", func(t *testing.T) {
 		for _, c := range []struct {
 			name string
