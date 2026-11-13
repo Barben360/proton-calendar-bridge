@@ -252,6 +252,19 @@ func TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning(t *testing.T) {
 	}
 }
 
+// Ruling R44 with ux-I2: a daemon with no account waits for a login (pcb
+// serve exits 10 without --wait-for-login): the process's needs-login is a
+// warning, exit 0, as the systemd and container smoke tests expect.
+func TestDoctorNeedsLoginOfADaemonWithNoAccountIsAWarning(t *testing.T) {
+	t.Parallel()
+	r := stubRig(t, &stubAPI{})
+	startDaemon(t, r, newStubHub(), nil)
+	r.want(exitcode.OK, "doctor")
+	if want := "!  alert needs-login: not logged in to Proton\n   fix: run pcb login\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("doctor lacks %q:\n%s", want, r.out.String())
+	}
+}
+
 // ux-I2: a daemon that does not answer its control socket cleanly is the
 // one error that may pass by itself: exit 20 when it is the only one.
 func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {

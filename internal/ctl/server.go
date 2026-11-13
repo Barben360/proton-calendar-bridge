@@ -284,7 +284,7 @@ func (s *Server) status(ctx context.Context, _ string, _ []byte) (any, error) {
 		accounts = append(accounts, as)
 	}
 	d := s.Daemon
-	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, now())}, nil
+	return Status{Daemon: &d, Listener: ln, Accounts: accounts, Alerts: ProcessAlerts(ln, accounts, now())}, nil
 }
 
 // accountStatus is info's entry of Status. An account that cannot be read

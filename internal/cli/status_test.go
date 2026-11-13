@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,14 +71,29 @@ func TestStatusWhenLoggedOutExits0(t *testing.T) {
 	if none.Accounts == nil || len(none.Accounts) != 0 || none.Daemon != nil {
 		t.Errorf("status with no account = %+v, want an empty accounts array", none)
 	}
+	// Ruling R44: with no account, the process needs a login.
+	needsLogin := []ctl.Alert{{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: "run pcb login"}}
+	if !slices.Equal(none.Alerts, needsLogin) {
+		t.Errorf("process alerts with no account = %+v, want %+v", none.Alerts, needsLogin)
+	}
 	r.want(exitcode.OK, "status")
-	if !strings.Contains(r.out.String(), "accounts: none (add one with pcb login)") {
-		t.Errorf("status with no account = %q", r.out.String())
+	for _, want := range []string{"accounts: none (add one with pcb login)", "alert: error needs-login: not logged in to Proton (fix: run pcb login)"} {
+		if !strings.Contains(r.out.String(), want) {
+			t.Errorf("status with no account lacks %q:\n%s", want, r.out.String())
+		}
 	}
 	r.want(exitcode.OK, "login", "--non-interactive")
 	r.want(exitcode.OK, "logout")
 	if st := loginStatus(t, r); st.Phase != "logged-out" || st.Address != r.f.Username {
 		t.Errorf("status = %+v", st)
+	}
+	// Signed out, the account's own needs-login says it: the process does
+	// not repeat it.
+	r.want(exitcode.OK, "status", "--json")
+	var out ctl.Status
+	mustUnmarshal(t, r.envelope().Data, &out)
+	if out.Alerts == nil || len(out.Alerts) != 0 || len(out.Accounts) != 1 || len(out.Accounts[0].Alerts) != 1 || out.Accounts[0].Alerts[0].Code != "needs-login" {
+		t.Errorf("status signed out: process alerts %+v, accounts %+v; want only the account's needs-login", out.Alerts, out.Accounts)
 	}
 }
 

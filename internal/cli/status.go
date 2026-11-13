@@ -90,7 +90,8 @@ func narrow(st ctl.Status, selector string) (*ctl.Status, error) {
 }
 
 // offlineStatus is the status of h's accounts (the one selector names, when
-// set) with no daemon: no listener, no live state.
+// set) with no daemon: no listener, no live state; the process alerts are
+// the daemon's would be (with no account, needs-login: ruling R44).
 func offlineStatus(ctx context.Context, h Hub, selector string) (*ctl.Status, error) {
 	infos := h.Accounts()
 	if selector != "" {
@@ -100,7 +101,7 @@ func offlineStatus(ctx context.Context, h Hub, selector string) (*ctl.Status, er
 		}
 		infos = []service.AccountInfo{info}
 	}
-	st := &ctl.Status{Accounts: make([]ctl.AccountStatus, 0, len(infos)), Alerts: []ctl.Alert{}}
+	st := &ctl.Status{Accounts: make([]ctl.AccountStatus, 0, len(infos))}
 	now := time.Now()
 	var failure error
 	for _, info := range infos {
@@ -123,6 +124,7 @@ func offlineStatus(ctx context.Context, h Hub, selector string) (*ctl.Status, er
 		}
 		st.Accounts = append(st.Accounts, as)
 	}
+	st.Alerts = ctl.ProcessAlerts(nil, st.Accounts, now)
 	return st, failure
 }
 

@@ -123,7 +123,10 @@ func (d doctorDaemon) results() []doctor.Result {
 		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "not running: offline checks only"}}
 	}
 	results := []doctor.Result{{Name: name, Status: doctor.StatusOK, Message: daemonText(st.Daemon)}}
-	results = append(results, alertResults("", st.Alerts, false)...)
+	// The process's needs-login means no account: a daemon that answers
+	// with none waits for a login (pcb serve exits 10 without
+	// --wait-for-login), a warning as for an account (ruling R44).
+	results = append(results, alertResults("", st.Alerts, true)...)
 	for _, as := range st.Accounts {
 		waiting := as.Health != nil && as.Health.Serve == service.ServeWaitingForLogin
 		results = append(results, alertResults(accountLabel(as.AccountInfo)+": ", as.Alerts, waiting)...)

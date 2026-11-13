@@ -153,6 +153,7 @@ func TestAlertsAreOrdered(t *testing.T) {
 // The certificate's alerts belong to the process, not to an account.
 func TestProcessAlerts(t *testing.T) {
 	t.Parallel()
+	ready := []ctl.AccountStatus{{AccountInfo: service.AccountInfo{ID: "a1", Phase: "ready"}}}
 	for _, tc := range []struct {
 		name string
 		l    *ctl.Listener
@@ -172,11 +173,46 @@ func TestProcessAlerts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ctl.ProcessAlerts(tc.l, now)
+			got := ctl.ProcessAlerts(tc.l, ready, now)
 			if got == nil {
 				t.Fatal("ProcessAlerts returned nil; want an empty list (alerts: [])")
 			}
 			if !slices.Equal(got, tc.want) {
+				t.Errorf("ProcessAlerts =\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Ruling R44: with no account at all (a fresh install), the process says
+// it needs a login, as M5's one account did; an account that exists says
+// it itself (its own needs-login, needs-captcha or account-unreadable), so
+// the process never repeats it.
+func TestProcessNeedsLoginWithNoAccount(t *testing.T) {
+	t.Parallel()
+	needsLogin := ctl.Alert{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: loginFix}
+	expired := ctl.Alert{Code: "tls-certificate-expired", Severity: "error", Message: "the CalDAV certificate expired on 2026-11-10", Fix: certFix}
+	account := func(phase string, pending bool) []ctl.AccountStatus {
+		return []ctl.AccountStatus{{AccountInfo: service.AccountInfo{ID: "a1", Phase: phase, Pending: pending}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		l        *ctl.Listener
+		accounts []ctl.AccountStatus
+		want     []ctl.Alert
+	}{
+		{"no account", nil, nil, []ctl.Alert{needsLogin}},
+		{"an empty list", nil, []ctl.AccountStatus{}, []ctl.Alert{needsLogin}},
+		{"no account, errors sorted by code", tlsListener(now.Add(-48 * time.Hour)), nil, []ctl.Alert{needsLogin, expired}},
+		{"a ready account", nil, account("ready", false), nil},
+		{"a pending account", nil, account("needs-captcha", true), nil},
+		{"a logged-out account says it itself", nil, account("logged-out", false), nil},
+		{"a login waiting for its 2FA code", nil, account("needs-totp", false), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ctl.ProcessAlerts(tc.l, tc.accounts, now)
+			if got == nil || !slices.Equal(got, tc.want) {
 				t.Errorf("ProcessAlerts =\n%+v\nwant\n%+v", got, tc.want)
 			}
 		})

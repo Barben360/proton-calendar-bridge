@@ -1323,7 +1323,7 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountRestartOffline`].
 - `pcb account remove` asks you to type `remove` (or `--yes`; without a terminal or with `--non-interactive` and no `--yes`: exit 10) [verified: `TestAccountRemoveNeedsYes`];
   `pcb account caldav on|off` [verified: `TestAccountCalDAVOff`].
-- `pcb status`: the process (daemon, listener, process alerts: the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
+- `pcb status`: the process (daemon, listener, process alerts: `needs-login` with no account at all (ruling R44), the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
   render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
   is the command's (the `pcb status` key-fault exception of §13 stands). `pcb status --daemon --json` is still the container's health check [verified:
   `TestStatusShowsEveryAccount`, `TestOfflineStatusDropsOnlyAccountsTheHubSaysAreGone`, `TestStatusShowsTheDaemon`].
@@ -1462,7 +1462,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 - Alerts: `{account?, code, severity: error|warning, message, fix, calendar?}` (`account` the local ID; none on a process alert), errors first, then account, code, then calendar ID. Codes
   (stable): `account-stopped` (error, M6: the account's serve loop is parked, §4.1; message the stop error's, fix its hint, `pcb account restart` or a login clears it) [verified: `TestAccountStoppedAlert`],
   `account-unreadable` (error, M6: the account's login state or store cannot be read, with that error's message and fix; the other accounts still answer) [verified: `TestOneFailingAccountDoesNotFailTheStatus`, `TestStatusShowsEveryAccount`],
-  `needs-login` (error), `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
+  `needs-login` (error; also a process alert, message `not logged in to Proton`, when no account exists, ruling R44: an existing account carries its own) [verified: `TestProcessNeedsLoginWithNoAccount`, `TestStatusOfNoAccountNeedsALogin`], `needs-captcha` (error, login), `human-verification` (error, API 9001, separate
   from the CAPTCHA because the fixes differ, M5-P7), `sync-stalled` (warning, per calendar: now minus the later of the last success and
   Serve's start is more than 5 intervals), `calendar-keys-failed` (error), `write-gate-undecided` (warning, names the calendar
   and why: closes the M4-R39 note), `clients-file-unreadable` (error: `clients.json` exists but cannot be loaded, so every CalDAV request answers 503; also in `pcb status` without a daemon and as the failed `caldav clients` check of `pcb doctor`, fix `fix or restore <path> (pcb client list shows the error)`), `tls-certificate-expiring` (warning, 30 days) and `tls-certificate-expired` (error; these two are the process's alone, `ProcessAlerts`)

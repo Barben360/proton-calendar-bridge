@@ -84,10 +84,18 @@ func Alerts(in AlertInput) []Alert {
 	return out
 }
 
-// ProcessAlerts lists the alerts of the process, not of an account: the
-// CalDAV listener's certificate nearing its end or past it; never nil.
-func ProcessAlerts(l *Listener, now time.Time) []Alert {
+// ProcessAlerts lists the alerts of the process, not of an account, sorted
+// as SortAlerts; never nil. With no account at all (a fresh install) it is
+// needs-login, as M5's one account was (ruling R44): an account that exists
+// says what it needs itself (its own needs-login, needs-captcha or
+// account-unreadable; a login waiting for its 2FA code had no alert in M5
+// either), so the process never repeats it. Then the CalDAV listener's
+// certificate nearing its end or past it.
+func ProcessAlerts(l *Listener, accounts []AccountStatus, now time.Time) []Alert {
 	out := []Alert{}
+	if len(accounts) == 0 {
+		out = append(out, Alert{Code: CodeNeedsLogin, Severity: SeverityError, Message: "not logged in to Proton", Fix: "run pcb login"})
+	}
 	if l != nil && l.TLS && l.CertNotAfter != nil {
 		left, date := l.CertNotAfter.Sub(now), l.CertNotAfter.UTC().Format(time.DateOnly)
 		switch {
@@ -97,6 +105,7 @@ func ProcessAlerts(l *Listener, now time.Time) []Alert {
 			out = append(out, Alert{Code: CodeTLSExpiring, Severity: SeverityWarning, Message: "the CalDAV certificate expires on " + date, Fix: certFix})
 		}
 	}
+	SortAlerts(out)
 	return out
 }
 

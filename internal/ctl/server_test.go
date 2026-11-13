@@ -348,6 +348,34 @@ func TestStatusOverTheSocket(t *testing.T) {
 	}
 }
 
+// Ruling R44: a daemon with no account (a fresh install, waiting for a
+// login) says it needs one, at the process level; once an account exists,
+// that account's own alerts say it and the process alert is gone.
+func TestStatusOfNoAccountNeedsALogin(t *testing.T) {
+	t.Parallel()
+	hub := newHub(service.Status{Phase: "logged-out"})
+	infos := hub.infos
+	hub.infos = nil
+	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon(), Now: func() time.Time { return now }})
+	c := dial(t, s.path)
+	st, err := c.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ctl.Alert{{Code: "needs-login", Severity: "error", Message: "not logged in to Proton", Fix: "run pcb login"}}
+	if st.Accounts == nil || len(st.Accounts) != 0 || !slices.Equal(st.Alerts, want) {
+		t.Errorf("status with no account: accounts %+v, alerts %+v; want none and %+v", st.Accounts, st.Alerts, want)
+	}
+
+	hub.infos = infos // the account signed out: its own alert says it
+	if st, err = c.Status(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Alerts) != 0 || len(st.Accounts) != 1 || len(st.Accounts[0].Alerts) != 1 || st.Accounts[0].Alerts[0].Code != "needs-login" {
+		t.Errorf("status with a signed-out account: process alerts %+v, accounts %+v; want only the account's needs-login", st.Alerts, st.Accounts)
+	}
+}
+
 // Each account is its own entry, with its own alerts and its own CalDAV URL.
 func TestStatusListsEveryAccount(t *testing.T) {
 	t.Parallel()
