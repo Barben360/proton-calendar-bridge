@@ -483,6 +483,10 @@ func refused(t *testing.T, act ui.Actions) {
 		if err == nil || !strings.Contains(err.Error(), "the bridge is not running") || !hasHint(err) {
 			t.Errorf("%s: err = %v, want the bridge is not running", name, err)
 		}
+		// Restart is in Settings, not in the tray menu (review M1).
+		if h := exitcode.HintOf(err); !strings.Contains(h, "Settings → Restart bridge") {
+			t.Errorf("%s: hint = %q, want it to point at Settings → Restart bridge", name, h)
+		}
 	}
 }
 

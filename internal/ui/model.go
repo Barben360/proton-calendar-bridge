@@ -235,7 +235,7 @@ var errNotRunning = errors.New("the bridge is not running")
 func (a actions) hub() (*service.Hub, error) {
 	h := a.b.Hub()
 	if h == nil || a.b.Err() != nil || a.b.Info().Addr == "" {
-		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errNotRunning, Hint: "restart the bridge (Restart in the tray menu), then try again"}
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: errNotRunning, Hint: "restart the bridge (Settings → Restart bridge), then try again"}
 	}
 	return h, nil
 }
