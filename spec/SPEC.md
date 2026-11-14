@@ -1610,7 +1610,7 @@ Initial-version audit behaviour (`spec/audits/2026-11-12-initial-version.md`; `i
   [verified: `TestDoctorExitCode`, `TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning`, `TestDoctorTransientDaemonErrorIsExit20`, `TestDoctorRefusedControlSocketIsExit10`,
   `TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens`, `TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens`].
 - Platforms: **Linux amd64 and arm64 are supported** (§3). macOS (amd64, arm64) gets `pcb` only, in the release archives and untested (decision 0017), and Windows (amd64) builds [verified: `GOOS=darwin go build ./cmd/pcb`, `GOOS=windows go build ./cmd/pcb`; CI vets
-  Windows] but are untested and unsupported (`pcb doctor` says `platform: GOOS/GOARCH: runs, unsupported`). Off Unix there is no file lock and no control socket, so the CLI runs
+  Windows] but is untested and unsupported (`pcb doctor` says `platform: GOOS/GOARCH: runs, unsupported`). Off Unix there is no file lock and no control socket, so the CLI runs
   offline there: `version`, `status`, `doctor` and `client add`/`list` ran under wine in the audit, while `login`, `sync` and `serve` exit 20 (`login locking needs a Unix system`, `sync locking needs a Unix
   system`, hint `run pcb on Linux or macOS`) [source: `filelock_other.go`, `listen_other.go`, the ux audit's wine run; no test runs off Linux]. macOS has the Unix lock and socket code but no service management:
   `install` and `service` need systemd (exit 20, `systemd is not running here`), and the control socket path limit is 103 bytes there [source: §7.1; not run on macOS].
