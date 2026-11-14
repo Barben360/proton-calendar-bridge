@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <g fill="#8C929C" fill-opacity="0.55">
+    <rect x="5.5" y="5.5" width="11" height="11" rx="3"/>
+    <rect x="19.5" y="5.5" width="11" height="11" rx="3"/>
+    <rect x="33.5" y="5.5" width="11" height="11" rx="3"/>
+    <rect x="47.5" y="5.5" width="11" height="11" rx="3"/>
+    <rect x="5.5" y="19.5" width="11" height="11" rx="3"/>
+    <rect x="47.5" y="19.5" width="11" height="11" rx="3"/>
+    <rect x="19.5" y="33.5" width="11" height="11" rx="3"/>
+    <rect x="33.5" y="33.5" width="11" height="11" rx="3"/>
+    <rect x="5.5" y="47.5" width="11" height="11" rx="3"/>
+    <rect x="19.5" y="47.5" width="11" height="11" rx="3"/>
+    <rect x="33.5" y="47.5" width="11" height="11" rx="3"/>
+  </g>
+  <g fill="#1FA898">
+    <rect x="19.5" y="19.5" width="11" height="11" rx="3"/>
+    <rect x="33.5" y="19.5" width="11" height="11" rx="3"/>
+    <rect x="5.5" y="33.5" width="11" height="11" rx="3"/>
+    <rect x="47.5" y="33.5" width="11" height="11" rx="3"/>
+  </g>
+  <circle cx="52" cy="54" r="9.5" fill="#F08C00"/>
+  <rect x="50.6" y="47.5" width="2.8" height="7.5" rx="1.4" fill="#FFFFFF"/>
+  <circle cx="52" cy="58.8" r="1.6" fill="#FFFFFF"/>
+</svg>
