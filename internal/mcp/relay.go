@@ -37,7 +37,9 @@ const protocolVersionHeader = "Mcp-Protocol-Version"
 // counts as the daemon gone, as a Unix socket that cannot be dialled does.
 // A daemon that answers without serving the session (a refused request
 // before any answer) ends it with ErrRelayRefused, the agent's messages
-// kept.
+// kept. A call the daemon never received (none of it written) before any
+// answer ends it with ErrDaemonGone, not ErrRelayRefused: the session
+// moves to the next backend without the refusal's wait.
 //
 // A call counts as delivered once its request was written, so dial's
 // connections must refuse a write once the daemon closed its end, as a
