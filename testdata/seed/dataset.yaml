@@ -1,0 +1,176 @@
+# Synthetic data set for the Proton test account (spec/experiments/DATASET.md).
+# Generator parameters plus explicit special cases; internal/lab/seed expands
+# them deterministically (seed below) into ~350 events. Every summary is
+# prefixed "pcb-seed <id> " so the seeder can skip what already exists and a
+# wipe can find what it created.
+seed: 42
+range: {from: "2021-01-01", to: "2027-06-30"}
+
+# key is what events refer to. The calendar flagged default is whichever one the
+# account marks as default (is_default in `proton-cal calendars -o json`); its
+# name here is informational only. The others are found by name or created.
+calendars:
+  - {key: default, name: My calendar, default: true}
+  - {key: work, name: Work, color: cobalt}
+  - {key: sport, name: Sport, color: fern}
+
+# 300 timed single events (15 min to 3 h, start 07:00-19:45 local wall time).
+timed:
+  count: 300
+  hours: [7, 20]
+  durations_min: [15, 30, 45, 60, 90, 120, 150, 180]
+  timezones:
+    - {v: Europe/Paris, w: 70}
+    - {v: America/New_York, w: 12}
+    - {v: Asia/Tokyo, w: 10}
+    - {v: UTC, w: 8}
+  calendars:
+    - {v: default, w: 55}
+    - {v: work, w: 30}
+    - {v: sport, w: 15}
+  # default = the calendar's own reminders; none = no reminder
+  reminders:
+    - {v: default, w: 40}
+    - {v: none, w: 15}
+    - {v: 15m, w: 20}
+    - {v: 1d, w: 15}
+    - {v: "email:1h", w: 10}
+  colors:
+    - {v: "", w: 55}
+    - {v: strawberry, w: 9}
+    - {v: pacific, w: 9}
+    - {v: fern, w: 9}
+    - {v: carrot, w: 9}
+    - {v: purple, w: 9}
+  titles:
+    default: [Dentist, Lunch with Sam, Groceries, Call the landlord, Haircut, Car service, Piano lesson, Dinner at Lea's, Pharmacy pickup, Book club]
+    work: [Standup, Design review, 1:1, Sprint planning, Retro, Customer call, Incident review, Hiring panel]
+    sport: [Run, Swim, Climbing, Yoga, Football, Cycling, Tennis]
+
+# 40 all-day events, a share of them spanning several days (end inclusive).
+allday:
+  count: 40
+  multi_day_share: 40
+  max_days: 5
+  calendars:
+    - {v: default, w: 60}
+    - {v: work, w: 25}
+    - {v: sport, w: 15}
+  reminders:
+    - {v: default, w: 60}
+    - {v: none, w: 20}
+    - {v: 1d, w: 20}
+  colors:
+    - {v: "", w: 70}
+    - {v: pacific, w: 15}
+    - {v: reef, w: 15}
+  titles: [Conference, Holiday, Trip, Birthday party, Deadline, Retreat, Festival, Day off]
+
+# 8 recurring series, each with one edited and one deleted occurrence (the
+# occurrence is named by its original start, in the series' time zone).
+series:
+  - title: Daily standup (count 10)
+    calendar: work
+    start: "2024-03-04 08:30"
+    end: "2024-03-04 09:00"
+    tz: Europe/Paris
+    repeat: daily
+    count: 10
+    edit: {occurrence: "2024-03-07 08:30", start: "2024-03-07 10:00", end: "2024-03-07 10:30"}
+    delete: {occurrence: "2024-03-09 08:30"}
+  - title: Weekly review until 2027
+    calendar: work
+    start: "2026-01-05 18:00"
+    end: "2026-01-05 19:00"
+    tz: America/New_York
+    repeat: weekly
+    until: "2027-01-01"
+    reminders: [15m]
+    edit: {occurrence: "2026-02-09 18:00", start: "2026-02-09 17:00", end: "2026-02-09 18:00"}
+    delete: {occurrence: "2026-02-16 18:00"}
+  - title: Every two weeks
+    calendar: default
+    start: "2025-09-02 12:00"
+    end: "2025-09-02 13:00"
+    tz: Europe/Paris
+    repeat: weekly
+    every: 2
+    count: 20
+    color: pacific
+    edit: {occurrence: "2025-09-30 12:00", start: "2025-09-30 12:30", end: "2025-09-30 13:30"}
+    delete: {occurrence: "2025-10-14 12:00"}
+  - title: Monthly on the 15th
+    calendar: default
+    start: "2025-01-15 10:00"
+    end: "2025-01-15 10:30"
+    tz: Europe/Paris
+    rrule: "FREQ=MONTHLY;BYMONTHDAY=15;COUNT=24"
+    reminders: [1d]
+    edit: {occurrence: "2025-03-15 10:00", start: "2025-03-15 11:00", end: "2025-03-15 11:30"}
+    delete: {occurrence: "2025-04-15 10:00"}
+  - title: Last Friday of the month
+    calendar: sport
+    start: "2025-01-31 17:00"
+    end: "2025-01-31 17:45"
+    tz: Europe/Paris
+    rrule: "FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR"
+    edit: {occurrence: "2025-02-28 17:00", start: "2025-02-28 18:00", end: "2025-02-28 18:45"}
+    delete: {occurrence: "2025-03-28 17:00"}
+  - title: Anniversary (yearly, all day)
+    calendar: default
+    all_day: true
+    start: "2021-06-12"
+    repeat: yearly
+    count: 7
+    color: strawberry
+    edit: {occurrence: "2023-06-12", start: "2023-06-13"}
+    delete: {occurrence: "2024-06-12"}
+  - title: Weekly across the March DST change
+    calendar: work
+    start: "2026-03-16 09:00"
+    end: "2026-03-16 09:45"
+    tz: Europe/Paris
+    repeat: weekly
+    count: 8
+    dst_crossing: true
+    edit: {occurrence: "2026-03-23 09:00", start: "2026-03-23 09:30", end: "2026-03-23 10:15"}
+    delete: {occurrence: "2026-04-06 09:00"}
+  - title: Daily in Tokyo
+    calendar: default
+    start: "2025-11-03 07:00"
+    end: "2025-11-03 07:20"
+    tz: Asia/Tokyo
+    repeat: daily
+    count: 14
+    reminders: ["email:1h"]
+    edit: {occurrence: "2025-11-05 07:00", start: "2025-11-05 08:00", end: "2025-11-05 08:20"}
+    delete: {occurrence: "2025-11-08 07:00"}
+
+# Text round-trip cases: unicode, a 2 KB description, escapes and newlines.
+text:
+  - title: "Café ☕ 日本語 🎂 Zażółć gęślą jaźń — émoji 👩‍👩‍👧‍👦"
+    calendar: default
+    start: "2023-05-04 14:00"
+    end: "2023-05-04 15:00"
+    tz: Europe/Paris
+    description: "Ünïcödé ✓ — “quotes” and an emoji 🧪"
+  - title: Long description (2 KB)
+    calendar: work
+    start: "2023-06-08 10:00"
+    end: "2023-06-08 11:00"
+    tz: UTC
+    description_bytes: 2048
+  - title: Location with separators
+    calendar: default
+    start: "2023-07-12 18:00"
+    end: "2023-07-12 19:30"
+    tz: Europe/Paris
+    location: "Salle 4, Bât. A; étage 2 \\ aile gauche\nentrée côté jardin\n(2e porte)"
+    description: "Line one\nLine two, with a comma; and a semicolon\\ and a backslash"
+  - title: Two reminders and a colour
+    calendar: sport
+    start: "2023-08-20 07:30"
+    end: "2023-08-20 09:00"
+    tz: Asia/Tokyo
+    reminders: [15m, 1d, "email:1h"]
+    color: cobalt
