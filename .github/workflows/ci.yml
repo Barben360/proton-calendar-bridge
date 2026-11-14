@@ -250,3 +250,93 @@ jobs:
           echo "$out" | grep -qF "pcb version reports 'v0.0.0-ci', want 'v0.0.0-wrong'"
       - name: install.sh tests on the macOS shell
         run: sh scripts/install_test.sh
+  # Both binaries on Windows (the Windows port): pcb and pcb-ui are built and
+  # run, and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
+  # release's ui-windows job) gives cgo its gcc and the steps their make; with
+  # path-type: inherit the runner's go and jq stay on PATH. The runner's user
+  # is an elevated administrator: tests that only hold for a standard user
+  # skip themselves when acl.Elevated() reports true.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~\AppData\Local\go-build
+            ~\go\pkg\mod
+          key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: make mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: Vet
+        shell: msys2 {0}
+        run: CGO_ENABLED=1 go vet ./...
+      - name: Build pcb and pcb-ui
+        shell: msys2 {0}
+        run: make build ui
+      - name: pcb version and doctor
+        shell: msys2 {0}
+        run: |
+          bin/pcb.exe version --json | jq -e '.data.os == "windows"'
+          rc=0; bin/pcb.exe doctor --json > doctor.json || rc=$?
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 10 ] || { echo "::error::pcb doctor exited $rc"; cat doctor.json; exit 1; }
+          jq -e '.data.results[] | select(.name == "platform") | .message == "windows/amd64: runs, untested"' doctor.json
+      - name: pcb-ui prints its version and carries its resources
+        shell: msys2 {0}
+        run: |
+          # A GUI-subsystem binary: its output reaches a file only when redirected.
+          bin/pcb-ui.exe --version > v.txt
+          cat v.txt
+          grep -q '^pcb-ui ' v.txt
+          powershell -NoProfile -Command '(Get-Item bin/pcb-ui.exe).VersionInfo.ProductName' | tr -d '\r' | grep -qx 'pcb-ui'
+  windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The shards of the test job (the two heavy packages alone).
+        shard: [service, cli, rest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~\AppData\Local\go-build
+            ~\go\pkg\mod
+          key: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: make mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: Race tests
+        shell: msys2 {0}
+        run: |
+          case "${{ matrix.shard }}" in
+            service) pkgs=./internal/service ;;
+            cli) pkgs=./internal/cli ;;
+            *) pkgs="./internal/filelock ./internal/ctl ./internal/paths ./internal/store/... ./internal/tlsutil ./internal/doctor ./internal/shellquote ./internal/atomicfile ./internal/acl ./internal/winzone ./internal/runkey ./internal/wingui ./internal/daemon ./internal/mcp ./internal/ui/... ./cmd/pcb ./cmd/pcb-ui/..." ;;
+          esac
+          # shellcheck disable=SC2086
+          CGO_ENABLED=1 go test -race -timeout 20m $pkgs
