@@ -396,10 +396,14 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	unlockSync, held := l.logoutSyncLock()
 	err = cache.Remove(cache.Path(l.o.Dirs.State))
 	unlockSync()
-	if err != nil {
+	busy := err != nil && held && cache.IsBusy(err)
+	if err != nil && !busy {
 		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
 			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
 	}
+	// Where a file open elsewhere cannot be removed (Windows), a sync of
+	// another process holding the cache is what the result reports: it
+	// finishes with the cache, and a later pcb logout removes it.
 	res.SyncRunning = held
 	// Seeded with the wiped generation + 1: over an unreadable state.json
 	// (the reset logout is) the mirror write failed and SaveState cannot

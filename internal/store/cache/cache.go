@@ -572,10 +572,10 @@ var RemoveRetry = 2 * time.Second
 
 // Remove deletes the cache file with its -wal and -shm; missing is fine.
 // Where another handle on a file blocks the removal, it is retried every
-// 50 ms for at most RemoveRetry.
+// 50 ms, the three files together for at most RemoveRetry.
 func Remove(path string) error {
+	deadline := time.Now().Add(RemoveRetry)
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		deadline := time.Now().Add(RemoveRetry)
 		for {
 			err := os.Remove(p)
 			if err == nil || errors.Is(err, os.ErrNotExist) {
@@ -590,6 +590,10 @@ func Remove(path string) error {
 	syncDir(filepath.Dir(path))
 	return nil
 }
+
+// IsBusy reports that err is Remove's failure over a file another handle
+// holds open (Windows only; never on Unix).
+func IsBusy(err error) bool { return fileBusy(err) }
 
 // syncDir fsyncs a directory, best effort; tests watch it.
 var syncDir = atomicfile.SyncDir

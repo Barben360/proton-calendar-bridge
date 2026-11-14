@@ -1191,8 +1191,17 @@ func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// The pump's pass saw the logout (the wipe is all it could see),
 		// and Serve already waits: no pass is left to meet the switch.
-		if p := r.wantPass(t); p.Err == nil {
-			t.Fatalf("pass that freed the cache: %v, want a failure (logged out)", p.Err)
+		// The pump's first tick may run a pass that succeeds before the
+		// revocation is seen: drain until the first failing one.
+		for {
+			p := r.wantPass(t)
+			if p.Err == nil {
+				continue
+			}
+			if m := p.Err.Error(); !strings.Contains(m, "logged out") && !strings.Contains(m, "no stored Proton session") {
+				t.Fatalf("pass that freed the cache: %v, want the logout as its cause", p.Err)
+			}
+			break
 		}
 		r.wantState(t, service.ServeWaitingForLogin)
 	} else {
