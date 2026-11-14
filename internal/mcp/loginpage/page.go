@@ -398,7 +398,7 @@ label{display:block;margin:.8rem 0}input[type=password],input[type=text]{width:1
 <input type="hidden" name="step" value="credentials">
 <label>Proton password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
 <label><input type="checkbox" name="unattended" value="1"> Repair the session without me (unattended relogin: pcb keeps the password, sealed)</label>
-<p class="note">If ticked: {{.Warning}}. With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code.</p>
+<p class="note">{{.Warning}}. With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code.</p>
 {{if .Suggested}}<p class="note">The agent suggests unattended relogin. Tick the box only if you want it.</p>{{end}}
 <button type="submit">Sign in</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
 </form>
