@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 )
 
 // Hooks are what Apply cannot do on its own.
@@ -26,6 +27,16 @@ type Hooks struct {
 	// stateDir (a keyring step, ruling R13). Its failure becomes the step's
 	// note, with how to delete the item by hand: the uninstall goes on.
 	Keyring func(ctx context.Context, stateDir string) error
+	// Autostart deletes pcb-ui's Run value (an autostart step; Windows).
+	// Nil: the step's note says how to delete it by hand.
+	Autostart func() error
+	// HeldDir is the directory (where it lies on the host, Root included) whose
+	// HeldFile the caller holds locked: Windows cannot remove a locked
+	// file nor its directory, so removing HeldDir deletes everything else
+	// first, then calls ReleaseServe, then removes HeldFile and HeldDir.
+	// Nil ReleaseServe: a plain removal.
+	HeldDir, HeldFile string
+	ReleaseServe      func()
 }
 
 // StepError is the step Apply stopped at. The steps before it are done and
@@ -92,13 +103,19 @@ func apply(ctx context.Context, h Host, s *Step, hooks Hooks) error {
 			s.Note = "not removed (" + err.Error() + "): " + keyringByHand(h.Path(s.Path))
 		}
 		return nil
+	case s.Action == ActionRemove && s.Kind == KindAutostart:
+		if hooks.Autostart == nil {
+			s.Note = "not removed: delete the value " + runkey.Value + ` under HKCU\` + runkey.KeyPath
+			return nil
+		}
+		return hooks.Autostart()
 	case s.Action == ActionRemove && s.Kind == KindFile:
 		if err := os.Remove(h.Path(s.Path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil
 	case s.Action == ActionRemove && s.Kind == KindDir:
-		return removeDir(h, s.Path)
+		return removeDir(h, s.Path, hooks)
 	}
 	return fmt.Errorf("unknown step %q %q", s.Action, s.Kind)
 }
@@ -268,11 +285,45 @@ func chown(h Host, f *os.File, owner string) error {
 // removeDir removes a directory and everything in it. A relative path, or
 // one not named exactly pcb (M5-R5), is refused here too, whatever the
 // plan said.
-func removeDir(h Host, dir string) error {
+func removeDir(h Host, dir string, hooks Hooks) error {
 	if !filepath.IsAbs(dir) || filepath.Base(dir) != removableName {
 		return fmt.Errorf("refusing to remove %s", dir)
 	}
+	if hooks.ReleaseServe != nil && h.Path(dir) == hooks.HeldDir {
+		return removeHeld(h.Path(dir), hooks.HeldFile, hooks.ReleaseServe)
+	}
 	return os.RemoveAll(h.Path(dir))
+}
+
+// removeHeld removes dir while its file held is locked by the caller:
+// everything else first, then release, then held and dir (a locked file
+// cannot be removed on Windows).
+func removeHeld(dir, held string, release func()) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			release()
+			return nil
+		}
+		return err
+	}
+	var first error
+	for _, e := range entries {
+		if e.Name() == held {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil && first == nil {
+			first = err
+		}
+	}
+	release()
+	if first != nil {
+		return first
+	}
+	if err := os.Remove(filepath.Join(dir, held)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return os.Remove(dir)
 }
 
 func runCommand(ctx context.Context, h Host, command string) error {

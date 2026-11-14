@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -76,6 +77,13 @@ func errNoSystemd() error {
 		Hint: "in a container, run pcb serve as the entrypoint (README)"}
 }
 
+// errNoService is the refusal of install and service on Windows, where
+// pcb-ui's "Start at login" is the only way to run at login.
+func errNoService() error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("no service on Windows"),
+		Hint: `use pcb-ui; "Start at login" runs it at each login`}
+}
+
 func (a *app) newInstall() *cobra.Command {
 	var scope scopeFlags
 	var plan bool
@@ -84,6 +92,9 @@ func (a *app) newInstall() *cobra.Command {
 		Short: "Install pcb as a systemd service (--user by default)",
 		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if a.GOOS == "windows" {
+				return Finish(cmd, nil, "", errNoService())
+			}
 			s, ok, err := scope.chosen()
 			if err != nil {
 				return Finish(cmd, nil, "", err)
@@ -191,6 +202,9 @@ func (a *app) newUninstall() *cobra.Command {
 		Short: "Remove the pcb systemd service (and with --delete-data, its data; without a service, pcb-ui's)",
 		Args:  NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if a.GOOS == "windows" {
+				return a.uninstallWindows(cmd, deleteData, yes, plan)
+			}
 			s, err := scope.detectScope(a.Host, "nothing to uninstall; pass --user or --system to remove what is left")
 			if deleteData && errors.Is(err, install.ErrNotInstalled) {
 				// No service: the data of this session's pcb (pcb-ui).
@@ -289,22 +303,35 @@ func (a *app) uninstallDesktop(cmd *cobra.Command, yes, plan bool) error {
 		}
 		return Finish(cmd, data, planText(steps, data.Next), nil)
 	}
+	hooks := a.desktopHooks(&data)
 	if state := h.Path(dirs.State); removed && dirExists(state) {
 		release, err := service.HoldServe(state, "uninstall")
 		if err != nil {
 			return Finish(cmd, nil, "", err)
 		}
+		release = sync.OnceFunc(release)
 		defer release()
+		hooks.HeldDir, hooks.HeldFile, hooks.ReleaseServe = state, "serve.lock", release
 	}
 	if d := deletionOf(steps); d.any() && !yes {
 		if err := a.confirmDelete(cmd, d); err != nil {
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	hooks := install.Hooks{Logout: a.logoutHook(h, &data.Logout), Keyring: func(ctx context.Context, stateDir string) error {
+	return a.applyUninstall(cmd, steps, data, hooks)
+}
+
+// desktopHooks are the hooks of an uninstall with no service: the Proton
+// logout and the keyring item (Linux and Windows alike).
+func (a *app) desktopHooks(data *installData) install.Hooks {
+	return install.Hooks{Logout: a.logoutHook(a.Host, &data.Logout), Keyring: func(ctx context.Context, stateDir string) error {
 		return service.DeleteSealingKey(ctx, stateDir, a.Keyring)
 	}}
-	if err := install.Apply(cmd.Context(), h, steps, hooks); err != nil {
+}
+
+// applyUninstall runs steps and prints their result and the logout's.
+func (a *app) applyUninstall(cmd *cobra.Command, steps []install.Step, data installData, hooks install.Hooks) error {
+	if err := install.Apply(cmd.Context(), a.Host, steps, hooks); err != nil {
 		if len(data.Logout) > 0 {
 			return Finish(cmd, data, uninstallLogoutText(data.Logout), applyFailed(err))
 		}
@@ -315,6 +342,64 @@ func (a *app) uninstallDesktop(cmd *cobra.Command, yes, plan bool) error {
 		text += "\n" + uninstallLogoutText(data.Logout)
 	}
 	return Finish(cmd, data, text, nil)
+}
+
+// uninstallWindows is pcb uninstall on Windows, where there is no service:
+// it deletes pcb-ui's Run value and, with --delete-data, logs out and
+// deletes the directories this invocation resolves. It refuses (exit 20,
+// naming the holder) while pcb-ui, pcb serve or an agent session serves the
+// state; with the state to delete it holds serve.lock meanwhile and
+// releases it last (Windows cannot remove a locked file).
+func (a *app) uninstallWindows(cmd *cobra.Command, deleteData, yes, plan bool) error {
+	h := a.Host
+	dirs, err := resolveDirs(a.Env)
+	if err != nil {
+		return Finish(cmd, nil, "", err)
+	}
+	state := h.Path(dirs.State)
+	held := dirExists(state)
+	if held && !plan {
+		if err := service.ServeHeld(state); err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+	}
+	var steps []install.Step
+	if deleteData {
+		if steps, err = install.PlanDeleteDesktop(h, dirs, "", true); err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+	}
+	_, present, err := a.RunKey.Get()
+	if err != nil {
+		return Finish(cmd, nil, "", fmt.Errorf("reading pcb-ui's Run value: %w", err))
+	}
+	steps = append(steps, install.AutostartStep(present))
+	data := installData{Plan: plan, Steps: steps, Next: []string{}}
+	if plan {
+		if held {
+			if err := service.ServeHeld(state); err != nil {
+				data.Next = append(data.Next, servingNote(err))
+			}
+		}
+		return Finish(cmd, data, planText(steps, data.Next), nil)
+	}
+	hooks := a.desktopHooks(&data)
+	hooks.Autostart = a.RunKey.Delete
+	if deleteData && install.StateRemoved(steps, dirs.State) && held {
+		release, err := service.HoldServe(state, "uninstall")
+		if err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+		release = sync.OnceFunc(release)
+		defer release()
+		hooks.HeldDir, hooks.HeldFile, hooks.ReleaseServe = state, "serve.lock", release
+	}
+	if d := deletionOf(steps); deleteData && d.any() && !yes {
+		if err := a.confirmDelete(cmd, d); err != nil {
+			return Finish(cmd, nil, "", err)
+		}
+	}
+	return a.applyUninstall(cmd, steps, data, hooks)
 }
 
 // defaultState is the state directory pcb resolves for env without
@@ -416,7 +501,7 @@ func deletionOf(steps []install.Step) deletion {
 			d.user = true
 		case st.Action == install.ActionRemove && st.Kind == install.KindKeyring:
 			d.keyring = true
-		case st.Action == install.ActionRemove && st.Kind == install.KindFile && st.Note == install.AutostartNote:
+		case st.Action == install.ActionRemove && (st.Kind == install.KindFile || st.Kind == install.KindAutostart) && st.Note == install.AutostartNote:
 			d.autostart = true
 		}
 	}
