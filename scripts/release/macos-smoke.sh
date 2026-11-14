@@ -5,8 +5,9 @@
 # uname, darwin on a Mac), install.sh and checksums.txt. The script lays them
 # out as download/TAG/ in a temp dir, points PCB_INSTALL_BASE_URL at it
 # (file://), installs under a temp prefix with a temp HOME, and checks that
-# `pcb version --json` reports TAG and `pcb doctor --json` the platform
-# <os>/<arch>. Uses jq when found, grep otherwise. Prints PASS last.
+# `pcb version --json` reports TAG and `pcb doctor --json` a platform result
+# (ok or warn) whose message starts with <os>/<arch> (darwin/arm64: runs,
+# unsupported on a Mac); doctor's own exit code is tolerated. Uses jq when found, grep otherwise. Prints PASS last.
 # Usage: scripts/release/macos-smoke.sh DIR TAG
 set -euo pipefail
 
@@ -41,19 +42,26 @@ pcb=$work/prefix/bin/pcb
 [[ -x $pcb ]] || die "install.sh left no $pcb"
 
 version_json=$(env HOME="$work/home" "$pcb" version --json)
-doctor_json=$(env HOME="$work/home" "$pcb" doctor --json)
+# doctor exits 10 or 20 when a check errors (a fresh HOME may): the envelope
+# is still printed and still required below.
+doctor_rc=0
+doctor_json=$(env HOME="$work/home" "$pcb" doctor --json) || doctor_rc=$?
 
 if command -v jq >/dev/null 2>&1; then
   got=$(jq -r '.data.version' <<<"$version_json")
   cmd=$(jq -r '.command' <<<"$doctor_json")
-  plat=$(jq -r '[.data.results[] | select(.name == "platform") | .message] | first // ""' <<<"$doctor_json")
+  plat=$(jq -r '[.data.results[] | select(.name == "platform")] | first | .message // ""' <<<"$doctor_json")
+  pstatus=$(jq -r '[.data.results[] | select(.name == "platform")] | first | .status // ""' <<<"$doctor_json")
 else
   got=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' <<<"$version_json" | head -n 1)
   cmd=$(sed -n 's/^ *"command": *"\([^"]*\)".*/\1/p' <<<"$doctor_json" | head -n 1)
   plat=$(grep -A 2 '"name": *"platform"' <<<"$doctor_json" | sed -n 's/^ *"message": *"\([^"]*\)".*/\1/p' | head -n 1)
+  pstatus=$(grep -A 2 '"name": *"platform"' <<<"$doctor_json" | sed -n 's/^ *"status": *"\([^"]*\)".*/\1/p' | head -n 1)
 fi
 
 [[ $got == "$tag" ]] || die "pcb version reports '$got', want '$tag'"
-[[ $cmd == doctor ]] || die "pcb doctor --json has command '$cmd', want doctor"
-[[ $plat == "$os/$arch" ]] || die "doctor platform is '$plat', want '$os/$arch'"
+[[ $cmd == doctor ]] || die "pcb doctor --json (exit $doctor_rc) has command '$cmd', want doctor"
+# The message is GOOS/GOARCH, plus ": runs, unsupported" off Linux.
+[[ $plat == "$os/$arch" || $plat == "$os/$arch:"* ]] || die "doctor platform is '$plat', want '$os/$arch'"
+[[ $pstatus == ok || $pstatus == warn ]] || die "doctor platform status is '$pstatus', want ok or warn"
 echo PASS

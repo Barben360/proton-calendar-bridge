@@ -2,7 +2,7 @@
 # Packages one release archive: OUTDIR/pcb_<OS>_<ARCH>.tar.gz, flat contents.
 # Reproducible: sorted names, fixed mtime (SOURCE_DATE_EPOCH, default the HEAD
 # commit time), owner 0:0, modes 0755 (binaries) and 0644 (the rest).
-# Needs GNU tar (Linux runners only).
+# Needs GNU tar: Linux runners, or macOS with gnu-tar's gnubin first on PATH.
 # Usage: scripts/release/package.sh OS ARCH BINDIR OUTDIR
 #   OS linux|darwin, ARCH amd64|arm64; linux needs BINDIR/pcb and BINDIR/pcb-ui,
 #   darwin BINDIR/pcb. Exit 2 on a refusal.

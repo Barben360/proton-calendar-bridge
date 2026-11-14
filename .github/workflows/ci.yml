@@ -220,8 +220,10 @@ jobs:
           echo "$(brew --prefix gnu-tar)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Build and package darwin
         run: |
-          arch=$(uname -m)
-          [ "$arch" = x86_64 ] && arch=amd64
+          case $(uname -m) in
+            x86_64) arch=amd64 ;;
+            *) arch=arm64 ;;
+          esac
           make build VERSION=v0.0.0-ci
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) scripts/release/package.sh darwin "$arch" bin dist
           cp scripts/install.sh dist/install.sh
@@ -230,6 +232,13 @@ jobs:
         run: scripts/release/macos-smoke.sh dist v0.0.0-ci
       - name: The smoke fails on a wrong version
         # The archive's pcb reports v0.0.0-ci: asking for another tag must fail.
-        run: '! scripts/release/macos-smoke.sh dist v0.0.0-wrong'
+        run: |
+          if out=$(scripts/release/macos-smoke.sh dist v0.0.0-wrong 2>&1); then
+            echo "$out"
+            echo "the smoke passed on a wrong version" >&2
+            exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -qF "pcb version reports 'v0.0.0-ci', want 'v0.0.0-wrong'"
       - name: install.sh tests on the macOS shell
         run: sh scripts/install_test.sh
