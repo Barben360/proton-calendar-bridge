@@ -73,6 +73,17 @@ test_image_tags() {
   want_status "image-tags prerelease maybe" 2 "$check" image-tags v1.3.0-rc.1 maybe no
 }
 
+# image-build.yml's publish job runs no repository code, so it repeats
+# image-tag-list's grammar inline: both must say the same.
+test_tag_grammar_in_publish() {
+  local wf=$here/../../.github/workflows/image-build.yml ours theirs
+  ours=$(grep -F "not an image tag" "$check" | sed -n 's/.*=~ \(.*\) \]\].*/\1/p')
+  theirs=$(grep -F "not an image tag" "$wf" | sed -n 's/.*=~ \(.*\) \]\].*/\1/p')
+  if [ -z "$ours" ] || [ "$(wc -l <<<"$ours")" != 1 ]; then fail "no single grammar in check.sh: [$ours]"; fi
+  if [ -z "$theirs" ] || [ "$(wc -l <<<"$theirs")" != 1 ]; then fail "no single grammar in image-build.yml: [$theirs]"; fi
+  [ "$ours" = "$theirs" ] || fail "check.sh has $ours, image-build.yml's publish $theirs"
+}
+
 test_on_main() {
   local r=$tmp/repo
   git init -q -b main "$r"
@@ -112,19 +123,6 @@ test_image_tag_list() {
   [ -z "$(image_tag_list $'1.2.3\nbad tag\n' 2>/dev/null)" ] || fail "partial list printed"
 }
 
-test_owner() {
-  "$check" owner alice alice alice || fail "the owner twice refused"
-  "$check" owner alice alice || fail "the owner once refused"
-  want_status "triggering actor not the owner" 1 "$check" owner alice alice bob
-  want_status "actor not the owner" 1 "$check" owner alice bob alice
-  want_status "empty actor" 1 "$check" owner alice alice ""
-  want_status "case differs" 1 "$check" owner alice Alice
-  local err; err=$("$check" owner alice alice bob 2>&1 || true)
-  [ "$err" = "check: bob is not the owner alice" ] || fail "message: $err"
-  want_status "no actor" 2 "$check" owner alice
-  want_status "empty owner" 2 "$check" owner "" ""
-}
-
 test_reachable() {
   local o=$tmp/origin w=$tmp/work g=(-c user.name=t -c user.email=t@example.invalid -c commit.gpgSign=false -c tag.gpgSign=false)
   git init -q -b main "$o"
@@ -149,7 +147,7 @@ test_reachable() {
   want_status "a branch name" 2 bash -c "$in_w" _ "$w" "$check" main
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_owner test_on_main test_reachable; do
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_tag_grammar_in_publish test_on_main test_reachable; do
   "$case_name"
   echo "ok   $case_name"
 done

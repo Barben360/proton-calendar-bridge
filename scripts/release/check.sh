@@ -8,8 +8,8 @@
 #   check.sh is-latest-minor TAG                same, among the tags of TAG's MAJOR.MINOR line
 #   check.sh image-tags TAG LATEST MINOR_LATEST image tags, one per line (flags: yes|no)
 #   check.sh image-tag-list                     tags on stdin, one per line; prints the non-blank ones, refuses
-#                                               a bad one or none (image-build.yml's tags input)
-#   check.sh owner OWNER ACTOR...               0 when every ACTOR is OWNER
+#                                               a bad one or none (image-build.yml's tags input; its
+#                                               publish job repeats the grammar inline)
 #   check.sh on-main SHA [BASE]                 0 when SHA is an ancestor of BASE (default origin/main)
 #   check.sh reachable SHA                      0 when a remote-tracking branch or a tag of the clone holds SHA
 set -eu
@@ -90,14 +90,6 @@ case $cmd in
     ((${#tags[@]} > 0)) || die "no tag given"
     printf '%s\n' "${tags[@]}"
     ;;
-  owner)
-    [[ $# -ge 2 && -n $1 ]] || die "usage: owner OWNER ACTOR..."
-    owner=$1
-    shift
-    for a in "$@"; do
-      [[ $a == "$owner" ]] || { echo "check: $a is not the owner $owner" >&2; exit 1; }
-    done
-    ;;
   on-main)
     [[ $# -ge 1 && $# -le 2 ]] || die "usage: on-main SHA [BASE]"
     git merge-base --is-ancestor "$1" "${2:-origin/main}"
@@ -112,6 +104,6 @@ case $cmd in
     [[ -n $(git for-each-ref --contains "$1" --format='%(refname)' refs/remotes refs/tags 2>/dev/null) ]]
     ;;
   *)
-    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|owner|on-main|reachable ..."
+    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|on-main|reachable ..."
     ;;
 esac
