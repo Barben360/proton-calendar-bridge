@@ -318,9 +318,10 @@ func (c ClientsCheck) Run(context.Context) Result {
 // opens the sealed copy of its password (a new key file or keyring key, an
 // edited clients.json): pcb client show cannot give it, and only a
 // rotation does (ux Minor, parked M5). Left to other checks, so no warning
-// here: a key file that cannot be read, one missing beside secrets.sealed
-// (the secrets check's: a rotation is refused then), and a keyring that is
-// locked or absent (the keyring check's).
+// here: a key file or DPAPI key that cannot be read, one missing beside
+// secrets.sealed (the secrets check's: a rotation is refused then), a
+// keyring that is locked or absent (the keyring check's) and a DPAPI key
+// Windows cannot unprotect in this session (the dpapi key check's).
 type SealedClientsCheck struct {
 	StateDir string
 	KeyFile  string
@@ -346,8 +347,8 @@ func (c SealedClientsCheck) RunAll(context.Context) []Result {
 	if c.Sealer != nil {
 		sealer = c.Sealer
 	}
-	if kf, ok := sealer.(*seal.KeyFile); ok {
-		switch err := kf.Check(); {
+	if kc, ok := sealer.(interface{ Check() error }); ok { // a key file or a DPAPI key
+		switch err := kc.Check(); {
 		case err == nil:
 		case errors.Is(err, fs.ErrNotExist) && !exists(filepath.Join(c.StateDir, "secrets.sealed")):
 			// Lost with no session sealed: a rotation makes a new key.
@@ -367,7 +368,7 @@ func (c SealedClientsCheck) RunAll(context.Context) []Result {
 		if err == nil || errors.Is(err, access.ErrNoSealedCopy) || !errors.Is(err, access.ErrNotRecoverable) {
 			continue
 		}
-		if errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) {
+		if errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, seal.ErrProtect) {
 			continue
 		}
 		out = append(out, Result{Name: c.Name() + " " + cl.Name, Status: StatusWarn,

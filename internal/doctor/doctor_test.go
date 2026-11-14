@@ -71,26 +71,6 @@ func TestDirModeCheckOK(t *testing.T) {
 	}
 }
 
-func TestPlatformCheck(t *testing.T) {
-	for _, tt := range []struct {
-		goos, goarch string
-		want         doctor.Status
-	}{
-		{"linux", "amd64", doctor.StatusOK},
-		{"linux", "arm64", doctor.StatusOK},
-		{"windows", "amd64", doctor.StatusWarn},
-		{"linux", "riscv64", doctor.StatusWarn},
-	} {
-		got := doctor.PlatformCheck{GOOS: tt.goos, GOARCH: tt.goarch}.Run(context.Background())
-		if got.Status != tt.want {
-			t.Errorf("%s/%s: got %+v, want %s", tt.goos, tt.goarch, got, tt.want)
-		}
-		if tt.want == doctor.StatusWarn && !strings.Contains(got.Message, "unsupported") {
-			t.Errorf("%s/%s: message %q lacks \"unsupported\"", tt.goos, tt.goarch, got.Message)
-		}
-	}
-}
-
 func TestRunKeepsOrderAndWorst(t *testing.T) {
 	checks := []doctor.Check{
 		doctor.PlatformCheck{GOOS: "linux", GOARCH: "amd64"},

@@ -168,7 +168,7 @@ func TestDoctorWarnsLockedKeyring(t *testing.T) {
 
 func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("auto never falls back to the key file on Windows (DPAPI: service's TestNewStateOnWindowsSealsWithDPAPI); doctor's DPAPI line is Task 11's, and doctor exits 10 on the platform warning until Task 16")
+		t.Skip("auto never falls back to the key file on Windows (DPAPI: service's TestNewStateOnWindowsSealsWithDPAPI); doctor's choice of key check there is doctor's TestChecksOnWindows and TestChecksOnWindowsWithTheKeyFileBackend")
 	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -24,7 +25,10 @@ func UnattendedKeyringWarning(sealed string) string {
 // SecretsCheck reports how the secrets are protected. A 0600 key file stops
 // other local users and casual disclosure, not root or the user's own
 // processes, and a backup of one volume holding both key and data exposes
-// both (E15); the desktop keyring keeps the key off the disk. A secrets.sealed older
+// both (E15); the desktop keyring keeps the key off the disk; a DPAPI key
+// opens only for its Windows user, signed in (a sealer named dpapi). A key
+// Windows cannot unprotect in this session is a warning with the sign-in
+// fix, never a logout: the dpapi key check reports the error. A secrets.sealed older
 // than the last one pcb wrote (restored or replaced, R3m) is an error; other
 // failures to open it are left to pcb status and pcb logout.
 type SecretsCheck struct {
@@ -70,6 +74,7 @@ func (c SecretsCheck) Run(context.Context) Result {
 	}
 	sealed := filepath.Join(c.StateDir, "secrets.sealed")
 	sealer, keyFile := c.resolve()
+	dpapi := sealer.Name() == service.SealerDPAPI
 	var msgs []string
 	if exists(sealed) {
 		if keyFile && !exists(c.KeyFile) {
@@ -81,9 +86,20 @@ func (c SecretsCheck) Run(context.Context) Result {
 		var (
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
+			pe *seal.ProtectError
 		)
 		_, err := store.NewSecrets(c.StateDir, sealer).Load()
 		switch {
+		case errors.Is(err, seal.ErrNoKey) && dpapi:
+			r.Status = StatusError
+			r.Message = "sealed secrets exist but their DPAPI key is missing: they cannot be read; `pcb logout` wipes them, then log in again"
+			r.Fix = "pcb logout"
+			return r
+		case errors.As(err, &pe) && pe.Unprotect:
+			// The dpapi key check reports the error; a logon with the
+			// password opens them.
+			r.Status, r.Message, r.Fix = StatusWarn, "the sealed secrets cannot be opened in this Windows session: "+pe.Error(), service.DPAPIUnprotectFix
+			return r
 		case errors.Is(err, seal.ErrNoKey) && !keyFile:
 			r.Status = StatusError
 			r.Message = "sealed secrets exist but the desktop keyring holds no key for them: they cannot be read; `pcb logout` wipes them, then log in again"
@@ -98,19 +114,25 @@ func (c SecretsCheck) Run(context.Context) Result {
 			r.Message, r.Fix = ue.Explain(), "upgrade pcb"
 			return r
 		}
-		if keyFile {
+		switch {
+		case keyFile:
 			msgs = append(msgs, "secrets sealed with a key file (headless fallback)")
 			if c.sameVolume() {
 				msgs = append(msgs, "the key and the sealed data are on the same volume, so a backup or copy of that volume exposes both")
 			}
-		} else {
+		case dpapi:
+			r.Status, r.Message = StatusOK, "secrets sealed with a key DPAPI protects for this Windows user"
+		default:
 			r.Status, r.Message = StatusOK, "secrets sealed with the desktop keyring"
 		}
 	}
 	if state.Unattended {
-		if keyFile {
+		switch {
+		case keyFile:
 			msgs = append(msgs, "unattended relogin is on: whoever can read "+c.KeyFile+" and "+sealed+" owns the Proton account")
-		} else {
+		case dpapi:
+			msgs = append(msgs, "unattended relogin is on: whoever can sign in as this Windows user and read "+sealed+" owns the Proton account")
+		default:
 			msgs = append(msgs, UnattendedKeyringWarning(sealed))
 		}
 	}
