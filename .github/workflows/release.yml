@@ -18,22 +18,32 @@ name: release
 # would land in an attested binary. The release builds from scratch:
 # modules from the proxy, checked against go.sum.
 #
-# A failed run publishes nothing beyond the step that failed. Fix the cause
-# and "Re-run failed jobs": a failed job re-runs with everything after it.
-# The one partial state is the image job: image-build.yml tags the manifest
-# list, then attests it, so a failed attestation leaves the version tags on
-# an unattested list; the release job never starts, no Release is
-# published, and the re-run builds the image again and re-points the tags.
+# A published version never moves (design §2): checks refuse a tag whose
+# Release is published or whose X.Y.Z image is already pushed. A failed run
+# publishes nothing beyond the step that failed; fix the cause and use
+# "Re-run failed jobs" on that run, never "Re-run all jobs" nor a re-pushed
+# tag: both start with checks, which refuse a version whose image is out.
+# "Re-run failed jobs" re-runs the failed job and the jobs after it, not
+# checks (it passed), so it resumes past the image check. That is how the
+# one partial state is retried: image-build.yml tags the manifest list,
+# then attests it, so a failed attestation leaves the version tags on an
+# unattested list and no Release; re-running the failed image job builds
+# the same commit again and re-points those tags before anything else is
+# published. A version whose image was pushed and whose run is not resumed
+# this way is burned: release the next tag.
 on:
   push:
     tags: ["v*"]
 permissions:
   contents: read
-# A tag pushed twice starts two runs: the newer cancels the older (and the
-# checks refuse a tag whose Release is already published).
+# One release at a time, never cancelled: a cancelled run could stop in
+# the middle of tagging the image (imagetools create), and two tags in
+# flight could finish out of order and leave latest on the older line. The
+# trade-off: GitHub keeps one pending run per group, so a third run queued
+# behind a pending one is dropped (cancelled) and must be re-run by hand.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: release
+  cancel-in-progress: false
 defaults:
   run:
     shell: bash
@@ -47,9 +57,11 @@ jobs:
     permissions:
       contents: read
       actions: read
+      packages: read
+    env:
+      REPO: ghcr.io/barben360/proton-calendar-bridge
     outputs:
       kind: ${{ steps.tag.outputs.kind }}
-      version: ${{ steps.tag.outputs.version }}
       latest: ${{ steps.latest.outputs.latest }}
       minor_latest: ${{ steps.latest.outputs.minor_latest }}
       image_tags: ${{ steps.latest.outputs.image_tags }}
@@ -73,7 +85,6 @@ jobs:
           [[ $GITHUB_REF == refs/tags/* ]] || { echo "::error::$GITHUB_REF is not a tag"; exit 1; }
           kind=$(scripts/release/check.sh tag-kind "$GITHUB_REF_NAME") || { echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE"; exit 1; }
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           echo "$GITHUB_REF_NAME is a $kind release"
       - name: Refuse a tag that is not on main
         run: |
@@ -88,6 +99,31 @@ jobs:
           published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\" and (.draft | not)) | .html_url")
           [ -z "$published" ] || { echo "::error::$GITHUB_REF_NAME is already published ($published): release a new tag"; exit 1; }
+      # An image pushed by an earlier run of this version (its Release may
+      # be only a draft, or missing) is never rebuilt: see the top comment.
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Refuse a version whose image is already pushed
+        run: |
+          ref="$REPO:${GITHUB_REF_NAME#v}"
+          rc=0
+          out=$(docker buildx imagetools inspect "$ref" 2>&1) || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::image ${GITHUB_REF_NAME#v} is already pushed: use Re-run failed jobs on the run that pushed it, or release a new tag"
+            exit 1
+          fi
+          if grep -qE 'not found|MANIFEST_UNKNOWN' <<<"$out"; then
+            echo "$ref is not pushed yet"
+          else
+            echo "$out"
+            echo "::error::cannot tell whether $ref is pushed (imagetools inspect failed, see above)"
+            exit 1
+          fi
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
       - name: Refuse a commit whose ci run on main did not succeed
         env:
           GH_TOKEN: ${{ github.token }}
@@ -377,7 +413,7 @@ jobs:
             --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | \"\(.id) \(.draft)\"")
           while read -r id draft; do
             [ -n "$id" ] || continue
-            [ "$draft" = true ] || { echo "::error::$GITHUB_REF_NAME was published while this run went on"; exit 1; }
+            [ "$draft" = true ] || { echo "::error::$GITHUB_REF_NAME is published already (by another run, or by this one before a later step failed): nothing to redo, check the Release"; exit 1; }
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
             echo "deleted the stale draft $id"
           done <<<"$releases"
@@ -408,12 +444,24 @@ jobs:
         run: |
           if [ "$LATEST" = yes ]; then latest=true; else latest=false; fi
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
+      # The Release is out by now: a failure here is the check's alone,
+      # to look at on GitHub, not to re-run. A few tries cover the API
+      # catching up with the edit.
       - name: The Release is published as decided
         run: |
           want="false $([ "$KIND" = prerelease ] && echo true || echo false)"
-          got=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
-          [ "$got" = "$want" ] || { echo "::error::published, but isDraft isPrerelease is '$got', want '$want'"; exit 1; }
-          if [ "$LATEST" = yes ]; then
-            got=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
-            [ "$got" = "$GITHUB_REF_NAME" ] || { echo "::error::published, but releases/latest is $got, want $GITHUB_REF_NAME"; exit 1; }
-          fi
+          state() {
+            local got
+            got=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"') || return 1
+            [ "$got" = "$want" ] || { echo "isDraft isPrerelease is '$got', want '$want'"; return 1; }
+            if [ "$LATEST" = yes ]; then
+              got=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name) || return 1
+              [ "$got" = "$GITHUB_REF_NAME" ] || { echo "releases/latest is $got, want $GITHUB_REF_NAME"; return 1; }
+            fi
+          }
+          for try in 1 2 3 4 5; do
+            if state; then echo "$GITHUB_REF_NAME is published as decided"; exit 0; fi
+            [ "$try" -eq 5 ] || sleep 10
+          done
+          echo "::error::$GITHUB_REF_NAME IS PUBLISHED; only this check failed (see above): check the Release on GitHub and fix it there, do not re-run"
+          exit 1
