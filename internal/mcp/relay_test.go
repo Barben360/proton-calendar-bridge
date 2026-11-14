@@ -334,8 +334,11 @@ func TestRelayAnswersRetryWhenItsDaemonEnds(t *testing.T) {
 	}
 
 	// The next call: RelayDial returns ErrDaemonGone, keeping the message;
-	// relayed to a new daemon, it is answered there.
+	// relayed to a new daemon, it is answered there. The new daemon has a
+	// socket of its own: on Windows a pipe just closed may not be served
+	// again at once (ErrPipeTaken), which is not what this test is about.
 	second := newRig(t, newHub())
+	socket = socketPath(t)
 	startDaemon(t, second.srv, socket)
 	next := make(chan map[string]any, 1)
 	go func() { next <- mustCall(t, cs, "status", nil) }()
@@ -391,7 +394,9 @@ func TestRelayRefusedIsNotADaemonGone(t *testing.T) {
 	_ = refusing.Close()
 
 	// The agent's initialize waited in the queue: a daemon that serves
-	// answers it.
+	// answers it (on a socket of its own, as in
+	// TestRelayAnswersRetryWhenItsDaemonEnds).
+	socket = socketPath(t)
 	startDaemon(t, newRig(t, newHub()).srv, socket)
 	go func() { relayed <- relay(t, st, socket) }()
 	select {
@@ -458,9 +463,9 @@ func (c *closeWatch) Close() error {
 	return c.Conn.Close()
 }
 
-// A call the relay picks an idle connection for just as its daemon ends,
-// and that fails before a byte of it was written (the HTTP client sees
-// the daemon's close on that connection first: "server closed idle
+// A call the relay gets a connection for just as its daemon ends, and
+// that fails before a byte of it was written (the HTTP client sees the
+// daemon's close on that connection first: "server closed idle
 // connection", which it does not retry for a POST), never reached the
 // daemon: it goes to the next backend, here the process itself, instead
 // of being answered retry.
@@ -482,12 +487,13 @@ func TestCallUnsentAsTheDaemonEndsMovesToTheProcess(t *testing.T) {
 		mu.Unlock()
 		return w, nil
 	}
-	// Armed, the next request given an idle connection kills the daemon
-	// and waits until the client has closed every connection on seeing
-	// the daemon's close, before the request is written.
+	// Armed, the next request given a connection (the idle one, or a new
+	// one when the last answer has not yet freed it) kills the daemon and
+	// waits until the client has closed every connection on seeing the
+	// daemon's close, before the request is written.
 	var armed atomic.Bool
-	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-		if !info.Reused || !armed.CompareAndSwap(true, false) {
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
+		if !armed.CompareAndSwap(true, false) {
 			return
 		}
 		d.kill()
@@ -535,7 +541,7 @@ func TestCallUnsentAsTheDaemonEndsMovesToTheProcess(t *testing.T) {
 		t.Fatal("RelayDial still running 15 s after its daemon ended")
 	}
 	if armed.Load() {
-		t.Fatal("the call never got an idle connection: the race was not set up")
+		t.Fatal("the call never got a connection: the race was not set up")
 	}
 	own := newRig(t, newHub())
 	served := make(chan error, 1)
