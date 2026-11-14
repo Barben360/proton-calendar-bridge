@@ -24,7 +24,7 @@ Goals:
 
 Non-goals (not designed here):
 - A Windows service, i.e. a bridge running with nobody logged in [author: pcb-ui only, started at login].
-- The MSI, Authenticode signing, winget/Chocolatey/Scoop packages (next project).
+- The MSI, Authenticode signing, winget, Chocolatey or Scoop packages (next project).
 - Windows on arm64; Windows Server; Windows before 10 1809 [call].
 - The container image on Windows (Linux containers already run on Docker Desktop).
 - A Windows `install.sh` equivalent (`install.ps1`): the zip and later the MSI cover it [call].

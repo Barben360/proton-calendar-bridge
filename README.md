@@ -17,7 +17,7 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 
 - **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux (and Windows, untested).
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
-- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container.
+- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows as `pcb-ui` (untested so far).
 
 > [!WARNING]
 > pcb is early software, built and tested against a fake Proton and checked live on a test account. Do not point it at an account you care about yet ([status](docs/status.md)).

@@ -79,7 +79,7 @@ Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CO
 |---|---|
 | Tray | Always there, in the notification area (it may sit under the arrow of hidden icons). Its menu has Quit. |
 | Start at login | Settings, "Start at login" writes the value `pcb-ui` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the absolute path of `pcb-ui.exe` and `--background`. Switching it off deletes the value. Moving the folder breaks it: switch it off and on again from the new place. |
-| Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. A click on a notification is not reported, so its text says where to look in the window. |
+| Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
 | Sign out, shutdown | `pcb-ui` gets up to 2 seconds to stop cleanly; what is cut short is recovered at the next start. |
 | `pcb-ui.exe --version`, `--help` | Print to the terminal they are typed in, or to a redirected file. Started from Explorer, `pcb-ui` has no console window. |
 | Open config.toml, logs | Open in the program Windows associates with them; `.toml` may have none: then open `%APPDATA%\pcb\config.toml` in a text editor. |

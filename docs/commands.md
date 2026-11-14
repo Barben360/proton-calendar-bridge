@@ -35,7 +35,7 @@ Details: [security](security.md#log-in).
 |---|---|
 | `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, alerts). |
 | `pcb status --daemon` | Exits 20 when no daemon answers (the container's health check). |
-| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. |
+| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. |
 
 ### Calendars and events
 
@@ -67,7 +67,7 @@ Details: [Thunderbird](thunderbird.md#caldav-app-passwords).
 | `pcb uninstall [--delete-data] [--plan]` | Removes the service, and with `--delete-data` the data ([service](service.md#uninstall)). |
 | `pcb service start\|stop\|restart\|status\|logs [-f]` | Manages the installed service. |
 
-On Windows there is no service: `pcb install` and every `pcb service` command exit 20 with `no service on Windows`, hint `use pcb-ui; "Start at login" runs it at each login`. `pcb serve` runs in a terminal (Ctrl-C stops it). `pcb uninstall` stops nothing and refuses (exit 20) while `pcb-ui` or `pcb serve` serves the state; it turns `pcb-ui`'s "Start at login" off (deletes its Run value) when that value starts the `pcb-ui.exe` beside this `pcb.exe` on the default directories, and keeps it otherwise, saying why. With `--delete-data` it also logs out and deletes the config and state directories, the sealing key included ([install](install.md#remove-it-from-windows)).
+On Windows there is no service: `pcb install` and every `pcb service` command exit 20 with `no service on Windows`, hint `use pcb-ui; "Start at login" runs it at each login`. `pcb serve` runs in a terminal (Ctrl-C stops it). `pcb uninstall` stops nothing and refuses (exit 20) while `pcb-ui`, `pcb serve` or an agent session (`pcb mcp`) serves the state; it turns `pcb-ui`'s "Start at login" off (deletes its Run value) when that value starts the `pcb-ui.exe` beside this `pcb.exe` on the default directories, and keeps it otherwise, saying why. With `--delete-data` it also logs out and deletes the config and state directories, the sealing key included ([install](install.md#remove-it-from-windows)).
 
 ### Agents
 

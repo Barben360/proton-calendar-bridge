@@ -127,7 +127,7 @@ On Windows a new state keeps its sealing key in `secrets.key.dpapi` in the state
 
 ### On Windows: files and the pipe
 
-- **Directories.** Every directory pcb creates under `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb` gets its own access list, not inherited from its parent: full control for your Windows account and for the system (`SYSTEM`), nothing else, with your account as its owner, also when pcb runs as administrator. The files inside inherit it.
+- **Directories.** The state and config directories and pcb's own subdirectories get their own access list, not inherited from their parent: full control for your Windows account and for the system (`SYSTEM`), nothing else, with your account as their owner, also when pcb runs as administrator. What they hold inherits that list.
 - **Checks.** Where Linux checks a file's mode or owner, Windows checks its access list: a file or directory that lets in an account other than yours, `SYSTEM` or `Administrators` is refused with the same exit codes, and `pcb doctor` prints the `icacls` command that removes that account. A directory must be owned by you (or by Administrators, accepted only while pcb itself runs elevated).
 - **Elevated runs.** pcb does not refuse to run as administrator, but `pcb doctor` warns: run it from a normal terminal.
 - **The control pipe.** The CLI reaches `pcb-ui` or `pcb serve` over a named pipe whose access list lets only your account in, and which refuses connections from other machines. The bridge checks the account of each client, and the CLI checks that the pipe is owned by your account before it sends anything (a login or a 2FA code crosses it): a pipe owned by another account is refused (exit 20).

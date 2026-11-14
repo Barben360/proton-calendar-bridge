@@ -8,7 +8,7 @@ What to do when pcb stops, refuses or misbehaves. Each entry gives the symptom, 
 pcb doctor
 ```
 
-`pcb doctor` runs every check (service, daemon, listener, certificate, clients, sealer, key file; on Windows also the access lists, the DPAPI key, the time zone and "Start at login") and prints the fix for each failure. It exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. `pcb status` shows the live state and the alerts, each with its fix. In a stopped container, run it through `docker compose run` ([container](container.md#when-the-container-stops-or-restarts-in-a-loop)).
+`pcb doctor` runs every check (service, daemon, listener, certificate, clients, sealer, key file; on Windows also the access lists, `elevated`, the DPAPI key, the time zone and "Start at login") and prints the fix for each failure. It exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. `pcb status` shows the live state and the alerts, each with its fix. In a stopped container, run it through `docker compose run` ([container](container.md#when-the-container-stops-or-restarts-in-a-loop)).
 
 ## Index
 
@@ -49,12 +49,12 @@ pcb doctor
 | Windows: `key-unavailable`; exit 20, `DPAPI could not unprotect the sealing key for this Windows user` | Windows cannot decrypt the sealing key in this session: a sign-in without your password; also another Windows account's key, or a profile reset | Sign in to Windows once with your password, then retry. Do not log out: the stored session is intact. If it stays after a password sign-in, the key is lost for good: `pcb logout`, then `pcb login`. [Security](security.md#on-windows-dpapi) |
 | Windows: exit 10, `the stored secrets cannot be opened with the key file …secrets.key.dpapi`; `pcb doctor` says the key `is damaged or not pcb's` | The DPAPI key file was damaged, replaced, or protected for the whole machine instead of your account | Restore it from a backup together with `secrets.sealed`, or `pcb logout` then `pcb login`. [Security](security.md#on-windows-dpapi) |
 | Exit 10, `the state in <dir> was created on Windows (sealer dpapi)` (or `on Linux`) | A state directory copied between systems: a DPAPI key opens on Windows only, a desktop keyring on Linux only | Use it on that system, or move the directory aside and `pcb login`. [Security](security.md#a-state-moved-between-systems) |
-| Windows: exit 10, `its access list (ACL) lets <account> in` | Another Windows account may read a file or directory of pcb | `pcb doctor` prints, for each, the `icacls` command that removes that account (PowerShell). [Security](security.md#on-windows-files-and-the-pipe) |
-| Windows: exit 10, `belongs to BUILTIN\Administrators (an elevated pcb made it)` | pcb was once run as administrator and created that directory | Run pcb elevated again, or take ownership with the `icacls … /setowner` command it prints; then run pcb from a normal terminal |
+| Windows: exit 10, `its access list … lets <account> in` | Another Windows account may read a file or directory of pcb | `pcb doctor` prints, for each, the `icacls` command that removes that account (PowerShell). [Security](security.md#on-windows-files-and-the-pipe) |
+| Windows: exit 10, `belongs to … Administrators (an elevated pcb made it)` (the group's name is in your Windows language) | pcb was once run as administrator and created that directory | Run pcb elevated again, or take ownership with the `icacls … /setowner` command it prints; then run pcb from a normal terminal |
 | Windows: `pcb doctor` warns `elevated` | pcb runs as administrator | Run it from a normal (not elevated) terminal: what an elevated pcb creates is owned by Administrators |
 | Windows: exit 20, `the control pipe … is owned by another user` | Another Windows account's process holds the name of pcb's control pipe | Run pcb as the account that runs `pcb-ui`; if that is you, find the process that created the pipe, or set `PCB_STATE_DIR` to another directory. [Security](security.md#on-windows-files-and-the-pipe) |
 | Windows: exit 20, `the control pipe is already served` when `pcb-ui` or `pcb serve` starts | Another `pcb-ui` or `pcb serve` of this state, or another account's process, holds the pipe's name | Stop the other one; if none runs, set `PCB_STATE_DIR` to another directory |
-| Windows: `pcb doctor` warns `the Windows time zone … has no IANA name` | pcb's table has no name for this Windows time zone, so agents get times with UTC offsets | Set `[mcp] timezone` in `config.toml` to your zone, such as `Europe/Paris` |
+| Windows: `pcb doctor` warns `the Windows time zone … has no IANA name in pcb's table`, or `the Windows time zone cannot be read` | pcb has no IANA name for this Windows time zone, so agents get times with UTC offsets | Set `[mcp] timezone` in `config.toml` to your zone, such as `Europe/Paris` |
 
 ## pcb-ui needs OpenGL 2.0
 

@@ -104,7 +104,7 @@ Quit `pcb-ui` (its tray menu, Quit), then in a terminal in its folder:
 .\pcb.exe uninstall --delete-data          # it asks; or --yes
 ```
 
-It logs out, deletes `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb` (the sealing key included) and turns "Start at login" off when it starts this folder's `pcb-ui.exe`. Then delete the folder you unzipped. Without `--delete-data` it only turns "Start at login" off. It refuses (exit 20) while `pcb-ui` or `pcb serve` still runs.
+It logs out, deletes `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb` (the sealing key included) and turns "Start at login" off when it starts this folder's `pcb-ui.exe`. Then delete the folder you unzipped. Without `--delete-data` it only turns "Start at login" off. It refuses (exit 20) while `pcb-ui`, `pcb serve` or an agent session (`pcb mcp`) still serves the state.
 
 ## Build from a clone
 
