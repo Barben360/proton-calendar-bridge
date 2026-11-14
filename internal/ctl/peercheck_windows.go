@@ -8,6 +8,11 @@ import (
 	"net/http"
 )
 
+// refusedPeerHint is the hint a refused peer gets: an elevated pcb of
+// another login session (an elevated ssh session against the console's
+// pcb-ui) is refused too, its token being unreadable from the daemon.
+const refusedPeerHint = "run pcb as the user that runs pcb-ui or pcb serve, not as another user or an elevated pcb of another login session"
+
 // refusedPeer reports whether r's pipe client runs as another user than
 // this process (s.PeerSID, or the client process's token): a client whose
 // SID cannot be read is refused, and so is a request whose connection is

@@ -9,6 +9,9 @@ import (
 	"os"
 )
 
+// refusedPeerHint is the hint a refused peer gets.
+const refusedPeerHint = "run pcb as the user that runs pcb serve"
+
 // refusedPeer reports whether r's peer is of another UID than this
 // process's effective one (SO_PEERCRED reports the peer's effective UID);
 // a request whose connection is unknown is refused. The attribute names

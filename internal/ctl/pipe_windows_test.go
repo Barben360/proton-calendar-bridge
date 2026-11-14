@@ -236,6 +236,10 @@ func TestServerRefusesAClientOfAnotherSID(t *testing.T) {
 			if logs := s.logs.String(); !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, tc.log) {
 				t.Errorf("logs lack the warning naming %q:\n%s", tc.log, logs)
 			}
+			var ee *exitcode.Error
+			if !errors.As(err, &ee) || !strings.Contains(ee.Hint, "elevated pcb of another login session") {
+				t.Errorf("hint = %q, want one naming an elevated pcb of another login session", ee.Hint)
+			}
 		})
 	}
 	// The user's own SID is served: the check compares, it does not refuse all.
@@ -254,9 +258,9 @@ func TestServerRefusesAClientOfAnotherSID(t *testing.T) {
 	}
 }
 
-// The client reads the SID of the process serving the pipe before it sends
-// anything: a squatter of another user never gets a request, on the first
-// dial or on a redial. Not parallel: it replaces the package's lookup.
+// The client reads the SID owning the pipe before it sends anything: a
+// squatter of another user never gets a request, on the first dial or on a
+// redial. Not parallel: it replaces the package's lookup.
 func TestDialRefusesAServerOfAnotherSID(t *testing.T) {
 	api := newHub(service.Status{})
 	s := servePipe(t, &ctl.Server{Hub: api, Daemon: daemon()})
@@ -267,7 +271,7 @@ func TestDialRefusesAServerOfAnotherSID(t *testing.T) {
 		_ = c.Close()
 	}
 	if exitcode.From(err) != exitcode.Blocked || !errors.Is(err, ctl.ErrRefused) ||
-		!strings.Contains(err.Error(), "runs as another user ("+foreignSID+")") {
+		!strings.Contains(err.Error(), "is owned by another user ("+foreignSID+")") {
 		t.Fatalf("a server of another SID: %v (exit %d); want blocked and refused, naming its SID", err, exitcode.From(err))
 	}
 	var ee *exitcode.Error
@@ -307,6 +311,23 @@ func TestDialRefusesAServerOfAnotherSID(t *testing.T) {
 	}
 }
 
+// Without this user's SID the client cannot tell its pipe from a
+// squatter's: refused, and the message says why, never "another user".
+// Not parallel: it replaces the package's lookup.
+func TestDialWithoutTheUsersSIDIsRefused(t *testing.T) {
+	api := newHub(service.Status{})
+	s := servePipe(t, &ctl.Server{Hub: api, Daemon: daemon()})
+	ctl.SetCurrentSID(t, func() (string, error) { return "", errors.New("no token") })
+	_, err := ctl.Dial(t.Context(), s.path)
+	if exitcode.From(err) != exitcode.Blocked || !errors.Is(err, ctl.ErrRefused) ||
+		!strings.Contains(err.Error(), "cannot read this user's SID (no token)") || strings.Contains(err.Error(), "another user") {
+		t.Fatalf("Dial without the user's SID: %v (exit %d); want blocked, refused, naming the lookup", err, exitcode.From(err))
+	}
+	if logs := s.logs.String(); strings.Contains(logs, "control request") {
+		t.Errorf("a request reached the server:\n%s", logs)
+	}
+}
+
 func TestDialWithoutDaemonIsNoDaemon(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -330,8 +351,9 @@ func TestDialWithoutDaemonIsNoDaemon(t *testing.T) {
 	}
 }
 
-// The real lookups read the process token at each end of a real pipe
-// connection, and refuse a connection that is not a pipe.
+// The real lookups read the client process's token (server side) and the
+// pipe's owner (client side, the SID Listen set) on a real pipe connection,
+// and refuse a connection that is not a pipe.
 func TestPipePeerSIDs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

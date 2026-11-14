@@ -10,44 +10,70 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// clientSIDOf reads the SID of a pipe connection's client (the server's
-// check), serverSIDOf that of its server (the client's). Variables: a test
-// replaces serverSIDOf to play a server of another user.
-var clientSIDOf, serverSIDOf = pipeClientSID, pipeServerSID
+// clientSIDOf reads the SID of a pipe connection's client, from its
+// process token (the server's check); serverSIDOf the SID owning the pipe
+// (the client's check, checkPipeOwner). Variables: a test replaces
+// serverSIDOf to play a pipe of another user.
+var clientSIDOf, serverSIDOf = pipeClientSID, pipeOwnerSID
 
+// pipeClientSID is the user SID of the process at the client end of c: its
+// token's user. A connection that is not a named pipe, or a process or
+// token that cannot be read (another user's, or an elevated one seen from
+// a normal process), is an error: the server refuses it. The PID is safe
+// here: a client that exits takes its end of the connection with it.
 func pipeClientSID(c net.Conn) (string, error) {
-	return pipePeerSID(c, windows.GetNamedPipeClientProcessId)
-}
-
-func pipeServerSID(c net.Conn) (string, error) {
-	return pipePeerSID(c, windows.GetNamedPipeServerProcessId)
-}
-
-// pipePeerSID is the user SID of the process pidOf names at the other end
-// of c: its token's user. A connection that is not a named pipe, or a
-// process or token that cannot be read, is an error: the caller refuses it.
-func pipePeerSID(c net.Conn, pidOf func(windows.Handle, *uint32) error) (string, error) {
-	f, ok := c.(interface{ Fd() uintptr })
-	if !ok {
-		return "", errors.New("not a named pipe connection")
+	h, err := pipeHandle(c)
+	if err != nil {
+		return "", err
 	}
 	var pid uint32
-	if err := pidOf(windows.Handle(f.Fd()), &pid); err != nil {
-		return "", fmt.Errorf("reading the pipe peer's process ID: %w", err)
+	if err := windows.GetNamedPipeClientProcessId(h, &pid); err != nil {
+		return "", fmt.Errorf("reading the pipe client's process ID: %w", err)
 	}
 	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return "", fmt.Errorf("opening the pipe peer's process %d: %w", pid, err)
+		return "", fmt.Errorf("opening the pipe client's process %d: %w", pid, err)
 	}
 	defer func() { _ = windows.CloseHandle(p) }()
 	var tok windows.Token
 	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
-		return "", fmt.Errorf("opening the token of the pipe peer's process %d: %w", pid, err)
+		return "", fmt.Errorf("opening the token of the pipe client's process %d: %w", pid, err)
 	}
 	defer func() { _ = tok.Close() }()
 	u, err := tok.GetTokenUser()
 	if err != nil {
-		return "", fmt.Errorf("reading the user of the pipe peer's process %d: %w", pid, err)
+		return "", fmt.Errorf("reading the user of the pipe client's process %d: %w", pid, err)
 	}
 	return u.User.Sid.String(), nil
+}
+
+// pipeOwnerSID is the owner SID of the pipe c is connected to, from its
+// security descriptor. A connection that is not a named pipe, or a
+// descriptor that cannot be read, is an error: the client refuses it.
+func pipeOwnerSID(c net.Conn) (string, error) {
+	h, err := pipeHandle(c)
+	if err != nil {
+		return "", err
+	}
+	sd, err := windows.GetSecurityInfo(h, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return "", fmt.Errorf("reading the pipe's owner: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return "", fmt.Errorf("reading the pipe's owner: %w", err)
+	}
+	if owner == nil {
+		return "", errors.New("the pipe has no owner")
+	}
+	return owner.String(), nil
+}
+
+// pipeHandle is the Win32 handle of a named pipe connection.
+func pipeHandle(c net.Conn) (windows.Handle, error) {
+	f, ok := c.(interface{ Fd() uintptr })
+	if !ok {
+		return 0, errors.New("not a named pipe connection")
+	}
+	return windows.Handle(f.Fd()), nil
 }

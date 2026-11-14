@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -295,5 +297,41 @@ func TestControlHintForATakenPipe(t *testing.T) {
 	want := "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set PCB_STATE_DIR to another directory"
 	if got != want {
 		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
+// The start line names the socket's path, and on Windows the pipe that
+// serves it (its name is a hash of the state directory): the live check
+// reads it there.
+func TestControlStartLogNamesThePipeOnWindows(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "pcb") // short: sun_path holds 108 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "pcb.sock")
+	var logs bytes.Buffer
+	stop, err := startControl(slog.New(slog.NewJSONHandler(&logs, nil)), nil, ctl.Daemon{Socket: socket}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	var started map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "control socket started" {
+			started = rec
+		}
+	}
+	if started == nil || started["path"] != socket {
+		t.Fatalf("start line = %v, want one naming %s:\n%s", started, socket, logs.String())
+	}
+	pipe, has := started["pipe"].(string)
+	switch {
+	case runtime.GOOS == "windows" && !strings.HasPrefix(pipe, `\\.\pipe\pcb-`):
+		t.Errorf("start line pipe = %q, want the pipe's name", pipe)
+	case runtime.GOOS != "windows" && has:
+		t.Errorf("start line names a pipe off Windows: %v", started)
 	}
 }

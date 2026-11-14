@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -378,7 +379,11 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			log.Warn("the control socket failed: pcb status shows the offline view", "error", err.Error())
 		}
 	}()
-	log.Info("control socket started", "path", d.Socket)
+	started := []any{"path", d.Socket}
+	if runtime.GOOS == "windows" {
+		started = append(started, "pipe", ln.Addr().String()) // the pipe's name, for the live check
+	}
+	log.Info("control socket started", started...)
 	var once sync.Once
 	return func() {
 		once.Do(func() {

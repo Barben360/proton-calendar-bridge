@@ -47,9 +47,9 @@ func Listen(path string) (net.Listener, error) {
 
 // dialSocket connects to the control pipe of path's directory: ErrNoDaemon
 // when the directory or the pipe is missing. A pipe this user may not open,
-// or one whose server process runs as another user (a squatter), is
-// refused, blocked (20), before anything is sent on it. peer, the Unix
-// server-UID check, is unused: serverSIDOf checks here.
+// or one another user owns (a squatter's), is refused, blocked (20), before
+// anything is sent on it. peer, the Unix server-UID check, is unused:
+// serverSIDOf checks here.
 func dialSocket(ctx context.Context, path string, _ func(net.Conn) (int, bool)) (net.Conn, error) {
 	name, err := pipeName(filepath.Dir(path))
 	switch {
@@ -72,20 +72,37 @@ func dialSocket(ctx context.Context, path string, _ func(net.Conn) (int, bool)) 
 	case err != nil:
 		return nil, err
 	}
-	sid, err := serverSIDOf(c)
-	if err != nil {
+	if err := checkPipeOwner(c, name, hint); err != nil {
 		_ = c.Close()
-		return nil, &exitcode.Error{Code: exitcode.Blocked,
-			Err:  refused(fmt.Sprintf("the user of the process answering on the control pipe %s cannot be read (%v): pcb refuses to talk to it", name, err)),
-			Hint: hint}
-	}
-	if own, err := currentSID(); err != nil || sid != own {
-		_ = c.Close()
-		return nil, &exitcode.Error{Code: exitcode.Blocked,
-			Err:  refused(fmt.Sprintf("the process answering on the control pipe %s runs as another user (%s): pcb refuses to talk to it", name, sid)),
-			Hint: hint}
+		return nil, err
 	}
 	return c, nil
+}
+
+// checkPipeOwner refuses the pipe connection c unless this user owns the
+// pipe. The owner, not the server's process ID: a PID outlives nothing, so
+// a squatter serving from a handle its exited helper created would report
+// a dead PID that may now be one of ours; no user can make another user's
+// SID the owner of a pipe without SeRestorePrivilege.
+func checkPipeOwner(c net.Conn, name, hint string) error {
+	own, err := currentSID()
+	if err != nil {
+		return &exitcode.Error{Code: exitcode.Blocked,
+			Err:  refused(fmt.Sprintf("cannot read this user's SID (%v): pcb refuses to talk to the control pipe %s", err, name)),
+			Hint: "check that pcb runs in a normal login session of this user"}
+	}
+	sid, err := serverSIDOf(c)
+	if err != nil {
+		return &exitcode.Error{Code: exitcode.Blocked,
+			Err:  refused(fmt.Sprintf("the owner of the control pipe %s cannot be read (%v): pcb refuses to talk to it", name, err)),
+			Hint: hint}
+	}
+	if sid != own {
+		return &exitcode.Error{Code: exitcode.Blocked,
+			Err:  refused(fmt.Sprintf("the control pipe %s is owned by another user (%s): pcb refuses to talk to it", name, sid)),
+			Hint: hint}
+	}
+	return nil
 }
 
 // pipeName is the control pipe of the state directory dir: pipeNameFor its

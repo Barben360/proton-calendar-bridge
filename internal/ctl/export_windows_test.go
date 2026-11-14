@@ -13,16 +13,24 @@ var PipeName = pipeName
 // CurrentSID is the SID of this process's user.
 var CurrentSID = currentSID
 
-// ClientSIDOf and ServerSIDOf read the SID of the process at the other
-// end of a pipe connection: its client (server side) and its server
-// (client side).
-var ClientSIDOf, ServerSIDOf = pipeClientSID, pipeServerSID
+// ClientSIDOf reads the SID of a pipe connection's client process (the
+// server's check); ServerSIDOf the SID owning the pipe (the client's).
+var ClientSIDOf, ServerSIDOf = pipeClientSID, pipeOwnerSID
 
-// SetServerSIDOf makes Dial read a pipe server's SID with f until the test
-// ends. A test calling it must not run in parallel.
+// SetServerSIDOf makes Dial read the SID owning a pipe with f until the
+// test ends. A test calling it must not run in parallel.
 func SetServerSIDOf(t testing.TB, f func(net.Conn) (string, error)) {
 	t.Helper()
 	old := serverSIDOf
 	serverSIDOf = f
 	t.Cleanup(func() { serverSIDOf = old })
+}
+
+// SetCurrentSID makes this process's user SID read with f until the test
+// ends. A test calling it must not run in parallel.
+func SetCurrentSID(t testing.TB, f func() (string, error)) {
+	t.Helper()
+	old := currentSID
+	currentSID = f
+	t.Cleanup(func() { currentSID = old })
 }
