@@ -1416,7 +1416,7 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   never show). On Windows, where Go reads no `TZ`, the zone is the IANA zone Unicode CLDR's `windowsZones.xml` (territory 001,
   a generated table in `internal/winzone`) maps the Windows zone key (`GetDynamicTimeZoneInformation`) to; a key the
   table does not list is reported by `pcb doctor`, naming the key, and takes the case below [verified:
-  `TestWindowsZoneNamesTheMappedZone`, `TestIANAForFixedKeys`]. A zone with no name found (an unmapped Windows key; an
+  `TestWindowsZoneNamesTheMappedZone`, `TestIANAForFixedKeys`, `TestZoneCheck`]. A zone with no name found (an unmapped Windows key; an
   unknown `TZ`; a zone file that is no link) stays the process's own zone: wall clocks are read in it, never in UTC, its label is its UTC offset (`UTC+01:00`), and
   new times are written as UTC instants (the same instant, no TZID to give) [verified: `TestResultsNameTheLocalZoneByItsIANAName`,
   `TestProcessZoneUnderAPathTZ`, `TestLocalZoneResolution`; M8-F1: the live run of 2026-11-14 saw `"zone":"Local"`; and a defect the F1 work found and fixed:

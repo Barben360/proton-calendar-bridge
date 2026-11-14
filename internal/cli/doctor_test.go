@@ -86,10 +86,18 @@ func TestDoctorExitCode(t *testing.T) {
 	}
 	// No account yet: the process checks, then "accounts" in place of the
 	// account checks (design §4.6).
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
+	if runtime.GOOS == "windows" {
+		// The DPAPI key for the key file, and Windows' own checks, whose
+		// statuses depend on the machine (elevation, zone, Start at login).
+		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon"; got != want {
+			t.Fatalf("names = %s, want %s", got, want)
+		}
+		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "warn,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
+			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
+		}
+	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
-	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
+	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
 		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
@@ -102,7 +110,7 @@ func TestDoctorExitCode(t *testing.T) {
 
 func TestDoctorTextOK(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to say ok on windows/amd64 (Task 16): it warns \"runs, unsupported\" until then")
+		t.Skip("needs the doctor's platform check to say ok on windows/amd64 (Task 16): it warns \"runs, untested\" until then; the Windows list also has the dpapi key, elevated, time zone and start at login lines")
 	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
@@ -156,18 +164,21 @@ func TestDoctorTextShowsFix(t *testing.T) {
 }
 
 func TestDoctorReportsUnresolvableDirs(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows resolves the directories from %APPDATA% and %LOCALAPPDATA%, never HOME or XDG_*: blanking those leaves them resolvable")
-	}
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("PCB_CONFIG_DIR", "")
 	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("HOME", "")
+	// Windows resolves them from %APPDATA% and %LOCALAPPDATA% alone.
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	configFix, stateFix := "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path", "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path"
+	if runtime.GOOS == "windows" {
+		configFix, stateFix = "fix: set PCB_CONFIG_DIR or APPDATA to an absolute path", "fix: set PCB_STATE_DIR or LOCALAPPDATA to an absolute path"
+	}
 	code, out, errs := run("doctor")
 	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
-		!strings.Contains(out, "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path") ||
-		!strings.Contains(out, "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path") {
+		!strings.Contains(out, configFix) || !strings.Contains(out, stateFix) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 	if want := "Error: pcb doctor found 2 errors\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; errs != want {

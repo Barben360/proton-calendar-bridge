@@ -72,9 +72,10 @@ const errInvalidParameter = syscall.Errno(87)
 // df9d8cd0-1501-11d1-8c7a-00c04fc297eb, in its byte order there.
 var dpapiProvider = []byte{0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2, 0x97, 0xeb}
 
-// dpapiHeader reports whether blob starts as a DPAPI blob does: dwVersion
-// 1, then the provider GUID.
-func dpapiHeader(blob []byte) bool {
+// HasDPAPIHeader reports whether blob starts as a DPAPI blob does:
+// dwVersion 1, then the provider GUID (pcb doctor tells a file that is no
+// DPAPI blob from one Windows refuses).
+func HasDPAPIHeader(blob []byte) bool {
 	return len(blob) >= 20 && binary.LittleEndian.Uint32(blob) == 1 && bytes.Equal(blob[4:20], dpapiProvider)
 }
 
@@ -88,7 +89,7 @@ func corruptBlob(blob []byte, err error) bool {
 		return false
 	}
 	if errno == errInvalidParameter {
-		return !dpapiHeader(blob)
+		return !HasDPAPIHeader(blob)
 	}
 	return slices.Contains(integrityErrnos, errno)
 }

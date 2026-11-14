@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -453,7 +454,11 @@ func TestDoctorNamesTheAccount(t *testing.T) {
 	for _, res := range data.Results {
 		count[res.Name]++
 	}
-	for _, name := range []string{"platform", "config file", "key file", "caldav listener", "tls certificate", "service", "daemon"} {
+	key := "key file"
+	if runtime.GOOS == "windows" { // auto sealed with DPAPI
+		key = "dpapi key"
+	}
+	for _, name := range []string{"platform", "config file", key, "caldav listener", "tls certificate", "service", "daemon"} {
 		if count[name] != 1 {
 			t.Errorf("%q appears %d times, want once: %+v", name, count[name], data.Results)
 		}
