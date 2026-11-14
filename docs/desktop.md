@@ -49,6 +49,23 @@ Open the add-account wizard from the window and type the address, the password, 
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
 
+## Connect an AI agent
+
+`pcb-ui` has no port for agents to set. The agent starts `pcb mcp`, the command-line binary, which hands the session to the running `pcb-ui`. So `pcb` must be installed next to `pcb-ui`: the release installer puts both, while from a clone `make install-ui` alone does not (run `make install install-ui`).
+
+For Claude Code:
+
+```sh
+claude mcp add pcb -- pcb mcp                    # read-only (the default)
+claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete
+```
+
+Give the absolute path of `pcb` (`~/.local/bin/pcb`) when the agent's `PATH` lacks it.
+
+The MCP selector in the window is not a server switch: it says what any agent may do with that account. The agent's profile says what that agent may do. Both apply, and the stricter wins: Read-write in the window lets an agent edit only if you also added it with `--profile full` ([the two settings](agents.md#two-settings-the-stricter-wins)).
+
+An agent on another machine uses the remote `/mcp` with a token: turn it on in `config.toml` (Settings, "Open config.toml", then "Restart bridge") and create the token with `pcb mcp token add` ([remote](agents.md#from-another-machine-remote-with-a-token)).
+
 ## No tray icon on GNOME
 
 GNOME shows no tray icon unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled.

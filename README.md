@@ -106,6 +106,8 @@ claude mcp add pcb -- pcb mcp                    # read-only: read events, start
 claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete
 ```
 
+The same commands work with `pcb-ui` running: `pcb mcp` hands the session to it, with no port to set. The account's MCP setting (`pcb account mcp`, or the selector in `pcb-ui`) and the agent's profile both apply, and the stricter wins: an agent edits only with `--profile full` on a Read-write account ([details](docs/agents.md#two-settings-the-stricter-wins)).
+
 You type passwords and 2FA codes yourself, in the desktop app or on a one-time local page, never the agent. Text from calendars reaches the agent marked untrusted. An agent on another machine uses `/mcp` with its own token: [docs/agents.md](docs/agents.md).
 
 ## Scripts and automation
@@ -117,7 +119,7 @@ Every command takes `--json` and prints one envelope, `{schema_version, command,
 | Page | What is in it |
 |---|---|
 | [install](docs/install.md) | Installing a release, building, platforms, upgrading. |
-| [desktop](docs/desktop.md) | `pcb-ui`: the tray, the window, adding accounts, start at login, removing it. |
+| [desktop](docs/desktop.md) | `pcb-ui`: the tray, the window, adding accounts, connecting an agent, start at login, removing it. |
 | [service](docs/service.md) | `pcb serve` as a systemd user or system service. |
 | [container](docs/container.md) | The image, compose, the key file, a container that restarts in a loop. |
 | [Thunderbird](docs/thunderbird.md) | Connecting, app passwords, several accounts, what writes Proton accepts, the listener and TLS. |
