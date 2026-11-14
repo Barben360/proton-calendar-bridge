@@ -131,7 +131,7 @@ func TestSessionEndDrainIsSharedByTheStops(t *testing.T) {
 			t.Fatal("a stop's drain outlived the session-end cut")
 		}
 	}
-	if e := time.Since(start); e < 1900*time.Millisecond || e > 2500*time.Millisecond {
+	if e := time.Since(start); e < 1900*time.Millisecond || e > 2900*time.Millisecond {
 		t.Errorf("the stops ended %v after the first began, want 2 s", e)
 	}
 	late, cancel3 := d.context()

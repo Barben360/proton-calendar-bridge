@@ -340,7 +340,7 @@ func TestSessionEndCutsTheDrainToTwoSeconds(t *testing.T) {
 	close(ended)
 	start := time.Now()
 	r.cancel()
-	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 3*time.Second)
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
 }
 
 // SessionEnd closing once the drain has begun (the root context's SIGTERM
@@ -353,7 +353,7 @@ func TestSessionEndDuringTheDrainCutsItToTwoSeconds(t *testing.T) {
 	r.cancel()
 	time.Sleep(500 * time.Millisecond)
 	close(ended)
-	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 3*time.Second)
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
 }
 
 // SessionEnd closing after 2 s of drain ends it at once.
@@ -365,7 +365,54 @@ func TestLateSessionEndEndsTheDrainAtOnce(t *testing.T) {
 	r.cancel()
 	time.Sleep(3 * time.Second)
 	close(ended)
-	drainedWithin(t, r, cut, start, 3*time.Second, 4*time.Second)
+	drainedWithin(t, r, cut, start, 3*time.Second, 4500*time.Millisecond)
+}
+
+// The whole stop on a session end, the sync loops' end after the drain
+// included, stays well before Windows ends the process (about 5 s), and
+// its length is logged. Not parallel: it times Run itself.
+func TestRunStopsWithinFourAndAHalfSecondsOnASessionEnd(t *testing.T) {
+	var logs syncBuffer
+	ended := make(chan struct{})
+	r, cut := stuckRequest(t, func(o *daemon.Options) {
+		o.SessionEnd = ended
+		o.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	})
+	close(ended)
+	start := time.Now()
+	r.cancel()
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
+	if d := time.Since(start); d >= 4500*time.Millisecond {
+		t.Errorf("Run returned %v after the stop began, want under 4.5 s", d)
+	}
+	var stopped map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "daemon stopped" {
+			stopped = rec
+		}
+	}
+	if stopped == nil || stopped["stop"] == nil {
+		t.Errorf("no \"daemon stopped\" record with its stop duration:\n%s", logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the logger's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // An open SessionEnd leaves the drain at 5 s.

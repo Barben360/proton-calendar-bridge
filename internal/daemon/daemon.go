@@ -70,9 +70,15 @@ type drain struct {
 	start time.Time
 }
 
+// began is when the first stop began (now, when none has yet).
+func (d *drain) began() time.Time {
+	d.once.Do(func() { d.start = time.Now() })
+	return d.start
+}
+
 // context is the context one stop waits under; cancel releases it.
 func (d *drain) context() (context.Context, context.CancelFunc) {
-	d.once.Do(func() { d.start = time.Now() })
+	d.began()
 	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	if d.ended == nil {
 		return ctx, cancel
@@ -226,10 +232,15 @@ func Run(ctx context.Context, o Options) error {
 	}()
 	// finish stops Hub.Serve and returns its error over err: a person is
 	// needed, which matters more than a listener that failed meanwhile.
+	// Stopping Hub.Serve after the drain is not bounded (the caller closes
+	// the Hub once Run returns, so the loops must have ended): the log says
+	// how long the whole stop took, the drain included.
 	finish := func(err error) error {
 		return unlessCut(log, o.Cut, func() error {
 			stopSync()
-			if serr := <-synced; serr != nil {
+			serr := <-synced
+			log.Info("daemon stopped", "stop", time.Since(drained.began()).Round(10*time.Millisecond))
+			if serr != nil {
 				return serr
 			}
 			return err

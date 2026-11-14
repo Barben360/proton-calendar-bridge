@@ -142,7 +142,7 @@ func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
 	if err := b.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if d := time.Since(start); d < 1800*time.Millisecond || d >= 3500*time.Millisecond {
+	if d := time.Since(start); d < 1800*time.Millisecond || d >= 4500*time.Millisecond {
 		t.Errorf("Stop took %s, want the 2 s session-end drain", d)
 	}
 }

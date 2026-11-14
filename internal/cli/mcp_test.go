@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/dbustest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -194,6 +197,56 @@ func TestMCPStdioBecomesTheDaemon(t *testing.T) {
 	}
 	if _, err := ctl.Dial(t.Context(), r.dirs.Socket()); !errors.Is(err, ctl.ErrNoDaemon) {
 		t.Errorf("the control socket still answers after the session: %v", err)
+	}
+}
+
+// pcb mcp's session daemon drains its control socket like pcb serve: with
+// a relay's request in flight (its body half sent) and one SIGTERM on both
+// paths, it stops in 2 s on Windows, where SIGTERM is a console close,
+// logoff or shutdown (spec §5.11), and waits the full 5 s elsewhere.
+func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	sigs := make(chan os.Signal, 2)
+	m := startMCPWith(t, r, nil, func(io *cli.IO) {
+		io.Signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
+	})
+	cs := m.connect("2025-11-25")
+	mcpStatus(t, cs)
+
+	g, err := mcp.Profile("read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := ctl.DialConn(t.Context(), r.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "POST /mcp HTTP/1.1\r\nHost: pcb\r\nContent-Type: application/json\r\n"+
+		"Accept: application/json, text/event-stream\r\n"+mcp.RelayGrantHeader+": "+string(grant)+"\r\n"+
+		"Content-Length: 1000\r\n\r\n{"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // the handler reads the body: the request is in flight
+	start := time.Now()
+	m.stop()                // SIGTERM through Execute's context
+	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
+	if code := m.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d, want 0\nstderr: %s", code, m.errb.String())
+	}
+	d := time.Since(start)
+	minD, maxD := 4500*time.Millisecond, 10*time.Second
+	if runtime.GOOS == "windows" {
+		minD, maxD = 1800*time.Millisecond, 4500*time.Millisecond
+	}
+	if d < minD || d >= maxD {
+		t.Errorf("pcb mcp stopped %v after SIGTERM, want within [%v, %v) on %s\nstderr: %s", d, minD, maxD, runtime.GOOS, m.errb.String())
 	}
 }
 

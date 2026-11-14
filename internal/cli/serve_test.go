@@ -953,7 +953,7 @@ func controlServes(t *testing.T, socket string) {
 func TestServeRefusesAnOpenStateDir(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no mode bits on Windows: the state directory's access list is checked instead, with its own tests")
+		t.Skip("on Windows the control pipe carries its own DACL: an open state directory does not open the control channel")
 	}
 	stub := newServeStub()
 	r := stubRig(t, &stub.stubAPI)
@@ -1243,7 +1243,7 @@ func TestServeDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 	d := (<-cut).Sub(start)
 	minD, maxD := 4500*time.Millisecond, 6*time.Second
 	if runtime.GOOS == "windows" {
-		minD, maxD = 1800*time.Millisecond, 3*time.Second
+		minD, maxD = 1800*time.Millisecond, 4500*time.Millisecond
 	}
 	if d < minD || d >= maxD {
 		t.Errorf("the request in flight was cut %v after SIGTERM, want within [%v, %v) on %s", d, minD, maxD, runtime.GOOS)

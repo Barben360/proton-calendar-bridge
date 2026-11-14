@@ -258,13 +258,19 @@ func (a *app) serveSession(ctx context.Context, st *mcp.Stdio, g mcp.Grant, dirs
 	srv := mcp.NewServer(mcp.Options{Hub: mh, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
 		LoginGuard: func(ctx context.Context) error { return sealerGuard(ctx, dirs, cfg, a.Keyring) }})
 
+	// A session end (on Windows a console close, logoff or shutdown, as
+	// SIGTERM) cuts the control socket's drain to 2 s, as in pcb serve.
+	sigs, unsubscribe := a.Signals()
+	defer unsubscribe()
+	_, _, ended, endSignals := stopSignals(ctx, sigs, sessionEndSignal)
+	defer endSignals()
 	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRun()
 	ready, ran := make(chan struct{}), make(chan error, 1)
 	go func() {
 		ran <- daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: "mcp", LogLevel: cfg.Log.Level, Logger: log, Warn: a.Stderr,
-			NoListener: true, WaitForLogin: true, MCP: srv,
+			NoListener: true, WaitForLogin: true, MCP: srv, SessionEnd: ended,
 			Ready: func(daemon.Info) { close(ready) },
 		})
 	}()

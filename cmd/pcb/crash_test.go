@@ -294,9 +294,9 @@ func TestKilledServeRestartsClean(t *testing.T) {
 		}
 	}
 	if synced(at) {
-		t.Logf("killed after the first pass: %d of %d calendars synced", n, len(cals))
+		t.Logf("killed after the first pass, at the last status before the kill: %d of %d calendars synced", n, len(cals))
 	} else {
-		t.Logf("killed mid-sync: %d of %d calendars synced", n, len(cals))
+		t.Logf("killed mid-sync, at the last status before the kill: %d of %d calendars synced", n, len(cals))
 	}
 
 	_, secondLog := r.serve("serve2")
