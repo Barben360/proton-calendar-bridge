@@ -45,11 +45,42 @@ check "SOURCE_DATE_EPOCH sets the mtime" "$(tar -tvzf "$tmp/out2/pcb_linux_amd64
 check "darwin packages" "$rc" 0
 check "darwin contents" "$(tar -tzf "$out/pcb_darwin_arm64.tar.gz" | LC_ALL=C sort | tr '\n' ' ')" "LICENSE README.md pcb "
 
-msg=$("$pkg" windows amd64 "$bin" "$out" 2>&1); rc=$?
-check "unknown OS refused" "$rc $(grep -c windows <<<"$msg")" "2 1"
+msg=$("$pkg" freebsd amd64 "$bin" "$out" 2>&1); rc=$?
+check "unknown OS refused" "$rc $(grep -c freebsd <<<"$msg")" "2 1"
+wb=$tmp/winbin; mkdir -p "$wb"
+printf 'MZpcb\n' > "$wb/pcb.exe"; printf 'MZui\n' > "$wb/pcb-ui.exe"
+chmod 0600 "$wb"/*.exe
+"$pkg" windows amd64 "$wb" "$out" >/dev/null 2>&1; rc=$?
+check "windows packages" "$rc" 0
+z=$out/pcb_windows_amd64.zip
+check "windows contents" "$(unzip -Z1 "$z" | LC_ALL=C sort | tr '\n' ' ')" "LICENSE README.md pcb-ui.exe pcb.exe "
+check "windows entries are in sorted order" "$(unzip -Z1 "$z" | tr '\n' ' ')" "LICENSE README.md pcb-ui.exe pcb.exe "
+check "windows entry content" "$(unzip -p "$z" pcb.exe)" "MZpcb"
+check "windows LICENSE is the repository's" "$(unzip -p "$z" LICENSE | cmp - "$here/../../LICENSE" && echo same)" same
+check "windows modes" "$(unzip -Z "$z" | awk '$NF ~ /^(LICENSE|pcb\.exe)$/{print $1}' | tr '\n' ' ')" "-rw-r--r-- -rwxr-xr-x "
+check "windows zip test passes" "$(unzip -tq "$z")" "No errors detected in compressed data of $z."
+sum=$(sha256sum "$z" | cut -d' ' -f1); sleep 1; touch "$wb"/*.exe
+mkdir -p "$tmp/outw"
+"$pkg" windows amd64 "$wb" "$tmp/outw" >/dev/null 2>&1
+check "windows rebuild is byte-identical" "$(sha256sum "$tmp/outw/pcb_windows_amd64.zip" | cut -d' ' -f1)" "$sum"
+SOURCE_DATE_EPOCH=315619200 "$pkg" windows amd64 "$wb" "$tmp/outw" >/dev/null 2>&1
+check "windows SOURCE_DATE_EPOCH sets the mtime" "$(unzip -Z "$tmp/outw/pcb_windows_amd64.zip" | awk '$NF=="pcb.exe"{print $7}')" "80-Jan-02"
+msg=$(SOURCE_DATE_EPOCH=86400 "$pkg" windows amd64 "$wb" "$tmp/out6" 2>&1); rc=$?
+check "windows epoch before 1980 refused" "$rc $(grep -c 1980 <<<"$msg")" "2 1"
+check "no archive for an epoch before 1980" "$(find "$tmp/out6" -type f 2>/dev/null | wc -l)" 0
+msg=$("$pkg" windows arm64 "$wb" "$out" 2>&1); rc=$?
+check "windows arm64 refused" "$rc $(grep -c arm64 <<<"$msg")" "2 1"
+check "no windows arm64 archive" "$(find "$out" -name "*windows_arm64*" | wc -l)" 0
+cp -r "$wb" "$tmp/wb2"; rm "$tmp/wb2/pcb-ui.exe"
+msg=$("$pkg" windows amd64 "$tmp/wb2" "$tmp/out5" 2>&1); rc=$?
+check "windows without pcb-ui.exe refused" "$rc $(grep -c pcb-ui.exe <<<"$msg")" "2 1"
+check "no archive without pcb-ui.exe" "$(find "$tmp/out5" -type f 2>/dev/null | wc -l)" 0
+msg=$("$pkg" windows amd64 "$bin" "$tmp/out5" 2>&1); rc=$?
+check "windows needs the .exe names" "$rc $(grep -c 'pcb.exe' <<<"$msg")" "2 1"
+
 msg=$("$pkg" linux riscv "$bin" "$out" 2>&1); rc=$?
 check "unknown ARCH refused" "$rc $(grep -c riscv <<<"$msg")" "2 1"
-check "no archive for refused OS" "$(find "$out" -name "*windows*" | wc -l)" 0
+check "no archive for refused OS" "$(find "$out" -name "*freebsd*" | wc -l)" 0
 (cd "$tmp" && "$pkg" linux arm64 bin rel/out >/dev/null 2>&1); rc=$?
 check "relative BINDIR and OUTDIR" "$rc $(find "$tmp/rel/out" -type f -printf %f)" "0 pcb_linux_arm64.tar.gz"
 
