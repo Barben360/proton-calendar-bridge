@@ -1,0 +1,56 @@
+name: image
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+# Pushes to main serialize (never cancelled: a half-finished push could leave
+# :main and :sha- out of step); a newer pull request run cancels the older.
+concurrency:
+  group: image-${{ github.event_name == 'push' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  # A pull request: build the image and smoke-test it; nothing is pushed.
+  smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test the image
+        run: make container-smoke
+  # main: build, smoke-test that very image, then push it to the private
+  # GHCR package.
+  push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REPO: ghcr.io/barben360/proton-calendar-bridge
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: make image IMAGE="$REPO:main"
+      - name: Smoke-test it
+        run: PCB_SMOKE_IMAGE="$REPO:main" scripts/container-smoke.sh
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Push main and sha-<12 hex>
+        run: |
+          sha_tag="$REPO:sha-${GITHUB_SHA::12}"
+          docker tag "$REPO:main" "$sha_tag"
+          docker push "$REPO:main"
+          docker push "$sha_tag"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io

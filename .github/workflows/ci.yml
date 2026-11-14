@@ -1,0 +1,190 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+# Each job keeps its own Go build and module cache (actions/cache below, keyed
+# by job, shard, Go version and go.sum): with setup-go's single shared key the
+# first job to finish (systemd-smoke, a plain CGO_ENABLED=0 build) won the save,
+# so every -race, cgo and GOOS=windows build compiled from scratch. A restored
+# build cache also holds test results: -count=1 makes every test run (go
+# commands that lack -count ignore it in GOFLAGS).
+env:
+  GOFLAGS: -count=1
+jobs:
+  secrets:
+    # gitleaks over the history (the pull request's commits on a PR, the
+    # pushed range on main). A test fixture that looks like a secret carries
+    # an inline "gitleaks:allow" with the reason.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists the PR's commits; without it, PR scans fail with 403
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/.cache/golangci-lint
+          key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - name: Install the GL and X development headers
+        # golangci-lint type-checks cmd/pcb-ui with cgo (Fyne).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make lint
+      - name: Live-session guard
+        run: |
+          make live-preflight-test
+          make shellcheck
+      - name: Vet for Windows
+        run: GOOS=windows go vet ./...
+      - name: Build is stamped
+        run: |
+          make build
+          if bin/pcb version --json | grep -q '"version": "dev"'; then
+            echo "make build did not stamp the version" >&2
+            exit 1
+          fi
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two heaviest packages (real SRP logins under -race) each get a
+        # runner of their own: together on one 4-core runner, service alone
+        # took 578 s of the 600 s go test default. The shards cover ./...
+        shard: [service, cli, rest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - name: Race tests
+        run: |
+          # cmd/pcb-ui needs cgo and the GL headers: the ui job runs it.
+          heavy='internal/(service|cli)$|cmd/pcb-ui$'
+          case "${{ matrix.shard }}" in
+            service) pkgs=$(go list ./internal/service) ;;
+            cli) pkgs=$(go list ./internal/cli) ;;
+            *) pkgs=$(go list ./... | grep -vE "$heavy" | tr "\n" " ") ;;
+          esac
+          test -n "$pkgs"
+          make test PKGS="$pkgs"
+  # pcb-ui, the desktop app (M7): built with cgo against the GL/X headers; its
+  # tests, and the sealer's, start private buses (dbus-daemon, from dbus).
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - name: Install the GL and X development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb
+      - run: make ui
+      - name: pcb-ui starts far enough to print its version
+        run: xvfb-run -a bin/pcb-ui --version
+      - name: UI and seal tests (each bus test starts its own private bus)
+        run: make test PKGS="./cmd/pcb-ui ./internal/ui/... ./internal/store/seal/... ./internal/dbustest"
+  # pcb install --user and --system in a Debian container with systemd as
+  # PID 1 (M5-P21): GitHub runners allow --privileged --cgroupns=host.
+  systemd-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - run: make systemd-smoke
+  # The live session rehearsed offline (plan R2): the real pcb against
+  # pcb-fake on 127.0.0.1. Only the module download uses the network; the
+  # rehearsal fences everything but loopback.
+  rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
+      - name: Download modules
+        run: go mod download
+      - run: make rehearse

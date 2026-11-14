@@ -1,0 +1,23 @@
+name: pr-title
+# Pull requests are squash-merged with their title as the commit subject, so
+# the title carries the gitmoji convention (CONTRIBUTING.md): one emoji (the
+# character, not a :code:), a space, then a capital letter.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+permissions: {}
+jobs:
+  gitmoji:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Title starts with a gitmoji
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s' "$TITLE" | grep -qP '^(?:\p{Extended_Pictographic}[\x{FE0F}\x{200D}]*)+ \p{Lu}'; then
+            echo "ok: $TITLE"
+          else
+            echo "::error::PR title must be '<gitmoji> <Capitalised imperative subject>', e.g. '✨ Add free/busy export' (got: $TITLE)"
+            exit 1
+          fi
