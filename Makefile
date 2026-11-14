@@ -23,7 +23,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test shellcheck pcb-fake rehearse screenshots
+.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test shellcheck pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -118,6 +118,11 @@ shellcheck:
 release-test:
 	bash scripts/release/check_test.sh
 	bash scripts/release/package_test.sh
+
+# install.sh against a fake release of stub binaries (POSIX sh, as the
+# curl | sh users run it); prints PASS last.
+install-test:
+	sh scripts/install_test.sh
 
 # The live session rehearsed offline against pcb-fake (plan R2): builds pcb
 # and pcb-fake into a temporary run root and prints PASS last.
