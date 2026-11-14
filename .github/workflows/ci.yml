@@ -74,7 +74,7 @@ jobs:
           make live-preflight-test
           make shellcheck
       - name: Release and install scripts, workflow lint
-        run: make release-test install-test actionlint
+        run: make release-test install-test vmtest-test actionlint
       - name: Vet for Windows
         run: GOOS=windows go vet ./...
       - name: Build is stamped
