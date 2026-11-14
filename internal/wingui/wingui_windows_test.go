@@ -30,13 +30,46 @@ func TestNeedsConsole(t *testing.T) {
 	}
 }
 
-// AttachParentConsole keeps handles that are already there: under go test
-// stdout and stderr are pipes or files, and must stay the same files.
-func TestAttachParentConsoleKeepsInheritedHandles(t *testing.T) {
-	out, errf := os.Stdout, os.Stderr
-	AttachParentConsole()
-	if os.Stdout != out || os.Stderr != errf {
-		t.Errorf("stdout or stderr replaced although inherited (%v %v → %v %v)", out.Fd(), errf.Fd(), os.Stdout.Fd(), os.Stderr.Fd())
+// Only a missing handle is reopened on the console, and the console is
+// attached only when one is missing: pcb-ui --version > v.txt 2>&1 | … keeps
+// both, a GUI start from a terminal gets both, and a start without a parent
+// console (Explorer) changes nothing.
+func TestReopenOnlyMissingHandles(t *testing.T) {
+	pipe := windows.Handle(os.Stdout.Fd())
+	for _, tc := range []struct {
+		name             string
+		stdout, stderr   windows.Handle
+		attachOK         bool
+		attached         bool
+		wantOut, wantErr bool
+	}{
+		{"both inherited", pipe, pipe, true, false, false, false},
+		{"stdout redirected, no stderr", pipe, 0, true, true, false, true},
+		{"no stdout, stderr redirected", windows.InvalidHandle, pipe, true, true, true, false},
+		{"both missing", 0, 0, true, true, true, true},
+		{"both missing, no parent console", 0, 0, false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attached := false
+			var opened []uint32
+			out, errf := reopen(tc.stdout, tc.stderr,
+				func() bool { attached = true; return tc.attachOK },
+				func(which uint32, _ string) *os.File {
+					opened = append(opened, which)
+					f, err := os.CreateTemp(t.TempDir(), "conout")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = f.Close() })
+					return f
+				})
+			if attached != tc.attached {
+				t.Errorf("attached %v, want %v", attached, tc.attached)
+			}
+			if (out != nil) != tc.wantOut || (errf != nil) != tc.wantErr {
+				t.Errorf("reopened stdout %v stderr %v (opened %v), want %v %v", out != nil, errf != nil, opened, tc.wantOut, tc.wantErr)
+			}
+		})
 	}
 }
 

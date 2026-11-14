@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,14 +115,14 @@ func TestVersionGoesToTheInheritedHandle(t *testing.T) {
 	}
 }
 
-func newSettings(t *testing.T) (*settings, *[]*url.URL) {
+func newSettings(t *testing.T) (*settings, *[]string) {
 	t.Helper()
-	var opened []*url.URL
+	var opened []string
 	return &settings{
 		level:      new(slog.LevelVar),
 		logsDir:    "/state/logs",
 		configPath: "/cfg/config.toml",
-		open:       func(u *url.URL) error { opened = append(opened, u); return nil },
+		open:       func(p string) error { opened = append(opened, p); return nil },
 		exe:        func() (string, error) { return "/opt/pcb/bin/pcb-ui", nil },
 	}, &opened
 }
@@ -136,9 +135,8 @@ func TestSettingsOpenFiles(t *testing.T) {
 	if err := s.OpenConfig(); err != nil {
 		t.Fatal(err)
 	}
-	got := []string{(*opened)[0].String(), (*opened)[1].String()}
-	if got[0] != "file:///state/logs" || got[1] != "file:///cfg/config.toml" {
-		t.Errorf("opened %v", got)
+	if got := *opened; len(got) != 2 || got[0] != "/state/logs" || got[1] != "/cfg/config.toml" {
+		t.Errorf("opened %q, want the logs folder then the config file", got)
 	}
 }
 

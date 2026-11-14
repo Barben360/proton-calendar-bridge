@@ -92,7 +92,7 @@ func run(args []string) int {
 	// ended is closed at logoff or shutdown: the bridge's drain is then 2 s.
 	ended := make(chan struct{})
 	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended})
-	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: a.OpenURL, exe: executable}
+	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: openPath(a.OpenURL), exe: executable}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
 
 	ctx, cancel := context.WithCancel(context.Background())

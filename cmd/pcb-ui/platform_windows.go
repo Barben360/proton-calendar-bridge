@@ -3,6 +3,7 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"strings"
 
@@ -42,3 +43,21 @@ func attachConsole() { wingui.AttachParentConsole() }
 // watchSessionEnd runs end at logoff or shutdown, before Windows ends
 // pcb-ui (it gets no signal: it has no console).
 func watchSessionEnd(end func()) (stop func(), err error) { return wingui.WatchSessionEnd(end) }
+
+// shellExecute is windows.ShellExecute; a test records what it is handed.
+var shellExecute = windows.ShellExecute
+
+// openPath opens a file or a folder ("Open logs", "Open config") with
+// ShellExecute, given the path itself: a file:// URL with an escaped
+// non-ASCII letter (Zo%C3%AB) reaches Windows' URL handler decoded as
+// Windows-1252 (ZoÃ«), a path that does not exist. openURL is not used.
+func openPath(func(*url.URL) error) func(string) error {
+	return func(p string) error {
+		file, err := windows.UTF16PtrFromString(p)
+		if err != nil {
+			return err
+		}
+		verb, _ := windows.UTF16PtrFromString("open")
+		return shellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL)
+	}
+}

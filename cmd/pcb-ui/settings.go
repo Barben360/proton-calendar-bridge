@@ -4,7 +4,6 @@ package main
 
 import (
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 
@@ -16,7 +15,7 @@ type settings struct {
 	level      *slog.LevelVar
 	logsDir    string
 	configPath string
-	open       func(*url.URL) error // fyne.App.OpenURL
+	open       func(path string) error // openPath
 	exe        func() (string, error)
 }
 
@@ -45,5 +44,5 @@ func (s *settings) SetAutostart(on bool) error {
 func (s *settings) Level() slog.Level     { return s.level.Level() }
 func (s *settings) SetLevel(l slog.Level) { s.level.Set(l) }
 
-func (s *settings) OpenLogs() error   { return s.open(fileURL(s.logsDir)) }
-func (s *settings) OpenConfig() error { return s.open(fileURL(s.configPath)) }
+func (s *settings) OpenLogs() error   { return s.open(s.logsDir) }
+func (s *settings) OpenConfig() error { return s.open(s.configPath) }

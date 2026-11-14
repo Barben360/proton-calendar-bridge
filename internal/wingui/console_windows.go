@@ -25,24 +25,37 @@ func needsConsole(h windows.Handle) bool { return h == 0 || h == windows.Invalid
 // inherited pipe or file is never replaced. Without a parent console
 // (started from Explorer, or at login) it does nothing.
 func AttachParentConsole() {
-	out := needsConsole(stdHandle(windows.STD_OUTPUT_HANDLE))
-	errh := needsConsole(stdHandle(windows.STD_ERROR_HANDLE))
-	if !out && !errh {
-		return
+	out, errf := reopen(stdHandle(windows.STD_OUTPUT_HANDLE), stdHandle(windows.STD_ERROR_HANDLE), attachParent, conout)
+	if out != nil {
+		os.Stdout = out
 	}
-	if r, _, _ := procAttachConsole.Call(attachParentProcess); r == 0 {
-		return
+	if errf != nil {
+		os.Stderr = errf
 	}
-	if out {
-		if f := conout(windows.STD_OUTPUT_HANDLE, "/dev/stdout"); f != nil {
-			os.Stdout = f
-		}
+}
+
+// reopen is AttachParentConsole's choice: given the current stdout and
+// stderr handles, it attaches (attach reports success) only when one is
+// missing, and opens (open) only the missing ones; a nil result keeps that
+// handle as it is.
+func reopen(stdout, stderr windows.Handle, attach func() bool, open func(which uint32, name string) *os.File) (out, errf *os.File) {
+	needOut, needErr := needsConsole(stdout), needsConsole(stderr)
+	if !needOut && !needErr || !attach() {
+		return nil, nil
 	}
-	if errh {
-		if f := conout(windows.STD_ERROR_HANDLE, "/dev/stderr"); f != nil {
-			os.Stderr = f
-		}
+	if needOut {
+		out = open(windows.STD_OUTPUT_HANDLE, "/dev/stdout")
 	}
+	if needErr {
+		errf = open(windows.STD_ERROR_HANDLE, "/dev/stderr")
+	}
+	return out, errf
+}
+
+// attachParent attaches to the console of the parent process, if it has one.
+func attachParent() bool {
+	r, _, _ := procAttachConsole.Call(attachParentProcess)
+	return r != 0
 }
 
 // HasStderr reports whether stderr reaches something: an inherited handle,
