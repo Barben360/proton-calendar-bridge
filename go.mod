@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	fyne.io/fyne/v2 v2.8.2
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/ProtonMail/go-crypto v1.5.2-proton
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
@@ -18,6 +19,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.45.0
 	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.61.1
@@ -105,7 +107,6 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

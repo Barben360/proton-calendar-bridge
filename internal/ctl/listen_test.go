@@ -20,7 +20,7 @@ import (
 func sockDir(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("Unix-socket test: Windows uses the named pipe (pipe_windows_test.go)")
 	}
 	dir, err := os.MkdirTemp("", "pcb")
 	if err != nil {

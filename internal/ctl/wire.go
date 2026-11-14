@@ -1,5 +1,7 @@
 // Package ctl is the control socket (CTL) of pcb serve: JSON over HTTP/1.1
-// on <state>/pcb.sock, internal and versioned under /v2/, and its client.
+// on <state>/pcb.sock (on Windows, a named pipe private to the user, named
+// after the state directory), internal and versioned under /v2/, and its
+// client.
 // Every answer is one output.Envelope: 200 when the command succeeds, 422
 // when it fails (its exit code, message and hint), 400, 403, 404, 405 or
 // 413 for a transport error (ruling M5-Rpre1).
@@ -131,8 +133,11 @@ var (
 	ErrUnsafeDir = errors.New("the control socket's directory is open to other users")
 	// ErrNotASocket: a file that is not a socket holds the path.
 	ErrNotASocket = errors.New("a file that is not a socket holds the control socket's path")
-	// ErrUnsupported: no control socket off Unix (ruling M5-P3).
+	// ErrUnsupported: no control socket off Unix and Windows (ruling M5-P3).
 	ErrUnsupported = errors.New("no control socket on this system")
+	// ErrPipeTaken: the control pipe's name is already served on Windows,
+	// by another pcb of the same state or another user's process.
+	ErrPipeTaken = errors.New("the control pipe is already served")
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 	// ErrRefused: Dial refuses the control socket: not a socket, another

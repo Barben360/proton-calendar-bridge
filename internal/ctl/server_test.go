@@ -228,18 +228,25 @@ type served struct {
 	logs *lockedBuffer
 }
 
-// serve runs srv on a fresh socket until the test ends.
+// serve runs srv on a fresh socket until the test ends. The tests using
+// it dial the socket directly (raw): Windows has none.
 func serve(t *testing.T, srv *ctl.Server) served {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("Unix-socket test: Windows uses the named pipe (pipe_windows_test.go)")
 	}
 	dir, err := os.MkdirTemp("", "pcb")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	path := filepath.Join(dir, "pcb.sock")
+	return serveAt(t, srv, filepath.Join(dir, "pcb.sock"))
+}
+
+// serveAt runs srv on the control channel Listen opens at path until the
+// test ends.
+func serveAt(t *testing.T, srv *ctl.Server, path string) served {
+	t.Helper()
 	ln, err := ctl.Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -1110,12 +1117,10 @@ func (l *countingListener) count() int {
 
 // The connection Dial made is used only while fresh: pcb login dials, then
 // prompts, and the server drops a connection that sent no request within
-// its 5 s header timeout. A stale one is replaced, not sent on.
+// its 5 s header timeout. A stale one is replaced, not sent on (over the
+// named pipe on Windows).
 func TestStaleFirstConnectionIsRedialled(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	dir, err := os.MkdirTemp("", "pcb")
 	if err != nil {
 		t.Fatal(err)

@@ -355,8 +355,9 @@ func (w *wrapped) Unwrap() error { return w.err }
 
 // startControl serves the control socket of d (d.Socket) on hub and
 // returns what stops it: it closes the socket, which removes it. Off Unix
-// there is no control socket (ruling M5-P3); any other failure to open it
-// is exit 20 with a hint for its cause.
+// and Windows there is no control socket (ruling M5-P3); on Windows it is a
+// named pipe (ctl.Listen). Any other failure to open it is exit 20 with a
+// hint for its cause.
 func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error,
 	mcpStatus func() *ctl.MCP, relay http.Handler) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
@@ -430,6 +431,9 @@ func controlHint(err error, socket string) string {
 		return "chmod 700 " + dir
 	case errors.Is(err, ctl.ErrNotASocket):
 		return "move " + socket + " away: pcb serve keeps its control socket there"
+	case errors.Is(err, ctl.ErrPipeTaken):
+		return "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set " +
+			paths.EnvStateDir + " to another directory"
 	}
 	return "make sure " + dir + " is writable by this user"
 }

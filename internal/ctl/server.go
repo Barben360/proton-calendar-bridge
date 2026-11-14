@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -48,8 +47,10 @@ type Hub interface {
 
 // Server answers the control socket of a pcb process. Listener returns the
 // CalDAV listener once bound (nil before). PeerUID reads a peer's UID (ok
-// false: unchecked); nil is SO_PEERCRED on Linux and unchecked elsewhere
-// (ruling M5-P3). A peer of another UID gets 403 and a warning naming its UID.
+// false: unchecked); nil is SO_PEERCRED on Linux and unchecked on other
+// Unix (ruling M5-P3). On Windows PeerSID reads the pipe client's SID in
+// its place (an error: refused); nil is the client process's token. A peer
+// of another user gets 403 and a warning naming its UID or SID.
 type Server struct {
 	Hub      Hub
 	Daemon   Daemon
@@ -57,6 +58,7 @@ type Server struct {
 	Now      func() time.Time
 	Logger   *slog.Logger
 	PeerUID  func(net.Conn) (uid int, ok bool)
+	PeerSID  func(net.Conn) (sid string, err error)
 	// ShowUI raises the desktop app's window (on the account's pane when
 	// named). nil: this process has no window, and POST /v2/ui/show is an
 	// unknown endpoint. It runs on the HTTP handler goroutine and must
@@ -162,8 +164,8 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var out outcome
 		r = r.WithContext(context.WithValue(r.Context(), outcomeKey{}, &out))
-		if uid, refused := s.refusedPeer(r); refused {
-			s.logger().Warn("control socket: refused a peer of another user", "peer_uid", uid)
+		if who, refused := s.refusedPeer(r); refused {
+			s.logger().Warn("control socket: refused a peer of another user", who)
 			out = transport(w, "ctl", http.StatusForbidden, "the control socket answers only its own user", "run pcb as the user that runs pcb serve")
 		} else if path.Clean(r.URL.Path) != r.URL.Path {
 			// ServeMux would redirect (301, plain text); no path is unclean here.
@@ -271,22 +273,6 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request, rt route) {
 	default:
 		record(r, write(w, command, http.StatusOK, data, nil))
 	}
-}
-
-// refusedPeer reports whether r's peer is of another UID than this
-// process's effective one (SO_PEERCRED reports the peer's effective UID);
-// a request whose connection is unknown is refused.
-func (s *Server) refusedPeer(r *http.Request) (int, bool) {
-	c, ok := r.Context().Value(connKey{}).(net.Conn)
-	if !ok {
-		return -1, true
-	}
-	peer := s.PeerUID
-	if peer == nil {
-		peer = defaultPeerUID
-	}
-	uid, checked := peer(c)
-	return uid, checked && uid != os.Geteuid()
 }
 
 // transport answers a transport error: blocked (20), with a hint.

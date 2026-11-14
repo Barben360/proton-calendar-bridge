@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -281,5 +283,17 @@ func TestLogPassInventsNoProtonAnswer(t *testing.T) {
 	}
 	if strings.Contains(got, "proton_status") || strings.Contains(got, "proton_code") {
 		t.Errorf("a status or code was invented:\n%s", got)
+	}
+}
+
+// A control pipe already served (Windows) names both causes and the way
+// out: another pcb of this state, or a squatter to step around.
+func TestControlHintForATakenPipe(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("%w: %s", ctl.ErrPipeTaken, `\\.\pipe\pcb-0123456789abcdef`)
+	got := controlHint(err, filepath.Join("state", "pcb.sock"))
+	want := "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set PCB_STATE_DIR to another directory"
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
 	}
 }
