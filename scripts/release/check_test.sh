@@ -53,6 +53,8 @@ test_is_latest_minor() {
   stdin_status 0 v1.2.4 $'v1.3.0\nv1.2.3\n' is-latest-minor
   stdin_status 1 v1.2.3 $'v1.2.10\n' is-latest-minor
   stdin_status 1 v1.2.3-rc.1 '' is-latest-minor
+  # v1.20.0 is another line than v1.2: the prefix is "v1.2.", not "v1.2".
+  stdin_status 0 v1.2.4 $'v1.20.0\n' is-latest-minor
 }
 
 test_image_tags() {
@@ -60,6 +62,15 @@ test_image_tags() {
   [ "$("$check" image-tags v1.2.4 no yes)" = $'1.2.4\n1.2' ] || fail "v1.2.4 no yes"
   [ "$("$check" image-tags v1.2.4 no no)" = 1.2.4 ] || fail "v1.2.4 no no"
   [ "$("$check" image-tags v1.3.0-rc.1 yes yes)" = 1.3.0-rc.1 ] || fail "prerelease"
+  # Flags other than yes|no are refused, a pre-release's too.
+  local flags l m
+  for flags in "true no" "no Yes" "1 0" "yes -"; do
+    read -r l m <<<"$flags"
+    want_status "image-tags v1.2.3 $flags" 2 "$check" image-tags v1.2.3 "$l" "$m"
+  done
+  want_status "image-tags empty LATEST" 2 "$check" image-tags v1.2.3 "" no
+  want_status "image-tags empty MINOR_LATEST" 2 "$check" image-tags v1.2.3 yes ""
+  want_status "image-tags prerelease maybe" 2 "$check" image-tags v1.3.0-rc.1 maybe no
 }
 
 test_on_main() {

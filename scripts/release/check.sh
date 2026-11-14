@@ -65,6 +65,8 @@ case $cmd in
   image-tags)
     [[ $# -eq 3 ]] || die "usage: image-tags TAG LATEST MINOR_LATEST"
     valid "$1" || die "$1 is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+    [[ $2 == yes || $2 == no ]] || die "LATEST is '$2', want yes or no"
+    [[ $3 == yes || $3 == no ]] || die "MINOR_LATEST is '$3', want yes or no"
     version=${1#v}
     echo "$version"
     if stable "$1"; then
