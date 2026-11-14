@@ -39,7 +39,7 @@ The agent starts `pcb mcp`, which speaks MCP on stdin and stdout.
 pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]
 ```
 
-- **When pcb already runs** (`pcb serve`, the service, `pcb-ui`), it relays the session to it over the control socket.
+- **When pcb already runs** (`pcb serve`, the service, `pcb-ui`), it relays the session to it over the control socket. There is no port to set: with `pcb-ui`, the agent still starts `pcb mcp`, so the `pcb` binary must be installed too.
 - **Otherwise** it serves your accounts itself for as long as the agent's session lasts. Meanwhile `pcb serve` and `pcb-ui` refuse to start, saying an agent session holds the state: end it first.
 
 - **With the pcb user service installed** and running or restarting, `pcb mcp` never takes its place: it waits up to 30 s for the service and relays to it, else exits 20 asking for `pcb service start`. A service you stopped changes nothing.
@@ -78,10 +78,27 @@ Give the absolute path of `pcb` when the agent's `PATH` lacks it.
 - `--allow write,delete` replaces the profile.
 - `--account ADDRESS` (repeatable) limits the session to those accounts.
 - Over stdio a profile is a guard rail, not a lock: any program running as you can run `pcb` itself.
-- Each account has its own MCP setting, above every profile and token (`pcb account mcp`, or the MCP selector in `pcb-ui`):
-  - `off` hides the account from every agent at once. Its sync keeps running while CalDAV is on.
-  - `read-only` lets agents read it but refuses every change, even from `--profile full` or a token with `write`: `event_create`, `event_update`, `event_delete` and `logout` answer `refused` (reason `pcb:account-read-only`), and `calendars_list`, `event_get` and `status` show it as `read_only`.
-  - `read-write` (the default) leaves it to the profile or token.
+### Two settings, the stricter wins
+
+Two settings decide what an agent may do, and both always apply:
+
+| Setting | Decides | Set with |
+|---|---|---|
+| The agent's grant | what **this agent** may do, on every account | `--profile` or `--allow` where you add the agent, or the token's `--allow` |
+| The account's MCP setting | what **any agent** may do with **this account** | `pcb account mcp off\|read-only\|read-write`, or the MCP selector in `pcb-ui` |
+
+An agent gets what both allow:
+
+| Account's MCP setting | Agent with `--profile read-only` (the default) | Agent with `--profile full`, or a token with `write` |
+|---|---|---|
+| Off | does not see the account | does not see the account |
+| Read-only | reads | reads; every change is refused |
+| Read-write (the default) | reads; it has no tools to edit | reads and edits |
+
+Read-write on an account does not let an agent edit by itself: add the agent with `--profile full` (or `--allow write`) too.
+
+- Off hides the account from every agent at once. Its sync keeps running while CalDAV is on.
+- Read-only refuses every change, from any profile or token: `event_create`, `event_update`, `event_delete` and `logout` answer `refused` (reason `pcb:account-read-only`), and `calendars_list`, `event_get` and `status` show the account as `read_only`.
 
 ## From another machine (remote, with a token)
 
