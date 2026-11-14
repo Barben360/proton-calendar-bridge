@@ -33,6 +33,8 @@ Images are pushed when a release is published, never from main.
 
 A patch release of an older line (`1.2.4` after `1.3.0`) does not take `latest`. Pin `X.Y.Z` for a server you do not want to change under you.
 
+GHCR may list an image's attestation as an extra `sha256-<hex>` version of the package. It belongs to the release: do not delete it.
+
 ### Check an image
 
 Each image carries a GitHub attestation: proof that this repository's release workflow built it.
@@ -59,7 +61,7 @@ mkdir -p data/config data/state && sudo chown -R 65532:65532 data && chmod 700 d
 ```yaml
 services:
   pcb:
-    image: ghcr.io/barben360/proton-calendar-bridge:latest   # or pcb:local from make image
+    image: ghcr.io/barben360/proton-calendar-bridge:latest   # pin X.Y.Z on a server; or pcb:local from make image
     container_name: pcb
     restart: unless-stopped
     ports:

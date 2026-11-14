@@ -70,8 +70,8 @@ Goals: CalDAV read/write for owned calendars; read-only for subscribed and
 holidays calendars; login with password, or password + TOTP [decided
 0010]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); several Proton
-accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); an MCP adapter for agents (M8, decision 0016: stdio and remote, grants per agent, login finished by the person, §12); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS and
-Windows only build, and the CLI there runs offline (§13, "Platforms").
+accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); an MCP adapter for agents (M8, decision 0016: stdio and remote, grants per agent, login finished by the person, §12); a container image; Linux amd64 and arm64. Those two are the supported platforms; macOS gets `pcb` only
+(release archives, untested), Windows only builds, and the CLI there runs offline (§13, "Platforms").
 
 Not planned (not designed here): REST API, `.ics` feeds, event
 commands in the CLI (Thunderbird is the client), auto-update, shared calendars, invitations, two-password mode,
@@ -1609,7 +1609,7 @@ Initial-version audit behaviour (`spec/audits/2026-11-12-initial-version.md`; `i
   `pcb client rotate NAME` (not shown when the key file cannot be read or is missing beside `secrets.sealed`: the key file and secrets checks report that)
   [verified: `TestDoctorExitCode`, `TestDoctorNeedsLoginWhileTheDaemonWaitsIsAWarning`, `TestDoctorTransientDaemonErrorIsExit20`, `TestDoctorRefusedControlSocketIsExit10`,
   `TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens`, `TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens`].
-- Platforms: **Linux amd64 and arm64 are supported** (§3). macOS (amd64, arm64) and Windows (amd64) build [verified: `GOOS=darwin go build ./cmd/pcb`, `GOOS=windows go build ./cmd/pcb`; CI vets
+- Platforms: **Linux amd64 and arm64 are supported** (§3). macOS (amd64, arm64) gets `pcb` only, in the release archives and untested (decision 0017), and Windows (amd64) builds [verified: `GOOS=darwin go build ./cmd/pcb`, `GOOS=windows go build ./cmd/pcb`; CI vets
   Windows] but are untested and unsupported (`pcb doctor` says `platform: GOOS/GOARCH: runs, unsupported`). Off Unix there is no file lock and no control socket, so the CLI runs
   offline there: `version`, `status`, `doctor` and `client add`/`list` ran under wine in the audit, while `login`, `sync` and `serve` exit 20 (`login locking needs a Unix system`, `sync locking needs a Unix
   system`, hint `run pcb on Linux or macOS`) [source: `filelock_other.go`, `listen_other.go`, the ux audit's wine run; no test runs off Linux]. macOS has the Unix lock and socket code but no service management:

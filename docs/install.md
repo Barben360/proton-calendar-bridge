@@ -6,7 +6,7 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 ## Requirements
 
-- **Linux, amd64 or arm64.** These are the supported platforms. macOS (`pcb` only) is untested ([below](#macos-and-windows)).
+- **Linux (amd64, arm64)** is supported. macOS (amd64, arm64) gets `pcb` only and is untested ([below](#macos-and-windows)).
 - **`curl` or `wget`**, to install a release.
 - **Go** (the version in `go.mod`) and `make`, only to [build from a clone](#build-from-a-clone).
 - **systemd 252 or later** (Debian 12 or 13) to run pcb as a service ([service](service.md)).
@@ -15,7 +15,7 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 ### macOS and Windows
 
-**macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux only for now), no desktop entry, no service management. It is untested by the author: the install and `pcb version` are checked on every release, but not logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
+**macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux only for now), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
 **Windows** only builds: `GOOS=windows` compiles `./cmd/pcb`, with no release archive, no `pcb-ui` and no service management. There is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 (`run pcb on Linux or macOS`). The rest of the CLI runs offline on the files.
 
