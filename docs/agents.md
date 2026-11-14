@@ -78,7 +78,10 @@ Give the absolute path of `pcb` when the agent's `PATH` lacks it.
 - `--allow write,delete` replaces the profile.
 - `--account ADDRESS` (repeatable) limits the session to those accounts.
 - Over stdio a profile is a guard rail, not a lock: any program running as you can run `pcb` itself.
-- `pcb account mcp off` hides an account from every agent at once, whatever their grants. Its sync keeps running while CalDAV is on.
+- Each account has its own MCP setting, above every profile and token (`pcb account mcp`, or the MCP selector in `pcb-ui`):
+  - `off` hides the account from every agent at once. Its sync keeps running while CalDAV is on.
+  - `read-only` lets agents read it but refuses every change, even from `--profile full` or a token with `write`: `event_create`, `event_update`, `event_delete` and `logout` answer `refused` (reason `pcb:account-read-only`), and `calendars_list`, `event_get` and `status` show it as `read_only`.
+  - `read-write` (the default) leaves it to the profile or token.
 
 ## From another machine (remote, with a token)
 

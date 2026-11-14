@@ -41,7 +41,8 @@ type AccountView struct {
 	ID, Address, Short         string
 	Dot                        TrayState
 	SignedIn, Pending          bool
-	CalDAV, MCP                bool // the adapter switches
+	CalDAV, MCP                bool            // the adapter switches
+	MCPMode                    service.MCPMode // the MCP switch in full: MCP is MCPMode != off
 	LastSync                   *time.Time
 	Calendars                  []CalendarView
 	Alerts                     []ctl.Alert
@@ -94,6 +95,14 @@ func accountView(as ctl.AccountStatus, ln *ctl.Listener, now time.Time) AccountV
 		ID: as.ID, Address: as.Address, Username: as.Address, URL: as.URL,
 		SignedIn: as.Phase == "ready", Pending: as.Pending, CalDAV: as.CalDAV, MCP: as.MCP,
 		Alerts: as.Alerts, Calendars: []CalendarView{},
+	}
+	switch {
+	case !as.MCP:
+		a.MCPMode = service.MCPOff
+	case as.MCPMode == service.MCPReadOnly:
+		a.MCPMode = service.MCPReadOnly
+	default: // read-write, or a daemon that predates the read-only mode
+		a.MCPMode = service.MCPReadWrite
 	}
 	if a.Address == "" {
 		a.Address, a.Username = as.Login.Address, as.Login.Address
@@ -215,7 +224,7 @@ type Actions interface {
 	SignOut(ctx context.Context, id string) error
 	Remove(ctx context.Context, id string) error
 	SetCalDAV(ctx context.Context, id string, on bool) error
-	SetMCP(ctx context.Context, id string, on bool) error
+	SetMCP(ctx context.Context, id string, mode service.MCPMode) error
 	// Password is the account's CalDAV password (the client default,
 	// created when there is none).
 	Password(ctx context.Context, id string) (string, error)
@@ -282,12 +291,12 @@ func (a actions) SetCalDAV(ctx context.Context, id string, on bool) error {
 	return err
 }
 
-func (a actions) SetMCP(ctx context.Context, id string, on bool) error {
+func (a actions) SetMCP(ctx context.Context, id string, mode service.MCPMode) error {
 	h, err := a.hub()
 	if err != nil {
 		return err
 	}
-	_, err = h.SetMCP(ctx, id, on)
+	_, err = h.SetMCP(ctx, id, mode)
 	return err
 }
 

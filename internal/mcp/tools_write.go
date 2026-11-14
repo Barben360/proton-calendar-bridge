@@ -173,8 +173,9 @@ func checkETag(etag string) error {
 	return nil
 }
 
-// writable refuses a calendar pcb's write gate keeps read-only, before any
-// write (design §5.4). gone answers an account that left the grant,
+// writable refuses, before any write, an account whose MCP switch keeps
+// agents to reads (mayWrite) and a calendar pcb's write gate keeps
+// read-only (design §5.4). gone answers an account that left the grant,
 // missing a calendar the account does not hold. A calendar not synced yet
 // is left to the agenda, which says so.
 func (ss *session) writable(ctx context.Context, localID, calID string, gone, missing error) error {
@@ -183,6 +184,9 @@ func (ss *session) writable(ctx context.Context, localID, calID string, gone, mi
 		return gone
 	}
 	if err != nil {
+		return err
+	}
+	if err := mayWrite(info); err != nil {
 		return err
 	}
 	cols, err := api.Collections(ctx)
@@ -198,6 +202,23 @@ func (ss *session) writable(ctx context.Context, localID, calID string, gone, mi
 			"pcb writes only to calendars calendars_list shows with read_only false; choose another calendar")
 	}
 	return nil
+}
+
+// reasonAccountReadOnly is the refusal of a write to an account whose MCP
+// switch is read-only.
+const reasonAccountReadOnly = "pcb:account-read-only"
+
+// mayWrite refuses an account whose MCP switch is not read-write (the
+// person's switch, above every grant): its agents only read. It reads the
+// account as the Hub has it now, so a switch turned during a session
+// counts from its next call.
+func mayWrite(a service.AccountInfo) error {
+	if a.MCPMode == service.MCPReadWrite {
+		return nil
+	}
+	return &toolError{Class: classRefused, Reason: reasonAccountReadOnly,
+		Message: "account " + a.Address + " is read-only for agents: nothing was changed",
+		Hint:    "reading still works; only a person can allow changes, in pcb-ui or with pcb account mcp read-write; do not retry"}
 }
 
 // writeError is a write's error as the agent reads it: a stale ETag says

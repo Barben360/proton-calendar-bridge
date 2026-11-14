@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -106,7 +107,9 @@ type accountPane struct {
 	addr, status       *widget.Label
 	statusDot          *canvas.Circle
 	signBtn, removeBtn *widget.Button
-	caldav, mcp        *toggle
+	caldav             *toggle
+	mcp                *widget.Select // off, read-only, read-write (mcpChoices)
+	mcpSilent          bool           // setAccount is selecting: no call
 	conn               *fyne.Container
 	url, user, fp      *textLine
 	urlCopy, userCopy  *widget.Button // the URL's and the username's Copy (F6)
@@ -150,7 +153,7 @@ func newAccountPane(w *Window) *accountPane {
 	p.removeBtn = widget.NewButton("Remove", p.remove)
 	p.removeBtn.Importance = widget.DangerImportance
 	p.caldav = newToggle("CalDAV", p.setCalDAV)
-	p.mcp = newToggle("MCP", p.setMCP)
+	p.mcp = widget.NewSelect(mcpLabels(), p.setMCP)
 	p.url, p.user, p.fp = mono(""), mono(""), mono("")
 	p.urlCopy, p.userCopy = w.copyOf(p.url), w.copyOf(p.user)
 	p.pw = newPwBox(w)
@@ -208,7 +211,9 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	}
 	p.signBtn.Refresh()
 	p.caldav.SetOn(av.CalDAV)
-	p.mcp.SetOn(av.MCP)
+	p.mcpSilent = true
+	p.mcp.SetSelected(mcpLabel(av.MCPMode))
+	p.mcpSilent = false
 	p.url.SetText(av.URL)
 	p.user.SetText(av.Username)
 	p.fp.SetText(av.Fingerprint)
@@ -265,7 +270,61 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 
 func (p *accountPane) setCalDAV(on bool) { p.flip(p.caldav, p.w.act.SetCalDAV, on) }
 
-func (p *accountPane) setMCP(on bool) { p.flip(p.mcp, p.w.act.SetMCP, on) }
+// mcpChoices are the MCP selector's choices, in its order.
+var mcpChoices = []struct {
+	label string
+	mode  service.MCPMode
+}{{"Off", service.MCPOff}, {"Read-only", service.MCPReadOnly}, {"Read-write", service.MCPReadWrite}}
+
+func mcpLabels() []string {
+	out := make([]string, len(mcpChoices))
+	for i, c := range mcpChoices {
+		out[i] = c.label
+	}
+	return out
+}
+
+// mcpLabel is mode's choice; an unknown mode selects none.
+func mcpLabel(mode service.MCPMode) string {
+	for _, c := range mcpChoices {
+		if c.mode == mode {
+			return c.label
+		}
+	}
+	return ""
+}
+
+// setMCP runs the person's choice on the MCP selector; a failure selects
+// the account's mode back, unless the pane shows another account by then.
+func (p *accountPane) setMCP(label string) {
+	if p.mcpSilent {
+		return
+	}
+	var mode service.MCPMode
+	for _, c := range mcpChoices {
+		if c.label == label {
+			mode = c.mode
+		}
+	}
+	if mode == "" || mode == p.av.MCPMode {
+		return
+	}
+	id, prev := p.av.ID, p.av.MCPMode
+	p.w.run(p.b, "Working…", func(ctx context.Context) error { return p.w.act.SetMCP(ctx, id, mode) }, func(err error) {
+		if err != nil {
+			p.w.showErr(err)
+			if p.av.ID == id {
+				p.mcpSilent = true
+				p.mcp.SetSelected(mcpLabel(prev))
+				p.mcpSilent = false
+			}
+			return
+		}
+		if p.av.ID == id { // the next Update brings the same; until then, a second choice compares with this one
+			p.av.MCPMode = mode
+		}
+	})
+}
 
 // flip runs set for the person's tap on the switch sw; a failure puts sw
 // back, unless the pane shows another account by then.

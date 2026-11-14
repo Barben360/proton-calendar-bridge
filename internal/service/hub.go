@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -545,7 +546,9 @@ func inspect(a *hubAccount) described {
 // cannot be read is needs-login, as Status says of unreadable secrets.
 func (h *Hub) info(a *hubAccount) AccountInfo {
 	d := inspect(a)
-	info := AccountInfo{ID: a.id, Address: d.address, Pending: d.pending, CalDAV: switchOn(d.st.CalDAV), MCP: switchOn(d.st.MCP)}
+	info := AccountInfo{ID: a.id, Address: d.address, Pending: d.pending, CalDAV: switchOn(d.st.CalDAV)}
+	info.MCPMode = mcpMode(d.st)
+	info.MCP = info.MCPMode != MCPOff
 	h.mu.Lock()
 	if a.stopped != nil {
 		s := *a.stopped
@@ -1193,6 +1196,19 @@ func (h *Hub) remove(ctx context.Context, selector string, req LogoutRequest) (A
 // switchOn is an adapter switch of a state.json: absent is on.
 func switchOn(s *bool) bool { return s == nil || *s }
 
+// mcpMode is the MCP switch of a state.json: off, else read-only when
+// mcp_read_only says so, else read-write (every state.json before the
+// read-only mode).
+func mcpMode(st store.State) MCPMode {
+	switch {
+	case !switchOn(st.MCP):
+		return MCPOff
+	case st.MCPReadOnly:
+		return MCPReadOnly
+	}
+	return MCPReadWrite
+}
+
 // SetCalDAV switches the account's CalDAV adapter, in its state.json. Off,
 // CalDAV refuses the account's clients; while the Hub serves, the
 // account's loop runs while either adapter is on (wantsLoop): a switch that
@@ -1204,11 +1220,19 @@ func (h *Hub) SetCalDAV(ctx context.Context, selector string, on bool) (AccountI
 	return h.setSwitch(ctx, selector, "CalDAV", func(s *store.State) { s.CalDAV = &on })
 }
 
-// SetMCP switches the account's MCP adapter, in its state.json, as
-// SetCalDAV does the CalDAV one. Off, the account is hidden from every MCP
-// entry, whatever their grants; its loop pauses only when CalDAV is off too.
-func (h *Hub) SetMCP(ctx context.Context, selector string, on bool) (AccountInfo, error) {
-	return h.setSwitch(ctx, selector, "MCP", func(s *store.State) { s.MCP = &on })
+// SetMCP sets the account's MCP mode, in its state.json, as SetCalDAV
+// does the CalDAV switch. Off, the account is hidden from every MCP entry,
+// whatever their grants, and its loop pauses only when CalDAV is off too;
+// read-only, every agent's writes to it are refused. An unknown mode is a
+// usage error that writes nothing.
+func (h *Hub) SetMCP(ctx context.Context, selector string, mode MCPMode) (AccountInfo, error) {
+	if !slices.Contains(MCPModes, mode) {
+		return AccountInfo{}, usage(strconv.Quote(string(mode))+" is not an MCP mode", "use off, read-only or read-write")
+	}
+	return h.setSwitch(ctx, selector, "MCP", func(s *store.State) {
+		on := mode != MCPOff
+		s.MCP, s.MCPReadOnly = &on, mode == MCPReadOnly
+	})
 }
 
 // setSwitch writes an adapter switch (set) of the account into its

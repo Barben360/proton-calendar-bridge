@@ -853,3 +853,74 @@ func TestUpdateTimesKeepTheEventZone(t *testing.T) {
 		}
 	}
 }
+
+// The person's read-only MCP switch is above every grant: a session that
+// may write, delete and log out changes nothing on that account (refused,
+// pcb:account-read-only, nothing reaches its agenda), still reads it, sees
+// its calendars and events as read-only, and still writes to another
+// account. Switched back to read-write, its next call writes.
+func TestReadOnlyAccountRefusesChanges(t *testing.T) {
+	hub := newHub()
+	hub.set("a1", func(a *service.AccountInfo) { a.MCPMode = service.MCPReadOnly })
+	r := newRig(t, hub)
+	g := grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapManage)
+	cs := r.connect(t, g, mcp.EntryStdio)
+	create := func(account string) map[string]any {
+		return map[string]any{"account": account, "calendar": map[string]string{"a1": "cal-a", "b2": "cal-b"}[account],
+			"summary": "X", "start": "2026-11-20T15:00", "end": "2026-11-20T16:00"}
+	}
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"event_create", create("a1")},
+		{"event_update", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series", "changes": map[string]any{"summary": "X"}}},
+		{"event_update", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series", "changes": map[string]any{"summary": "X"}, "dry_run": true}},
+		{"event_delete", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}},
+		{"logout", map[string]any{"account": "alice@example.com"}},
+	} {
+		terr := mustFail(t, cs, tc.tool, tc.args, "refused")
+		if terr.Reason != "pcb:account-read-only" || !strings.Contains(terr.Message, "alice@example.com is read-only") {
+			t.Errorf("%s %v: %+v, want reason pcb:account-read-only naming alice", tc.tool, tc.args["dry_run"], *terr)
+		}
+	}
+	if n := hub.agendas["a1"].asked(); n != 0 {
+		t.Errorf("alice's agenda was asked %d writes", n)
+	}
+	if got := hub.signedOut(); len(got) != 0 {
+		t.Errorf("signed out %v", got)
+	}
+	// Reads still answer, and say what may not be written.
+	if got := mustCall(t, cs, "event_get", map[string]any{"event_id": standupID}); got["read_only"] != true {
+		t.Errorf("event_get read_only = %v, want true", got["read_only"])
+	}
+	cals := mustCall(t, cs, "calendars_list", map[string]any{})
+	ro := map[string]any{}
+	for _, c := range cals["calendars"].([]any) {
+		c := c.(map[string]any)
+		ro[c["id"].(string)] = c["read_only"]
+	}
+	if ro["cal-a"] != true || ro["cal-b"] != false {
+		t.Errorf("calendars_list read_only = %v, want cal-a true, cal-b false", ro)
+	}
+	st := mustCall(t, cs, "status", map[string]any{})
+	sro := map[string]any{}
+	for _, a := range st["accounts"].([]any) {
+		a := a.(map[string]any)
+		sro[a["id"].(string)] = a["read_only"]
+	}
+	if sro["a1"] != true || sro["b2"] != false {
+		t.Errorf("status read_only = %v, want a1 true, b2 false", sro)
+	}
+	// The same session writes to bob.
+	mustCall(t, cs, "event_create", create("b2"))
+	if w := hub.agendas["b2"].writes(); len(w.creates) != 1 {
+		t.Errorf("bob's creates %+v, want one", w.creates)
+	}
+	// Turned back to read-write, alice takes the session's next write.
+	hub.set("a1", func(a *service.AccountInfo) { a.MCPMode = service.MCPReadWrite })
+	mustCall(t, cs, "event_create", create("a1"))
+	if w := hub.agendas["a1"].writes(); len(w.creates) != 1 {
+		t.Errorf("alice's creates after read-write %+v, want one", w.creates)
+	}
+}

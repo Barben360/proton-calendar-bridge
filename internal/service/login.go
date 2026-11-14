@@ -294,6 +294,7 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 			Address:     loginAddress(cur, username, relogin),
 			CalDAV:      cur.CalDAV,
 			MCP:         cur.MCP,
+			MCPReadOnly: cur.MCPReadOnly,
 			Created:     createdOr(cur, now),
 		}
 	})
@@ -442,7 +443,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		st := store.State{
 			AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 			LastLogin: now, LastRelogin: pl.last.LastRelogin,
-			Address: loginAddress(cur, pl.username, pl.relogin), CalDAV: cur.CalDAV, MCP: cur.MCP, Created: createdOr(cur, now),
+			Address: loginAddress(cur, pl.username, pl.relogin), CalDAV: cur.CalDAV, MCP: cur.MCP, MCPReadOnly: cur.MCPReadOnly, Created: createdOr(cur, now),
 		}
 		if pl.relogin {
 			st.LastLogin, st.LastRelogin = pl.last.LastLogin, now

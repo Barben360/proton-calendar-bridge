@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -39,15 +40,15 @@ func screenshotView() ui.View {
 		Accounts: []ui.AccountView{
 			{
 				ID: "1a2b3c4d", Address: "alice@proton.me", Short: "synced 1 min ago", Dot: ui.TrayOK,
-				SignedIn: true, CalDAV: true, MCP: true, LastSync: &synced,
+				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite, LastSync: &synced,
 				URL: "http://127.0.0.1:1080/dav/1a2b3c4d/", Username: "alice@proton.me",
 				Calendars: []ui.CalendarView{
 					{Name: "Personal"},
 					{Name: "Holidays in France", ReadOnly: true, Badge: "read-only: subscribed calendar"},
 				},
 			},
-			{ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing, SignedIn: true, CalDAV: true, MCP: false},
-			{ID: "9c0d1e2f", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false},
+			{ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing, SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly},
+			{ID: "9c0d1e2f", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false, MCPMode: service.MCPOff},
 		},
 	}
 }

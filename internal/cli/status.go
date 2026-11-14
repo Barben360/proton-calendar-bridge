@@ -220,7 +220,7 @@ func mcpText(m ctl.MCP) string {
 }
 
 // accountMarks says, after an account's name, what sets it apart: a
-// pending add, CalDAV off, MCP off, a stopped loop.
+// pending add, CalDAV off, MCP off or read-only, a stopped loop.
 func accountMarks(info service.AccountInfo) string {
 	var marks []string
 	if info.Pending {
@@ -229,8 +229,8 @@ func accountMarks(info service.AccountInfo) string {
 	if !info.CalDAV {
 		marks = append(marks, "CalDAV off")
 	}
-	if !info.MCP {
-		marks = append(marks, "MCP off")
+	if w := mcpWord(info); w != string(service.MCPReadWrite) {
+		marks = append(marks, "MCP "+w)
 	}
 	if info.Stopped != nil {
 		marks = append(marks, "stopped")

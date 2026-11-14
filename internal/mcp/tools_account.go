@@ -344,6 +344,9 @@ func (ss *session) logout(ctx context.Context, req *sdkmcp.CallToolRequest, in l
 	}
 	a := ts[0].info
 	auditOf(ctx).account(a.ID)
+	if err := mayWrite(a); err != nil {
+		return logoutOut{}, nil, err
+	}
 	if asksForm(req) {
 		answer, asked := req.Params.InputResponses[confirmLogoutKey]
 		if !asked {

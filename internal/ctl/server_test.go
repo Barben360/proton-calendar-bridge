@@ -164,13 +164,13 @@ func (h *stubHub) SetCalDAV(_ context.Context, selector string, on bool) (servic
 	return i, err
 }
 
-func (h *stubHub) SetMCP(_ context.Context, selector string, on bool) (service.AccountInfo, error) {
+func (h *stubHub) SetMCP(_ context.Context, selector string, mode service.MCPMode) (service.AccountInfo, error) {
 	i, err := h.find(selector)
 	if err == nil {
 		h.mu.Lock()
-		h.mcp = append(h.mcp, selector+"="+map[bool]string{true: "on", false: "off"}[on])
+		h.mcp = append(h.mcp, selector+"="+string(mode))
 		h.mu.Unlock()
-		i.MCP = on
+		i.MCP, i.MCPMode = mode != service.MCPOff, mode
 	}
 	return i, err
 }
@@ -802,12 +802,12 @@ func TestAccountRoutesReachTheHub(t *testing.T) {
 	if info, err = c.SetCalDAV(ctx, idB, true); err != nil || !info.CalDAV {
 		t.Fatalf("SetCalDAV on = %+v, %v", info, err)
 	}
-	info, err = c.SetMCP(ctx, addrB, false) // by address
+	info, err = c.SetMCP(ctx, addrB, service.MCPOff) // by address
 	if err != nil || info.ID != idB || info.MCP || !info.CalDAV {
 		t.Fatalf("SetMCP off = %+v, %v", info, err)
 	}
-	if info, err = c.SetMCP(ctx, idB, true); err != nil || !info.MCP {
-		t.Fatalf("SetMCP on = %+v, %v", info, err)
+	if info, err = c.SetMCP(ctx, idB, service.MCPReadOnly); err != nil || info.MCPMode != service.MCPReadOnly {
+		t.Fatalf("SetMCP read-only = %+v, %v", info, err)
 	}
 	if info, err = c.Restart(ctx, idA); err != nil || info.ID != idA {
 		t.Fatalf("Restart = %+v, %v", info, err)
@@ -816,7 +816,7 @@ func TestAccountRoutesReachTheHub(t *testing.T) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	if !slices.Equal(hub.logoutFor, []string{idB}) || !slices.Equal(hub.removed, []string{addrA}) ||
-		!slices.Equal(hub.caldav, []string{idB + "=off", idB + "=on"}) || !slices.Equal(hub.mcp, []string{addrB + "=off", idB + "=on"}) ||
+		!slices.Equal(hub.caldav, []string{idB + "=off", idB + "=on"}) || !slices.Equal(hub.mcp, []string{addrB + "=off", idB + "=read-only"}) ||
 		!slices.Equal(hub.restarted, []string{idA}) {
 		t.Errorf("hub calls: logout %v, remove %v, caldav %v, mcp %v, restart %v", hub.logoutFor, hub.removed, hub.caldav, hub.mcp, hub.restarted)
 	}
@@ -826,13 +826,14 @@ func TestAccountRoutesReachTheHub(t *testing.T) {
 }
 
 // The caldav and mcp switches must be given: a body without "on" is no
-// request.
+// request, nor an mcp body without "mode" or with both.
 func TestCalDAVNeedsItsSwitch(t *testing.T) {
 	t.Parallel()
 	hub := newHub(service.Status{Phase: "ready"})
 	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
-	for _, adapter := range []string{"caldav", "mcp"} {
-		for _, body := range []string{``, `{}`, `{"on":`, `{"on":"yes"}`} {
+	bad := []string{``, `{}`, `{"on":`, `{"on":"yes"}`}
+	for adapter, bodies := range map[string][]string{"caldav": bad, "mcp": append(bad, `{"mode":true}`, `{"on":true,"mode":"off"}`)} {
+		for _, body := range bodies {
 			resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/"+idA+"/"+adapter, strings.NewReader(body))
 			if resp.StatusCode != http.StatusBadRequest || env["ok"] != false {
 				t.Errorf("%s, body %q: HTTP %d, envelope %v; want 400", adapter, body, resp.StatusCode, env)
@@ -841,6 +842,24 @@ func TestCalDAVNeedsItsSwitch(t *testing.T) {
 	}
 	if len(hub.caldav)+len(hub.mcp) != 0 {
 		t.Errorf("a refused body switched an adapter: caldav %v, mcp %v", hub.caldav, hub.mcp)
+	}
+}
+
+// The mcp body from before the read-only mode is still taken: "on" false
+// is off, true read-write; "mode" goes to the Hub as given.
+func TestMCPTakesTheOnBody(t *testing.T) {
+	t.Parallel()
+	hub := newHub(service.Status{Phase: "ready"})
+	s := serve(t, &ctl.Server{Hub: hub, Daemon: daemon()})
+	for _, body := range []string{`{"on":false}`, `{"on":true}`, `{"mode":"read-only"}`} {
+		if resp, env := raw(t, s.path, http.MethodPost, "/v2/accounts/"+idA+"/mcp", strings.NewReader(body)); resp.StatusCode != http.StatusOK {
+			t.Errorf("body %s: HTTP %d, envelope %v; want 200", body, resp.StatusCode, env)
+		}
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if want := []string{idA + "=off", idA + "=read-write", idA + "=read-only"}; !slices.Equal(hub.mcp, want) {
+		t.Errorf("hub mcp calls = %v, want %v", hub.mcp, want)
 	}
 }
 

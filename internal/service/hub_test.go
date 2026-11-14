@@ -817,7 +817,7 @@ func TestSetMCPPersists(t *testing.T) {
 	if got := find(h.Accounts(), ra.Account); got == nil || !got.MCP {
 		t.Fatalf("a new account: %+v, want MCP on (no mcp key)", got)
 	}
-	info, err := h.SetMCP(t.Context(), userA, false)
+	info, err := h.SetMCP(t.Context(), userA, service.MCPOff)
 	if err != nil || info.MCP || !info.CalDAV || info.ID != ra.Account {
 		t.Fatalf("SetMCP(off) = %+v, %v; want MCP off, CalDAV on", info, err)
 	}
@@ -835,14 +835,84 @@ func TestSetMCPPersists(t *testing.T) {
 	if got := find(h.Accounts(), ra.Account); got == nil || got.MCP {
 		t.Fatalf("after a sign-out: %+v, want MCP still off", got)
 	}
-	if info, err := h.SetMCP(t.Context(), ra.Account, true); err != nil || !info.MCP {
+	if info, err := h.SetMCP(t.Context(), ra.Account, service.MCPReadWrite); err != nil || !info.MCP {
 		t.Fatalf("SetMCP(on) = %+v, %v", info, err)
 	}
 	if got := find(h.Accounts(), ra.Account); got == nil || !got.MCP {
 		t.Fatalf("after on: %+v", got)
 	}
-	if _, err := h.SetMCP(t.Context(), "nobody@x", false); exitcode.From(err) != exitcode.Usage {
+	if _, err := h.SetMCP(t.Context(), "nobody@x", service.MCPOff); exitcode.From(err) != exitcode.Usage {
 		t.Errorf("SetMCP of an unknown account = %v, want exit 2", err)
+	}
+}
+
+// The MCP switch's read-only mode is the state.json key mcp_read_only
+// beside mcp: absent (every account before it) is read-write. It survives
+// a reopening and a sign-out; off then on (the alias of read-write) drops
+// it; an unknown mode writes nothing.
+func TestSetMCPReadOnlyPersists(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	h := e.open(t)
+	e.skip(t, h)
+	ra := e.mustLogin(t, h, userA)
+	dir := store.AccountDir(e.dirs.State, ra.Account)
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCPMode != service.MCPReadWrite || !got.MCP {
+		t.Fatalf("a new account: %+v, want MCP read-write", got)
+	}
+	info, err := h.SetMCP(t.Context(), userA, service.MCPReadOnly)
+	if err != nil || info.MCPMode != service.MCPReadOnly || !info.MCP || !info.CalDAV {
+		t.Fatalf("SetMCP(read-only) = %+v, %v; want MCP read-only (on), CalDAV on", info, err)
+	}
+	if st, err := store.LoadState(dir); err != nil || st.MCP == nil || !*st.MCP || !st.MCPReadOnly {
+		t.Fatalf("state.json after read-only: mcp %v, mcp_read_only %v, %v; want true, true", st.MCP, st.MCPReadOnly, err)
+	}
+	_ = h.Close()
+	h = e.open(t)
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCPMode != service.MCPReadOnly {
+		t.Fatalf("after reopening: %+v, want MCP read-only", got)
+	}
+	if _, err := h.SignOut(t.Context(), ra.Account, service.LogoutRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCPMode != service.MCPReadOnly {
+		t.Fatalf("after a sign-out: %+v, want MCP still read-only", got)
+	}
+	if _, err := h.SetMCP(t.Context(), ra.Account, "write-only"); exitcode.From(err) != exitcode.Usage {
+		t.Errorf("SetMCP(write-only) = %v, want exit 2", err)
+	}
+	if got := find(h.Accounts(), ra.Account); got == nil || got.MCPMode != service.MCPReadOnly {
+		t.Fatalf("after an unknown mode: %+v, want MCP still read-only", got)
+	}
+	if info, err := h.SetMCP(t.Context(), ra.Account, service.MCPOff); err != nil || info.MCPMode != service.MCPOff || info.MCP {
+		t.Fatalf("SetMCP(off) = %+v, %v", info, err)
+	}
+	if st, err := store.LoadState(dir); err != nil || st.MCPReadOnly {
+		t.Fatalf("state.json after off: mcp_read_only %v, %v; want it dropped", st.MCPReadOnly, err)
+	}
+	mode, err := service.ParseMCPMode("on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := h.SetMCP(t.Context(), ra.Account, mode); err != nil || info.MCPMode != service.MCPReadWrite {
+		t.Fatalf("SetMCP(on) = %+v, %v; want read-write", info, err)
+	}
+}
+
+// ParseMCPMode takes the three modes and on (read-write); anything else
+// is a usage error.
+func TestParseMCPMode(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]service.MCPMode{"off": service.MCPOff, "read-only": service.MCPReadOnly,
+		"read-write": service.MCPReadWrite, "on": service.MCPReadWrite} {
+		if got, err := service.ParseMCPMode(in); err != nil || got != want {
+			t.Errorf("ParseMCPMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "ro", "Read-Only", "true", "full"} {
+		if got, err := service.ParseMCPMode(in); exitcode.From(err) != exitcode.Usage {
+			t.Errorf("ParseMCPMode(%q) = %q, %v; want exit 2", in, got, err)
+		}
 	}
 }
 

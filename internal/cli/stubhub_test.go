@@ -24,6 +24,7 @@ type stubAccount struct {
 	pending     bool
 	caldavOff   bool
 	mcpOff      bool
+	mcpReadOnly bool
 }
 
 // stubHub is a cli.Hub over stub services, one per account, choosing among
@@ -72,7 +73,15 @@ func (h *stubHub) info(a *stubAccount) service.AccountInfo {
 	if address == "" {
 		address = st.Address
 	}
-	return service.AccountInfo{ID: a.id, Address: address, Phase: st.Phase, Pending: a.pending, CalDAV: !a.caldavOff, MCP: !a.mcpOff}
+	info := service.AccountInfo{ID: a.id, Address: address, Phase: st.Phase, Pending: a.pending, CalDAV: !a.caldavOff, MCP: !a.mcpOff,
+		MCPMode: service.MCPReadWrite}
+	switch {
+	case a.mcpOff:
+		info.MCPMode = service.MCPOff
+	case a.mcpReadOnly:
+		info.MCPMode = service.MCPReadOnly
+	}
+	return info
 }
 
 func (h *stubHub) list() []*stubAccount {
@@ -205,14 +214,14 @@ func (h *stubHub) SetCalDAV(_ context.Context, sel string, on bool) (service.Acc
 	return h.info(a), nil
 }
 
-func (h *stubHub) SetMCP(_ context.Context, sel string, on bool) (service.AccountInfo, error) {
+func (h *stubHub) SetMCP(_ context.Context, sel string, mode service.MCPMode) (service.AccountInfo, error) {
 	a, err := h.pick(sel)
 	if err != nil {
 		return service.AccountInfo{}, err
 	}
-	h.record("mcp " + a.id + " " + map[bool]string{true: "on", false: "off"}[on])
+	h.record("mcp " + a.id + " " + string(mode))
 	h.mu.Lock()
-	a.mcpOff = !on
+	a.mcpOff, a.mcpReadOnly = mode == service.MCPOff, mode == service.MCPReadOnly
 	h.mu.Unlock()
 	return h.info(a), nil
 }

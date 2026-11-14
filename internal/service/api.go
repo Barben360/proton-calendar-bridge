@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 )
 
@@ -199,7 +200,8 @@ type LoginResult struct {
 // Pending: an add that has not completed its first login (it waits for a
 // CAPTCHA or a 2FA code); it does not count for the account selector.
 // CalDAV and MCP are the account's adapter switches (its serve loop runs
-// while either is on). Stopped is set while its serve loop is parked on an
+// while either is on); MCPMode is the MCP switch in full, MCP being
+// MCPMode != MCPOff. Stopped is set while its serve loop is parked on an
 // error a login cannot fix.
 type AccountInfo struct {
 	ID      string    `json:"id"`
@@ -208,7 +210,37 @@ type AccountInfo struct {
 	Pending bool      `json:"pending"`
 	CalDAV  bool      `json:"caldav"`
 	MCP     bool      `json:"mcp"`
+	MCPMode MCPMode   `json:"mcp_mode"`
 	Stopped *StopInfo `json:"stopped,omitempty"`
+}
+
+// MCPMode is an account's MCP switch: what every agent may do with the
+// account, on top of what its grant allows. Off hides the account from
+// agents; read-only keeps them to reads; read-write leaves the grant alone.
+type MCPMode string
+
+// The MCP modes, in the order they are shown.
+const (
+	MCPOff       MCPMode = "off"
+	MCPReadOnly  MCPMode = "read-only"
+	MCPReadWrite MCPMode = "read-write"
+)
+
+// MCPModes are the modes, in the order they are shown.
+var MCPModes = []MCPMode{MCPOff, MCPReadOnly, MCPReadWrite}
+
+// ParseMCPMode reads a mode by its name; "on" is read-write, as the switch
+// was on/off before it had a read-only mode.
+func ParseMCPMode(s string) (MCPMode, error) {
+	if s == "on" {
+		return MCPReadWrite, nil
+	}
+	for _, m := range MCPModes {
+		if s == string(m) {
+			return m, nil
+		}
+	}
+	return "", usage(strconv.Quote(s)+" is not an MCP mode", "use off, read-only or read-write")
 }
 
 // StopInfo is why and when an account's serve loop stopped: the exit code,

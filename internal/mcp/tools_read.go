@@ -85,6 +85,7 @@ type accountStatus struct {
 	Account        string      `json:"account" jsonschema:"the account's address"`
 	ID             string      `json:"id" jsonschema:"the account's local ID"`
 	Phase          string      `json:"phase" jsonschema:"ready, needs-login, needs-captcha or stopped"`
+	ReadOnly       bool        `json:"read_only" jsonschema:"the person keeps agents to reads on this account: every change is refused"`
 	LastSyncAgeS   *int        `json:"last_sync_age_s,omitempty" jsonschema:"seconds since the last successful sync"`
 	StaleCalendars []string    `json:"stale_calendars,omitempty" jsonschema:"IDs of calendars whose sync fails or has not happened"`
 	Alerts         []alertView `json:"alerts,omitempty"`
@@ -132,7 +133,7 @@ func (ss *session) loginStep() string {
 }
 
 func (ss *session) accountStatus(ctx context.Context, a service.AccountInfo, now time.Time) accountStatus {
-	st := accountStatus{Account: a.Address, ID: a.ID, Phase: a.Phase}
+	st := accountStatus{Account: a.Address, ID: a.ID, Phase: a.Phase, ReadOnly: mayWrite(a) != nil}
 	if s := a.Stopped; s != nil {
 		st.Phase = phaseStopped
 		st.Alerts = append(st.Alerts, alertView{Code: "account-stopped", Message: s.Message, Step: s.Hint})
@@ -193,7 +194,7 @@ type calendarView struct {
 	Account   string       `json:"account"`
 	Color     string       `json:"color,omitempty"`
 	Type      string       `json:"type" jsonschema:"normal, subscribed or holidays"`
-	ReadOnly  bool         `json:"read_only" jsonschema:"pcb does not write to it (its write gate)"`
+	ReadOnly  bool         `json:"read_only" jsonschema:"pcb does not write to it (its write gate, or the account is read-only for agents)"`
 	Default   bool         `json:"default"`
 	Untrusted calendarText `json:"untrusted"`
 }
@@ -239,7 +240,7 @@ func addCalendarsList(ss *session) {
 					continue
 				}
 				out.Calendars = append(out.Calendars, calendarView{ID: c.ID, Account: t.info.Address, Color: c.Color, Type: c.Type,
-					ReadOnly: c.ReadOnly, Default: c.Default, Untrusted: calendarText{Name: c.Name, Description: c.Description}})
+					ReadOnly: c.ReadOnly || mayWrite(info) != nil, Default: c.Default, Untrusted: calendarText{Name: c.Name, Description: c.Description}})
 			}
 		}
 		if err := f.err(); err != nil {
@@ -674,7 +675,7 @@ type eventOut struct {
 	Account           string          `json:"account"`
 	CalendarID        string          `json:"calendar_id"`
 	CalendarType      string          `json:"calendar_type"`
-	ReadOnly          bool            `json:"read_only" jsonschema:"pcb does not write to its calendar"`
+	ReadOnly          bool            `json:"read_only" jsonschema:"pcb does not write to its calendar (its write gate, or the account is read-only for agents)"`
 	ETag              string          `json:"etag"`
 	ExternalOrganizer bool            `json:"external_organizer"`
 	ThirdParty        bool            `json:"third_party"`
@@ -700,7 +701,7 @@ func addEventGet(ss *session) {
 		external := d.ExternalOrganizer // the service's judgement, as the lists'
 		out := eventOut{
 			EventID: in.EventID, Account: info.Address, CalendarID: ref.CalendarID, CalendarType: d.CalendarType,
-			ReadOnly: d.ReadOnly, ETag: d.ETag, ExternalOrganizer: external, ThirdParty: external || d.CalendarType != "normal",
+			ReadOnly: d.ReadOnly || mayWrite(info) != nil, ETag: d.ETag, ExternalOrganizer: external, ThirdParty: external || d.CalendarType != "normal",
 			Event: component(d.Data),
 		}
 		for _, ov := range d.Data.Overrides {
