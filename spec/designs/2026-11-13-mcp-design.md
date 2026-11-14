@@ -1,7 +1,7 @@
 # MCP adapter (M8) — design
 
 - **Date**: 2026-11-13
-- **Status**: design approved by the author 2026-11-13; built in M8 on 2026-11-13 (branch `m8-mcp`; live session pending, `spec/HUMAN-CHECKS.md` step 10). Where the built code differs, the paragraph says so, marked "*Built:*" with the controller ruling (`.superpowers/sdd/2026-11-13-m8-mcp/progress.md`, summarised in SPEC §18); the code wins, and SPEC §12 describes what is built
+- **Status**: design approved by the author 2026-11-13; built in M8 on 2026-11-13 (branch `m8-mcp`; live session run 2026-11-13/14, `spec/HUMAN-CHECKS.md` step 10, `spec/experiments/M8-live.md`). Where the built code differs, the paragraph says so, marked "*Built:*" with the controller ruling (`.superpowers/sdd/2026-11-13-m8-mcp/progress.md`, summarised in SPEC §18); the code wins, and SPEC §12 describes what is built
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call]. Two Sonnet reviews (architecture; security and tool surface) read the proposal against the code; their findings are folded in and marked [review].
 - **Amends**: decision 0007 (MCP not planned) and SPEC §12 (the note "agents never on the control socket"), via a new decision 0016; SPEC §3 (MCP in "not planned"), §4 (A4), §4.1 (the loop rule and the adapters switch of decision 0014, §5.5b), §13 (`pcb mcp`), §14 (`[mcp]`), §18 (M8).
 
