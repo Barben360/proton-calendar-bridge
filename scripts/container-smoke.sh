@@ -9,8 +9,11 @@
 # PCB_SMOKE_IMAGE when set (CI tests the image it pushed, by digest; it is
 # kept). With PCB_SMOKE_VERSION set, the image's version label and
 # pcb version --json must both equal it, and its revision label the commit
-# pcb was stamped with. The container, its volume and a throwaway image are
-# removed on any exit. The last line is PASS.
+# pcb was stamped with; with PCB_SMOKE_REVISION set too (a full SHA, as
+# image-build.yml labels it), the revision label must equal it and pcb's
+# (short) commit be its prefix; set without PCB_SMOKE_VERSION, it is
+# refused. The container, its volume and a throwaway image are removed on
+# any exit. The last line is PASS.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -76,6 +79,11 @@ wait_healthy() {
 	done
 }
 
+# PCB_SMOKE_REVISION is checked in step 1b, which PCB_SMOKE_VERSION enables.
+if [ -n "${PCB_SMOKE_REVISION:-}" ] && [ -z "${PCB_SMOKE_VERSION:-}" ]; then
+	fail "PCB_SMOKE_REVISION needs PCB_SMOKE_VERSION: without it the labels are not checked"
+fi
+
 step "1. build"
 if [ -z "$image" ]; then
 	built="pcb:$id"
@@ -84,15 +92,28 @@ if [ -z "$image" ]; then
 fi
 
 if [ -n "${PCB_SMOKE_VERSION:-}" ]; then
-	step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label pcb's commit"
+	if [ -n "${PCB_SMOKE_REVISION:-}" ]; then
+		step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label $PCB_SMOKE_REVISION (pcb's commit its prefix)"
+	else
+		step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label pcb's commit"
+	fi
 	labels=$(docker image inspect -f '{{json .Config.Labels}}' "$image")
 	ver=$(docker run --rm --network none "$image" version --json) || fail "pcb version --json failed: $ver"
 	jq -e --arg v "$PCB_SMOKE_VERSION" '.ok == true and .data.version == $v' <<<"$ver" >/dev/null ||
 		fail "pcb version --json: want version $PCB_SMOKE_VERSION: $ver"
 	jq -e --arg v "$PCB_SMOKE_VERSION" '.["org.opencontainers.image.version"] == $v' <<<"$labels" >/dev/null ||
 		fail "org.opencontainers.image.version: want $PCB_SMOKE_VERSION: $labels"
-	jq -e --arg c "$(jq -r .data.commit <<<"$ver")" '.["org.opencontainers.image.revision"] == $c' <<<"$labels" >/dev/null ||
-		fail "org.opencontainers.image.revision: want pcb's commit $(jq -r .data.commit <<<"$ver"): $labels"
+	commit=$(jq -r .data.commit <<<"$ver")
+	if [ -n "${PCB_SMOKE_REVISION:-}" ]; then
+		[[ $PCB_SMOKE_REVISION =~ ^[0-9a-f]{40}$ ]] || fail "PCB_SMOKE_REVISION is not a full commit SHA: $PCB_SMOKE_REVISION"
+		[[ $commit =~ ^[0-9a-f]{7,40}$ && $PCB_SMOKE_REVISION == "$commit"* ]] ||
+			fail "pcb's commit $commit is not a prefix of $PCB_SMOKE_REVISION"
+		jq -e --arg c "$PCB_SMOKE_REVISION" '.["org.opencontainers.image.revision"] == $c' <<<"$labels" >/dev/null ||
+			fail "org.opencontainers.image.revision: want $PCB_SMOKE_REVISION: $labels"
+	else
+		jq -e --arg c "$commit" '.["org.opencontainers.image.revision"] == $c' <<<"$labels" >/dev/null ||
+			fail "org.opencontainers.image.revision: want pcb's commit $commit: $labels"
+	fi
 fi
 
 step "2. run $image with a fresh volume on 127.0.0.1:$port"

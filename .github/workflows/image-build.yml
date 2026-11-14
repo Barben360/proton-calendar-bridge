@@ -27,6 +27,11 @@ on:
         description: The tags to put on the manifest list, newline-separated, without the repository.
         type: string
         required: true
+      owner-only:
+        description: Refuse unless the run's actor and triggering actor are the repository owner.
+        type: boolean
+        required: false
+        default: false
     outputs:
       digest:
         description: The manifest list's digest.
@@ -68,10 +73,27 @@ jobs:
         run: |
           [[ $REF =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref is not a full commit SHA: $REF"; exit 1; }
           [[ $VERSION =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || { echo "::error::not a version: $VERSION"; exit 1; }
+      # release.yml: "Re-run failed jobs" on a failed image job skips its
+      # checks job, and with it the owner check; this one runs again,
+      # before any code of inputs.ref is checked out.
+      # Same check: publish below, release.yml's checks and release jobs.
+      - name: Refuse an image started by anyone but the owner
+        if: inputs.owner-only
+        run: |
+          for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
+            [ "$a" = "$GITHUB_REPOSITORY_OWNER" ] || { echo "::error::$a is not $GITHUB_REPOSITORY_OWNER: only the owner releases"; exit 1; }
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      # The tags are put on the list by publish; a bad one fails here,
+      # before anything is built or pushed.
+      - name: Check the tags
+        env:
+          TAGS: ${{ inputs.tags }}
+        run: |
+          scripts/release/check.sh image-tag-list <<<"$TAGS" >/dev/null 2>"$RUNNER_TEMP/tags.err" || { echo "::error::tags input: $(cat "$RUNNER_TEMP/tags.err")"; exit 1; }
       - name: Set up the builder
         run: docker buildx create --name "$BUILDX_BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --bootstrap
       - name: Log in to GHCR
@@ -82,12 +104,15 @@ jobs:
         id: build
         env:
           VERSION: ${{ inputs.version }}
+          REF: ${{ inputs.ref }}
         run: |
           meta="$RUNNER_TEMP/build-metadata.json"
           # No BuildKit attestations: the image is a single manifest, and
-          # its provenance is the publish job's attestation.
+          # its provenance is the publish job's attestation. The revision
+          # label is the full SHA (--label overrides the Dockerfile's);
+          # pcb version keeps the short commit make stamps.
           make image IMAGE="$REPO" VERSION="$VERSION" \
-            IMAGE_FLAGS="--provenance=false --sbom=false --output type=image,push-by-digest=true,name-canonical=true,push=true --metadata-file $meta"
+            IMAGE_FLAGS="--provenance=false --sbom=false --label org.opencontainers.image.revision=$REF --output type=image,push-by-digest=true,name-canonical=true,push=true --metadata-file $meta"
           digest=$(jq -r '."containerimage.digest" // ""' "$meta")
           [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no image digest in the build metadata"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -95,13 +120,14 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           VERSION: ${{ inputs.version }}
+          REF: ${{ inputs.ref }}
           ARCH: ${{ matrix.arch }}
         run: |
           image="$REPO@$DIGEST"
           docker pull "$image"
           got=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")
           [ "$got" = "linux/$ARCH" ] || { echo "::error::$image is $got, want linux/$ARCH"; exit 1; }
-          PCB_SMOKE_IMAGE="$image" PCB_SMOKE_VERSION="$VERSION" scripts/container-smoke.sh
+          PCB_SMOKE_IMAGE="$image" PCB_SMOKE_VERSION="$VERSION" PCB_SMOKE_REVISION="$REF" scripts/container-smoke.sh
       - name: Hand the smoke-tested digest on
         id: handoff
         env:
@@ -122,7 +148,17 @@ jobs:
       attestations: write
     outputs:
       digest: ${{ steps.list.outputs.digest }}
+    # No checkout: this job holds id-token and attestations, so it runs no
+    # code of any ref; its checks are inline.
     steps:
+      # "Re-run failed jobs" on a failed publish runs this job alone.
+      # Same check: the build job above, release.yml's checks and release jobs.
+      - name: Refuse an image started by anyone but the owner
+        if: inputs.owner-only
+        run: |
+          for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
+            [ "$a" = "$GITHUB_REPOSITORY_OWNER" ] || { echo "::error::$a is not $GITHUB_REPOSITORY_OWNER: only the owner releases"; exit 1; }
+          done
       - name: Log in to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -137,6 +173,8 @@ jobs:
           for d in "$AMD64" "$ARM64"; do
             [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::an architecture's digest is missing: '$d'"; exit 1; }
           done
+          # The grammar of check.sh image-tag-list, which the build job ran
+          # (check_test.sh checks both say the same).
           args=()
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue

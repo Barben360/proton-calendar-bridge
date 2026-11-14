@@ -64,5 +64,17 @@ check "missing pcb refused" "$rc $(grep -c pcb <<<"$msg")" "2 1"
 msg=$("$pkg" linux amd64 "$bin" 2>&1); rc=$?
 check "missing argument refused" "$rc" 2
 
+# A copy of the tree with no git history and no SOURCE_DATE_EPOCH: no
+# mtime to stamp, so it refuses and writes no archive.
+cp=$tmp/nogit
+mkdir -p "$cp/scripts/release" "$cp/packaging" "$cp/internal/ui/desktop/icons"
+cp "$pkg" "$cp/scripts/release/"
+cp "$here/../../LICENSE" "$here/../../README.md" "$cp/"
+cp "$here/../../packaging/pcb-ui.desktop" "$cp/packaging/"
+cp "$here/../../internal/ui/desktop/icons/app.svg" "$cp/internal/ui/desktop/icons/"
+msg=$(env -u SOURCE_DATE_EPOCH GIT_CEILING_DIRECTORIES="$tmp" "$cp/scripts/release/package.sh" linux amd64 "$bin" "$tmp/out4" 2>&1); rc=$?
+check "no epoch, no git history refused" "$rc $msg" "2 package.sh: no SOURCE_DATE_EPOCH and no git history"
+check "no archive without an epoch" "$(find "$tmp/out4" -type f 2>/dev/null | wc -l)" 0
+
 if ((failures > 0)); then echo "$failures failed"; exit 1; fi
 echo PASS

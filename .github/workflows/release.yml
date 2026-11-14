@@ -71,6 +71,7 @@ jobs:
       # lets only the admin create v* tags (repository settings), and this
       # refuses anyone else. "Re-run failed jobs" skips this job once it
       # passed, so the release job checks the owner again.
+      # Same check: the release job, image-build.yml's build and publish jobs.
       - name: Refuse releases started by anyone but the owner
         run: |
           for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
@@ -406,6 +407,9 @@ jobs:
       ref: ${{ github.sha }}
       version: ${{ github.ref_name }}
       tags: ${{ needs.checks.outputs.image_tags }}
+      # "Re-run failed jobs" on this job skips checks: the build and
+      # publish jobs check the owner themselves.
+      owner-only: true
 
   release:
     needs: [checks, package, image]
@@ -422,6 +426,7 @@ jobs:
     steps:
       # "Re-run failed jobs" does not run checks again: whoever re-runs
       # must be the owner too.
+      # Same check: the checks job, image-build.yml's build and publish jobs.
       - name: Refuse releases started by anyone but the owner
         run: |
           for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do

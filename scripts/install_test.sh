@@ -332,6 +332,11 @@ test_prefix_forms() {
   want_rc 2
   has "$c/err" "--prefix needs a directory, not the option --no-ui"
   absent "$c/home/.local" "$c/cwd/--no-ui"
+  # The = form is refused alike.
+  run --prefix=-x
+  want_rc 2
+  has "$c/err" "--prefix needs a directory, not the option -x"
+  absent "$c/home/.local" "$c/cwd/-x"
   end_case
 }
 

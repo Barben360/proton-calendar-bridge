@@ -84,6 +84,8 @@ The run's jobs, in order: checks, the builds, the archives, macOS, `image`, `rel
 | the image's attestation | the version tags, on an image without its attestation, and no Release | "Re-run failed jobs": it builds the same commit again and moves those tags onto the attested image |
 | the last step, "The Release is published as decided" | everything: the Release is out | do not re-run; check the Release on GitHub and fix it there |
 
+Only the owner may re-run a release's `image` job: its build and publish jobs refuse anyone else before building or tagging, as checks does on the first run.
+
 ### A development image
 
 An image of any commit, branch or tag, tagged `sha-<12 hex>` of the commit it resolves to:
@@ -91,6 +93,8 @@ An image of any commit, branch or tag, tagged `sha-<12 hex>` of the commit it re
 ```sh
 gh workflow run image.yml -f ref=<sha>
 ```
+
+A commit on no branch or tag of this repository (a fork's, which GitHub resolves too) is refused: push it to a branch here first.
 
 ### Testing the release scripts
 

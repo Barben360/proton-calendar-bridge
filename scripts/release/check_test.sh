@@ -73,6 +73,17 @@ test_image_tags() {
   want_status "image-tags prerelease maybe" 2 "$check" image-tags v1.3.0-rc.1 maybe no
 }
 
+# image-build.yml's publish job runs no repository code, so it repeats
+# image-tag-list's grammar inline: both must say the same.
+test_tag_grammar_in_publish() {
+  local wf=$here/../../.github/workflows/image-build.yml ours theirs
+  ours=$(grep -F "not an image tag" "$check" | sed -n 's/.*=~ \(.*\) \]\].*/\1/p')
+  theirs=$(grep -F "not an image tag" "$wf" | sed -n 's/.*=~ \(.*\) \]\].*/\1/p')
+  if [ -z "$ours" ] || [ "$(wc -l <<<"$ours")" != 1 ]; then fail "no single grammar in check.sh: [$ours]"; fi
+  if [ -z "$theirs" ] || [ "$(wc -l <<<"$theirs")" != 1 ]; then fail "no single grammar in image-build.yml: [$theirs]"; fi
+  [ "$ours" = "$theirs" ] || fail "check.sh has $ours, image-build.yml's publish $theirs"
+}
+
 test_on_main() {
   local r=$tmp/repo
   git init -q -b main "$r"
@@ -86,7 +97,62 @@ test_on_main() {
   want_status "other-branch commit" 1 bash -c 'cd "$1" && "$2" on-main "$3" main' _ "$r" "$check" "$other_sha"
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_on_main; do
+# image_tag_list STDIN: stdout of `check.sh image-tag-list` fed STDIN.
+image_tag_list() { printf '%s' "$1" | "$check" image-tag-list; }
+
+test_image_tag_list() {
+  [ "$(image_tag_list $'1.2.3\n1.2\nlatest\n')" = $'1.2.3\n1.2\nlatest' ] || fail "release tags"
+  # Blank lines are skipped; a last line with no newline counts.
+  [ "$(image_tag_list $'\nsha-0123456789ab\n\n')" = sha-0123456789ab ] || fail "blank lines"
+  [ "$(image_tag_list 'a_b.c-d')" = a_b.c-d ] || fail "no trailing newline"
+  local max; max=$(printf 'a%.0s' {1..128})
+  [ "$(image_tag_list "$max")" = "$max" ] || fail "128 characters refused"
+  local bad
+  for bad in "${max}a" 'bad tag' -lead .lead a/b a:b ' x' $'ok\nb@d' $'ok\n\t'; do
+    printf '%s' "$bad" | want_status "refuse [$bad]" 2 "$check" image-tag-list
+  done
+  local err
+  err=$(image_tag_list $'1.2.3\nbad tag\n' 2>&1 >/dev/null || true)
+  [ "$err" = "check: not an image tag: 'bad tag'" ] || fail "message: $err"
+  for bad in '' $'\n\n'; do
+    printf '%s' "$bad" | want_status "refuse no tag [$bad]" 2 "$check" image-tag-list
+  done
+  err=$(image_tag_list $'\n' 2>&1 >/dev/null || true)
+  [ "$err" = "check: no tag given" ] || fail "message: $err"
+  # Nothing is printed when any tag is refused: no partial list.
+  [ -z "$(image_tag_list $'1.2.3\nbad tag\n' 2>/dev/null)" ] || fail "partial list printed"
+}
+
+test_reachable() {
+  local o=$tmp/origin w=$tmp/work g=(-c user.name=t -c user.email=t@example.invalid -c commit.gpgSign=false -c tag.gpgSign=false)
+  git init -q -b main "$o"
+  git -C "$o" "${g[@]}" commit -q --allow-empty -m on-main
+  local on_main; on_main=$(git -C "$o" rev-parse HEAD)
+  git -C "$o" checkout -q --detach
+  git -C "$o" "${g[@]}" commit -q --allow-empty -m tag-only
+  local tagged; tagged=$(git -C "$o" rev-parse HEAD)
+  git -C "$o" "${g[@]}" tag -a -m t1 t1
+  git -C "$o" checkout -q -b feature main
+  git -C "$o" "${g[@]}" commit -q --allow-empty -m feature-only
+  local feature; feature=$(git -C "$o" rev-parse HEAD)
+  git -C "$o" checkout -q main
+  git clone -q "$o" "$w"
+  git -C "$w" "${g[@]}" commit -q --allow-empty -m local-only
+  local local_only; local_only=$(git -C "$w" rev-parse HEAD)
+  # shellcheck disable=SC2016 # $1..$3 are for the inner bash
+  local in_w='cd "$1" && "$2" reachable "$3"'
+  want_status "a commit of a branch" 0 bash -c "$in_w" _ "$w" "$check" "$on_main"
+  # On an unmerged branch other than the default one: still this repository's.
+  want_status "a commit of a non-default branch only" 0 bash -c "$in_w" _ "$w" "$check" "$feature"
+  want_status "a commit of a tag only" 0 bash -c "$in_w" _ "$w" "$check" "$tagged"
+  # The local branch holds it, no remote branch nor tag does.
+  want_status "a commit of no remote branch nor tag" 1 bash -c "$in_w" _ "$w" "$check" "$local_only"
+  want_status "an unknown commit" 1 bash -c "$in_w" _ "$w" "$check" 0123456789abcdef0123456789abcdef01234567
+  want_status "a short SHA" 2 bash -c "$in_w" _ "$w" "$check" "${on_main::12}"
+  want_status "a branch name" 2 bash -c "$in_w" _ "$w" "$check" main
+}
+
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_tag_grammar_in_publish test_on_main test_reachable; do
   "$case_name"
   echo "ok   $case_name"
 done

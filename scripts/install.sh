@@ -41,7 +41,10 @@ parse_args() {
       prefix=$2 prefix_set=1
       shift
       ;;
-    --prefix=*) prefix=${1#--prefix=} prefix_set=1 ;;
+    --prefix=*)
+      prefix=${1#--prefix=} prefix_set=1
+      case $prefix in -*) die_usage "--prefix needs a directory, not the option $prefix" ;; esac
+      ;;
     --version) [ $# -ge 2 ] || die_usage "--version needs a version"; version=$2 version_set=1; shift ;;
     --version=*) version=${1#--version=} version_set=1 ;;
     --no-desktop) no_desktop=1 ;;
