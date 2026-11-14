@@ -25,7 +25,7 @@ Details: [security](security.md#log-in).
 |---|---|
 | `pcb account list` | Every account: local ID, address, phase, CalDAV on or off, MCP off, read-only or read-write, last sync. A pending add, stopped by a CAPTCHA, is listed too. |
 | `pcb account caldav on\|off` | The account's CalDAV switch. Off, its CalDAV clients are refused; its sync pauses only when MCP is off too. |
-| `pcb account mcp off\|read-only\|read-write` | What agents may do with the account, whatever their profile or token. Off, they do not see it, and its sync pauses only when CalDAV is off too. Read-only, they read it and every change is refused. Read-write, they do what their profile or token allows (the default). `on` means read-write. |
+| `pcb account mcp off\|read-only\|read-write` | What agents may do with the account, whatever their profile or token. Off, they do not see it, and its sync pauses only when CalDAV is off too. Read-only, they read it and every change is refused. Read-write, they do what their profile or token allows (the default; `pcb mcp`'s default profile allows everything). `on` means read-write. |
 | `pcb account restart` | Serves an account again after it stopped on an error (`pcb status` shows it as `account-stopped`). |
 | `pcb account remove [--yes]` | Signs the account out, then deletes its directory (its cache and CalDAV passwords too). |
 
@@ -71,7 +71,7 @@ Details: [Thunderbird](thunderbird.md#caldav-app-passwords).
 
 | Command | What it does |
 |---|---|
-| `pcb mcp [--profile read-only\|full] [--allow CAPS] [--account A]` | MCP for the agent that runs it, on stdin and stdout ([agents](agents.md)). |
+| `pcb mcp [--profile full\|read-only] [--allow CAPS] [--account A]` | MCP for the agent that runs it, on stdin and stdout; `full`, the default, allows everything, `read-only` reading and starting a login ([agents](agents.md)). |
 | `pcb mcp token add NAME --allow read` | A remote agent's bearer token, printed once. |
 | `pcb mcp token list`, `pcb mcp token remove NAME` | List the tokens (never their values), remove one. |
 

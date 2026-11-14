@@ -227,7 +227,7 @@ func (a *app) newAccountCalDAV() *cobra.Command {
 func (a *app) newAccountMCP() *cobra.Command {
 	return a.adapterSwitch("mcp", "MCP", "off|read-only|read-write", "off, read-only or read-write",
 		"Set what agents may do with the account: off (they do not see it; its sync pauses only when CalDAV is off too), "+
-			"read-only (they read, every change is refused, whatever their profile or token) or read-write (as their profile or token allows; on is read-write too)",
+			"read-only (they read, every change is refused, whatever their profile or token) or read-write (as their profile or token allows: everything for pcb mcp's default profile; on is read-write too)",
 		func(arg string) (accountChange, string, error) {
 			mode, err := service.ParseMCPMode(arg)
 			if err != nil {

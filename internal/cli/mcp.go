@@ -23,8 +23,8 @@ func (a *app) newMCP() *cobra.Command {
 		Long: "Speak MCP on stdin and stdout for the agent that runs this command; logs and warnings go to stderr. " +
 			"When a pcb daemon runs (pcb serve, pcb-ui), the session is relayed to it over its control socket; " +
 			"otherwise pcb mcp serves the accounts itself until the agent ends the session (kind mcp: no network " +
-			"listener, and pcb serve or pcb-ui cannot start meanwhile). --profile read-only (the default) allows " +
-			"reading and starting a login, full allows everything; --allow replaces the profile with a " +
+			"listener, and pcb serve or pcb-ui cannot start meanwhile). --profile full (the default) allows " +
+			"everything, read-only allows reading and starting a login; --allow replaces the profile with a " +
 			"comma-separated list among freebusy, read, write, delete, login, manage. --account limits the session " +
 			"to accounts (address or local ID, repeatable; none: every account). With a system-scope pcb service " +
 			"installed, use its remote /mcp with a token instead (pcb mcp token).",
@@ -42,7 +42,7 @@ func (a *app) newMCP() *cobra.Command {
 			return a.runMCP(cmd, g)
 		},
 	})
-	c.Flags().StringVar(&profile, "profile", "read-only", "what the agent may do: `PROFILE` read-only or full")
+	c.Flags().StringVar(&profile, "profile", "full", "what the agent may do: `PROFILE` full or read-only")
 	c.Flags().StringVar(&allow, "allow", "", "what the agent may do, instead of a profile: `CAPS` comma-separated among freebusy, read, write, delete, login, manage")
 	// --account here is the command's own (repeatable: the session's
 	// scope), in place of the root's selector; selecting lets it past the

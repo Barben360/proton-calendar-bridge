@@ -596,6 +596,52 @@ func TestMCPSelectorCallsSetMCP(t *testing.T) {
 	}
 }
 
+// Under the MCP selector, the command that adds pcb to Claude Code, with
+// its Copy, and what the agents of the shown mode may do: both settings
+// apply (issue 13), so Read-write says the agent's profile can still keep
+// it to reads. Off has nothing to add an agent to.
+func TestMCPAgentHint(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	if !f.visible(f.w.pane.agentRow) || !f.visible(f.w.pane.agentCopy) {
+		t.Fatal("no agent command under a Read-write account's MCP selector")
+	}
+	if !f.has("claude mcp add --scope user pcb -- pcb mcp") || !f.has("--profile read-only") || f.has("every change is refused") {
+		t.Errorf("Read-write hint: %v", f.texts())
+	}
+	test.Tap(f.w.pane.agentCopy)
+	if got := f.app.Clipboard().Content(); got != "claude mcp add --scope user pcb -- pcb mcp" {
+		t.Errorf("agent Copy: clipboard = %q", got)
+	}
+	v := twoAccounts()
+	v.Accounts[0].MCPMode = service.MCPReadOnly
+	f.w.Update(v)
+	if !f.visible(f.w.pane.agentRow) || !f.has("every change is refused") || f.has("--profile read-only") {
+		t.Errorf("Read-only hint: %v", f.texts())
+	}
+	f.w.Show("b2")
+	if f.visible(f.w.pane.agentRow) {
+		t.Error("agent command shown for an account with MCP off")
+	}
+	if len(f.act.got()) != 0 {
+		t.Errorf("the hint or its Copy called the bridge: %v", f.act.got())
+	}
+	// A choice that went through changes the hint at once, before the
+	// next update.
+	f.w.Show("a1")
+	f.w.pane.mcp.SetSelected("Read-write")
+	f.wait()
+	if !f.has("--profile read-only") {
+		t.Errorf("hint after choosing Read-write: %v", f.texts())
+	}
+	f.w.pane.mcp.SetSelected("Off")
+	f.wait()
+	if f.visible(f.w.pane.agentRow) {
+		t.Error("agent command still shown after choosing Off")
+	}
+}
+
 func TestRemoveAsksThenCalls(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts())
@@ -923,8 +969,8 @@ func TestConnectionCopiesURLAndUsername(t *testing.T) {
 	v.Accounts[1].CalDAV, v.Accounts[1].URL, v.Accounts[1].Username = true, "http://127.0.0.1:8080/dav/b2/", "bob@example.org"
 	f.w.Update(v)
 	f.w.Show("a1")
-	if got := f.copies(); len(got) != 3 {
-		t.Fatalf("Copy buttons in the connection block: %d, want 3 (URL, username, password)", len(got))
+	if got := f.copies(); len(got) != 4 {
+		t.Fatalf("Copy buttons: %d, want 4 (the agent command, then the connection's URL, username, password)", len(got))
 	}
 	test.Tap(f.w.pane.urlCopy)
 	if got := f.app.Clipboard().Content(); got != "http://127.0.0.1:8080/" {

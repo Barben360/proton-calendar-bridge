@@ -155,6 +155,10 @@ Where the password and the 2FA code can come from, and what to do when Proton as
 
 Run the install line again: it replaces the files with the latest release (or the one you name with `--version`), and says to restart a running pcb. From a clone, pull, rebuild and reinstall (`make install`, and `make install-ui` for the desktop app). Then restart what runs pcb: `pcb service restart`, Quit and start `pcb-ui` again, or recreate the container from the new image.
 
+### Agents added without a profile now edit
+
+`pcb mcp` with no `--profile` used to give the agent reads only. It now gives everything: reading, creating, editing and deleting events, and signing an account out. To keep an agent you added that way to reads, add it again with `--profile read-only` (`claude mcp remove pcb`, then `claude mcp add --scope user pcb -- pcb mcp --profile read-only`), or set its accounts to Read-only (`pcb account mcp read-only`, or the selector in `pcb-ui`). See [agents](agents.md#two-settings-the-stricter-wins).
+
 ### No downgrade after the multi-account layout
 
 The first command of a version with several accounts per process moves the state of an older, single-account version into `accounts/<id>/`: the session, the cache and the CalDAV passwords come across. After that:
