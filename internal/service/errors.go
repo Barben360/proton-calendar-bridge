@@ -363,10 +363,10 @@ func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, 
 	return mustAct("the state directory belongs to "+name+": run pcb as that user", "sudo -u "+sudoName+" pcb …")
 }
 
-// keyCause is why the key file or the sealed store could not be used, safe
-// to show (it never holds a secret): the OS error with its operation and
-// path (permission denied, read-only file system) or the key file's mode
-// refusal; "" when there is none to give (M5-R15 C2).
+// keyCause is why the key file, the sealed store or the login lock could
+// not be used, safe to show (it never holds a secret): the OS error with its
+// operation and path (permission denied, read-only file system) or the key
+// file's mode refusal; "" when there is none to give (M5-R15 C2).
 func keyCause(err error) string {
 	var (
 		me *seal.KeyModeError
@@ -477,7 +477,8 @@ func (l *Local) stateWriteError(err error) error {
 
 // acquireError maps what loginguard.Acquire returns: its own refusals are
 // already *exitcode.Error; the raw rest (no file locks off Unix, an
-// unwritable directory) becomes Blocked.
+// unwritable directory) becomes Blocked, naming the file-system cause (the
+// lock or the stamp that failed, and why) and no other error's text.
 func acquireError(err error, stateDir string) error {
 	var ee *exitcode.Error
 	switch {
@@ -486,7 +487,11 @@ func acquireError(err error, stateDir string) error {
 	case errors.Is(err, filelock.ErrUnsupported):
 		return final("login locking needs a Unix system", "run pcb on Linux or macOS")
 	}
-	return blocked("cannot take the login lock", "make sure "+stateDir+" is writable by this user")
+	msg := "cannot take the login lock"
+	if cause := keyCause(err); cause != "" {
+		msg += ": " + cause
+	}
+	return blocked(msg, "make sure "+stateDir+" is writable by this user")
 }
 
 // keysError is the secret-free reason a calendar's keys did not unlock:

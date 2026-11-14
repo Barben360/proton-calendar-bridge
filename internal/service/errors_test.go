@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,15 @@ func TestAcquireErrorIsBlocked(t *testing.T) {
 		if got := acquireError(err, "/state"); !errors.As(got, &ee) || ee.Code != exitcode.Blocked || ee.Hint == "" {
 			t.Errorf("acquireError(%v) = %#v, want Blocked with a hint", err, got)
 		}
+	}
+	// The file-system cause is named (the stamp's rename failing, say);
+	// another error's text is not.
+	rename := fmt.Errorf("recording the login time: %w", &os.LinkError{Op: "rename", Old: "/state/.tmp-1", New: "/state/login.stamp", Err: errors.New("the filename syntax is incorrect")})
+	if got := acquireError(rename, "/state"); !strings.Contains(got.Error(), "rename /state/.tmp-1 /state/login.stamp: the filename syntax is incorrect") {
+		t.Errorf("acquireError(rename) = %q, want it to name the rename and its cause", got)
+	}
+	if got := acquireError(errors.New("hunter2"), "/state"); strings.Contains(got.Error(), "hunter2") {
+		t.Errorf("acquireError leaked an unknown error's text: %q", got)
 	}
 	guard := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("busy"), Hint: "wait for it to finish"}
 	if got := acquireError(guard, "/state"); got != guard { //nolint:errorlint // identity is the point
