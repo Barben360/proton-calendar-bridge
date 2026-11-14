@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	_ "embed"
 	"image/color"
 
 	"fyne.io/fyne/v2"
@@ -99,9 +100,27 @@ var paper = map[fyne.ThemeVariant]map[fyne.ThemeColorName]color.Color{
 
 type paperTheme struct{}
 
-// Theme is the window's look, the Paper design: Fyne's fonts and icons with
-// its own colours and rounder corners.
+// Theme is the window's look, the Paper design: Inter for text, Fyne's
+// monospace and icons, its own colours and rounder corners.
 func Theme() fyne.Theme { return paperTheme{} }
+
+// Inter 4.1 (SIL OFL 1.1, fonts/OFL.txt), unmodified static files from the
+// release archive. Bold is drawn with SemiBold, as in the design.
+var (
+	//go:embed fonts/Inter-Regular.ttf
+	interRegular []byte
+	//go:embed fonts/Inter-SemiBold.ttf
+	interSemiBold []byte
+	//go:embed fonts/Inter-Italic.ttf
+	interItalic []byte
+	//go:embed fonts/Inter-SemiBoldItalic.ttf
+	interSemiBoldItalic []byte
+
+	fontRegular        = fyne.NewStaticResource("Inter-Regular.ttf", interRegular)
+	fontSemiBold       = fyne.NewStaticResource("Inter-SemiBold.ttf", interSemiBold)
+	fontItalic         = fyne.NewStaticResource("Inter-Italic.ttf", interItalic)
+	fontSemiBoldItalic = fyne.NewStaticResource("Inter-SemiBoldItalic.ttf", interSemiBoldItalic)
+)
 
 func (paperTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 	if v != theme.VariantDark {
@@ -113,7 +132,19 @@ func (paperTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color 
 	return theme.DefaultTheme().Color(n, v)
 }
 
-func (paperTheme) Font(s fyne.TextStyle) fyne.Resource { return theme.DefaultTheme().Font(s) }
+func (paperTheme) Font(s fyne.TextStyle) fyne.Resource {
+	switch {
+	case s.Monospace, s.Symbol:
+		return theme.DefaultTheme().Font(s)
+	case s.Bold && s.Italic:
+		return fontSemiBoldItalic
+	case s.Bold:
+		return fontSemiBold
+	case s.Italic:
+		return fontItalic
+	}
+	return fontRegular
+}
 
 func (paperTheme) Icon(n fyne.ThemeIconName) fyne.Resource { return theme.DefaultTheme().Icon(n) }
 

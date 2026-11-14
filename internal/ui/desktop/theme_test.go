@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"bytes"
 	"image/color"
 	"math"
 	"testing"
@@ -79,5 +80,33 @@ func TestNewWindowAppliesTheme(t *testing.T) {
 	got := f.app.Settings().Theme().Color(theme.ColorNamePrimary, theme.VariantLight)
 	if got != Theme().Color(theme.ColorNamePrimary, theme.VariantLight) || got == theme.DefaultTheme().Color(theme.ColorNamePrimary, theme.VariantLight) {
 		t.Errorf("primary = %v, want the Paper teal", got)
+	}
+}
+
+// Text is set in Inter (bold is its SemiBold, as in the design); monospace
+// and symbols stay Fyne's. Each embedded file is a real TrueType font.
+func TestThemeFonts(t *testing.T) {
+	th := Theme()
+	for _, c := range []struct {
+		style fyne.TextStyle
+		want  string
+	}{
+		{fyne.TextStyle{}, "Inter-Regular.ttf"},
+		{fyne.TextStyle{Bold: true}, "Inter-SemiBold.ttf"},
+		{fyne.TextStyle{Italic: true}, "Inter-Italic.ttf"},
+		{fyne.TextStyle{Bold: true, Italic: true}, "Inter-SemiBoldItalic.ttf"},
+	} {
+		r := th.Font(c.style)
+		if r.Name() != c.want {
+			t.Errorf("font %+v = %q, want %q", c.style, r.Name(), c.want)
+		}
+		if b := r.Content(); len(b) < 100_000 || !bytes.Equal(b[:4], []byte{0, 1, 0, 0}) {
+			t.Errorf("font %q is not a TrueType file (%d bytes)", r.Name(), len(b))
+		}
+	}
+	for _, s := range []fyne.TextStyle{{Monospace: true}, {Monospace: true, Bold: true}, {Symbol: true}} {
+		if got, want := th.Font(s), theme.DefaultTheme().Font(s); got != want {
+			t.Errorf("font %+v = %q, want Fyne's %q", s, got.Name(), want.Name())
+		}
 	}
 }
