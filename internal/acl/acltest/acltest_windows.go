@@ -48,9 +48,14 @@ func WantPrivate(t testing.TB, path string, _ fs.FileMode) {
 
 // Unreadable makes the file path unreadable by this user until t ends: a
 // deny ACE for reading its data, which leaves its attributes and access
-// list readable, as a mode 0000 file's stat is on Unix.
+// list readable, as a mode 0000 file's stat is on Unix. An elevated
+// administrator (SeBackupPrivilege) reads it anyway, as root reads a mode
+// 0000 file: the test is skipped then.
 func Unreadable(t testing.TB, path string) {
 	t.Helper()
+	if acl.Elevated() {
+		t.Skip("an elevated administrator reads a file its access list denies")
+	}
 	user, err := acl.UserSID()
 	if err != nil {
 		t.Fatal(err)
