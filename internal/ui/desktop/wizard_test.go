@@ -97,7 +97,7 @@ func TestWizardScreensFollowSteps(t *testing.T) {
 	}
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
-	f.tap("+ Add account")
+	f.tapAdd()
 	if !f.has("Repair the session without me") || !f.has(ui.UnattendedWarning) {
 		t.Errorf("credentials screen lacks the unattended checkbox and its warning: %v", f.texts())
 	}
@@ -151,7 +151,7 @@ func TestWizardClearsPasswordEntryOnSubmit(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	test.Type(f.entry("name@example.org"), "carol@example.org")
 	pw := f.entry("Proton password")
 	test.Type(pw, "hunter2")
@@ -175,7 +175,7 @@ func TestWizardShowsWaitingAfterCaptcha(t *testing.T) {
 	f.wiz.step = ui.StepCaptcha
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	f.wiz.block = make(chan struct{})
 	test.Tap(f.button("I solved it"))
 	if !f.has("Waiting for Proton (up to a minute)…") {
@@ -193,7 +193,7 @@ func TestWizardShowsError(t *testing.T) {
 	f.wiz.err = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("wrong password"), Hint: "check it"}
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	test.Type(f.entry("name@example.org"), "carol@example.org")
 	f.tap("Sign in")
 	if !f.has("wrong password") || !f.has("check it") {
@@ -213,7 +213,7 @@ func TestWizardCancelledWhenLeft(t *testing.T) {
 			f.wiz.step = ui.StepTOTP
 			f.w.Update(twoAccounts())
 			f.w.Show("")
-			f.tap("+ Add account")
+			f.tapAdd()
 			leave(f)
 			f.wait()
 			if got := f.wiz.got(); !slices.Equal(got, []string{"cancel"}) {
@@ -231,7 +231,7 @@ func TestWizardCancelRunsOffTheCallerGoroutine(t *testing.T) {
 	f.wiz.step = ui.StepTOTP
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	f.wiz.block = make(chan struct{})
 	done := make(chan struct{})
 	go func() { f.w.Hide(); close(done) }()
@@ -253,8 +253,8 @@ func TestAddAccountDuringWizardCancelsTheOldOne(t *testing.T) {
 	f.wiz.step = ui.StepTOTP
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
-	f.tap("+ Add account")
+	f.tapAdd()
+	f.tapAdd()
 	if got := f.wiz.got(); !slices.Equal(got, []string{"cancel"}) {
 		t.Errorf("calls = %v, want exactly one cancel of the first flow", got)
 	}
@@ -265,13 +265,13 @@ func TestAddAccountAfterDoneHidesThePassword(t *testing.T) {
 	f.wiz.step = ui.StepDone
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	f.tap("Show")
 	pb := f.w.wiz.done
 	if pb == nil || pb.label.Text != "wizard-pw" {
 		t.Fatal("setup: Done password not shown")
 	}
-	f.tap("+ Add account")
+	f.tapAdd()
 	if pb.label.Text != mask {
 		t.Errorf("Done password still displayed after starting another wizard: %q", pb.label.Text)
 	}
@@ -283,7 +283,7 @@ func TestDoneErrorIsShown(t *testing.T) {
 	f.wiz.doneErr = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("bridge stopped"), Hint: "restart it"}
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	if !f.has("bridge stopped") || !f.has("restart it") {
 		t.Errorf("Done error not shown with its hint: %v", f.texts())
 	}
@@ -317,7 +317,7 @@ func TestShowLoginKeepsALoginInProgress(t *testing.T) {
 	f.wiz.script = map[string]ui.Step{"submit carol@example.org": ui.StepTOTP, "cancel": ui.StepCredentials}
 	f.w.Update(twoAccounts())
 	f.w.Show("")
-	f.tap("+ Add account")
+	f.tapAdd()
 	f.entry("name@example.org").SetText("carol@example.org")
 	f.entry("Proton password").SetText("pw")
 	f.tap("Sign in")

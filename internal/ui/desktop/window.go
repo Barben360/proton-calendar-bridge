@@ -22,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -66,10 +67,15 @@ const (
 	paneSettings
 )
 
+// row is an account in the sidebar: its avatar, address and status line
+// over a flat button that takes the tap, and the selection's highlight.
 type row struct {
-	id  string
-	btn *widget.Button
-	dot *canvas.Circle
+	id          string
+	btn         *widget.Button
+	dot         *canvas.Circle
+	initial     *canvas.Text
+	addr, short *textLine
+	sel         *panel
 }
 
 // Window is the pcb-ui window. Every method runs on the main goroutine.
@@ -86,11 +92,15 @@ type Window struct {
 	mode     paneKind
 	selected string // the account of the account pane
 
-	banner *widget.Label
-	notice *widget.Label // the one-time no-tray line
-	rows   []row
-	rowBox *fyne.Container
-	right  *fyne.Container
+	banner    *widget.Label
+	bannerBox fyne.CanvasObject
+	notice    *widget.Label // the one-time no-tray line
+	rows      []row
+	rowBox    *fyne.Container
+	right     *fyne.Container
+	addBtn    *widget.Button // the sidebar's +
+	gear      *widget.Button
+	listen    *textLine // under Settings: where the bridge listens
 
 	pane     *accountPane
 	wiz      *wizardPane
@@ -113,26 +123,38 @@ type Window struct {
 // flow; open opens a URL in the browser.
 func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() WizardModel, open func(u *url.URL) error) *Window {
 	w := &Window{app: a, act: act, set: set, newWizard: newWizard, open: open, view: ui.View{Accounts: []ui.AccountView{}}, dispatch: fyne.Do}
+	a.Settings().SetTheme(Theme())
 	w.win = a.NewWindow("pcb")
 	w.banner = widget.NewLabel("")
 	w.banner.Wrapping = fyne.TextWrapWord
-	w.banner.Hide()
+	w.bannerBox = alertBox(w.banner)
+	w.bannerBox.Hide()
 	w.notice = widget.NewLabel("")
 	w.notice.Wrapping = fyne.TextWrapWord
+	w.notice.Importance = widget.LowImportance
 	w.notice.Hide()
-	w.rowBox = container.NewVBox()
+	w.rowBox = vbox(2)
 	w.pane = newAccountPane(w)
 	w.wiz = &wizardPane{w: w}
 	w.settings = newSettingsPane(w)
-	w.right = container.NewStack(widget.NewLabel("Add an account to start."))
+	w.right = container.NewStack(emptyPane("Add an account to start.", func() { w.openWizard("") }))
 
-	add := widget.NewButton("+ Add account", func() { w.openWizard("") })
-	gear := widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), w.openSettings)
-	left := container.NewBorder(nil, container.NewVBox(add, gear), nil, nil, container.NewVScroll(w.rowBox))
-	split := container.NewHSplit(left, container.NewPadded(w.right))
-	split.Offset = 0.3
-	w.win.SetContent(container.NewBorder(container.NewVBox(w.banner, w.notice), nil, nil, nil, split))
-	w.win.Resize(fyne.NewSize(800, 550))
+	w.addBtn = widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() { w.openWizard("") })
+	w.addBtn.Importance = widget.LowImportance
+	w.gear = widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), w.openSettings)
+	w.gear.Alignment = widget.ButtonAlignLeading
+	w.gear.Importance = widget.LowImportance
+	w.listen = newTextLine("", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
+	w.listen.Truncate = true
+	header := pad(0, 6, 6, 0, container.NewBorder(nil, nil, nil, w.addBtn,
+		newTextLine("Accounts", theme.ColorNameForeground, theme.SizeNameSubHeadingText, fyne.TextStyle{Bold: true})))
+	footer := vbox(4, widget.NewSeparator(), w.gear, pad(0, 0, 12, 0, w.listen))
+	sidebar := fixedWidth(250, newPanel(pad(14, 12, 10, 10, container.NewBorder(header, footer, nil, nil, container.NewVScroll(w.rowBox))), colorCard, "", 0, 0, 0))
+	top := pad(16, 0, 28, 28, vbox(8, w.bannerBox, w.notice))
+	main := container.NewBorder(top, nil, nil, nil, w.right)
+	w.win.SetContent(container.NewBorder(nil, nil, container.NewBorder(nil, nil, nil, widget.NewSeparator(), sidebar), nil, main))
+	w.win.SetPadded(false) // the sidebar runs to the window's edges
+	w.win.Resize(fyne.NewSize(880, 620))
 	w.win.SetCloseIntercept(w.onClose)
 	return w
 }
@@ -221,11 +243,11 @@ func (w *Window) confirm(title, text, yes string, do func()) {
 func dotColor(s ui.TrayState) color.Color {
 	switch s {
 	case ui.TrayAttention:
-		return color.NRGBA{R: 0xd6, G: 0x3b, B: 0x3b, A: 0xff}
+		return color.NRGBA{R: 0xd9, G: 0x77, B: 0x06, A: 0xff}
 	case ui.TraySyncing:
-		return color.NRGBA{R: 0xe0, G: 0xa1, B: 0x00, A: 0xff}
+		return color.NRGBA{R: 0x3b, G: 0x82, B: 0xf6, A: 0xff}
 	}
-	return color.NRGBA{R: 0x2e, G: 0x9e, B: 0x4f, A: 0xff}
+	return color.NRGBA{R: 0x1f, G: 0x9d, B: 0x55, A: 0xff}
 }
 
 // Update draws a new view (call it through fyne.Do from another goroutine).
@@ -241,9 +263,14 @@ func (w *Window) Update(v ui.View) {
 	}
 	w.banner.SetText(strings.Join(lines, "\n"))
 	if len(lines) == 0 {
-		w.banner.Hide()
+		w.bannerBox.Hide()
 	} else {
-		w.banner.Show()
+		w.bannerBox.Show()
+	}
+	if v.Listener != nil {
+		w.listen.SetText("Listening on " + v.Listener.Addr)
+	} else {
+		w.listen.SetText("Not listening")
 	}
 	w.drawRows()
 	switch w.mode {
@@ -278,19 +305,60 @@ func (w *Window) drawRows() {
 		if name == "" {
 			name = id
 		}
-		btn := widget.NewButton(name, func() { w.selectAccount(id) })
-		btn.Alignment = widget.ButtonAlignLeading
-		btn.Importance = widget.LowImportance
-		if w.mode == paneAccount && id == w.selected {
-			btn.Importance = widget.MediumImportance
+		selected := w.mode == paneAccount && id == w.selected
+		av := newAvatar()
+		av.set(initialOf(name), a.SignedIn)
+		addr := newTextLine(name, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{Bold: selected})
+		addr.Truncate = true
+		shortColor := theme.ColorNameDisabled
+		if a.Dot == ui.TrayAttention {
+			shortColor = theme.ColorNameWarning
 		}
-		dot := canvas.NewCircle(dotColor(a.Dot))
-		dot.Resize(fyne.NewSquareSize(12))
-		w.rows = append(w.rows, row{id: id, btn: btn, dot: dot})
-		objs = append(objs, container.NewBorder(nil, nil, container.NewGridWrap(fyne.NewSquareSize(14), dot), nil, btn))
+		short := newTextLine(a.Short, shortColor, theme.SizeNameCaptionText, fyne.TextStyle{})
+		short.Truncate = true
+		d, dotObj := dot(dotColor(a.Dot), 7)
+		status := container.NewBorder(nil, nil, dotObj, nil, short)
+		text := container.NewVBox(layout.NewSpacer(), vbox(2, addr, status), layout.NewSpacer())
+		content := pad(6, 6, 8, 8, container.NewBorder(nil, nil, av, nil, pad(0, 0, 6, 0, text)))
+		sel := newPanel(nil, colorSelected, "", 10, 0, 0)
+		if !selected {
+			sel.Hide()
+		}
+		btn := widget.NewButton("", func() { w.selectAccount(id) })
+		btn.Importance = widget.LowImportance
+		w.rows = append(w.rows, row{id: id, btn: btn, dot: d, initial: av.text, addr: addr, short: short, sel: sel})
+		objs = append(objs, container.NewStack(sel, btn, content))
 	}
 	w.rowBox.Objects = objs
 	w.rowBox.Refresh()
+	w.gear.Importance = widget.LowImportance
+	if w.mode == paneSettings {
+		w.gear.Importance = widget.MediumImportance
+	}
+	w.gear.Refresh()
+}
+
+// initialOf is the avatar's letter: the first of name, upper case.
+func initialOf(name string) string {
+	for _, r := range name {
+		return strings.ToUpper(string(r))
+	}
+	return "?"
+}
+
+// emptyPane is the right pane's message when there is no account to show,
+// with the add as its main action when add is set.
+func emptyPane(text string, add func()) fyne.CanvasObject {
+	l := wrapped(text)
+	l.Alignment = fyne.TextAlignCenter
+	l.Importance = widget.LowImportance
+	objs := []fyne.CanvasObject{l}
+	if add != nil {
+		b := widget.NewButtonWithIcon("Add account", theme.ContentAddIcon(), add)
+		b.Importance = widget.HighImportance
+		objs = append(objs, container.NewCenter(b))
+	}
+	return container.NewCenter(fixedWidth(360, vbox(8, objs...)))
 }
 
 func (w *Window) setRight(o fyne.CanvasObject) {
@@ -338,9 +406,9 @@ func (w *Window) showDefault() {
 		w.mode, w.selected = paneEmpty, ""
 		if w.view.Bridge != "" {
 			// A stopped bridge has no accounts to show, not none to have.
-			w.setRight(wrapped(stoppedPane))
+			w.setRight(emptyPane(stoppedPane, nil))
 		} else {
-			w.setRight(widget.NewLabel("Add an account to start."))
+			w.setRight(emptyPane("Add an account to start.", func() { w.openWizard("") }))
 		}
 	}
 }
