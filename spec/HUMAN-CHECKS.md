@@ -613,6 +613,21 @@ M8 (SPEC §12, §13, §19, decision 0016) is built and tested against the fake P
 
 **10.8 Write up (agent, from the author's report).** Create `spec/experiments/M8-live.md` with each sub-step's result (redacted: no address, no local ID, no URL, no token), the Claude Code version and what it declared (form elicitation, URL elicitation, the session bus kept or not); turn the `[assumed → step 10]` markers of SPEC §1, §12, §16, README and `OPEN.md` into `[verified: live]` or what differed, settle the "Parked by M8" items this run answers (elicitation support, the session bus), update README "Status", commit `🧪 M8 live session against the test account`.
 
+## 11. First release (2026-11-14, agent, with the author's go)
+
+The rollout of design §5.7 (decision 0017), on main 62a4689 (the merge of PR #3). Every check below passed.
+
+| Step | What was checked | Result |
+|---|---|---|
+| Tag ruleset | `refs/tags/v*`: creation, update and deletion restricted, repository admins bypass | active |
+| Manual image build on main (`image.yml`) | both architectures built, pushed by digest, smoke-tested, listed as `sha-62a4689638df`, attested | green; `gh attestation verify oci://…:sha-62a4689638df --signer-workflow …/image-build.yml` exit 0, and exit 1 with `release.yml` as signer |
+| GHCR cleanup | the 9 versions of the old push-on-main process (`main`, three `sha-…` tags, their per-architecture images) deleted; kept: what `sha-62a4689638df` points to (its two images, its attestation and the `sha256-…` index), found from the manifests rather than by date | the kept image still resolves and verifies |
+| Package visibility | already public (API `visibility: public`, anonymous manifest request 200) | nothing to do |
+| `v0.1.0-rc.1` (signed tag) | every release job green on the first run (both macOS runners included); Release marked pre-release with 6 files; `releases/latest` 404; `checksums.txt` and `gh attestation verify` on `pcb_linux_amd64.tar.gz` (`--signer-workflow …/release.yml`); image `0.1.0-rc.1` pulled anonymously, `0.1` and `latest` absent; image attestation with `--source-ref refs/tags/v0.1.0-rc.1`; `curl …/download/v0.1.0-rc.1/install.sh \| sh -s -- --version v0.1.0-rc.1 --prefix <tmp>` installed both binaries at `v0.1.0-rc.1`, the desktop entry with the absolute `Exec=` and the icon | passed |
+| `v0.1.0` (signed tag, same commit) | every release job green; Release stable with 6 files, `releases/latest` → `v0.1.0`; the README line `curl …/releases/latest/download/install.sh \| sh` installed `pcb v0.1.0`; image tags `0.1.0`, `0.1`, `latest` answer anonymously; `docker pull …:latest` with no login runs `pcb version` → `v0.1.0`; image attestation with `--source-ref refs/tags/v0.1.0` | passed |
+
+Not checked here: the attestation step inside `install.sh` on a machine with `gh` logged in (the test installs ran with a throwaway `HOME`, so it was skipped, as designed); macOS by a person (CI's two macOS runners installed and ran the archives).
+
 ## M1 live session (after steps 1 to 4; agent-run except the author's marked actions)
 
 Proves `pcb` against the test account, with the main-based build in `$R/bin`. Same rules as above, plus:

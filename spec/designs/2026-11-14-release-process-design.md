@@ -1,7 +1,7 @@
 # Release process — design
 
 - **Date**: 2026-11-14
-- **Status**: approved 2026-11-14; built on branch `release-process` (rollout pending)
+- **Status**: approved 2026-11-14; built and merged 2026-11-14 (PR #3); rolled out 2026-11-14: `v0.1.0-rc.1` then `v0.1.0`, both on 62a4689 (`spec/HUMAN-CHECKS.md` §11)
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 ("updates/signed releases (while private)" leaves "not planned"), SPEC §13 "Until the repository is public" and "Later, when public" (the minisign [call] is replaced by GitHub attestations, and `install.sh` does not run `pcb install`), via a new decision 0017; `docs/install.md`, `docs/container.md`, `docs/development.md`, the README; the "private" wording left in SPEC §3, §13 and the `Makefile`'s `JOBS` comment (the repository is public now).
 
