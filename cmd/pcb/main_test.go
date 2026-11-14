@@ -15,7 +15,7 @@ func TestLdflagsStampReachesVersion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	const pkg = "github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
-	bin := filepath.Join(t.TempDir(), "pcb")
+	bin := filepath.Join(t.TempDir(), exe("pcb"))
 	flags := "-X " + pkg + ".Version=v9.9.9 -X " + pkg + ".Commit=abc1234 -X " + pkg + ".Date=2026-01-02T03:04:05Z"
 	if out, err := exec.CommandContext(ctx, "go", "build", "-ldflags", flags, "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
