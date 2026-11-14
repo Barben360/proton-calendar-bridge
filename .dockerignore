@@ -1,0 +1,11 @@
+.git
+.github
+.claude
+.superpowers
+bin
+spec
+**/*.md
+!README.md
+**/.env*
+**/*.sealed
+**/*.key

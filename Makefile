@@ -1,0 +1,118 @@
+PKG     := github.com/Barben360/proton-calendar-bridge
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w \
+	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
+	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
+	-X $(PKG)/internal/buildinfo.Date=$(DATE)
+OUT     ?= bin/pcb
+# make install puts pcb in $(PREFIX)/bin (M5-P23); pcb install then sets up
+# the service.
+PREFIX  ?= $(HOME)/.local
+# Every target runs go on JOBS CPUs (make test JOBS=8 for more). Uncapped,
+# go test -race ./... runs a package per core, each binary on every core
+# with up to that many parallel tests: on a 24-core machine the load passed
+# 130 and logins starved past their 30 s deadline (spurious failures).
+# GOMAXPROCS sets go's -p (packages at once), -parallel (tests at once per
+# package) and the threads of each test binary and child. JOBS is 4, or the
+# machine's CPUs when fewer: more than the CPUs starves the same way (CI's
+# private-repo runners have 2). At 4 locally the suite takes about 250 s
+# against 200 s uncapped, for half the CPU time (contention under -race
+# doubles the work).
+JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
+export GOMAXPROCS := $(JOBS)
+
+.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test shellcheck pcb-fake rehearse screenshots
+
+build:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
+
+install: build
+	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
+
+# pcb-ui, the desktop app (M7): cgo and the GL/X development headers
+# (libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev on Debian), so it is not part of make build.
+UI_OUT ?= bin/pcb-ui
+
+ui:
+	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)" -o $(UI_OUT) ./cmd/pcb-ui
+
+# The icon is the window's app icon, installed as the desktop entry's Icon.
+install-ui: ui
+	install -D -m 0755 $(UI_OUT) $(DESTDIR)$(PREFIX)/bin/pcb-ui
+	# The absolute Exec: launchers often lack $(PREFIX)/bin on their PATH.
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	sed 's|^Exec=pcb-ui|Exec=$(PREFIX)/bin/pcb-ui|' packaging/pcb-ui.desktop > $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
+	chmod 0644 $(DESTDIR)$(PREFIX)/share/applications/pcb-ui.desktop
+	install -D -m 0644 internal/ui/desktop/icons/app.svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/pcb-ui.svg
+
+# The fake Proton for rehearsals (plan R2): developer only, never in the
+# image nor in make install.
+FAKE_OUT ?= bin/pcb-fake
+
+pcb-fake:
+	CGO_ENABLED=0 go build -trimpath -o $(FAKE_OUT) ./cmd/pcb-fake
+
+# PKGS narrows the packages (CI runs three shards in parallel).
+PKGS ?= ./...
+# The service and cli packages run real SRP logins under -race: on a small
+# CI runner they need more than go test's 10 min default.
+TEST_TIMEOUT ?= 20m
+
+# The tests never see the caller's session bus: one that forgot its
+# package's guard cannot reach the developer's desktop keyring, and the bus
+# tests start their own private bus (internal/dbustest), so no
+# dbus-run-session is needed (or wanted: it activates the system's
+# gnome-keyring-daemon on the caller's home).
+test:
+	env -u DBUS_SESSION_BUS_ADDRESS go test -race -timeout $(TEST_TIMEOUT) $(PKGS)
+
+# Formatting, vet, then golangci-lint, as CI runs it. golangci-lint sizes
+# its workers by the machine's cores, not by GOMAXPROCS.
+lint:
+	@files=$$(gofmt -l .); \
+		if [ -n "$$files" ]; then echo "gofmt: run gofmt -w on:"; echo "$$files"; exit 1; fi
+	go vet ./...
+	golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
+
+# The container image (M5-Rpre7), stamped like make build.
+IMAGE ?= pcb:local
+
+image:
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+
+# Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
+container-smoke:
+	scripts/container-smoke.sh
+
+systemd-smoke: build
+	scripts/systemd-smoke.sh $(OUT)
+
+# The live session (spec/HUMAN-CHECKS.md): preflight of a run root, and the
+# test of the guard that keeps live commands off the author's real dirs.
+# make live-preflight RUN=$$HOME/pcb-live-run/<date> [STEP7=1]
+live-preflight:
+	@test -n "$(RUN)" || { echo "usage: make live-preflight RUN=\$$HOME/pcb-live-run/<date> [STEP7=1]" >&2; exit 2; }
+	scripts/live/preflight.sh "$(RUN)" $(if $(STEP7),--step7)
+
+live-preflight-test:
+	scripts/live/guard_test.sh
+
+# shellcheck of the live-session scripts, pinned by digest so CI and a
+# workstation run the same one (the runner's own v0.11.0 crashes on
+# preflight.sh: "Non-exhaustive patterns in function checkCmd").
+SHELLCHECK_IMAGE ?= koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
+shellcheck:
+	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m/scripts/live $(SHELLCHECK_IMAGE) \
+		-x -P SCRIPTDIR common.sh guard.sh run.sh preflight.sh guard_test.sh rehearse.sh
+
+# The live session rehearsed offline against pcb-fake (plan R2): builds pcb
+# and pcb-fake into a temporary run root and prints PASS last.
+rehearse:
+	scripts/live/rehearse.sh
+
+# The README's pcb-ui pictures, light and dark, rendered by Fyne's test driver
+# on made-up accounts (internal/ui/desktop/screenshots_test.go).
+screenshots:
+	PCB_SCREENSHOTS=$(CURDIR)/docs/assets/ui go test ./internal/ui/desktop -run '^TestScreenshots$$' -count=1

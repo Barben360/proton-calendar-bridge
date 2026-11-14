@@ -1,0 +1,10 @@
+/bin/
+/pcb
+*.test
+*.out
+coverage.*
+.superpowers/
+
+# pcb-lab records (redacted live captures) stay local, never committed
+/spec/experiments/raw/E*/
+/spec/experiments/raw/L*/
