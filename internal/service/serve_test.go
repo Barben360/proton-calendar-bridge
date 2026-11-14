@@ -503,6 +503,32 @@ func (r *waitRig) openTicked(t *testing.T) *service.Local {
 	return svc
 }
 
+// pumpWhereRemovalNeedsIt returns the function that stops what it starts.
+// On Windows, SQLite holds pcb.db open without FILE_SHARE_DELETE, so a
+// logout by another process (here another Local) removes the cache only once
+// the serving process lets go: at its next pass, which sees the logout. The
+// pump stands for that next pass by ticking Serve's sleep until stop. On Unix
+// it does nothing: the removal never waits.
+func (r *waitRig) pumpWhereRemovalNeedsIt() (stop func()) {
+	if runtime.GOOS != "windows" {
+		return func() {}
+	}
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case r.tick <- struct{}{}:
+			case <-quit:
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	return func() { close(quit); <-done }
+}
+
 // serve runs Serve in the background with o, its states and passes sent to
 // the rig's channels; stop ends it and returns what it returned.
 func (r *waitRig) serve(t *testing.T, o service.ServeOptions) (done chan error, stop func() error) {
@@ -1151,7 +1177,10 @@ func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
 	r.wantState(t, service.ServeServing)
 	r.wantPass(t)
 	other := r.open(t)
-	if _, err := other.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+	stopPump := r.pumpWhereRemovalNeedsIt()
+	_, err := other.Logout(t.Context(), service.LogoutRequest{})
+	stopPump()
+	if err != nil {
 		t.Fatal(err)
 	}
 	r.f.AddUser("other", "other-pass")
@@ -1159,11 +1188,20 @@ func TestAccountSwitchWaitsThenServesTheNewAccount(t *testing.T) {
 	if _, err := other.Login(t.Context(), service.LoginRequest{Username: "other", Password: "other-pass"}); err != nil {
 		t.Fatal(err)
 	}
-	r.tick <- struct{}{}
-	if p := r.wantPass(t); exitcode.From(p.Err) != exitcode.Blocked || !strings.Contains(p.Err.Error(), "another Proton account") {
-		t.Fatalf("pass after the switch: %v, want the account switch", p.Err)
+	if runtime.GOOS == "windows" {
+		// The pump's pass saw the logout (the wipe is all it could see),
+		// and Serve already waits: no pass is left to meet the switch.
+		if p := r.wantPass(t); p.Err == nil {
+			t.Fatalf("pass that freed the cache: %v, want a failure (logged out)", p.Err)
+		}
+		r.wantState(t, service.ServeWaitingForLogin)
+	} else {
+		r.tick <- struct{}{}
+		if p := r.wantPass(t); exitcode.From(p.Err) != exitcode.Blocked || !strings.Contains(p.Err.Error(), "another Proton account") {
+			t.Fatalf("pass after the switch: %v, want the account switch", p.Err)
+		}
+		r.wantState(t, service.ServeWaitingForLogin)
 	}
-	r.wantState(t, service.ServeWaitingForLogin)
 	r.wantState(t, service.ServeServing)
 	if p := r.wantPass(t); p.Err != nil {
 		t.Errorf("first pass of the new account: %v", p.Err)

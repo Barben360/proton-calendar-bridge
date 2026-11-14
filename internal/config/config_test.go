@@ -15,7 +15,17 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
-var dirs = paths.Dirs{Config: "/x/cfg/pcb", State: "/x/state/pcb"}
+// root is an absolute directory on every OS (the config demands absolute
+// paths, and "/x" is not one on Windows).
+var root = filepath.Join(os.TempDir(), "pcb-config-test")
+
+var dirs = paths.Dirs{Config: filepath.Join(root, "x", "cfg", "pcb"), State: filepath.Join(root, "x", "state", "pcb")}
+
+// abs is a path under root, absolute like the config wants.
+func abs(elem ...string) string { return filepath.Join(append([]string{root}, elem...)...) }
+
+// lit is p as a TOML literal string: backslashes stay as they are.
+func lit(p string) string { return "'" + p + "'" }
 
 func write(t *testing.T, body string) string {
 	t.Helper()
@@ -41,12 +51,12 @@ func refused(t *testing.T, body string) string {
 }
 
 func TestPathAndDefaults(t *testing.T) {
-	if got := config.Path(dirs); got != "/x/cfg/pcb/config.toml" {
+	if got := config.Path(dirs); got != filepath.Join(dirs.Config, "config.toml") {
 		t.Fatalf("path = %q", got)
 	}
 	d := config.Defaults(dirs)
 	if d.Proton.BaseURL != "https://mail-api.proton.me" || d.Proton.AppVersion != "Other" ||
-		d.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" || d.CalDAV.Listen != "127.0.0.1:1080" ||
+		d.Secrets.KeyFile != filepath.Join(dirs.Config, "secrets.key") || d.CalDAV.Listen != "127.0.0.1:1080" ||
 		d.CalDAV.Hostnames != nil || d.CalDAV.TLSCert != "" || d.CalDAV.TLSKey != "" {
 		t.Fatalf("defaults = %+v", d)
 	}
@@ -63,14 +73,14 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 }
 
 func TestLoadOverridesEachKey(t *testing.T) {
-	p := write(t, "[proton]\nbase_url = \"https://example.org\"\napp_version = \"web-calendar@1.2.3\"\n[secrets]\nkey_file = \"/k/my.key\"\n")
+	p := write(t, "[proton]\nbase_url = \"https://example.org\"\napp_version = \"web-calendar@1.2.3\"\n[secrets]\nkey_file = "+lit(abs("k", "my.key"))+"\n")
 	got, err := config.Load(p, dirs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := config.Config{
 		Proton:  config.Proton{BaseURL: "https://example.org", AppVersion: "web-calendar@1.2.3"},
-		Secrets: config.Secrets{KeyFile: "/k/my.key", Backend: "auto"},
+		Secrets: config.Secrets{KeyFile: abs("k", "my.key"), Backend: "auto"},
 		CalDAV:  config.CalDAV{Listen: "127.0.0.1:1080"},
 		Log:     config.Log{Level: "info"},
 	}
@@ -84,7 +94,7 @@ func TestLoadKeepsDefaultsForAbsentKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Proton.BaseURL != config.DefaultBaseURL || got.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" || got.Proton.AppVersion != "x" {
+	if got.Proton.BaseURL != config.DefaultBaseURL || got.Secrets.KeyFile != filepath.Join(dirs.Config, "secrets.key") || got.Proton.AppVersion != "x" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -167,12 +177,12 @@ func TestLoadUnreadableFileIsAnError(t *testing.T) {
 
 func TestLoadCalDAVSection(t *testing.T) {
 	p := write(t, "[caldav]\nlisten = \"0.0.0.0:8443\"\nhostnames = [\"pcb.lan\", \"192.168.1.5\"]\n"+
-		"tls_cert = \"/c/cert.pem\"\ntls_key = \"/c/key.pem\"\n")
+		"tls_cert = "+lit(abs("c", "cert.pem"))+"\ntls_key = "+lit(abs("c", "key.pem"))+"\n")
 	got, err := config.Load(p, dirs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"pcb.lan", "192.168.1.5"}, TLSCert: "/c/cert.pem", TLSKey: "/c/key.pem"}
+	want := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"pcb.lan", "192.168.1.5"}, TLSCert: abs("c", "cert.pem"), TLSKey: abs("c", "key.pem")}
 	if !reflect.DeepEqual(got.CalDAV, want) {
 		t.Fatalf("caldav = %+v, want %+v", got.CalDAV, want)
 	}
@@ -188,24 +198,24 @@ func TestLoadCalDAVSection(t *testing.T) {
 
 func TestLoadCalDAVIsStrict(t *testing.T) {
 	for body, key := range map[string]string{
-		"[caldav]\nport = 1080\n":                            "caldav.port",
-		"[caldav]\nlisten = 1080\n":                          "listen",
-		"[caldav]\nlisten = \"1080\"\n":                      "caldav.listen",
-		"[caldav]\nlisten = \":1080\"\n":                     "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1\"\n":                 "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:65536\"\n":           "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:-1\"\n":              "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:http\"\n":            "caldav.listen",
-		"[caldav]\nlisten = \"bad host:1080\"\n":             "caldav.listen",
-		"[caldav]\nhostnames = []\n":                         "caldav.hostnames",
-		"[caldav]\nhostnames = [\"\"]\n":                     "caldav.hostnames",
-		"[caldav]\nhostnames = [\"a b\"]\n":                  "caldav.hostnames",
-		"[caldav]\nhostnames = [\"-a.lan\"]\n":               "caldav.hostnames",
-		"[caldav]\nhostnames = [\"https://a.lan\"]\n":        "caldav.hostnames",
-		"[caldav]\ntls_cert = \"/c/cert.pem\"\n":             "caldav.tls_key",
-		"[caldav]\ntls_key = \"/c/key.pem\"\n":               "caldav.tls_cert",
-		"[caldav]\ntls_cert = \"c.pem\"\ntls_key = \"/k\"\n": "caldav.tls_cert",
-		"[caldav]\ntls_cert = \"/c\"\ntls_key = \"k.pem\"\n": "caldav.tls_key",
+		"[caldav]\nport = 1080\n":                                         "caldav.port",
+		"[caldav]\nlisten = 1080\n":                                       "listen",
+		"[caldav]\nlisten = \"1080\"\n":                                   "caldav.listen",
+		"[caldav]\nlisten = \":1080\"\n":                                  "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1\"\n":                              "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:65536\"\n":                        "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:-1\"\n":                           "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:http\"\n":                         "caldav.listen",
+		"[caldav]\nlisten = \"bad host:1080\"\n":                          "caldav.listen",
+		"[caldav]\nhostnames = []\n":                                      "caldav.hostnames",
+		"[caldav]\nhostnames = [\"\"]\n":                                  "caldav.hostnames",
+		"[caldav]\nhostnames = [\"a b\"]\n":                               "caldav.hostnames",
+		"[caldav]\nhostnames = [\"-a.lan\"]\n":                            "caldav.hostnames",
+		"[caldav]\nhostnames = [\"https://a.lan\"]\n":                     "caldav.hostnames",
+		"[caldav]\ntls_cert = " + lit(abs("c", "cert.pem")) + "\n":        "caldav.tls_key",
+		"[caldav]\ntls_key = " + lit(abs("c", "key.pem")) + "\n":          "caldav.tls_cert",
+		"[caldav]\ntls_cert = 'c.pem'\ntls_key = " + lit(abs("k")) + "\n": "caldav.tls_cert",
+		"[caldav]\ntls_cert = " + lit(abs("c")) + "\ntls_key = 'k.pem'\n": "caldav.tls_key",
 	} {
 		if msg := refused(t, body); !strings.Contains(msg, key) {
 			t.Errorf("%q: error %q does not name %s", body, msg, key)
@@ -276,7 +286,7 @@ func TestBackendDefaultsToAuto(t *testing.T) {
 	if got := config.Defaults(dirs).Secrets.Backend; got != "auto" {
 		t.Fatalf("default backend = %q", got)
 	}
-	cfg, err := config.Load(write(t, "[secrets]\nkey_file = \"/k\"\n"), dirs)
+	cfg, err := config.Load(write(t, "[secrets]\nkey_file = "+lit(abs("k"))+"\n"), dirs)
 	if err != nil || cfg.Secrets.Backend != "auto" {
 		t.Fatalf("backend = %q, %v", cfg.Secrets.Backend, err)
 	}

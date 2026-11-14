@@ -565,11 +565,26 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 	return nil
 }
 
+// RemoveRetry bounds how long Remove waits for another handle on the cache
+// (Windows only: SQLite opens it without FILE_SHARE_DELETE, so a running
+// serve, or a scanner, makes the removal fail until it lets go).
+var RemoveRetry = 2 * time.Second
+
 // Remove deletes the cache file with its -wal and -shm; missing is fine.
+// Where another handle on a file blocks the removal, it is retried every
+// 50 ms for at most RemoveRetry.
 func Remove(path string) error {
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		deadline := time.Now().Add(RemoveRetry)
+		for {
+			err := os.Remove(p)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if !fileBusy(err) || !time.Now().Before(deadline) {
+				return err
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	syncDir(filepath.Dir(path))
