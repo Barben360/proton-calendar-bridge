@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -84,7 +83,7 @@ var ErrNewerState = errors.New("state.json was written by a newer pcb")
 // is an error (fail closed: an unreadable state must not read as ready), and
 // one that is only newer wraps ErrNewerState.
 func LoadState(stateDir string) (State, error) {
-	raw, err := os.ReadFile(statePath(stateDir))
+	raw, err := atomicfile.ReadFile(statePath(stateDir))
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{Phase: PhaseLoggedOut}, nil
 	}

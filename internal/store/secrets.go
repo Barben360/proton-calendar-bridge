@@ -182,7 +182,7 @@ func (s *Secrets) load() (accounts map[string]Account, gen, mirror uint64, err e
 // open reads and opens the file with no rollback check; a missing file
 // (found false) is an empty store of generation 0.
 func (s *Secrets) open() (accounts map[string]Account, gen uint64, found bool, err error) {
-	raw, err := os.ReadFile(s.Path)
+	raw, err := atomicfile.ReadFile(s.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]Account{}, 0, false, nil
 	}

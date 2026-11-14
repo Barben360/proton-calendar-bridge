@@ -293,11 +293,11 @@ func generate(o Options, now time.Time) (Result, error) {
 // LoadPair reads a PEM certificate (chain) and its key. A missing file is
 // an error wrapping fs.ErrNotExist.
 func LoadPair(certPath, keyPath string) (tls.Certificate, *x509.Certificate, error) {
-	certPEM, err := os.ReadFile(certPath)
+	certPEM, err := atomicfile.ReadFile(certPath)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyPEM, err := atomicfile.ReadFile(keyPath)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
@@ -321,7 +321,7 @@ func Inspect(dir string) (*x509.Certificate, error) {
 
 // ReadCertificate reads the first certificate of a PEM file.
 func ReadCertificate(path string) (*x509.Certificate, error) {
-	data, err := os.ReadFile(path)
+	data, err := atomicfile.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

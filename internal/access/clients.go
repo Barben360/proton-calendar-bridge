@@ -181,7 +181,7 @@ func (s *Store) refresh(force bool) error {
 	if !st.exists {
 		return nil
 	}
-	data, err := os.ReadFile(s.path())
+	data, err := atomicfile.ReadFile(s.path())
 	if err != nil {
 		s.loaded, s.loadErr = false, fmt.Errorf("client list unreadable: %w", err)
 		return s.loadErr

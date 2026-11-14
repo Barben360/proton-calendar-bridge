@@ -176,7 +176,7 @@ type layoutFile struct {
 // when there is none, sealer "keyfile" when it names none.
 func readLayoutFile(stateDir string) (layoutFile, error) {
 	path := filepath.Join(stateDir, layoutName)
-	raw, err := os.ReadFile(path)
+	raw, err := atomicfile.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return layoutFile{Sealer: sealerKeyFile}, nil
 	}
@@ -353,9 +353,9 @@ func makeDir(parent, dir string) error {
 	return nil
 }
 
-// rename is os.Rename, then renameHook.
+// rename is atomicfile.Rename, then renameHook.
 func rename(from, to string) error {
-	if err := os.Rename(from, to); err != nil {
+	if err := atomicfile.Rename(from, to); err != nil {
 		return err
 	}
 	if renameHook != nil {

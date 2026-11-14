@@ -1,6 +1,8 @@
 package atomicfile_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -159,5 +161,23 @@ func TestRemoveStaleNeverFollowsSymlinks(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("the link target %s was removed: %v", p, err)
 		}
+	}
+}
+
+func TestReadFileReadsWhatWriteWrote(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := atomicfile.Write(p, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := atomicfile.ReadFile(p)
+	if err != nil || string(b) != "v1" {
+		t.Fatalf("ReadFile = %q, %v; want v1", b, err)
+	}
+}
+
+func TestOpenMissingIsNotExist(t *testing.T) {
+	_, err := atomicfile.Open(filepath.Join(t.TempDir(), "missing"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open missing = %v, want fs.ErrNotExist", err)
 	}
 }
