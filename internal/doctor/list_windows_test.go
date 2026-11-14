@@ -80,6 +80,34 @@ func TestChecksOnWindows(t *testing.T) {
 	if !found {
 		t.Error("no dpapi key check for a dpapi state")
 	}
+	result := func(name string) doctor.Result {
+		t.Helper()
+		for _, r := range doctor.Run(t.Context(), doctor.Checks(env, install.Host{}, nil, nil), nil) {
+			if r.Name == name {
+				return r
+			}
+		}
+		t.Fatalf("no %q result", name)
+		return doctor.Result{}
+	}
+	// An open state directory is the state dir check's error only: one
+	// cause, one ✗.
+	acltest.Allow(t, state, acltest.Everyone, windows.GENERIC_READ, windows.NO_INHERITANCE) // the key keeps its own access list
+	if got := result("state dir"); got.Status != doctor.StatusError {
+		t.Errorf("open state dir: %+v", got)
+	}
+	if got := result("dpapi key"); got.Status != doctor.StatusOK {
+		t.Errorf("dpapi key in an open state dir: %+v, want ok (the state dir check reports it)", got)
+	}
+	// An account with sealed secrets and no key: the key is lost.
+	saveState(t, store.AccountDir(state, "aaaaaaaa"), "a@x")
+	writeFile(t, filepath.Join(store.AccountDir(state, "aaaaaaaa"), "secrets.sealed"), "x")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if got := result("dpapi key"); got.Status != doctor.StatusError || got.Message != key+" does not exist" {
+		t.Errorf("key missing beside sealed secrets: %+v", got)
+	}
 }
 
 // A fresh state under [secrets] backend = keyfile keeps the key file check.
@@ -162,6 +190,10 @@ func TestDPAPIKeyCheckJudgesItsDirectory(t *testing.T) {
 	if got := (doctor.DPAPIKeyCheck{Path: path}).Run(t.Context()); got.Status != doctor.StatusError || !strings.Contains(got.Message, dir) ||
 		got.Fix != acl.Fix(dir, acltest.Everyone) {
 		t.Errorf("open directory: %+v, want the fix %q", got, acl.Fix(dir, acltest.Everyone))
+	}
+	// The state directory is the state dir check's: not reported twice.
+	if got := (doctor.DPAPIKeyCheck{Path: path, StateDir: dir}).Run(t.Context()); got.Status != doctor.StatusOK {
+		t.Errorf("open state directory: %+v, want ok (the state dir check reports it)", got)
 	}
 }
 

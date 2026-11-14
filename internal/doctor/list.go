@@ -54,7 +54,7 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 	case layout.Sealer == service.SealerDPAPI, layout.Fresh && runtime.GOOS == "windows" && cfg.Secrets.Backend != service.SealerKeyFile:
 		// A fresh state on Windows gets DPAPI's key unless the key file is
 		// asked for (service's chooseSealerOn).
-		checks = append(checks, DPAPIKeyCheck{Path: filepath.Join(dirs.State, seal.DPAPIKeyName)})
+		checks = append(checks, DPAPIKeyCheck{Path: filepath.Join(dirs.State, seal.DPAPIKeyName), Sealed: anySealed(layout.Accounts), StateDir: dirs.State})
 	default: // the key file, also while the layout cannot be read
 		checks = append(checks, KeyFileCheck{Path: cfg.Secrets.KeyFile})
 	}
@@ -93,7 +93,17 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 			checks = append(checks, named{prefix: prefix, Check: c})
 		}
 	}
-	return append(checks, tailChecks(env, host)...)
+	return append(checks, tailChecks(env, host, cfg.MCP.Timezone)...)
+}
+
+// anySealed reports whether an account directory holds secrets.sealed.
+func anySealed(accounts []Account) bool {
+	for _, a := range accounts {
+		if exists(filepath.Join(a.Dir, "secrets.sealed")) {
+			return true
+		}
+	}
+	return false
 }
 
 // warnCheck is a warning found without a check of its own to run.

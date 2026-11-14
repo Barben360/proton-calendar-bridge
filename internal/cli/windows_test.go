@@ -184,6 +184,35 @@ func TestServiceRefusedOnWindows(t *testing.T) {
 	}
 }
 
+// pcb doctor's service line on Windows says why there is none, under the
+// name it has on every OS; systemd is never looked at.
+func TestDoctorServiceLineOnWindows(t *testing.T) {
+	t.Parallel()
+	w := newWinRig(t)
+	w.run("doctor", "--json") // the rig's files are placeholders: other checks fail
+	var env struct {
+		Data struct {
+			Results []struct{ Name, Status, Message string } `json:"results"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(w.stdout.String()), &env); err != nil {
+		t.Fatalf("no envelope (%v): %s", err, w.stdout.String())
+	}
+	n := 0
+	for _, r := range env.Data.Results {
+		if r.Name != "service" {
+			continue
+		}
+		n++
+		if r.Status != "skip" || r.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+			t.Errorf("service = %+v", r)
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d service results, want 1: %s", n, w.stdout.String())
+	}
+}
+
 func TestUninstallOnWindowsRemovesOnlyTheRunValue(t *testing.T) {
 	t.Parallel()
 	w := newWinRig(t)

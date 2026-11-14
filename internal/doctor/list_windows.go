@@ -26,12 +26,12 @@ func dirFix(override, base string) string {
 
 // tailChecks are the checks of Windows that close the list: elevation,
 // the time zone and Start at login. Windows has no systemd, desktop entry
-// or Secret Service to check.
-func tailChecks(func(string) string, install.Host) []Check {
+// or Secret Service to check. mcpZone is [mcp] timezone.
+func tailChecks(_ func(string) string, _ install.Host, mcpZone string) []Check {
 	key, keyOK := winzone.Key()
 	return []Check{
 		ElevatedCheck{Elevated: acl.Elevated()},
-		ZoneCheck{Key: key, KeyOK: keyOK},
+		ZoneCheck{Key: key, KeyOK: keyOK, Configured: mcpZone},
 		AutostartCheck{Read: runkey.System().Get, Beside: besidePcb("pcb-ui.exe"), Exists: exists},
 	}
 }

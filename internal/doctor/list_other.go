@@ -22,8 +22,8 @@ func dirFix(override, base string) string {
 }
 
 // tailChecks are the checks of this OS that close the list: pcb-ui
-// installed beside the pcb service.
-func tailChecks(env func(string) string, host install.Host) []Check {
+// installed beside the pcb service ([mcp] timezone is Windows').
+func tailChecks(env func(string) string, host install.Host, _ string) []Check {
 	return []Check{DesktopCheck{AppDirs: desktopDirs(env, host), ServiceInstalled: func() bool { return serviceInstalled(host) }}}
 }
 

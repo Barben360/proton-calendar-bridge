@@ -19,8 +19,9 @@ import (
 // no Windows API themselves, so they are built and tested everywhere.
 
 // ElevatedCheck warns when pcb runs elevated: the files it creates then
-// belong to Administrators, which a later normal run accepts but which
-// should not be the habit.
+// belong to Administrators (its directories stay the user's, their owner
+// set explicitly), which a later normal run accepts but which should not
+// be the habit.
 type ElevatedCheck struct{ Elevated bool }
 
 // Name implements Check.
@@ -32,7 +33,7 @@ func (c ElevatedCheck) Run(context.Context) Result {
 		return Result{Name: c.Name(), Status: StatusOK, Message: "not elevated"}
 	}
 	return Result{Name: c.Name(), Status: StatusWarn,
-		Message: "pcb runs elevated (as administrator): what it creates is owned by Administrators",
+		Message: "pcb runs elevated (as administrator): the files it creates are owned by Administrators",
 		Fix:     "run pcb from a normal (not elevated) terminal"}
 }
 
@@ -57,7 +58,9 @@ func (AutostartCheck) Name() string { return "start at login" }
 // rewrites it with its own path.
 const autostartFix = "turn Start at login off and on again in pcb-ui"
 
-// Run implements Check.
+// Run implements Check. With no pcb-ui.exe beside this pcb (pcb.exe alone,
+// go run) there is nothing to compare: the entry is fine as long as its
+// program exists.
 func (c AutostartCheck) Run(context.Context) Result {
 	r := Result{Name: c.Name()}
 	data, ok, err := c.Read()
@@ -77,6 +80,8 @@ func (c AutostartCheck) Run(context.Context) Result {
 		r.Status, r.Message, r.Fix = StatusError, "Start at login runs "+exe+", which does not exist", autostartFix
 	case c.Beside == "":
 		r.Status, r.Message = StatusWarn, "starts "+exe+"; where this pcb lies is unknown, so it cannot be compared with the pcb-ui beside it"
+	case !samePath(exe, c.Beside) && !c.Exists(c.Beside):
+		r.Status, r.Message = StatusOK, "starts "+exe+"; no pcb-ui.exe beside this pcb"
 	case !samePath(exe, c.Beside):
 		r.Status = StatusWarn
 		r.Message = "starts " + exe + ", not " + c.Beside + " beside this pcb"
@@ -96,11 +101,14 @@ func samePath(a, b string) bool {
 }
 
 // ZoneCheck reports the IANA zone the Windows zone key maps to (the MCP
-// tools name times by it); a key Unicode CLDR's table does not list is a
-// warning naming it.
+// tools name times by it); a key Unicode CLDR's table does not list, or
+// one that cannot be read, is a warning naming it, unless [mcp] timezone
+// names the zone the MCP tools use (Configured).
 type ZoneCheck struct {
 	Key   string
 	KeyOK bool // false: the key cannot be read
+	// Configured is [mcp] timezone ("" when unset).
+	Configured string
 }
 
 // Name implements Check.
@@ -109,12 +117,20 @@ func (ZoneCheck) Name() string { return "time zone" }
 // Run implements Check.
 func (c ZoneCheck) Run(context.Context) Result {
 	r := Result{Name: c.Name()}
+	if !c.KeyOK && c.Configured != "" {
+		r.Status, r.Message = StatusOK, "the Windows time zone cannot be read; the MCP tools use [mcp] timezone = "+c.Configured
+		return r
+	}
 	if !c.KeyOK {
 		r.Status, r.Message = StatusWarn, "the Windows time zone cannot be read"
 		r.Fix = "set [mcp] timezone in config.toml to your IANA zone, such as Europe/Paris"
 		return r
 	}
 	name, ok := winzone.IANA(c.Key)
+	if !ok && c.Configured != "" {
+		r.Status, r.Message = StatusOK, c.Key+" has no IANA name in pcb's table; the MCP tools use [mcp] timezone = "+c.Configured
+		return r
+	}
 	if !ok {
 		r.Status = StatusWarn
 		r.Message = "the Windows time zone " + c.Key + " has no IANA name in pcb's table (Unicode CLDR " + winzone.CLDRVersion +
@@ -130,9 +146,17 @@ func (c ZoneCheck) Run(context.Context) Result {
 // directory) as pcb reads it: its access list and its directory's (aclProblem),
 // that it is a DPAPI blob at all (seal.HasDPAPIHeader), then that this
 // Windows user can unprotect it to a 32-byte key protected for the user, not
-// the machine (seal.DPAPI.Check). A missing key is skipped: the first login
-// creates it.
-type DPAPIKeyCheck struct{ Path string }
+// the machine (seal.DPAPI.Check). A missing key is skipped while no account
+// has sealed secrets: the first login creates it.
+type DPAPIKeyCheck struct {
+	Path string
+	// Sealed is whether an account holds secrets.sealed: a missing key is
+	// then an error (the secrets check reports the loss).
+	Sealed bool
+	// StateDir is the directory the state dir check judges: when it holds
+	// the key, its access list is not reported a second time here.
+	StateDir string
+}
 
 // Name implements Check.
 func (DPAPIKeyCheck) Name() string { return "dpapi key" }
@@ -149,15 +173,22 @@ func (c DPAPIKeyCheck) Run(ctx context.Context) Result {
 	switch r.Status {
 	case StatusOK:
 	case StatusSkip: // missing
-		r.Message = "no key yet: the first login creates it"
+		if c.Sealed {
+			r.Status, r.Message = StatusError, c.Path+" does not exist"
+		} else {
+			r.Message = "no key yet: the first login creates it"
+		}
 		return r
 	default:
 		return r
 	}
 	dir := filepath.Dir(c.Path)
-	if msg, fix, checked := aclProblem(dir, true); checked && msg != "" {
-		r.Status, r.Message, r.Fix = StatusError, msg+" (the directory of "+c.Path+")", fix
-		return r
+	// The state dir check judges the state directory: one cause, one error.
+	if c.StateDir == "" || !samePath(dir, c.StateDir) {
+		if msg, fix, checked := aclProblem(dir, true); checked && msg != "" {
+			r.Status, r.Message, r.Fix = StatusError, msg+" (the directory of "+c.Path+")", fix
+			return r
+		}
 	}
 	head, err := readHead(c.Path)
 	if err == nil && !seal.HasDPAPIHeader(head) {

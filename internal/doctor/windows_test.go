@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -41,7 +43,7 @@ func TestElevatedCheck(t *testing.T) {
 	}
 	got := doctor.ElevatedCheck{Elevated: true}.Run(t.Context())
 	if got.Name != "elevated" || got.Status != doctor.StatusWarn ||
-		got.Message != "pcb runs elevated (as administrator): what it creates is owned by Administrators" ||
+		got.Message != "pcb runs elevated (as administrator): the files it creates are owned by Administrators" ||
 		got.Fix != "run pcb from a normal (not elevated) terminal" {
 		t.Errorf("elevated: %+v", got)
 	}
@@ -89,6 +91,13 @@ func TestAutostartCheck(t *testing.T) {
 		got.Fix != "turn Start at login off and on again in pcb-ui" {
 		t.Errorf("no program: %+v", got)
 	}
+	// No pcb-ui.exe beside this pcb (pcb.exe alone, go run): nothing to
+	// compare, and no fix naming the missing exe.
+	alone := check(runkey.Data(other), true, nil, true)
+	alone.Exists = func(p string) bool { return p == other }
+	if got := alone.Run(ctx); got.Status != doctor.StatusOK || got.Message != "starts "+other+"; no pcb-ui.exe beside this pcb" || got.Fix != "" {
+		t.Errorf("no pcb-ui beside: %+v", got)
+	}
 	// Where pcb.exe lies is unknown (os.Executable failed): a warning.
 	noBeside := check(runkey.Data(other), true, nil, true)
 	noBeside.Beside = ""
@@ -113,6 +122,19 @@ func TestZoneCheck(t *testing.T) {
 	}
 	if got := (doctor.ZoneCheck{}).Run(ctx); got.Status != doctor.StatusWarn || got.Message != "the Windows time zone cannot be read" {
 		t.Errorf("unread: %+v", got)
+	}
+	// [mcp] timezone names the zone the MCP tools use: nothing to fix.
+	got = doctor.ZoneCheck{Key: "Mars Standard Time", KeyOK: true, Configured: "Europe/Paris"}.Run(ctx)
+	if got.Status != doctor.StatusOK || got.Message != "Mars Standard Time has no IANA name in pcb's table; the MCP tools use [mcp] timezone = Europe/Paris" || got.Fix != "" {
+		t.Errorf("unmapped, configured: %+v", got)
+	}
+	got = doctor.ZoneCheck{Configured: "Europe/Paris"}.Run(ctx)
+	if got.Status != doctor.StatusOK || got.Message != "the Windows time zone cannot be read; the MCP tools use [mcp] timezone = Europe/Paris" || got.Fix != "" {
+		t.Errorf("unread, configured: %+v", got)
+	}
+	// A mapped key keeps its own line.
+	if got := (doctor.ZoneCheck{Key: "W. Europe Standard Time", KeyOK: true, Configured: "Europe/Paris"}).Run(ctx); got.Status != doctor.StatusOK || got.Message != "W. Europe Standard Time → Europe/Berlin" {
+		t.Errorf("mapped, configured: %+v", got)
 	}
 }
 
@@ -168,9 +190,33 @@ func TestDPAPIKeyCheckRefusesAFileThatIsNoDPAPIBlob(t *testing.T) {
 }
 
 func TestDPAPIKeyCheckSkipsAMissingKey(t *testing.T) {
-	got := doctor.DPAPIKeyCheck{Path: filepath.Join(t.TempDir(), seal.DPAPIKeyName)}.Run(t.Context())
+	path := filepath.Join(t.TempDir(), seal.DPAPIKeyName)
+	got := doctor.DPAPIKeyCheck{Path: path}.Run(t.Context())
 	if got.Name != "dpapi key" || got.Status != doctor.StatusSkip || got.Message != "no key yet: the first login creates it" {
 		t.Errorf("missing: %+v", got)
+	}
+	// With sealed secrets the key is lost, not yet to come.
+	got = doctor.DPAPIKeyCheck{Path: path, Sealed: true}.Run(t.Context())
+	if got.Status != doctor.StatusError || got.Message != path+" does not exist" {
+		t.Errorf("missing beside sealed secrets: %+v", got)
+	}
+}
+
+func TestDPAPIKeyCheckReportsAKeyThisUserCannotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), seal.DPAPIKeyName)
+	dpapiLike(t, path)
+	acltest.Unreadable(t, path)
+	defer doctor.SetDPAPICheck(func(string) error {
+		t.Error("an unreadable key was given to Windows to unprotect")
+		return nil
+	})()
+	got := doctor.DPAPIKeyCheck{Path: path}.Run(t.Context())
+	want := "chown" // the Unix fix; Windows' resets the access list
+	if runtime.GOOS == "windows" {
+		want = "icacls"
+	}
+	if got.Status != doctor.StatusError || got.Transient || !strings.Contains(got.Message, path+" is not readable by this user: ") || !strings.Contains(got.Fix, want) {
+		t.Errorf("unreadable: %+v, want a %s fix", got, want)
 	}
 }
 

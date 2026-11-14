@@ -60,7 +60,7 @@ func TestDoctorExitCode(t *testing.T) {
 		OK   bool `json:"ok"`
 		Data struct {
 			Results []struct {
-				Name, Status, Fix string
+				Name, Status, Message, Fix string
 			} `json:"results"`
 		} `json:"data"`
 		Error struct {
@@ -94,6 +94,10 @@ func TestDoctorExitCode(t *testing.T) {
 		}
 		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "warn,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
 			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
+		}
+		// No systemd on Windows: pcb-ui's Start at login is the service.
+		if got := env.Data.Results[len(env.Data.Results)-2]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+			t.Errorf("service = %+v", got)
 		}
 	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)

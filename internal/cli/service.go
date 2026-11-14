@@ -179,6 +179,9 @@ func (j *journalWriter) Write(p []byte) (int, error) {
 // or why there is none.
 func (a *app) serviceResult(ctx context.Context) doctor.Result {
 	const name = "service"
+	if a.GOOS == "windows" { // the name stays, so the JSON lists the same results
+		return doctor.Result{Name: name, Status: doctor.StatusSkip, Message: "no service on Windows: pcb-ui's Start at login runs it"}
+	}
 	h := a.Host
 	if !install.SystemdRunning(h) {
 		return doctor.Result{Name: name, Status: doctor.StatusSkip, Message: "no systemd here"}
