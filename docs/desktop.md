@@ -36,7 +36,7 @@ After `make install-ui` it is also in your applications menu.
 | Part | What it does |
 |---|---|
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
-| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account), its calendars, and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
+| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
 | Add-account wizard | Password, 2FA code, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you. |
 | Settings | "Start at login", "Open config.toml", "Restart bridge", the log level. |
