@@ -16,6 +16,31 @@ const DPAPIKeyName = "secrets.key.dpapi"
 // ErrNoDPAPI is a DPAPI sealer used off Windows: there is no DPAPI there.
 var ErrNoDPAPI = errors.New("DPAPI is Windows only")
 
+// ErrProtect means Windows could not protect a new key for this user
+// (CryptProtectData failed): typically a logon without the user's
+// password, such as SSH with a key, where DPAPI cannot reach the user's
+// master key. Nothing was written. The error is a *ProtectError.
+var ErrProtect = errors.New("DPAPI could not protect the sealing key for this Windows user")
+
+// ProtectError is ErrProtect with Windows' cause.
+type ProtectError struct{ Err error }
+
+func (e *ProtectError) Error() string { return ErrProtect.Error() + ": " + e.Err.Error() }
+
+// Unwrap is the cause.
+func (e *ProtectError) Unwrap() error { return e.Err }
+
+// Is makes errors.Is(err, ErrProtect) hold.
+func (e *ProtectError) Is(target error) bool { return target == ErrProtect }
+
+// errMachineScope is a key protected for the whole machine
+// (CRYPTPROTECT_LOCAL_MACHINE), which any local account unprotects: pcb
+// only writes user-scoped keys, so another account planted it.
+var errMachineScope = errors.New("protected for the whole machine, not this user")
+
+// protectKey is protect; tests replace it.
+var protectKey = protect
+
 // maxDPAPIBlob bounds what is read of a DPAPI key file: a protected 32-byte
 // key takes a few hundred bytes.
 const maxDPAPIBlob = 64 << 10
@@ -36,6 +61,7 @@ func (d *DPAPI) Seal(plaintext, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clear(key)
 	return sealAEAD(key, plaintext, aad)
 }
 
@@ -45,6 +71,7 @@ func (d *DPAPI) Open(sealed, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clear(key)
 	return openAEAD(key, sealed, aad)
 }
 
@@ -96,6 +123,8 @@ func (d *DPAPI) read() ([]byte, error) {
 	switch {
 	case errors.Is(err, ErrNoDPAPI):
 		return nil, err
+	case errors.Is(err, errMachineScope):
+		return nil, fmt.Errorf("%w: key file %s is %w", ErrCorrupt, d.Path, err)
 	case err != nil:
 		return nil, fmt.Errorf("%w: key file %s cannot be unprotected by this Windows user: %w", ErrCorrupt, d.Path, err)
 	case len(key) != keySize:
@@ -113,10 +142,13 @@ func (d *DPAPI) create() error {
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("random key: %w", err)
 	}
-	blob, err := protect(key)
+	blob, err := protectKey(key)
 	clear(key)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNoDPAPI):
 		return err
+	case err != nil:
+		return &ProtectError{Err: err}
 	}
 	return createOnce(d.Path, blob)
 }

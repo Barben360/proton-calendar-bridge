@@ -18,6 +18,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -218,6 +219,9 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	if err := checkStateRoot(root); err != nil {
 		return nil, err
 	}
+	// A crash while a DPAPI key was being created left its temporary file
+	// (a protected key) here; the accounts' own are their Local's.
+	atomicfile.RemoveStale(root, base.Now(), atomicfile.KeyPrefix)
 	kr := o.Keyring
 	if kr == nil {
 		kr = seal.DBusKeyring("")

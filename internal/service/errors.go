@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -243,6 +244,7 @@ func mapError(err error, keyFile string) error {
 		use *store.UnsupportedError
 		ne  net.Error
 		ue  *url.Error
+		pe  *seal.ProtectError
 	)
 	cf := cacheFailure(err)
 	switch {
@@ -287,6 +289,8 @@ func mapError(err error, keyFile string) error {
 		return keyringLockedError()
 	case errors.Is(err, seal.ErrNoService):
 		return keyringUnavailableError()
+	case errors.As(err, &pe):
+		return mustAct(pe.Error(), dpapiProtectFix(keyFile))
 	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
 		return mustAct("the sealing key is not in the desktop keyring", "pcb logout then pcb login")
 	case errors.Is(err, seal.ErrCorrupt) && keyFile == keyringRef:
@@ -392,6 +396,15 @@ func keyFailure(err error, msg, hint string) *exitcode.Error {
 	return blocked(msg, hint)
 }
 
+// dpapiProtectFix is the hint when Windows could not protect a new DPAPI
+// key (keyFile, in the state directory): DPAPI needs a logon with the
+// user's password; a key file needs a new state, the sealer being chosen
+// once.
+func dpapiProtectFix(keyFile string) string {
+	return "sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move " +
+		filepath.Dir(keyFile) + " aside before the next pcb login"
+}
+
 // keyFix is the hint for a key file that cannot be used.
 const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, " + privateFile + " (pcb doctor)"
 
@@ -402,7 +415,7 @@ const keyringFailFix = "check that the desktop keyring is running and unlocked (
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrProtect) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
 		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}

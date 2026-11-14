@@ -3,6 +3,7 @@
 package seal
 
 import (
+	"encoding/binary"
 	"fmt"
 	"unsafe"
 
@@ -23,9 +24,26 @@ func protect(data []byte) ([]byte, error) {
 	return protectWith(data, dpapiEntropy, windows.CRYPTPROTECT_UI_FORBIDDEN)
 }
 
-// unprotect is CryptUnprotectData of blob, never prompting.
+// unprotect is CryptUnprotectData of blob, never prompting, refusing a
+// blob protected for the whole machine (errMachineScope).
 func unprotect(blob []byte) ([]byte, error) {
-	return unprotectWith(blob, dpapiEntropy)
+	data, err := unprotectWith(blob, dpapiEntropy)
+	if err != nil {
+		return nil, err
+	}
+	if !userScope(blob) {
+		clear(data)
+		return nil, errMachineScope
+	}
+	return data, nil
+}
+
+// userScope reports whether blob, which CryptUnprotectData accepted, is
+// protected for the user: its header (DPAPI_BLOB: version, provider GUID,
+// master-key version and GUID, then dwFlags at offset 40, all covered by
+// the blob's integrity check) lacks CRYPTPROTECT_LOCAL_MACHINE.
+func userScope(blob []byte) bool {
+	return len(blob) >= 44 && binary.LittleEndian.Uint32(blob[40:44])&windows.CRYPTPROTECT_LOCAL_MACHINE == 0
 }
 
 func protectWith(data, entropy []byte, flags uint32) ([]byte, error) {

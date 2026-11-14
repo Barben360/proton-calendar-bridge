@@ -99,6 +99,7 @@ func (k *KeyFile) create() error {
 	if _, err := rand.Read(key); err != nil {
 		return fmt.Errorf("random key: %w", err)
 	}
+	defer clear(key)
 	return createOnce(k.Path, key)
 }
 

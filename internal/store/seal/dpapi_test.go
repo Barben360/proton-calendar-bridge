@@ -48,3 +48,19 @@ func TestDPAPIOffWindowsFails(t *testing.T) {
 		t.Fatalf("Check = %v, want ErrNoDPAPI", err)
 	}
 }
+
+// When Windows cannot protect a new key (a logon without the user's
+// password, such as SSH with a key), Seal says so (ErrProtect, the cause
+// kept) and writes nothing.
+func TestDPAPIProtectFailureIsErrProtect(t *testing.T) {
+	cause := errors.New("access is denied")
+	defer seal.SetProtect(func([]byte) ([]byte, error) { return nil, cause })()
+	path := filepath.Join(t.TempDir(), "state", seal.DPAPIKeyName)
+	_, err := (&seal.DPAPI{Path: path}).Seal([]byte("x"), nil)
+	if !errors.Is(err, seal.ErrProtect) || !errors.Is(err, cause) || errors.Is(err, seal.ErrCorrupt) {
+		t.Fatalf("Seal = %v, want ErrProtect wrapping the cause", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a key was written (%v)", err)
+	}
+}

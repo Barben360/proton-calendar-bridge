@@ -132,7 +132,13 @@ func TestDPAPIForeignBlobIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string][]byte{"other entropy": other, "no entropy": none, "raw key": key} {
+	// A blob for the whole machine opens for every local account: another
+	// account could plant a key it knows, under pcb's public entropy.
+	machine, err := seal.ProtectWith(key, seal.DPAPIEntropy(), windows.CRYPTPROTECT_UI_FORBIDDEN|windows.CRYPTPROTECT_LOCAL_MACHINE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"other entropy": other, "no entropy": none, "raw key": key, "machine scope": machine} {
 		path := dpapiPath(t)
 		if err := acl.MkdirAll(filepath.Dir(path)); err != nil {
 			t.Fatal(err)
@@ -140,8 +146,12 @@ func TestDPAPIForeignBlobIsRefused(t *testing.T) {
 		if err := os.WriteFile(path, content, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (&seal.DPAPI{Path: path}).Open(make([]byte, 64), nil); !errors.Is(err, seal.ErrCorrupt) {
-			t.Errorf("%s: Open = %v, want ErrCorrupt", name, err)
+		err := (&seal.DPAPI{Path: path}).Check() // the key alone: no sealed data to fail on
+		if !errors.Is(err, seal.ErrCorrupt) {
+			t.Errorf("%s: Check = %v, want ErrCorrupt", name, err)
+		}
+		if name == "machine scope" && (err == nil || !strings.Contains(err.Error(), "protected for the whole machine, not this user")) {
+			t.Errorf("machine scope: Check = %v, want the scope named", err)
 		}
 	}
 	// The same key under pcb's entropy opens: the refusals above are the

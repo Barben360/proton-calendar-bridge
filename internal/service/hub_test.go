@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -1459,5 +1460,38 @@ func TestNewStateOnWindowsSealsWithDPAPI(t *testing.T) {
 	}
 	if asked, _, _ := e.keyring.(*fakeKeyring).counts(); asked != 0 {
 		t.Errorf("the keyring was asked %d times, want 0", asked)
+	}
+}
+
+// OpenHub removes from the state root the temporary key files a crash left
+// while the DPAPI key was being created (older than atomicfile.StaleAfter),
+// not a recent one (a creation in progress) nor another file.
+func TestOpenHubRemovesStaleKeyTempsAtTheRoot(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	if err := acl.MkdirAll(e.dirs.State); err != nil {
+		t.Fatal(err)
+	}
+	now := e.clk.Now()
+	files := map[string]time.Time{
+		".key-stale":  now.Add(-2 * time.Hour),
+		".key-recent": now.Add(-time.Minute),
+		"other-old":   now.Add(-2 * time.Hour),
+	}
+	for name, at := range files {
+		p := filepath.Join(e.dirs.State, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.open(t)
+	for name, keep := range map[string]bool{".key-stale": false, ".key-recent": true, "other-old": true} {
+		_, err := os.Stat(filepath.Join(e.dirs.State, name))
+		if gone := errors.Is(err, os.ErrNotExist); gone == keep {
+			t.Errorf("%s: gone %v, want kept %v (%v)", name, gone, keep, err)
+		}
 	}
 }

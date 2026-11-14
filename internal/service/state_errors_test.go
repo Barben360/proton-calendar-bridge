@@ -12,6 +12,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // The messages of a state this pcb cannot read (state-I1, I2): the cause
@@ -34,6 +35,14 @@ func TestStateAndStoreMessages(t *testing.T) {
 			`secrets.sealed is sealed with "tpm2", which this pcb cannot use`, "upgrade pcb"},
 		{"newer state.json", stateError(fmt.Errorf("/s/state.json: %w", store.ErrNewerState)), exitcode.MustAct,
 			"state.json was written by a newer pcb", "upgrade pcb"},
+		// Windows could not protect a new DPAPI key (a logon without the
+		// password): a person acts, told how.
+		{"dpapi protect", storeError(fmt.Errorf("seal: %w", &seal.ProtectError{Err: errors.New("access is denied")}), filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not protect the sealing key for this Windows user: access is denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move state aside before the next pcb login"},
+		{"dpapi protect, mapped", mapError(&seal.ProtectError{Err: errors.New("denied")}, filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not protect the sealing key for this Windows user: denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move state aside before the next pcb login"},
 		{"store unusable", storeError(errors.New("odd"), keyFile), exitcode.Blocked,
 			"cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)"},
 	} {
