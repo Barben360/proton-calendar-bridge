@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
@@ -267,7 +268,7 @@ func generate(o Options, now time.Time) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("encode the TLS key: %w", err)
 	}
-	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
+	if err := acl.MkdirAll(o.Dir); err != nil {
 		return Result{}, fmt.Errorf("create %s: %w", o.Dir, err)
 	}
 	if err := os.Chmod(o.Dir, 0o700); err != nil { // an older directory, or the umask

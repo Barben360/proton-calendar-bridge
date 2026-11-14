@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
@@ -342,7 +343,7 @@ func exists(path string) bool {
 
 // makeDir makes dir (0700) unless it exists, and fsyncs parent after.
 func makeDir(parent, dir string) error {
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := acl.Mkdir(dir); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil
 		}

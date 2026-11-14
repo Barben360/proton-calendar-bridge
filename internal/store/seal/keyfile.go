@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 )
 
 const keySize = 32
@@ -95,7 +97,7 @@ func (k *KeyFile) read() ([]byte, error) {
 // concurrent reader never sees a partial key and the first writer wins.
 func (k *KeyFile) create() error {
 	dir := filepath.Dir(k.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := acl.MkdirAll(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".key-*")

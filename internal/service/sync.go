@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -38,7 +38,7 @@ var ErrSyncRunning = errors.New("a sync is already running")
 
 // lockSync takes the sync lock: one sync (or watch) per state directory.
 func (l *Local) lockSync() (func(), error) {
-	if err := os.MkdirAll(l.o.Dirs.State, 0o700); err != nil {
+	if err := acl.MkdirAll(l.o.Dirs.State); err != nil {
 		return nil, blocked("cannot take the sync lock", "make sure "+l.o.Dirs.State+" is writable by this user")
 	}
 	unlock, ok, err := filelock.TryLock(filepath.Join(l.o.Dirs.State, syncLockName))

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -206,7 +207,7 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	}
 	root := base.Dirs.State
 	base.GuardDir = root
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	if err := acl.MkdirAll(root); err != nil {
 		return nil, blocked("cannot create the state directory "+root, "make sure its parent directory is writable by this user")
 	}
 	kr := o.Keyring
@@ -967,10 +968,10 @@ func (h *Hub) add() (*hubAccount, error) {
 		return nil, blocked("cannot draw a local account ID", "run the command again")
 	}
 	dir := store.AccountDir(h.root, id)
-	if err := os.MkdirAll(store.AccountsDir(h.root), 0o700); err != nil {
+	if err := acl.MkdirAll(store.AccountsDir(h.root)); err != nil {
 		return nil, blocked("cannot create "+store.AccountsDir(h.root), "make sure "+h.root+" is writable by this user")
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := acl.Mkdir(dir); err != nil {
 		return nil, blocked("cannot create the account directory "+dir, "make sure "+h.root+" is writable by this user")
 	}
 	l, err := h.newLocal(dir)

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 )
@@ -152,7 +153,7 @@ var stateLockBusy func()
 // lock: its holders take no other lock, so it can be taken under the
 // secrets lock. Its errors wrap ErrStateLock.
 func lockState(ctx context.Context, stateDir string) (unlock func(), err error) {
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+	if err := acl.MkdirAll(stateDir); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrStateLock, err)
 	}
 	if err := ctx.Err(); err != nil {

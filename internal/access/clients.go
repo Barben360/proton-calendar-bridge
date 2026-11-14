@@ -25,6 +25,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 )
@@ -219,7 +220,7 @@ func (s *Store) save(clients []record) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := acl.MkdirAll(s.dir); err != nil {
 		return err
 	}
 	if err := atomicfile.Write(s.path(), append(data, '\n')); err != nil {
@@ -255,7 +256,7 @@ func (s *Store) mutate(ctx context.Context, fn func(clients []record) ([]record,
 // dir/name, which unlock releases.
 func lockDir(ctx context.Context, dir, name string) (unlock func(), err error) {
 	processMu.Lock()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := acl.MkdirAll(dir); err != nil {
 		processMu.Unlock()
 		return nil, err
 	}

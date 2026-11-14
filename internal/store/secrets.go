@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -235,7 +236,7 @@ func (s *Secrets) decode(raw []byte) (map[string]Account, uint64, error) {
 // writes nothing, so a lost key can never turn into an overwrite. If fn fails
 // nothing is written either.
 func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Account) error) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Dir(s.Path)); err != nil {
 		return err
 	}
 	unlock, err := filelock.Lock(ctx, s.LockPath)
@@ -324,7 +325,7 @@ func stateWriteCause(err error) string {
 // an error): a caller that rewrites state.json from scratch seeds it with
 // next, since the mirror write fails when state.json is unreadable.
 func (s *Secrets) Wipe(ctx context.Context) (next uint64, err error) {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Dir(s.Path)); err != nil {
 		return 0, err
 	}
 	unlock, err := filelock.Lock(ctx, s.LockPath)
