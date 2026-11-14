@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,6 +66,36 @@ func TestWriteRenameFailureRemovesTemp(t *testing.T) {
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
 			t.Errorf("temp file %s left behind", e.Name())
+		}
+	}
+}
+
+// A directory where the file should be fails at once with the error Go
+// gives on Unix (EEXIST), never a permission error: Windows' rename returns
+// access denied there, which would be retried as a reader's and read as a
+// permission fault (exit 10 where Unix gives 20).
+func TestWriteOverADirectoryFailsAtOnceAsOnUnix(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "d")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if full {
+			if err := os.WriteFile(filepath.Join(target, "x"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		start := time.Now()
+		err := atomicfile.Write(target, []byte("x"))
+		if !errors.Is(err, syscall.EEXIST) || errors.Is(err, fs.ErrPermission) {
+			t.Errorf("non-empty %v: err = %v, want EEXIST and no permission error", full, err)
+		}
+		if d := time.Since(start); d >= atomicfile.RenameRetry/2 {
+			t.Errorf("non-empty %v: failed after %v, want no retry", full, d)
+		}
+		if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
+			t.Errorf("non-empty %v: the directory was replaced (%v)", full, err)
 		}
 	}
 }

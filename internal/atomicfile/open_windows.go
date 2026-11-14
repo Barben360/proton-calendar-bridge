@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -33,8 +34,12 @@ func Open(path string) (*os.File, error) {
 // Rename moves from to to, replacing to (see rename: POSIX semantics for a
 // file, os.Rename for a directory), retried every 50 ms for at most
 // RenameRetry while a foreign reader or a scanner holds a file (sharing
-// violation, access denied).
+// violation, access denied). A directory at to fails at once as on Unix
+// (dirTarget), not with the access denied Windows gives for it.
 func Rename(from, to string) error {
+	if err := dirTarget(from, to); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(RenameRetry)
 	for {
 		err := rename(from, to)
@@ -43,6 +48,30 @@ func Rename(from, to string) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// dirTarget is the refusal Go's os.Rename gives on Unix when to is a
+// directory: EEXIST, unless from is the same directory under another case.
+// Windows refuses to replace a directory too, but with access denied, which
+// reads as a permission fault and is retried as a reader's for RenameRetry;
+// no wait makes it succeed.
+func dirTarget(from, to string) error {
+	fi, err := os.Lstat(to)
+	if err != nil || !fi.IsDir() {
+		return nil
+	}
+	ofi, err := os.Lstat(from)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: err}
+	}
+	if from == to || !os.SameFile(fi, ofi) {
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EEXIST}
+	}
+	return nil
 }
 
 // rename moves a file with POSIX semantics (FileRenameInfoEx, Windows 10
