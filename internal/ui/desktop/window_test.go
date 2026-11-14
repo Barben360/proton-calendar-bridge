@@ -13,6 +13,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
@@ -217,9 +218,63 @@ func (f *fixture) texts() []string {
 			out = append(out, "["+v.Text+"]")
 		case *widget.Check:
 			out = append(out, "(check "+v.Text+")")
+		case *toggle:
+			out = append(out, "(toggle "+v.Label+")")
+		case *textLine:
+			out = append(out, v.Text)
 		}
 	})
 	return out
+}
+
+// visible tells whether o is drawn (it and every parent shown).
+func (f *fixture) visible(o fyne.CanvasObject) bool {
+	found := false
+	walk(f.roots(), func(c fyne.CanvasObject) {
+		if c == o {
+			found = true
+		}
+	})
+	return found
+}
+
+func (f *fixture) toggle(label string) *toggle {
+	f.t.Helper()
+	var found *toggle
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if c, ok := o.(*toggle); ok && c.Label == label && found == nil {
+			found = c
+		}
+	})
+	if found == nil {
+		f.t.Fatalf("no visible toggle %q; visible: %v", label, f.texts())
+	}
+	return found
+}
+
+// line is the visible text line whose text is exactly text.
+func (f *fixture) line(text string) *textLine {
+	f.t.Helper()
+	var found *textLine
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if l, ok := o.(*textLine); ok && l.Text == text && found == nil {
+			found = l
+		}
+	})
+	if found == nil {
+		f.t.Fatalf("no visible line %q; visible: %v", text, f.texts())
+	}
+	return found
+}
+
+// tapAdd taps the sidebar's + (add an account).
+func (f *fixture) tapAdd() {
+	f.t.Helper()
+	if !f.visible(f.w.addBtn) {
+		f.t.Fatalf("the add-account button is not visible: %v", f.texts())
+	}
+	test.Tap(f.w.addBtn)
+	f.wait()
 }
 
 func (f *fixture) has(sub string) bool {
@@ -276,8 +331,8 @@ func TestAccountListRendersView(t *testing.T) {
 		dot  ui.TrayState
 	}{{"alice@example.org", ui.TrayOK}, {"bob@example.org", ui.TrayAttention}} {
 		r := f.w.rows[i]
-		if r.btn.Text != want.addr {
-			t.Errorf("row %d text = %q, want %q", i, r.btn.Text, want.addr)
+		if r.addr.Text != want.addr {
+			t.Errorf("row %d text = %q, want %q", i, r.addr.Text, want.addr)
 		}
 		if r.dot.FillColor != dotColor(want.dot) {
 			t.Errorf("row %d dot colour = %v, want %v", i, r.dot.FillColor, dotColor(want.dot))
@@ -292,8 +347,8 @@ func TestAccountListRendersView(t *testing.T) {
 			t.Errorf("selected account pane lacks %q; visible: %v", s, f.texts())
 		}
 	}
-	if !f.hasButton("+ Add account") {
-		t.Error("no + Add account")
+	if !f.visible(f.w.addBtn) || f.w.addBtn.Icon == nil {
+		t.Error("no + (add account) in the sidebar")
 	}
 	test.Tap(f.w.rows[1].btn)
 	if !f.has("needs login") || f.has("Personal") {
@@ -301,19 +356,105 @@ func TestAccountListRendersView(t *testing.T) {
 	}
 }
 
+// Paper design: each row has an avatar with the address's initial and a
+// status line; only the selected row is highlighted.
+func TestAccountRowsAvatarAndSelection(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	for i, want := range []struct{ initial, short string }{{"A", "synced 1 min ago"}, {"B", "needs login"}} {
+		r := f.w.rows[i]
+		if r.initial.Text != want.initial || r.short.Text != want.short {
+			t.Errorf("row %d initial=%q short=%q, want %q %q", i, r.initial.Text, r.short.Text, want.initial, want.short)
+		}
+		if !f.visible(r.initial) || !f.visible(r.short) {
+			t.Errorf("row %d avatar or status line not drawn", i)
+		}
+	}
+	if !f.visible(f.w.rows[0].sel) || f.visible(f.w.rows[1].sel) {
+		t.Error("the highlight is not on the selected row only")
+	}
+	test.Tap(f.w.rows[1].btn)
+	if f.visible(f.w.rows[0].sel) || !f.visible(f.w.rows[1].sel) {
+		t.Error("the highlight did not follow the selection")
+	}
+	f.tap("Settings")
+	if f.visible(f.w.rows[0].sel) || f.visible(f.w.rows[1].sel) {
+		t.Error("a row stays highlighted while Settings shows")
+	}
+}
+
+// Paper design: the account pane opens with the alerts, then the grouped
+// boxes in order; a calendar's badge is a warning-coloured badge.
+func TestAccountPaneOrderAndBadge(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	at := func(sub string) int {
+		for i, s := range f.texts() {
+			if strings.Contains(s, sub) {
+				return i
+			}
+		}
+		t.Fatalf("%q not visible: %v", sub, f.texts())
+		return -1
+	}
+	order := []string{"alice@example.org", "sync is stalled", "ADAPTERS", "(toggle CalDAV)", "CALDAV CONNECTION", "http://127.0.0.1:8080/", "CALENDARS", "Personal"}
+	for i := 1; i < len(order); i++ {
+		if at(order[i-1]) >= at(order[i]) {
+			t.Errorf("%q is not above %q: %v", order[i-1], order[i], f.texts())
+		}
+	}
+	if l := f.line("read-only: ambiguous"); l.ColorName != theme.ColorNameWarning {
+		t.Errorf("badge colour = %v, want warning", l.ColorName)
+	}
+}
+
+// Paper design: the pane's main action stands out: Sign in for a signed-out
+// account; Remove is drawn as a destructive action.
+func TestAccountActionsEmphasis(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("b2")
+	if f.button("Sign in").Importance != widget.HighImportance {
+		t.Error("Sign in is not the highlighted action of a signed-out account")
+	}
+	if f.button("Remove").Importance != widget.DangerImportance {
+		t.Error("Remove is not drawn as destructive")
+	}
+	f.w.Show("a1")
+	if f.button("Sign out").Importance == widget.HighImportance {
+		t.Error("Sign out is highlighted")
+	}
+}
+
+// With CalDAV off the connection box and its title are gone, and so is the
+// calendars box of an account without calendars: no empty boxes.
+func TestConnectionGroupHiddenWithCalDAVOff(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("b2")
+	if f.has("CALDAV CONNECTION") || f.hasButton("New password") {
+		t.Errorf("connection group shown for an account with CalDAV off: %v", f.texts())
+	}
+	if f.has("CALENDARS") {
+		t.Errorf("an empty calendars box is shown: %v", f.texts())
+	}
+}
+
 func TestCalDAVSwitchCallsSetCalDAV(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
-	sw := f.check("CalDAV")
-	if !sw.Checked {
+	sw := f.toggle("CalDAV")
+	if !sw.On {
 		t.Fatal("CalDAV switch is off for an account with CalDAV on")
 	}
 	// a failure puts the switch back and says why.
 	f.act.err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("bridge busy"), Hint: "try later"}
 	test.Tap(sw)
 	f.wait()
-	if !f.w.pane.caldav.Checked {
+	if !f.w.pane.caldav.On {
 		t.Error("the switch stayed off after the call failed")
 	}
 	if !f.has("bridge busy") || !f.has("try later") {
@@ -321,7 +462,7 @@ func TestCalDAVSwitchCallsSetCalDAV(t *testing.T) {
 	}
 	f.tap("OK")
 	f.act.err = nil
-	test.Tap(f.check("CalDAV"))
+	test.Tap(f.toggle("CalDAV"))
 	f.wait()
 	if got := f.act.got(); !slices.Equal(got, []string{"caldav a1 off", "caldav a1 off"}) {
 		t.Fatalf("calls = %v", got)
@@ -335,14 +476,14 @@ func TestMCPSwitchCallsSetMCP(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
-	sw := f.check("MCP")
-	if !sw.Checked {
+	sw := f.toggle("MCP")
+	if !sw.On {
 		t.Fatal("MCP switch is off for an account with MCP on")
 	}
 	f.act.err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("bridge busy"), Hint: "try later"}
 	test.Tap(sw)
 	f.wait()
-	if !f.w.pane.mcp.Checked {
+	if !f.w.pane.mcp.On {
 		t.Error("the switch stayed off after the call failed")
 	}
 	if !f.has("bridge busy") || !f.has("try later") {
@@ -350,16 +491,16 @@ func TestMCPSwitchCallsSetMCP(t *testing.T) {
 	}
 	f.tap("OK")
 	f.act.err = nil
-	test.Tap(f.check("MCP"))
+	test.Tap(f.toggle("MCP"))
 	f.wait()
 	if got := f.act.got(); !slices.Equal(got, []string{"mcp a1 off", "mcp a1 off"}) {
 		t.Fatalf("calls = %v", got)
 	}
-	if !f.w.pane.caldav.Checked {
+	if !f.w.pane.caldav.On {
 		t.Error("the MCP switch turned the CalDAV switch off")
 	}
 	test.Tap(f.w.rows[1].btn)
-	if f.w.pane.mcp.Checked {
+	if f.w.pane.mcp.On {
 		t.Error("b2's MCP switch is on for an account with MCP off")
 	}
 }
@@ -521,13 +662,13 @@ func TestSettingsCallsAndListenerShown(t *testing.T) {
 	f.w.Update(v)
 	f.w.Show("")
 	f.tap("Settings")
-	if !f.has("127.0.0.1:8443") || !f.has("TLS: on") {
+	if !f.has("127.0.0.1:8443") || f.w.settings.tls.Text != "on" || !f.visible(f.w.settings.tls) {
 		t.Errorf("listener not shown: %v", f.texts())
 	}
 	if !f.has("set [log] level in config.toml to keep it") {
 		t.Errorf("log level hint missing: %v", f.texts())
 	}
-	test.Tap(f.check("Start at login"))
+	test.Tap(f.toggle("Start at login"))
 	f.wait()
 	var sel *widget.Select
 	walk(f.roots(), func(o fyne.CanvasObject) {
@@ -558,7 +699,7 @@ func TestSettingsCallsAndListenerShown(t *testing.T) {
 	f.tap("Close")
 	v.Listener = &ctl.Listener{Addr: "127.0.0.1:8080", URL: "http://127.0.0.1:8080/"}
 	f.w.Update(v)
-	if !f.has("TLS: off") {
+	if f.w.settings.tls.Text != "off" || !f.visible(f.w.settings.tls) {
 		t.Errorf("TLS off not shown: %v", f.texts())
 	}
 }
@@ -588,8 +729,8 @@ func TestCloseHides(t *testing.T) {
 
 func TestWindowSizeAndNoBranding(t *testing.T) {
 	f := newFixture(t)
-	if got := f.w.win.Canvas().Size(); got.Width != 800 || got.Height != 550 {
-		t.Errorf("size = %v, want 800x550", got)
+	if got := f.w.win.Canvas().Size(); got.Width != 880 || got.Height != 620 {
+		t.Errorf("size = %v, want 880x620", got)
 	}
 	if strings.Contains(strings.ToLower(f.w.win.Title()), "proton") {
 		t.Errorf("title %q carries the Proton name", f.w.win.Title())
@@ -634,11 +775,11 @@ func TestCalDAVFailureRevertsOnlyTheSameAccount(t *testing.T) {
 	test.Tap(f.w.rows[1].btn) // the pane shows b2 while the call is out
 	close(f.act.block)
 	f.wait()
-	if f.w.pane.caldav.Checked {
+	if f.w.pane.caldav.On {
 		t.Error("the revert of a1's switch landed on b2's pane")
 	}
 	test.Tap(f.w.rows[0].btn)
-	if !f.w.pane.caldav.Checked {
+	if !f.w.pane.caldav.On {
 		t.Error("a1's switch does not show its CalDAV state")
 	}
 }
@@ -653,11 +794,11 @@ func TestMCPFailureRevertsOnlyTheSameAccount(t *testing.T) {
 	test.Tap(f.w.rows[1].btn) // the pane shows b2 while the call is out
 	close(f.act.block)
 	f.wait()
-	if f.w.pane.mcp.Checked {
+	if f.w.pane.mcp.On {
 		t.Error("the revert of a1's switch landed on b2's pane")
 	}
 	test.Tap(f.w.rows[0].btn)
-	if !f.w.pane.mcp.Checked {
+	if !f.w.pane.mcp.On {
 		t.Error("a1's switch does not show its MCP state")
 	}
 }
@@ -668,12 +809,32 @@ func TestAutostartFailureRevertsSwitch(t *testing.T) {
 	f.w.Update(twoAccounts())
 	f.w.Show("")
 	f.tap("Settings")
-	test.Tap(f.check("Start at login"))
+	test.Tap(f.toggle("Start at login"))
 	f.wait()
-	if f.w.settings.autostart.Checked {
+	if f.w.settings.autostart.On {
 		t.Error("the switch stayed on although SetAutostart failed")
 	}
 	if !f.has("cannot write the autostart file") {
 		t.Errorf("no error shown: %v", f.texts())
+	}
+}
+
+// With no account, the empty pane offers the add as its main action; a
+// stopped bridge's pane does not (it has nothing to add to).
+func TestEmptyPaneOffersAdd(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(ui.View{Accounts: []ui.AccountView{}})
+	f.w.Show("")
+	if b := f.button("Add account"); b.Importance != widget.HighImportance {
+		t.Errorf("the empty pane's Add account is not the main action")
+	}
+	f.tap("Add account")
+	if f.w.mode != paneWizard {
+		t.Fatalf("Add account did not open the wizard: %v", f.texts())
+	}
+	f.w.Update(ui.View{Bridge: "bridge stopped", Accounts: []ui.AccountView{}})
+	f.tap("Cancel")
+	if f.hasButton("Add account") {
+		t.Errorf("a stopped bridge's pane offers an add: %v", f.texts())
 	}
 }

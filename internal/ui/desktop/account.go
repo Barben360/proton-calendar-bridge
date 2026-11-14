@@ -2,10 +2,11 @@ package desktop
 
 import (
 	"context"
-	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -25,14 +26,14 @@ type pwBox struct {
 	copyBtn *widget.Button
 	shown   bool
 	gen     int // bumped by hide: a password fetched before it never shows
-	root    fyne.CanvasObject
 }
 
 func newPwBox(w *Window) *pwBox {
 	p := &pwBox{w: w, label: widget.NewLabel(mask)}
-	p.showBtn = widget.NewButton("Show", p.toggle)
-	p.copyBtn = widget.NewButton("Copy", p.copy)
-	p.root = container.NewHBox(p.label, p.showBtn, p.copyBtn)
+	p.label.TextStyle = fyne.TextStyle{Monospace: true}
+	p.showBtn = widget.NewButtonWithIcon("Show", theme.VisibilityIcon(), p.toggle)
+	p.copyBtn = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), p.copy)
+	p.showBtn.Importance, p.copyBtn.Importance = widget.LowImportance, widget.LowImportance
 	return p
 }
 
@@ -92,59 +93,84 @@ type accountPane struct {
 	w  *Window
 	av ui.AccountView
 
-	root                *fyne.Container
-	addr, state, last   *widget.Label
-	signBtn, removeBtn  *widget.Button
-	caldav, mcp         *widget.Check
-	silent              bool // setting the switches from the view, not the person
-	conn                *fyne.Container
-	url, user, fp       *widget.Label
-	fpRow               *fyne.Container
-	pw                  *pwBox
-	newPw               *widget.Button
-	calendars, alertBox *fyne.Container
-	b                   *busy
+	root               *fyne.Container
+	addr, status       *widget.Label
+	statusDot          *canvas.Circle
+	signBtn, removeBtn *widget.Button
+	caldav, mcp        *toggle
+	conn               *fyne.Container
+	url, user, fp      *textLine
+	fpRow              *fyne.Container
+	pw                 *pwBox
+	newPw              *widget.Button
+	calGroup           *fyne.Container
+	calendars          *fyne.Container
+	alertBox           *fyne.Container
+	b                  *busy
+}
+
+// keyWidth is the width of a grouped row's key column.
+const keyWidth = 110
+
+func key(s string) fyne.CanvasObject {
+	return newTextLine(s, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
+}
+
+func mono(s string) *textLine {
+	l := newTextLine(s, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{Monospace: true})
+	l.Truncate = true
+	return l
+}
+
+// adapterKey is a switch's name and, muted, what it is for.
+func adapterKey(name, what string) fyne.CanvasObject {
+	return container.NewHBox(key(name), newTextLine("· "+what, theme.ColorNameDisabled, theme.SizeNameText, fyne.TextStyle{}))
 }
 
 func newAccountPane(w *Window) *accountPane {
 	p := &accountPane{w: w}
 	p.addr = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	p.state, p.last = widget.NewLabel(""), widget.NewLabel("")
+	p.addr.SizeName = theme.SizeNameSubHeadingText
+	p.addr.Truncation = fyne.TextTruncateEllipsis
+	p.status = widget.NewLabel("")
+	p.status.Importance = widget.LowImportance
+	var dotObj fyne.CanvasObject
+	p.statusDot, dotObj = dot(dotColor(ui.TrayOK), 8)
 	p.signBtn = widget.NewButton("Sign out", p.signInOut)
 	p.removeBtn = widget.NewButton("Remove", p.remove)
-	p.caldav = widget.NewCheck("CalDAV", p.setCalDAV)
-	p.mcp = widget.NewCheck("MCP", p.setMCP)
-	p.url, p.user, p.fp = widget.NewLabel(""), widget.NewLabel(""), widget.NewLabel("")
+	p.removeBtn.Importance = widget.DangerImportance
+	p.caldav = newToggle("CalDAV", p.setCalDAV)
+	p.mcp = newToggle("MCP", p.setMCP)
+	p.url, p.user, p.fp = mono(""), mono(""), mono("")
 	p.pw = newPwBox(w)
 	p.pw.fetch = func() func(context.Context) (string, error) {
 		id := p.av.ID
 		return func(ctx context.Context) (string, error) { return w.act.Password(ctx, id) }
 	}
-	p.newPw = widget.NewButton("New password", p.newPassword)
+	p.newPw = widget.NewButtonWithIcon("New password", theme.ViewRefreshIcon(), p.newPassword)
+	p.newPw.Alignment = widget.ButtonAlignLeading
+	p.newPw.Importance = widget.LowImportance
 	p.b = newBusy(p.signBtn, p.removeBtn, p.caldav, p.mcp, p.newPw, p.pw.showBtn, p.pw.copyBtn)
 	p.pw.b = p.b
-	p.calendars, p.alertBox = container.NewVBox(), container.NewVBox()
+	p.calendars, p.alertBox = vbox(0), vbox(8)
 
-	p.fpRow = container.NewHBox(widget.NewLabel("Fingerprint"), p.fp)
-	p.conn = container.NewVBox(
-		widget.NewLabelWithStyle("CalDAV connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(widget.NewLabel("URL"), p.url),
-		container.NewHBox(widget.NewLabel("Username"), p.user),
-		container.NewHBox(widget.NewLabel("Password"), p.pw.root, p.newPw),
+	header := container.NewBorder(nil, nil, nil, vcenter(container.NewHBox(p.signBtn, p.removeBtn)),
+		vbox(0, p.addr, container.NewBorder(nil, nil, pad(0, 0, 8, 0, dotObj), nil, p.status)))
+	adapters := group("ADAPTERS",
+		groupRow(adapterKey("CalDAV", "calendar apps"), 0, nil, vcenter(p.caldav)),
+		divided(groupRow(adapterKey("MCP", "AI agents"), 0, nil, vcenter(p.mcp))),
+	)
+	p.fpRow = divided(groupRow(key("Fingerprint"), keyWidth, p.fp))
+	p.conn = group("CALDAV CONNECTION",
+		groupRow(key("Server"), keyWidth, p.url),
+		divided(groupRow(key("Username"), keyWidth, p.user)),
+		divided(groupRow(key("Password"), keyWidth, vcenter(p.pw.label), p.pw.showBtn, p.pw.copyBtn)),
 		p.fpRow,
+		divided(pad(2, 2, 4, 4, p.newPw)),
 	)
-	header := container.NewVBox(
-		p.addr, container.NewHBox(p.state, p.last),
-		container.NewHBox(p.signBtn, p.removeBtn), p.b.label,
-	)
-	body := container.NewVBox(
-		header, widget.NewSeparator(),
-		widget.NewLabelWithStyle("Adapters", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.caldav, p.mcp,
-		p.conn, widget.NewSeparator(),
-		widget.NewLabelWithStyle("Calendars", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.calendars,
-		widget.NewLabelWithStyle("Alerts", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), p.alertBox,
-	)
-	p.root = container.NewStack(container.NewVScroll(body))
+	p.calGroup = group("CALENDARS", p.calendars)
+	body := vbox(18, header, p.b.label, p.alertBox, adapters, p.conn, p.calGroup)
+	p.root = container.NewStack(container.NewVScroll(pad(4, 24, 28, 28, body)))
 	return p
 }
 
@@ -155,19 +181,23 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	}
 	p.av = av
 	p.addr.SetText(av.Address)
-	p.state.SetText(av.Short)
+	last := "not synced yet"
 	if av.LastSync != nil {
-		p.last.SetText("Last sync " + av.LastSync.Local().Format("15:04:05 2 Jan"))
-	} else {
-		p.last.SetText("Not synced yet")
+		last = "last sync " + av.LastSync.Local().Format("15:04:05 2 Jan")
 	}
+	p.status.SetText(av.Short + " · " + last)
+	p.statusDot.FillColor = dotColor(av.Dot)
+	p.statusDot.Refresh()
 	if av.SignedIn {
 		p.signBtn.SetText("Sign out")
+		p.signBtn.Importance = widget.MediumImportance
 	} else {
 		p.signBtn.SetText("Sign in")
+		p.signBtn.Importance = widget.HighImportance
 	}
-	p.setChecked(p.caldav, av.CalDAV)
-	p.setChecked(p.mcp, av.MCP)
+	p.signBtn.Refresh()
+	p.caldav.SetOn(av.CalDAV)
+	p.mcp.SetOn(av.MCP)
 	p.url.SetText(av.URL)
 	p.user.SetText(av.Username)
 	p.fp.SetText(av.Fingerprint)
@@ -182,35 +212,44 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 		p.fpRow.Hide()
 	}
 	cals := make([]fyne.CanvasObject, 0, len(av.Calendars))
-	for _, c := range av.Calendars {
-		parts := []string{c.Name}
-		if c.Badge != "" {
-			parts = append(parts, "["+c.Badge+"]")
-		} else if c.ReadOnly {
-			parts = append(parts, "[read-only]")
+	for i, c := range av.Calendars {
+		var tags []fyne.CanvasObject
+		switch {
+		case c.Badge != "":
+			tags = append(tags, badge(c.Badge))
+		case c.ReadOnly:
+			tags = append(tags, badge("read-only"))
 		}
 		if c.LastSync != "" {
-			parts = append(parts, c.LastSync)
+			tags = append(tags, newTextLine(c.LastSync, theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{}))
 		}
 		if c.Error != "" {
-			parts = append(parts, "error: "+c.Error)
+			tags = append(tags, newTextLine("error: "+c.Error, theme.ColorNameError, theme.SizeNameCaptionText, fyne.TextStyle{}))
 		}
-		cals = append(cals, wrapped(strings.Join(parts, "  ")))
+		name := newTextLine(c.Name, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
+		name.Truncate = true
+		r := groupRow(nil, 0, name, tags...)
+		if i > 0 {
+			r = divided(r)
+		}
+		cals = append(cals, r)
 	}
 	p.calendars.Objects = cals
 	p.calendars.Refresh()
+	if len(cals) == 0 {
+		p.calGroup.Hide()
+	} else {
+		p.calGroup.Show()
+	}
 	alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
 	for _, a := range av.Alerts {
-		alerts = append(alerts, wrapped(a.Message+"\nFix: "+a.Fix))
+		msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		msg.Wrapping = fyne.TextWrapWord
+		fix := wrapped("Fix: " + a.Fix)
+		alerts = append(alerts, alertBox(vbox(0, msg, fix)))
 	}
 	p.alertBox.Objects = alerts
 	p.alertBox.Refresh()
-}
-
-func (p *accountPane) setChecked(sw *widget.Check, on bool) {
-	p.silent = true
-	sw.SetChecked(on)
-	p.silent = false
 }
 
 func (p *accountPane) setCalDAV(on bool) { p.flip(p.caldav, p.w.act.SetCalDAV, on) }
@@ -219,16 +258,13 @@ func (p *accountPane) setMCP(on bool) { p.flip(p.mcp, p.w.act.SetMCP, on) }
 
 // flip runs set for the person's tap on the switch sw; a failure puts sw
 // back, unless the pane shows another account by then.
-func (p *accountPane) flip(sw *widget.Check, set func(ctx context.Context, id string, on bool) error, on bool) {
-	if p.silent {
-		return
-	}
+func (p *accountPane) flip(sw *toggle, set func(ctx context.Context, id string, on bool) error, on bool) {
 	id, prev := p.av.ID, !on
 	p.w.run(p.b, "Working…", func(ctx context.Context) error { return set(ctx, id, on) }, func(err error) {
 		if err != nil {
 			p.w.showErr(err)
 			if p.av.ID == id { // the pane may show another account by now
-				p.setChecked(sw, prev)
+				sw.SetOn(prev)
 			}
 		}
 	})

@@ -7,6 +7,8 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -41,25 +43,37 @@ func (p *wizardPane) reset() {
 	p.address = ""
 }
 
+// set shows a step's screen: a white card in the pane.
 func (p *wizardPane) set(o fyne.CanvasObject) {
-	p.root.Objects = []fyne.CanvasObject{container.NewVScroll(o)}
+	card := newPanel(o, colorCard, theme.ColorNameSeparator, 12, 16, 12)
+	p.root.Objects = []fyne.CanvasObject{container.NewVScroll(pad(4, 24, 28, 28, container.NewVBox(card)))}
 	p.root.Refresh()
 }
 
 func title(s string) fyne.CanvasObject {
-	return widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	l.SizeName = theme.SizeNameSubHeadingText
+	return l
 }
 
+// errLabel is the step's error in an alert box, or nothing.
 func (p *wizardPane) errLabel() fyne.CanvasObject {
 	e := p.model().Err()
 	if e == nil {
-		return widget.NewLabel("")
+		none := widget.NewLabel("")
+		none.Hide()
+		return none
 	}
 	msg := e.Error()
 	if e.Hint != "" {
 		msg += "\n" + e.Hint
 	}
-	return wrapped(msg)
+	return alertBox(wrapped(msg))
+}
+
+// buttons is a step's actions, on the right.
+func buttons(bs ...fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewHBox(append([]fyne.CanvasObject{layout.NewSpacer()}, bs...)...)
 }
 
 // call runs a wizard call off the main goroutine, then draws the next screen
@@ -101,6 +115,7 @@ func (p *wizardPane) credentials() {
 	pw.PlaceHolder = "Proton password"
 	un := widget.NewCheck("Repair the session without me", nil)
 	warn := wrapped(ui.UnattendedWarning)
+	warn.Importance = widget.LowImportance
 	cancel := p.cancelBtn()
 	var b *busy
 	sign := widget.NewButton("Sign in", func() {
@@ -115,7 +130,7 @@ func (p *wizardPane) credentials() {
 	})
 	sign.Importance = widget.HighImportance
 	b = newBusy(addr, pw, un, sign, cancel)
-	p.set(container.NewVBox(title("Add an account"), p.errLabel(), addr, pw, un, warn, container.NewHBox(sign, cancel), b.label))
+	p.set(container.NewVBox(title("Add an account"), p.errLabel(), addr, pw, un, warn, buttons(cancel, sign), b.label))
 }
 
 func (p *wizardPane) totp() {
@@ -129,7 +144,7 @@ func (p *wizardPane) totp() {
 	})
 	verify.Importance = widget.HighImportance
 	b = newBusy(code, verify, cancel)
-	p.set(container.NewVBox(title("Two-factor code"), wrapped("Enter your 2FA code."), p.errLabel(), code, container.NewHBox(verify, cancel), b.label))
+	p.set(container.NewVBox(title("Two-factor code"), wrapped("Enter your 2FA code."), p.errLabel(), code, buttons(cancel, verify), b.label))
 }
 
 func (p *wizardPane) captcha() {
@@ -151,7 +166,7 @@ func (p *wizardPane) captcha() {
 	b = newBusy(openBtn, solved, cancel)
 	p.set(container.NewVBox(title("Human verification"),
 		wrapped("A verification is needed. Open it, solve it in the browser, then come back and press I solved it."),
-		p.errLabel(), container.NewHBox(openBtn, solved, cancel), b.label))
+		p.errLabel(), buttons(cancel, openBtn, solved), b.label))
 }
 
 // finish loads the new account, then draws the Done screen.
@@ -201,10 +216,12 @@ func (p *wizardPane) drawDone(m WizardModel, av ui.AccountView) {
 	p.done = pw
 	p.set(container.NewVBox(title("Account added"),
 		wrapped("Use these in your calendar app."),
-		container.NewHBox(widget.NewLabel("URL"), widget.NewLabel(av.URL)),
-		container.NewHBox(widget.NewLabel("Username"), widget.NewLabel(av.Username)),
-		container.NewHBox(widget.NewLabel("Password"), pw.root),
-		closeBtn, b.label))
+		newPanel(vbox(0,
+			groupRow(key("Server"), keyWidth, mono(av.URL)),
+			divided(groupRow(key("Username"), keyWidth, mono(av.Username))),
+			divided(groupRow(key("Password"), keyWidth, vcenter(pw.label), pw.showBtn, pw.copyBtn)),
+		), theme.ColorNameBackground, theme.ColorNameSeparator, 10, 0, 0),
+		buttons(closeBtn), b.label))
 }
 
 // drawFailed is the Done screen when the account's details could not be read.
@@ -213,5 +230,5 @@ func (p *wizardPane) drawFailed(e error) {
 		p.w.closeWizard()
 		p.w.showDefault()
 	})
-	p.set(container.NewVBox(title("Account added"), wrapped("The account is added, but its connection details could not be read: "+e.Error()), closeBtn))
+	p.set(container.NewVBox(title("Account added"), wrapped("The account is added, but its connection details could not be read: "+e.Error()), buttons(closeBtn)))
 }
