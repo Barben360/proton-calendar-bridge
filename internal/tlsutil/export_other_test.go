@@ -1,3 +1,5 @@
+//go:build !windows
+
 package tlsutil
 
 import "io/fs"

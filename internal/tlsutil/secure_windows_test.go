@@ -39,7 +39,7 @@ func TestSecureRefusesAnOpenKey(t *testing.T) {
 			acltest.Allow(t, target, "S-1-1-0", windows.GENERIC_READ, windows.NO_INHERITANCE)
 			before, _ := os.ReadFile(tlsutil.KeyPath(o.Dir))
 			_, err := tlsutil.SelfSigned(o)
-			if err == nil || !strings.Contains(err.Error(), "access list") || !strings.Contains(err.Error(), "Everyone") ||
+			if err == nil || !strings.Contains(err.Error(), "access list") || !strings.Contains(err.Error(), acl.AccountName(acltest.Everyone)) ||
 				!strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "pcb doctor") {
 				t.Fatalf("SelfSigned with an open %s = %v, want the access list refused", open, err)
 			}

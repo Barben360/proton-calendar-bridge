@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -162,7 +161,7 @@ func (c KeyFileCheck) Run(ctx context.Context) Result {
 	case errors.Is(err, fs.ErrPermission):
 		r.Status = StatusError
 		r.Message = c.Path + " is not readable by this user" + uidText() + ": " + causeOf(err)
-		r.Fix = "chown " + ownerText() + " " + shellquote.Quote(c.Path) + " (a container secret: on the host, chown 65532:65532 and chmod 600 the key file)"
+		r.Fix = unreadableKeyFix(c.Path)
 	case errors.Is(err, seal.ErrCorrupt):
 		r.Status = StatusError
 		r.Message = c.Path + " is not a 32-byte key"
@@ -189,12 +188,4 @@ func uidText() string {
 		return " (uid " + strconv.Itoa(uid) + ")"
 	}
 	return ""
-}
-
-// ownerText is the owner a chown fix names: this process's UID.
-func ownerText() string {
-	if uid := os.Geteuid(); uid >= 0 {
-		return strconv.Itoa(uid)
-	}
-	return "$USER"
 }

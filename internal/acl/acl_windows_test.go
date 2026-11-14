@@ -233,3 +233,43 @@ func TestAccountName(t *testing.T) {
 		}
 	}
 }
+
+// madeBy is a Mkdir that loses the race: another process makes path first
+// (here os.Mkdir, so it takes its parent's access list), then Mkdir fails
+// as it would, with fs.ErrExist.
+func madeBy(t *testing.T) func(string) error {
+	return func(path string) error {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return &fs.PathError{Op: "mkdir", Path: path, Err: fs.ErrExist}
+	}
+}
+
+// A directory made meanwhile is accepted only as pcb would have made it:
+// owned by this user, its access list letting no other account in.
+func TestMkdirAllChecksADirectoryMadeMeanwhile(t *testing.T) {
+	t.Run("private and ours", func(t *testing.T) {
+		defer acl.SetMkdir(madeBy(t))()
+		if err := acl.MkdirAll(filepath.Join(t.TempDir(), "pcb")); err != nil {
+			t.Errorf("MkdirAll = %v, want the directory made meanwhile accepted", err)
+		}
+	})
+	t.Run("open", func(t *testing.T) {
+		parent := t.TempDir()
+		acltest.OpenToOthers(t, parent) // inherited by what is made inside
+		defer acl.SetMkdir(madeBy(t))()
+		var oe *acl.OpenError
+		if err := acl.MkdirAll(filepath.Join(parent, "pcb")); !errors.As(err, &oe) || oe.SID != acltest.Everyone {
+			t.Errorf("MkdirAll = %v, want an *OpenError for Everyone", err)
+		}
+	})
+	t.Run("foreign owner", func(t *testing.T) {
+		defer acl.SetMkdir(madeBy(t))()
+		defer acl.SetOwnerOf(func(string) (string, error) { return acl.SIDSystem, nil })()
+		err := acl.MkdirAll(filepath.Join(t.TempDir(), "pcb"))
+		if err == nil || !strings.Contains(err.Error(), "made meanwhile by "+acl.AccountName(acl.SIDSystem)) {
+			t.Errorf("MkdirAll = %v, want the SYSTEM-owned directory refused", err)
+		}
+	})
+}

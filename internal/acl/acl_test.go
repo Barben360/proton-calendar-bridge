@@ -27,6 +27,14 @@ func TestFix(t *testing.T) {
 	}
 }
 
+func TestTakeOwnershipFix(t *testing.T) {
+	got := acl.TakeOwnershipFix(`C:\Users\Zoë O’Brien\pcb`)
+	want := `icacls 'C:\Users\Zoë O’’Brien\pcb' /setowner $env:USERNAME /t /c`
+	if got != want {
+		t.Errorf("TakeOwnershipFix = %q, want %q", got, want)
+	}
+}
+
 func TestOpenErrorNamesTheACLAndDoctor(t *testing.T) {
 	for _, c := range []struct {
 		e    acl.OpenError

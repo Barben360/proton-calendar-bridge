@@ -46,16 +46,36 @@ func WantPrivate(t testing.TB, path string, _ fs.FileMode) {
 	}
 }
 
-// Unreadable makes the file path unreadable by this user: a deny ACE for
-// reading its data, which leaves its attributes and access list readable,
-// as a mode 0000 file's stat is on Unix.
+// Unreadable makes the file path unreadable by this user until t ends: a
+// deny ACE for reading its data, which leaves its attributes and access
+// list readable, as a mode 0000 file's stat is on Unix.
 func Unreadable(t testing.TB, path string) {
 	t.Helper()
 	user, err := acl.UserSID()
 	if err != nil {
 		t.Fatal(err)
 	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("acltest: read the DACL of %s: %v", path, err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("acltest: %s has no DACL: %v", path, err)
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		t.Fatalf("acltest: read the control of %s: %v", path, err)
+	}
+	protection := windows.SECURITY_INFORMATION(windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		protection = windows.PROTECTED_DACL_SECURITY_INFORMATION
+	}
 	Deny(t, path, user, windows.FILE_READ_DATA)
+	t.Cleanup(func() { // the path may be gone or replaced by then
+		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|protection, nil, nil, dacl, nil)
+		_ = sd // keeps dacl's memory alive
+	})
 }
 
 // OpenToOthers lets Everyone read path, through an allow ACE (inherited by

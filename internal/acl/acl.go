@@ -34,6 +34,13 @@ func Fix(path, sid string) string {
 	return "icacls " + p + " /inheritance:d; icacls " + p + " /remove:g " + shellquote.PowerShell("*"+sid)
 }
 
+// TakeOwnershipFix returns the PowerShell command line that makes the user
+// running it the owner of path and of what it holds: the way out of a
+// directory an elevated run made, which Administrators owns.
+func TakeOwnershipFix(path string) string {
+	return "icacls " + shellquote.PowerShell(path) + " /setowner $env:USERNAME /t /c"
+}
+
 // OpenError is an access list that lets in an account other than the user,
 // SYSTEM or Administrators.
 type OpenError struct {

@@ -254,8 +254,9 @@ func TestKeyFileCheckReadsTheKey(t *testing.T) {
 	acltest.Unreadable(t, path)
 	got := check.Run(ctx)
 	if runtime.GOOS == "windows" {
-		if got.Status != doctor.StatusError || !strings.Contains(got.Message, path+" is not readable by this user: ") {
-			t.Errorf("unreadable: %+v", got)
+		if got.Status != doctor.StatusError || !strings.Contains(got.Message, path+" is not readable by this user: ") ||
+			!strings.Contains(got.Fix, "icacls") || strings.Contains(got.Fix, "chown") || strings.Contains(got.Fix, "chmod") {
+			t.Errorf("unreadable: %+v, want an icacls fix and no chown or chmod", got)
 		}
 	} else {
 		want := fmt.Sprintf("not readable by this user (uid %d): permission denied", os.Geteuid())

@@ -29,3 +29,10 @@ func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, 
 	}
 	return mustAct("the state directory belongs to "+name+": run pcb as that user", "sudo -u "+sudoName+" pcb …")
 }
+
+// privateFile is what a hint asks of a file only its user may read.
+const privateFile = "mode 0600"
+
+// checkStateRoot is Windows'; on Unix the files pcb writes are 0600
+// whatever the directory's mode.
+func checkStateRoot(string) error { return nil }

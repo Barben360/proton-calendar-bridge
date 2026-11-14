@@ -208,7 +208,14 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	root := base.Dirs.State
 	base.GuardDir = root
 	if err := acl.MkdirAll(root); err != nil {
+		if cerr := checkStateRoot(root); cerr != nil { // made meanwhile, not as pcb makes it
+			return nil, cerr
+		}
 		return nil, blocked("cannot create the state directory "+root, "make sure its parent directory is writable by this user")
+	}
+	// Windows: the files written here take its access list.
+	if err := checkStateRoot(root); err != nil {
+		return nil, err
 	}
 	kr := o.Keyring
 	if kr == nil {

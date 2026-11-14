@@ -60,11 +60,19 @@ func TestModeChecksJudgeTheOwnerOfDirectoriesOnly(t *testing.T) {
 	}
 	owner = acl.SIDAdministrators
 	got = doctor.DirModeCheck{Label: "state dir", Path: d, Want: 0o700}.Run(context.Background())
-	if wantOK := acl.Elevated(); (got.Status == doctor.StatusOK) != wantOK {
-		t.Errorf("Administrators-owned directory, elevated %v: %+v", wantOK, got)
+	if acl.Elevated() {
+		if got.Status != doctor.StatusOK {
+			t.Errorf("Administrators-owned directory, elevated: %+v", got)
+		}
+	} else if got.Status != doctor.StatusError || got.Message != d+" belongs to "+acl.AccountName(acl.SIDAdministrators)+" (an elevated pcb made it)" ||
+		got.Fix != "run pcb elevated, or take ownership: "+acl.TakeOwnershipFix(d) {
+		t.Errorf("Administrators-owned directory, not elevated: %+v", got)
 	}
+	// SYSTEM, never accepted, so that an owner check on files would bite
+	// elevated too.
+	owner = acl.SIDSystem
 	if got := (doctor.FileModeCheck{Label: "state", Path: f, Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusOK || got.Message != f+" private" {
-		t.Errorf("Administrators-owned private file: %+v", got)
+		t.Errorf("SYSTEM-owned private file: %+v", got)
 	}
 	acltest.Allow(t, f, acltest.Everyone, windows.GENERIC_READ, windows.NO_INHERITANCE)
 	if got := (doctor.FileModeCheck{Label: "state", Path: f, Want: 0o600}).Run(context.Background()); got.Status != doctor.StatusError || got.Fix != acl.Fix(f, acltest.Everyone) {

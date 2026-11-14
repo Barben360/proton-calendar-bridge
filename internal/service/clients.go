@@ -73,7 +73,7 @@ func (l *Local) clientsError(err error) error {
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
 		return blocked("the CalDAV client list could not be read or written",
-			fmt.Sprintf("check clients.json and its permissions in %s (it must be valid JSON in the format pcb wrote, mode 0600)", l.o.Dirs.State))
+			fmt.Sprintf("check clients.json and its permissions in %s (it must be valid JSON in the format pcb wrote, %s)", l.o.Dirs.State, privateFile))
 	}
 }
 

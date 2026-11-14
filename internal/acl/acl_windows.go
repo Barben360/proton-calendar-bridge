@@ -22,6 +22,13 @@ const accessAllowedCallbackACEType = 0x9
 // everyone is the SID of Everyone, what a null DACL lets in.
 const everyone = "S-1-1-0"
 
+// mkdir and ownerOf are Mkdir and Owner; tests replace them to stage a
+// directory made meanwhile by another process.
+var (
+	mkdir   = Mkdir
+	ownerOf = Owner
+)
+
 var userSID = sync.OnceValues(func() (string, error) {
 	u, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -53,14 +60,30 @@ func MkdirAll(path string) error {
 			return err
 		}
 	}
-	if err := Mkdir(clean); err != nil {
-		// Made meanwhile by another process: as good.
+	if err := mkdir(clean); err != nil {
+		// Made meanwhile by another process: as good if pcb could have made it.
 		if fi, serr := os.Lstat(clean); serr == nil && fi.IsDir() {
-			return nil
+			return madeMeanwhile(clean)
 		}
 		return err
 	}
 	return nil
+}
+
+// madeMeanwhile accepts a directory another process made between
+// MkdirAll's check and its Mkdir only as pcb makes them: owned by an
+// account pcb accepts (OwnerAccepted), its access list letting no other
+// account in (Check: an *OpenError otherwise).
+func madeMeanwhile(path string) error {
+	owner, err := ownerOf(path)
+	if err != nil {
+		return err
+	}
+	if !OwnerAccepted(owner) {
+		return &fs.PathError{Op: "mkdir", Path: path,
+			Err: fmt.Errorf("made meanwhile by %s, an owner pcb does not accept", AccountName(owner))}
+	}
+	return Check(path)
 }
 
 // Mkdir makes path as a private directory (see the package doc); its

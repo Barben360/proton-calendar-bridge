@@ -37,8 +37,20 @@ func aclProblem(path string, dir bool) (message, fix string, checked bool) {
 	if err != nil {
 		return err.Error(), "", true
 	}
-	if !acl.OwnerAccepted(owner) {
+	switch {
+	case acl.OwnerAccepted(owner):
+	case owner == acl.SIDAdministrators: // a group: what an elevated pcb leaves
+		return path + " belongs to " + acl.AccountName(owner) + " (an elevated pcb made it)",
+			"run pcb elevated, or take ownership: " + acl.TakeOwnershipFix(path), true
+	default:
 		return path + " belongs to " + acl.AccountName(owner), "run pcb as that user, or move " + shellquote.Quote(path) + " aside", true
 	}
 	return "", "", true
+}
+
+// unreadableKeyFix is the fix for a key file this Windows user cannot read:
+// back to its directory's access list (pcb's private one), or the account
+// that owns it.
+func unreadableKeyFix(path string) string {
+	return "icacls " + shellquote.PowerShell(path) + " /reset (the key file then takes its directory's access list); if another account owns it, run pcb as that account"
 }

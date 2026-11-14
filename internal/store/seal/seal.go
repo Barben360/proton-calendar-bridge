@@ -47,9 +47,20 @@ type KeyModeError struct {
 	Path    string
 	Mode    fs.FileMode // the refused mode (Unix)
 	Grantee string      // the SID the access list lets in (Windows), "" on Unix
+	// Dir is set when Path is the directory a new key file would be made in
+	// (Windows: the key would take its access list); Owner then names the
+	// account owning it when that, not Grantee, is the refusal.
+	Dir   bool
+	Owner string
 }
 
 func (e *KeyModeError) Error() string {
+	switch {
+	case e.Dir && e.Owner != "":
+		return "key file directory " + e.Path + " belongs to " + e.Owner + ": pcb refuses to make a key there. Fix: run pcb doctor"
+	case e.Dir:
+		return "key file directory " + e.Path + ": its access list lets " + e.Grantee + " in: pcb refuses to make a key there. Fix: run pcb doctor"
+	}
 	if e.Grantee != "" {
 		return "key file " + e.Path + ": its access list lets " + e.Grantee + " in: pcb refuses it. Fix: run pcb doctor"
 	}

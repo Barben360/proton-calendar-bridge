@@ -3,9 +3,12 @@
 package service
 
 import (
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
@@ -69,5 +72,56 @@ func TestCheckStateOwnerRefusesAForeignSID(t *testing.T) {
 		}
 		return
 	}
-	wantForeignOwner(t, err, acl.AccountName(acl.SIDAdministrators))
+	// A group: the way out is an elevated pcb or taking ownership.
+	if exitcode.From(err) != exitcode.MustAct || !strings.Contains(err.Error(), "belongs to "+acl.AccountName(acl.SIDAdministrators)+" (an elevated pcb made it)") ||
+		exitcode.HintOf(err) != acl.TakeOwnershipFix(d) {
+		t.Errorf("Administrators-owned state, not elevated: %v, hint %q", err, exitcode.HintOf(err))
+	}
+}
+
+// Files pcb writes take the state directory's access list: an existing one
+// open to others is refused (exit 10) with pcb doctor's fix.
+func TestCheckStateOwnerRefusesAnOpenRoot(t *testing.T) {
+	d := filepath.Join(t.TempDir(), "state")
+	if err := acl.MkdirAll(d); err != nil {
+		t.Fatal(err)
+	}
+	acltest.OpenToOthers(t, d)
+	err := CheckStateOwner(d, -1, nil)
+	if exitcode.From(err) != exitcode.MustAct || !strings.Contains(err.Error(), "access list") || !strings.Contains(err.Error(), acltest.Everyone) || !strings.Contains(err.Error(), d) {
+		t.Fatalf("err = %v, want exit 10 naming the directory's access list and Everyone", err)
+	}
+	if hint := exitcode.HintOf(err); !strings.Contains(hint, "pcb doctor") || !strings.Contains(hint, acl.Fix(d, acltest.Everyone)) {
+		t.Errorf("hint %q, want pcb doctor and its fix", hint)
+	}
+}
+
+// An owner that cannot be read is refused, not passed (fails closed); only a
+// missing directory passes.
+func TestCheckStateOwnerFailsClosed(t *testing.T) {
+	d := filepath.Join(t.TempDir(), "state")
+	old := stateDirOwner
+	stateDirOwner = func(p string) (string, error) {
+		return "", &fs.PathError{Op: "GetNamedSecurityInfo", Path: p, Err: windows.ERROR_ACCESS_DENIED}
+	}
+	t.Cleanup(func() { stateDirOwner = old })
+	err := CheckStateOwner(d, -1, nil)
+	if exitcode.From(err) != exitcode.MustAct || !strings.Contains(err.Error(), "cannot be read") || !strings.Contains(err.Error(), d) {
+		t.Errorf("err = %v, want exit 10: the owner cannot be read", err)
+	}
+}
+
+// The Windows hints about a private file name the access list, never a
+// Unix mode or chmod/chown.
+func TestWindowsHintsNameNoUnixMode(t *testing.T) {
+	for _, h := range []string{keyFix, privateFile} {
+		for _, unix := range []string{"chmod", "chown", "mode 0"} {
+			if strings.Contains(h, unix) {
+				t.Errorf("hint %q holds %q", h, unix)
+			}
+		}
+	}
+	if !strings.Contains(keyFix, "access list") {
+		t.Errorf("keyFix %q does not name the access list", keyFix)
+	}
 }

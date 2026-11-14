@@ -965,18 +965,16 @@ func TestLogoutOfAStoreThisPcbCannotRead(t *testing.T) {
 // hint fixes the cause instead of looping back to logout (exit 10).
 func TestLogoutKeepsAStoreItCannotRead(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 file")
-	}
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
-	if err := os.Chmod(e.secrets().Path, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(e.secrets().Path, 0o600) })
+	acltest.Unreadable(t, e.secrets().Path)
 	_, err := e.svc.Logout(t.Context(), service.LogoutRequest{Discard: true})
 	ee := wantExit(t, err, exitcode.MustAct) // ux-I3: a person fixes the permission
-	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": permission denied), so they were kept"; ee.Error() != want {
+	denied := "permission denied"
+	if runtime.GOOS == "windows" {
+		denied = "Access is denied."
+	}
+	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": " + denied + "), so they were kept"; ee.Error() != want {
 		t.Errorf("message = %q, want %q", ee.Error(), want)
 	}
 	if want := "make secrets.sealed in " + e.dirs.State + " readable by the user pcb runs as, then run pcb logout again"; ee.Hint != want {

@@ -11,3 +11,7 @@ func checkKeyAccess(path string, info fs.FileInfo) error {
 	}
 	return nil
 }
+
+// checkKeyDir is Windows'; on Unix a key file is 0600 whatever its
+// directory's mode.
+func checkKeyDir(string) error { return nil }

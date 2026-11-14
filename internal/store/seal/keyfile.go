@@ -98,6 +98,12 @@ func (k *KeyFile) read() ([]byte, error) {
 func (k *KeyFile) create() error {
 	dir := filepath.Dir(k.Path)
 	if err := acl.MkdirAll(dir); err != nil {
+		if derr := checkKeyDir(dir); derr != nil { // made meanwhile, not as pcb makes it
+			return derr
+		}
+		return err
+	}
+	if err := checkKeyDir(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".key-*")

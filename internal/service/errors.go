@@ -353,6 +353,10 @@ func keyCause(err error) string {
 		le *os.LinkError
 	)
 	switch {
+	case errors.As(err, &me) && me.Dir && me.Owner != "":
+		return "its directory belongs to " + me.Owner + ", and pcb refuses to make a key there"
+	case errors.As(err, &me) && me.Dir:
+		return "its directory's access list lets " + me.Grantee + " in, and pcb refuses to make a key there"
 	case errors.As(err, &me) && me.Grantee != "":
 		return "its access list lets " + me.Grantee + " in, and pcb refuses it"
 	case errors.As(err, &me):
@@ -389,7 +393,7 @@ func keyFailure(err error, msg, hint string) *exitcode.Error {
 }
 
 // keyFix is the hint for a key file that cannot be used.
-const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, " + privateFile + " (pcb doctor)"
 
 // keyringFailFix is keyFix's for a key in the desktop keyring that cannot be used.
 const keyringFailFix = "check that the desktop keyring is running and unlocked (pcb doctor)"

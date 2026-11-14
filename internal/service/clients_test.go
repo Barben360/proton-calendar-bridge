@@ -759,8 +759,12 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 	if got := err.Error(); got != want+key+" (it holds 5 bytes, not a 32-byte key), so nothing was stored" {
 		t.Errorf("wrong size: error %q, want the size named", got)
 	}
-	if h := exitcode.HintOf(err); h != "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)" {
-		t.Errorf("wrong size: hint %q", h)
+	wantHint := "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+	if runtime.GOOS == "windows" {
+		wantHint = "the key file must be readable by the user pcb runs as, 32 bytes, no other account in its access list (pcb doctor)"
+	}
+	if h := exitcode.HintOf(err); h != wantHint {
+		t.Errorf("wrong size: hint %q, want %q", h, wantHint)
 	}
 }
 

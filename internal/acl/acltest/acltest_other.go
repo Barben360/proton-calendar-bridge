@@ -22,16 +22,21 @@ func WantPrivate(t testing.TB, path string, mode fs.FileMode) {
 	}
 }
 
-// Unreadable makes the file path unreadable by this user: mode 0000. Root
-// reads it anyway: the test is skipped then.
+// Unreadable makes the file path unreadable by this user until t ends:
+// mode 0000. Root reads it anyway: the test is skipped then.
 func Unreadable(t testing.TB, path string) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode 0000 file")
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(path, info.Mode().Perm()) }) // the path may be gone or replaced by then
 }
 
 // OpenToOthers lets other users read path: mode 0644 (0755 for a
