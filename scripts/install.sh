@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs a pcb release (pcb, and on Linux pcb-ui with its desktop entry and
-# icon) from GitHub, after checking its SHA-256 and, when gh is logged in, its
-# build attestation. Never uses sudo.
+# icon) from GitHub, after checking its SHA-256 and, when gh (2.49 or later)
+# is logged in, its build attestation. Never uses sudo.
 #   curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/download/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --no-desktop
 # POSIX sh. Only functions until the last line, so a truncated download runs
@@ -147,20 +147,27 @@ check_sum() {
   [ "$got" = "$want" ] || die "$archive does not match checksums.txt (got $got, want $want): refusing it"
 }
 
-# check_attestation: gh logged in checks (a failure stops); otherwise skipped,
-# unless --verify.
+# check_attestation: gh logged in, with gh attestation (2.49 or later),
+# checks that release.yml built the archive (a failure stops); otherwise
+# skipped with the reason, unless --verify.
 check_attestation() {
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    gh attestation verify "$stage/$archive" --repo "$REPO" >"$stage/gh.out" 2>&1 || {
-      cat "$stage/gh.out" >&2
-      die "the attestation of $archive does not verify: refusing it"
-    }
-    say "Attestation of $archive verified."
-  elif [ "$verify" = 1 ]; then
-    die "--verify needs gh, installed and logged in (gh auth login)"
-  else
+  if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+    [ "$verify" = 0 ] || die "--verify needs gh, installed and logged in (gh auth login)"
     say "Note: attestation not checked (gh missing or not logged in); the SHA-256 was."
+    return 0
   fi
+  if ! gh attestation verify --help 2>/dev/null | grep -q -- --signer-workflow; then
+    ghv=$(gh --version 2>/dev/null | head -n 1)
+    [ "$verify" = 0 ] || die "--verify needs gh attestation (gh 2.49 or later); this gh is ${ghv:-of an unknown version}"
+    say "Note: attestation not checked (${ghv:-this gh} has no gh attestation; 2.49 or later has); the SHA-256 was."
+    return 0
+  fi
+  gh attestation verify "$stage/$archive" --repo "$REPO" \
+    --signer-workflow "$REPO/.github/workflows/release.yml" >"$stage/gh.out" 2>&1 || {
+    cat "$stage/gh.out" >&2
+    die "the attestation of $archive does not verify: refusing it"
+  }
+  say "Attestation of $archive verified."
 }
 
 extract() {
@@ -259,10 +266,12 @@ ldd_hint() {
 report() {
   say ""
   "$prefix/bin/pcb" version || warn "$prefix/bin/pcb does not start"
-  if [ "$no_ui" = 0 ]; then
-    say "Next: start pcb-ui from your applications menu, or run pcb login then pcb install for a service."
+  if [ "$no_ui" = 0 ] && [ "$no_desktop" = 0 ]; then
+    say "Next: start pcb-ui from your applications menu, or run pcb install for a service, then pcb login."
+  elif [ "$no_ui" = 0 ]; then
+    say "Next: run pcb-ui, or pcb install for a service, then pcb login."
   elif [ "$os" = linux ]; then
-    say "Next: run pcb login, then pcb install to run it as a service."
+    say "Next: run pcb install to run it as a service, then pcb login."
   else
     say "Next: run pcb login."
   fi

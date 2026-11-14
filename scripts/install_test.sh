@@ -110,7 +110,7 @@ new_case() {
   cwd=$c/cwd
   run_path=$tmp/tools
   os=Linux arch=x86_64
-  export GH_STUB_AUTH=0 GH_STUB_VERIFY=0 GH_STUB_LOG="$c/gh.log"
+  export GH_STUB_AUTH=0 GH_STUB_VERIFY=0 GH_STUB_OLD=0 GH_STUB_LOG="$c/gh.log"
   unset PCB_STUB_DAEMON_RC
 }
 end_case() { [ "$case_failed" = 0 ] && echo "ok   $case_name"; }
@@ -121,10 +121,21 @@ stub() {
   chmod 0755 "$c/stubs/$1"
   run_path=$c/stubs:$run_path
 }
+# stub_gh: a gh whose login (GH_STUB_AUTH) and verify (GH_STUB_VERIFY) exit
+# codes the case sets; GH_STUB_OLD=1 makes it a gh older than 2.49, with no
+# attestation command.
 stub_gh() {
   # shellcheck disable=SC2016 # expanded by the stub
   stub gh 'echo "$*" >>"$GH_STUB_LOG"
-case $1 in auth) exit "$GH_STUB_AUTH" ;; attestation) exit "$GH_STUB_VERIFY" ;; esac
+case $1 in
+--version) if [ "$GH_STUB_OLD" = 1 ]; then echo "gh version 2.40.1 (2023-12-13)"; else echo "gh version 2.60.0 (2024-10-24)"; fi
+  echo "https://github.com/cli/cli/releases/latest"; exit 0 ;;
+auth) exit "$GH_STUB_AUTH" ;;
+attestation)
+  if [ "$GH_STUB_OLD" = 1 ]; then echo "unknown command \"attestation\" for \"gh\"" >&2; exit 1; fi
+  case " $* " in *" --help "*) echo "      --signer-workflow string   the workflow"; exit 0 ;; esac
+  exit "$GH_STUB_VERIFY" ;;
+esac
 exit 3'
 }
 
@@ -152,6 +163,7 @@ test_default_install() {
   mode "$d" -rw-r--r--
   same "$p/share/icons/hicolor/scalable/apps/pcb-ui.svg" "$root/internal/ui/desktop/icons/app.svg"
   has "$c/out" "pcb version v0.2.0"
+  line "$c/out" "Next: start pcb-ui from your applications menu, or run pcb install for a service, then pcb login."
   absent "$c/home/.local"
   end_case
 }
@@ -171,6 +183,8 @@ test_no_desktop() {
   want_rc 0
   exists "$p/bin/pcb" "$p/bin/pcb-ui"
   absent "$p/share"
+  line "$c/out" "Next: run pcb-ui, or pcb install for a service, then pcb login."
+  lacks "$c/out" "applications menu"
   end_case
 }
 
@@ -180,6 +194,7 @@ test_no_ui() {
   want_rc 0
   same "$p/bin/pcb" "$v2/pcb"
   absent "$p/bin/pcb-ui" "$p/share"
+  line "$c/out" "Next: run pcb install to run it as a service, then pcb login."
   end_case
 }
 
@@ -380,8 +395,27 @@ test_gh_verify_ok() {
   run --prefix "$p" --verify
   want_rc 0
   same "$p/bin/pcb" "$v2/pcb"
-  grep -q '^attestation verify .*/pcb_linux_amd64\.tar\.gz --repo Barben360/proton-calendar-bridge$' "$c/gh.log" ||
+  grep -q '^attestation verify .*/pcb_linux_amd64\.tar\.gz --repo Barben360/proton-calendar-bridge --signer-workflow Barben360/proton-calendar-bridge/\.github/workflows/release\.yml$' "$c/gh.log" ||
     fail "gh not called as expected: $(cat "$c/gh.log")"
+  end_case
+}
+
+# A logged-in gh older than 2.49 has no attestation command: skipped with
+# its version named, as a missing gh; --verify fails on it.
+test_gh_without_attestation_skips() {
+  new_case gh_without_attestation_skips
+  stub_gh
+  GH_STUB_OLD=1
+  run --prefix "$p"
+  want_rc 0
+  same "$p/bin/pcb" "$v2/pcb"
+  has "$c/out" "attestation not checked"
+  has "$c/out" "gh version 2.40.1"
+  lacks "$c/gh.log" "pcb_linux_amd64.tar.gz"
+  run --prefix "$p/v" --verify
+  want_rc 1
+  has "$c/err" "gh version 2.40.1"
+  absent "$p/v"
   end_case
 }
 
@@ -498,6 +532,7 @@ test_verify_without_gh
 test_gh_verify_failure_stops
 test_gh_verify_ok
 test_gh_logged_out_skips
+test_gh_without_attestation_skips
 test_path_warning
 test_daemon_hint
 test_ldd_warning
