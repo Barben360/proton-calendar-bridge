@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release tag rules (spec/designs/2026-11-14-release-process-design.md §5.1-5.2),
-# called by .github/workflows/release.yml and image-build.yml.
+# called by .github/workflows/release.yml, image-build.yml and image.yml.
 # Linux runners only.
 #
 #   check.sh tag-kind TAG                       stable | prerelease
@@ -11,6 +11,7 @@
 #                                               a bad one or none (image-build.yml's tags input)
 #   check.sh owner OWNER ACTOR...               0 when every ACTOR is OWNER
 #   check.sh on-main SHA [BASE]                 0 when SHA is an ancestor of BASE (default origin/main)
+#   check.sh reachable SHA                      0 when a remote-tracking branch or a tag of the clone holds SHA
 set -eu
 
 tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
@@ -101,7 +102,16 @@ case $cmd in
     [[ $# -ge 1 && $# -le 2 ]] || die "usage: on-main SHA [BASE]"
     git merge-base --is-ancestor "$1" "${2:-origin/main}"
     ;;
+  reachable)
+    # A commit of another repository of the fork network is not in the
+    # clone (it fetched this repository's branches and tags), or is held by
+    # none of its refs.
+    [[ $# -eq 1 ]] || die "usage: reachable SHA"
+    [[ $1 =~ ^[0-9a-f]{40}$ ]] || die "$1 is not a full commit SHA"
+    # An unknown object fails for-each-ref: no output, refused.
+    [[ -n $(git for-each-ref --contains "$1" --format='%(refname)' refs/remotes refs/tags 2>/dev/null) ]]
+    ;;
   *)
-    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|owner|on-main ..."
+    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|owner|on-main|reachable ..."
     ;;
 esac

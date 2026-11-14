@@ -125,7 +125,31 @@ test_owner() {
   want_status "empty owner" 2 "$check" owner "" ""
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_owner test_on_main; do
+test_reachable() {
+  local o=$tmp/origin w=$tmp/work g=(-c user.name=t -c user.email=t@example.invalid -c commit.gpgSign=false -c tag.gpgSign=false)
+  git init -q -b main "$o"
+  git -C "$o" "${g[@]}" commit -q --allow-empty -m on-main
+  local on_main; on_main=$(git -C "$o" rev-parse HEAD)
+  git -C "$o" checkout -q --detach
+  git -C "$o" "${g[@]}" commit -q --allow-empty -m tag-only
+  local tagged; tagged=$(git -C "$o" rev-parse HEAD)
+  git -C "$o" "${g[@]}" tag -a -m t1 t1
+  git -C "$o" checkout -q main
+  git clone -q "$o" "$w"
+  git -C "$w" "${g[@]}" commit -q --allow-empty -m local-only
+  local local_only; local_only=$(git -C "$w" rev-parse HEAD)
+  # shellcheck disable=SC2016 # $1..$3 are for the inner bash
+  local in_w='cd "$1" && "$2" reachable "$3"'
+  want_status "a commit of a branch" 0 bash -c "$in_w" _ "$w" "$check" "$on_main"
+  want_status "a commit of a tag only" 0 bash -c "$in_w" _ "$w" "$check" "$tagged"
+  # The local branch holds it, no remote branch nor tag does.
+  want_status "a commit of no remote branch nor tag" 1 bash -c "$in_w" _ "$w" "$check" "$local_only"
+  want_status "an unknown commit" 1 bash -c "$in_w" _ "$w" "$check" 0123456789abcdef0123456789abcdef01234567
+  want_status "a short SHA" 2 bash -c "$in_w" _ "$w" "$check" "${on_main::12}"
+  want_status "a branch name" 2 bash -c "$in_w" _ "$w" "$check" main
+}
+
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_owner test_on_main test_reachable; do
   "$case_name"
   echo "ok   $case_name"
 done

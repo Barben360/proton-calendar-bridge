@@ -94,6 +94,8 @@ An image of any commit, branch or tag, tagged `sha-<12 hex>` of the commit it re
 gh workflow run image.yml -f ref=<sha>
 ```
 
+A commit on no branch or tag of this repository (a fork's, which GitHub resolves too) is refused: push it to a branch here first.
+
 ### Testing the release scripts
 
 ```sh

@@ -47,6 +47,12 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
+      # Every branch and tag of this repository, to check the commit is on
+      # one of them (check.sh reachable).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Resolve the ref to a full commit SHA
         id: resolve
         env:
@@ -63,6 +69,10 @@ jobs:
             sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$REF" --jq .sha) || { echo "::error::no commit for $REF"; exit 1; }
           fi
           [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a full commit SHA: $sha"; exit 1; }
+          # commits/<sha> answers for any commit of the fork network, a
+          # fork's too: only a commit of this repository's branches or tags
+          # is built.
+          scripts/release/check.sh reachable "$sha" || { echo "::error::$sha is on no branch or tag of $GITHUB_REPOSITORY (a fork's commit?): push it to a branch here first"; exit 1; }
           echo "Building $sha as sha-${sha::12}"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${sha::12}" >> "$GITHUB_OUTPUT"
