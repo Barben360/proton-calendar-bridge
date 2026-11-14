@@ -149,9 +149,22 @@ func TestAccountFields(t *testing.T) {
 	if !got.SignedIn || got.Pending || !got.CalDAV || !got.MCP || got.ID != "a" || v.Listener != s.Listener {
 		t.Errorf("flags: %+v", got)
 	}
-	a.MCP = false
-	if got := ui.Build(status(a), now).Accounts[0]; got.MCP || !got.CalDAV {
-		t.Errorf("MCP off: flags %+v, want MCP false, CalDAV true", got)
+	for _, tc := range []struct {
+		on   bool
+		mode service.MCPMode
+		want service.MCPMode
+	}{
+		{true, service.MCPReadWrite, service.MCPReadWrite},
+		{true, service.MCPReadOnly, service.MCPReadOnly},
+		{true, "", service.MCPReadWrite}, // a daemon before the read-only mode
+		{false, service.MCPOff, service.MCPOff},
+		{false, "", service.MCPOff},
+	} {
+		b := a
+		b.MCP, b.MCPMode = tc.on, tc.mode
+		if got := ui.Build(status(b), now).Accounts[0]; got.MCP != tc.on || got.MCPMode != tc.want || !got.CalDAV {
+			t.Errorf("mcp %v, mode %q: flags %+v, want MCP %v, mode %q, CalDAV true", tc.on, tc.mode, got, tc.on, tc.want)
+		}
 	}
 	if got.LastSync == nil || !got.LastSync.Equal(a.Health.LastPass.At) {
 		t.Errorf("LastSync = %v, want the last pass %v", got.LastSync, a.Health.LastPass.At)
@@ -478,11 +491,11 @@ func TestAccountActionsGoThroughTheHub(t *testing.T) {
 	if got := b.Hub().Accounts()[0].CalDAV; got {
 		t.Errorf("CalDAV = true after SetCalDAV(false)")
 	}
-	if err := act.SetMCP(t.Context(), id, false); err != nil {
+	if err := act.SetMCP(t.Context(), id, service.MCPOff); err != nil {
 		t.Fatalf("SetMCP: %v", err)
 	}
 	if got := b.Hub().Accounts()[0]; got.MCP || got.CalDAV {
-		t.Errorf("after SetMCP(false): %+v, want MCP and CalDAV off", got)
+		t.Errorf("after SetMCP(off): %+v, want MCP and CalDAV off", got)
 	}
 	if err := act.SignOut(t.Context(), id); err != nil {
 		t.Fatalf("SignOut: %v", err)
@@ -549,7 +562,7 @@ func refused(t *testing.T, act ui.Actions) {
 		"SignOut":     act.SignOut(context.Background(), "a"),
 		"Remove":      act.Remove(context.Background(), "a"),
 		"SetCalDAV":   act.SetCalDAV(context.Background(), "a", true),
-		"SetMCP":      act.SetMCP(context.Background(), "a", true),
+		"SetMCP":      act.SetMCP(context.Background(), "a", service.MCPReadWrite),
 		"Password":    func() error { _, err := act.Password(context.Background(), "a"); return err }(),
 		"NewPassword": func() error { _, err := act.NewPassword(context.Background(), "a"); return err }(),
 	} {

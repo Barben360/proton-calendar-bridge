@@ -41,7 +41,7 @@ type Hub interface {
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	SetCalDAV(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
-	SetMCP(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
+	SetMCP(ctx context.Context, selector string, mode service.MCPMode) (service.AccountInfo, error)
 	Restart(ctx context.Context, selector string) (service.AccountInfo, error)
 	Health(ctx context.Context, selector string) (service.Health, error)
 }
@@ -458,18 +458,26 @@ func (s *Server) setCalDAV(ctx context.Context, id string, body []byte) (any, er
 	return s.Hub.SetCalDAV(ctx, id, on)
 }
 
-// setMCP is POST /v2/accounts/{id}/mcp: Hub.SetMCP on the body's "on",
-// which must be given.
+// setMCP is POST /v2/accounts/{id}/mcp: Hub.SetMCP on the body's "mode"
+// (an unknown one is the Hub's usage error), or on its "on" (false off,
+// true read-write); a body with both or neither is errBadBody.
 func (s *Server) setMCP(ctx context.Context, id string, body []byte) (any, error) {
-	on, err := switchBody(body)
-	if err != nil {
-		return nil, err
+	var req MCPRequest
+	if err := json.Unmarshal(body, &req); err != nil || (req.Mode == "") == (req.On == nil) {
+		return nil, errBadBody
 	}
-	return s.Hub.SetMCP(ctx, id, on)
+	mode := req.Mode
+	if req.On != nil {
+		mode = service.MCPOff
+		if *req.On {
+			mode = service.MCPReadWrite
+		}
+	}
+	return s.Hub.SetMCP(ctx, id, mode)
 }
 
-// switchBody is the "on" of an adapter switch's body (CalDAVRequest,
-// MCPRequest); a body without it is errBadBody.
+// switchBody is the "on" of an adapter switch's body (CalDAVRequest); a
+// body without it is errBadBody.
 func switchBody(body []byte) (bool, error) {
 	var req struct {
 		On *bool `json:"on"`

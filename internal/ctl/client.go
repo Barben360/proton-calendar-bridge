@@ -167,10 +167,10 @@ func (c *Client) SetCalDAV(ctx context.Context, accountID string, on bool) (serv
 	return res, err
 }
 
-// SetMCP turns the account's MCP on or off (Hub.SetMCP).
-func (c *Client) SetMCP(ctx context.Context, accountID string, on bool) (service.AccountInfo, error) {
+// SetMCP sets the account's MCP mode (Hub.SetMCP).
+func (c *Client) SetMCP(ctx context.Context, accountID string, mode service.MCPMode) (service.AccountInfo, error) {
 	var res service.AccountInfo
-	err := c.post(ctx, accountRoute(accountID, "mcp"), MCPRequest{On: on}, &res)
+	err := c.post(ctx, accountRoute(accountID, "mcp"), MCPRequest{Mode: mode}, &res)
 	return res, err
 }
 

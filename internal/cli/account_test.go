@@ -75,6 +75,7 @@ type accountRow struct {
 	Pending  bool       `json:"pending"`
 	CalDAV   bool       `json:"caldav"`
 	MCP      bool       `json:"mcp"`
+	MCPMode  string     `json:"mcp_mode"`
 	LastSync *time.Time `json:"last_sync"`
 }
 
@@ -373,7 +374,7 @@ func TestAccountListShowsBothSwitches(t *testing.T) {
 	if len(lines) != 3 || strings.Join(strings.Fields(lines[0]), " ") != "ID ADDRESS PHASE CALDAV MCP LAST SYNC" {
 		t.Fatalf("account list:\n%s\nwant a header ID ADDRESS PHASE CALDAV MCP LAST SYNC and two rows", r.out.String())
 	}
-	for i, want := range []string{"on off", "off on"} {
+	for i, want := range []string{"on off", "off read-write"} {
 		f := strings.Fields(lines[i+1])
 		if len(f) < 5 || f[1] != list[i].Address || f[3]+" "+f[4] != want {
 			t.Errorf("row %q: want %s with CALDAV MCP %q", lines[i+1], list[i].Address, want)
@@ -389,14 +390,34 @@ func TestAccountListShowsBothSwitches(t *testing.T) {
 			t.Errorf("status lacks %q:\n%s", want, out)
 		}
 	}
-	r.want(exitcode.OK, "account", "mcp", "on", "--account", userA)
-	if want := "MCP of " + userA + " (" + list[0].ID + "): on.\n"; r.out.String() != want {
+	r.want(exitcode.OK, "account", "mcp", "on", "--account", userA) // on is read-write
+	if want := "MCP of " + userA + " (" + list[0].ID + "): read-write.\n"; r.out.String() != want {
 		t.Errorf("mcp on: stdout %q, want %q", r.out.String(), want)
 	}
-	if list := accountList(t, r); !list[0].MCP {
-		t.Errorf("account list after mcp on = %+v, want a's MCP on", list)
+	if list := accountList(t, r); !list[0].MCP || list[0].MCPMode != "read-write" {
+		t.Errorf("account list after mcp on = %+v, want a's MCP read-write", list)
 	}
-	r.want(exitcode.Usage, "account", "mcp", "maybe", "--account", userA, "--json")
+	r.want(exitcode.OK, "account", "mcp", "read-only", "--account", userA)
+	if want := "MCP of " + userA + " (" + list[0].ID + "): read-only.\n"; r.out.String() != want {
+		t.Errorf("mcp read-only: stdout %q, want %q", r.out.String(), want)
+	}
+	if list := accountList(t, r); !list[0].MCP || list[0].MCPMode != "read-only" || list[1].MCPMode != "read-write" {
+		t.Errorf("account list --json after mcp read-only = %+v, want a read-only (MCP on), b read-write", list)
+	}
+	r.want(exitcode.OK, "account", "list")
+	if f := strings.Fields(strings.Split(r.out.String(), "\n")[1]); len(f) < 5 || f[4] != "read-only" {
+		t.Errorf("account list row %v, want MCP read-only", f)
+	}
+	r.want(exitcode.OK, "status")
+	if want := "account: " + userA + " (" + list[0].ID + "), MCP read-only\n"; !strings.Contains(r.out.String(), want) {
+		t.Errorf("status lacks %q:\n%s", want, r.out.String())
+	}
+	for _, bad := range []string{"maybe", "ro", "true"} {
+		r.want(exitcode.Usage, "account", "mcp", bad, "--account", userA, "--json")
+	}
+	if list := accountList(t, r); list[0].MCPMode != "read-only" {
+		t.Errorf("after refused modes: %+v, want a still read-only", list)
+	}
 }
 
 // Design §4.6: the --json shapes changed: every envelope says schema 2.
@@ -783,7 +804,11 @@ func TestAccountMCPThroughTheDaemon(t *testing.T) {
 	if info.ID != "00000001" || !info.MCP {
 		t.Errorf("mcp on = %+v, want b with MCP on", info)
 	}
-	if want := []string{"mcp 00000001 off", "mcp 00000001 on"}; !slices.Equal(hub.calls(), want) {
+	r.want(exitcode.OK, "account", "mcp", "read-only", "--account", userA)
+	if list := accountList(t, r); list[0].MCPMode != "read-only" || list[1].MCPMode != "read-write" {
+		t.Errorf("the daemon's account list = %+v, want a read-only, b read-write", list)
+	}
+	if want := []string{"mcp 00000001 off", "mcp 00000001 read-write", "mcp 00000000 read-only"}; !slices.Equal(hub.calls(), want) {
 		t.Errorf("Hub calls = %v, want %v", hub.calls(), want)
 	}
 }

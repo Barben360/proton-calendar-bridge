@@ -233,7 +233,12 @@ a second account is a second `service.Local` in the same process, held by
   `state.json`, means on) into the account's `state.json`; the design's `adapters: {"caldav": ...}`
   became this one key. M8 adds `pcb account mcp on|off`, the key `mcp` (absent means on), beside it
   (design `2026-11-13-mcp-design.md` §5.5b). CalDAV off: CalDAV refuses the account's clients (401,
-  no charge, R28). MCP off: the account is hidden from every MCP entry. The loop pauses only once
+  no charge, R28). MCP off: the account is hidden from every MCP entry. Since 2026-11-14 the MCP switch has a
+  third position: `pcb account mcp off|read-only|read-write` (`on` is read-write), read-only stored as
+  `mcp_read_only: true` beside `mcp: true` (absent: read-write, so every earlier account keeps writing; off drops it).
+  Read-only keeps the account visible but caps every grant at reads (§12) and keeps the loop running
+  [verified: `TestSetMCPReadOnlyPersists`, `TestParseMCPMode`, `TestMCPReadOnlyDuringAReloginIsKept`,
+  `TestMCPReadOnlyDuringACaptchaReloginIsKept`]. The loop pauses only once
   both are off; an adapter switched on resumes it with a pass at once, and a switch made while a
   relogin runs, or kept across a sign-out, is kept (R19) [verified: `TestSetCalDAVPersists`,
   `TestSetMCPPersists`, `TestBothAdaptersOffPausesTheLoop`, `TestCalDAVOffMCPOnKeepsSyncing`,
@@ -1383,7 +1388,11 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   invisible: a call naming it or one of its `event_id`s answers as for something that does not exist (`no account
   X`, `no event X`), and its agenda is never asked [verified: `TestScopedGrantCannotSeeOtherAccounts`,
   `TestMCPOffAccountIsInvisible`, `TestAccountRemovedMidSessionIsNotFound`, `TestEventIDOfAnotherAccountOutsideGrant`,
-  `TestEventIDToolsHideAccountsLikeMissing`]. An account that needs a login stays visible, so `status` can name the
+  `TestEventIDToolsHideAccountsLikeMissing`]. An account whose MCP switch is read-only stays visible but caps every
+  grant at reads: `event_create`, `event_update` (`dry_run` included), `event_delete` and `logout` answer `refused`,
+  reason `pcb:account-read-only`, before anything is asked of its agenda; `calendars_list` and `event_get` show its
+  calendars and events `read_only`, `status` the account `read_only`; the switch is read at every call
+  [verified: `TestReadOnlyAccountRefusesChanges`]. An account that needs a login stays visible, so `status` can name the
   step. Under a calendar grant an account counts only when it holds a granted calendar, and one whose calendars are
   not known yet (before its first sync) counts as holding none (ruling R14: fail closed); named in a call's `accounts`
   or `account`, such an account answers `not-found` exactly as an account pcb does not have, so a calendar-scoped token
@@ -1559,9 +1568,9 @@ pcb event list --calendar ID|NAME [--from D] [--to D]   # M2: cached events, no 
 pcb client add NAME|list|remove NAME|ID      # CalDAV credentials (M3: app passwords; add works logged out; `clients.json` survives `pcb logout`, M3-R17)
 pcb client show [NAME|ID] [--reveal]         # M5, decision 0013: URL (M6: the account's /dav/<local-id>/), username (M6: the account's address; any username is accepted), password and, over TLS, the certificate fingerprint; without NAME: `default`, else the only client
 pcb client rotate NAME|ID                    # M5, decision 0013: a new password, the old one stops working at once
-pcb account list                            # M6: local ID, address, phase, CalDAV on/off (M8: and MCP on/off), last sync; pending adds included; the daemon's view when one answers
+pcb account list                            # M6: local ID, address, phase, CalDAV on/off (M8: and MCP off/read-only/read-write), last sync; pending adds included; the daemon's view when one answers
 pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
-pcb account mcp on|off                      # M8: the account's MCP switch (§4.1)
+pcb account mcp off|read-only|read-write    # M8: the account's MCP switch (§4.1); read-only since 2026-11-14, on = read-write
 pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
 pcb mcp token add NAME --allow CAPS [--account A]... [--calendar ID]... [--expires D] [--plan]   # M8: a remote agent's bearer token, printed once (§12)
 pcb mcp token list                          # M8: name, grants, created, last used, expiry (expired ones marked)
@@ -1694,7 +1703,7 @@ M6 behaviour (decision 0014; `internal/cli`, `internal/service`, `internal/ctl`,
   Hub's own rules: a running Hub does not rescan `accounts/`, so an offline add would stay unseen until the next start (R15). Offline, `account restart` only
   says the account is served again at the next `pcb serve` [verified: `TestAccountChangesGoThroughTheDaemon`, `TestAccountMCPThroughTheDaemon`, `TestAccountRestartOffline`].
 - `pcb account remove` asks you to type `remove` (or `--yes`; without a terminal or with `--non-interactive` and no `--yes`: exit 10) [verified: `TestAccountRemoveNeedsYes`];
-  `pcb account caldav on|off` and `pcb account mcp on|off`; `account list` and `status` show both switches [verified: `TestAccountCalDAVOff`,
+  `pcb account caldav on|off` and `pcb account mcp on|off` (since 2026-11-14 `off|read-only|read-write`, `on` kept for read-write, `account list --json` adding `mcp_mode`); `account list` and `status` show both switches [verified: `TestAccountCalDAVOff`,
   `TestAccountListShowsBothSwitches`].
 - `pcb status`: the process (daemon, listener, process alerts: `needs-login` with no account at all (ruling R44), the TLS certificate's) once, then a block per account (name, URL, login lines, serve state, calendars,
   render counters, its own alerts); `--account` narrows it to one. Offline, an account that cannot be read keeps its entry with an `account-unreadable` alert and its error
@@ -1724,7 +1733,7 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   `Hint: run pcb-ui from the desktop session (its terminal, or the applications menu); on a headless host run pcb serve instead`, exit 10 (the user must act: no retry of this start can succeed, unlike R15's keyring out of reach over SSH, exit 20, which can come back by itself, §7.3; exit 2 before the live run of 2026-11-13, F8, where an SSH start with `DISPLAY` set and no X authority printed Fyne's raw
   `failed to initialise GLFW` and panicked), and touches no state (the sealer is not chosen by a start that cannot show anything); `--version` and `--help` exit 0 before any toolkit starts
   [verified: `TestParseArgs`, `TestCheckDisplay`, `TestUnusableDisplayIsAPcbMessage` (the real `run` in a child, `DISPLAY` on no server); the same runs by hand, R11]. It runs the daemon in process (`ui.Bridge`, kind `ui`, wait for login, the same listener, control socket and `serve.lock` as `pcb serve`), shows
-  a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 880 x 620 window in the Paper theme (light or dark with the desktop; a fixed accounts sidebar, each account with its initial, address and state; per account the alerts first, then grouped boxes: the CalDAV and MCP switches, the CalDAV connection (the server URL and the username each with Copy, since the live run of 2026-11-13, F6, `TestConnectionCopiesURLAndUsername`; the password masked behind Show and Copy), New password, and the calendars with their badges; Sign out or Sign in,
+  a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 880 x 620 window in the Paper theme (light or dark with the desktop; a fixed accounts sidebar, each account with its initial, address and state; per account the alerts first, then grouped boxes: the CalDAV switch and the MCP selector (Off, Read-only, Read-write since 2026-11-14, `TestMCPSelectorCallsSetMCP`), the CalDAV connection (the server URL and the username each with Copy, since the live run of 2026-11-13, F6, `TestConnectionCopiesURLAndUsername`; the password masked behind Show and Copy), New password, and the calendars with their badges; Sign out or Sign in,
   Remove; the "+" beside Accounts, or Add account when there is none, opens the wizard: address and password, an unattended-relogin opt-in (unticked) with one line saying what ticking it means for the state's sealer (below), the 2FA code, the CAPTCHA with "Open verification", then the CalDAV connection to copy;
   Settings: start at login, log level, open the logs folder or `config.toml`, Restart bridge, the doctor report) [verified: `TestThemeContrast`, `TestAccountPaneOrderAndBadge`, `TestEmptyPaneOffersAdd`]. The logs folder opens as a `file://` URL with spaces and specials escaped [verified: `TestSettingsOpenFiles`, `TestFileURLEscapesSpacesAndSpecials`]. Closing the window hides it; Quit in the tray menu drains (5 s) and stops everything, after which `pcb status` says offline.
   `--background` starts in the tray only; when no tray host answers (GNOME without the AppIndicator extension) the window opens anyway and says once `your desktop shows no tray icons; on GNOME install the AppIndicator extension`,
@@ -2275,8 +2284,9 @@ M8 additions (MCP, §12):
   profile or `--allow` is a guard rail against a careless agent, not a boundary against a hostile process; the socket's
   peer-UID check (§15) stays the boundary, and its `/mcp` route takes the grant the relaying process sends. Agents reach
   no `/v2` route: `pcb mcp` uses only the status probe [verified: `TestControlSocketMCPRefusesOtherUID`, `TestRelayAuthNeedsTheGrantHeader`].
-- **The person's switch**: `pcb account mcp off` hides an account from every agent and every token at once [verified:
-  `TestMCPOffAccountIsInvisible`].
+- **The person's switch**: `pcb account mcp off` hides an account from every agent and every token at once, and
+  `pcb account mcp read-only` keeps them all to reads on it [verified: `TestMCPOffAccountIsInvisible`,
+  `TestReadOnlyAccountRefusesChanges`].
 - **Secrets never pass through the agent**: `login` takes a username only; the password, 2FA code and CAPTCHA are typed by
   the person in `pcb-ui`'s window or on the loopback page (127.0.0.1 only, an ephemeral port, a 128-bit single-use path
   bound to that username, claimed by the first browser that posts, 5 minutes, `no-store` and `Referrer-Policy:

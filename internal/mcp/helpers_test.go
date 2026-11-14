@@ -292,8 +292,8 @@ func newHub() *stubHub {
 	synced := fixedNow.Add(-90 * time.Second)
 	return &stubHub{
 		accounts: []service.AccountInfo{
-			{ID: "a1", Address: "alice@example.com", Phase: "ready", CalDAV: true, MCP: true},
-			{ID: "b2", Address: "bob@example.com", Phase: "ready", CalDAV: true, MCP: true},
+			{ID: "a1", Address: "alice@example.com", Phase: "ready", CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite},
+			{ID: "b2", Address: "bob@example.com", Phase: "ready", CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite},
 		},
 		agendas: map[string]*stubAgenda{"a1": alice, "b2": bob},
 		cals: map[string][]service.Calendar{

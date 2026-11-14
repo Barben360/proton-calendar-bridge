@@ -127,10 +127,22 @@ func accountTable(list []accountEntry) string {
 		if address == "" {
 			address = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, address, phase, onOff(e.CalDAV), onOff(e.MCP), synced)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", e.ID, address, phase, onOff(e.CalDAV), mcpWord(e.AccountInfo), synced)
 	}
 	_ = w.Flush() // a strings.Builder does not fail
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// mcpWord is an account's MCP mode as pcb shows it: off, read-only or
+// read-write.
+func mcpWord(info service.AccountInfo) string {
+	if !info.MCP {
+		return string(service.MCPOff)
+	}
+	if info.MCPMode == "" {
+		return string(service.MCPReadWrite)
+	}
+	return string(info.MCPMode)
 }
 
 func onOff(on bool) string {
@@ -190,60 +202,70 @@ func (a *app) changeAccount(cmd *cobra.Command, ch accountChange) (service.Accou
 }
 
 func (a *app) newAccountCalDAV() *cobra.Command {
-	return a.adapterSwitch("caldav", "CalDAV",
+	return a.adapterSwitch("caldav", "CalDAV", "on|off", "on or off",
 		"Turn the account's CalDAV on or off (off: its clients are refused; its sync pauses only when MCP is off too)",
-		func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error) {
-			return c.SetCalDAV(ctx, id, on)
-		},
-		func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error) {
-			return h.SetCalDAV(ctx, id, on)
-		})
-}
-
-func (a *app) newAccountMCP() *cobra.Command {
-	return a.adapterSwitch("mcp", "MCP",
-		"Turn the account's MCP on or off (off: agents do not see it; its sync pauses only when CalDAV is off too)",
-		func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error) {
-			return c.SetMCP(ctx, id, on)
-		},
-		func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error) {
-			return h.SetMCP(ctx, id, on)
-		})
-}
-
-// adapterSwitch is pcb account <use> on|off: an adapter switch (named
-// adapter in its output), set through the daemon when one answers, else on
-// the in-process accounts.
-func (a *app) adapterSwitch(use, adapter, short string,
-	daemon func(ctx context.Context, c *ctl.Client, id string, on bool) (service.AccountInfo, error),
-	local func(ctx context.Context, h Hub, id string, on bool) (service.AccountInfo, error),
-) *cobra.Command {
-	return OneOperand(selecting(&cobra.Command{
-		Use:   use + " on|off",
-		Short: short,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		func(arg string) (accountChange, string, error) {
 			var on bool
-			switch args[0] {
+			switch arg {
 			case "on":
 				on = true
 			case "off":
 			default:
-				return UsageError(fmt.Errorf("%q is neither on nor off", args[0]))
+				return accountChange{}, "", UsageError(fmt.Errorf("%q is neither on nor off", arg))
 			}
-			info, err := a.changeAccount(cmd, accountChange{
+			return accountChange{
 				daemon: func(ctx context.Context, c *ctl.Client, id string) (service.AccountInfo, error) {
-					return daemon(ctx, c, id, on)
+					return c.SetCalDAV(ctx, id, on)
 				},
 				local: func(ctx context.Context, h Hub, id string) (service.AccountInfo, error) {
-					return local(ctx, h, id, on)
+					return h.SetCalDAV(ctx, id, on)
 				},
-			})
+			}, arg, nil
+		})
+}
+
+func (a *app) newAccountMCP() *cobra.Command {
+	return a.adapterSwitch("mcp", "MCP", "off|read-only|read-write", "off, read-only or read-write",
+		"Set what agents may do with the account: off (they do not see it; its sync pauses only when CalDAV is off too), "+
+			"read-only (they read, every change is refused, whatever their profile or token) or read-write (as their profile or token allows; on is read-write too)",
+		func(arg string) (accountChange, string, error) {
+			mode, err := service.ParseMCPMode(arg)
+			if err != nil {
+				return accountChange{}, "", err
+			}
+			return accountChange{
+				daemon: func(ctx context.Context, c *ctl.Client, id string) (service.AccountInfo, error) {
+					return c.SetMCP(ctx, id, mode)
+				},
+				local: func(ctx context.Context, h Hub, id string) (service.AccountInfo, error) {
+					return h.SetMCP(ctx, id, mode)
+				},
+			}, string(mode), nil
+		})
+}
+
+// adapterSwitch is pcb account <use> <values>: an adapter switch (named
+// adapter in its output), set through the daemon when one answers, else on
+// the in-process accounts. parse reads the operand (what names its values)
+// into the change and the word the output says it was set to.
+func (a *app) adapterSwitch(use, adapter, values, what, short string,
+	parse func(arg string) (accountChange, string, error),
+) *cobra.Command {
+	return OneOperand(selecting(&cobra.Command{
+		Use:   use + " " + values,
+		Short: short,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ch, word, err := parse(args[0])
 			if err != nil {
 				return Finish(cmd, nil, "", err)
 			}
-			return Finish(cmd, info, fmt.Sprintf("%s of %s: %s.", adapter, accountName(info), args[0]), nil)
+			info, err := a.changeAccount(cmd, ch)
+			if err != nil {
+				return Finish(cmd, nil, "", err)
+			}
+			return Finish(cmd, info, fmt.Sprintf("%s of %s: %s.", adapter, accountName(info), word), nil)
 		},
-	}), "on or off")
+	}), what)
 }
 
 func (a *app) newAccountRestart() *cobra.Command {

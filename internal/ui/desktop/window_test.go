@@ -19,6 +19,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -56,11 +57,8 @@ func (f *fakeActions) SetCalDAV(_ context.Context, id string, on bool) error {
 	}
 	return f.rec("caldav " + id + " off")
 }
-func (f *fakeActions) SetMCP(_ context.Context, id string, on bool) error {
-	if on {
-		return f.rec("mcp " + id + " on")
-	}
-	return f.rec("mcp " + id + " off")
+func (f *fakeActions) SetMCP(_ context.Context, id string, mode service.MCPMode) error {
+	return f.rec("mcp " + id + " " + string(mode))
 }
 func (f *fakeActions) Password(_ context.Context, id string) (string, error) {
 	return f.pw, f.rec("password " + id)
@@ -148,11 +146,11 @@ func newFixture(t *testing.T) *fixture {
 
 func twoAccounts() ui.View {
 	return ui.View{Tray: ui.TrayAttention, Accounts: []ui.AccountView{
-		{ID: "a1", Address: "alice@example.org", Short: "synced 1 min ago", Dot: ui.TrayOK, SignedIn: true, CalDAV: true, MCP: true,
+		{ID: "a1", Address: "alice@example.org", Short: "synced 1 min ago", Dot: ui.TrayOK, SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite,
 			URL: "http://127.0.0.1:8080/", Username: "alice@example.org",
 			Calendars: []ui.CalendarView{{Name: "Personal"}, {Name: "Shared", ReadOnly: true, Badge: "read-only: ambiguous"}},
 			Alerts:    []ctl.Alert{{Code: "sync-stalled", Severity: "error", Message: "sync is stalled", Fix: "restart the bridge"}}},
-		{ID: "b2", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false, CalDAV: false, MCP: false},
+		{ID: "b2", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false, CalDAV: false, MCP: false, MCPMode: service.MCPOff},
 	}}
 }
 
@@ -469,39 +467,50 @@ func TestCalDAVSwitchCallsSetCalDAV(t *testing.T) {
 	}
 }
 
-// Design §5.5b: the MCP switch beside the CalDAV one, with the same
-// behaviour: it shows the account's switch, a failure puts it back and
-// says why, a tap calls SetMCP and leaves CalDAV alone.
-func TestMCPSwitchCallsSetMCP(t *testing.T) {
+// The MCP selector beside the CalDAV switch: it shows the account's mode
+// without calling anything, a choice calls SetMCP with that mode and
+// leaves CalDAV alone, a failure selects the mode back and says why.
+func TestMCPSelectorCallsSetMCP(t *testing.T) {
 	f := newFixture(t)
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
-	sw := f.toggle("MCP")
-	if !sw.On {
-		t.Fatal("MCP switch is off for an account with MCP on")
+	sel := f.w.pane.mcp
+	if !f.visible(sel) || sel.Selected != "Read-write" || !slices.Equal(sel.Options, []string{"Off", "Read-only", "Read-write"}) {
+		t.Fatalf("MCP selector: visible %v, selected %q, options %v; want Read-write of Off, Read-only, Read-write", f.visible(sel), sel.Selected, sel.Options)
 	}
 	f.act.err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("bridge busy"), Hint: "try later"}
-	test.Tap(sw)
+	sel.SetSelected("Read-only")
 	f.wait()
-	if !f.w.pane.mcp.On {
-		t.Error("the switch stayed off after the call failed")
+	if sel.Selected != "Read-write" {
+		t.Errorf("selected %q after the call failed, want Read-write back", sel.Selected)
 	}
 	if !f.has("bridge busy") || !f.has("try later") {
 		t.Errorf("error dialog lacks the message and the hint: %v", f.texts())
 	}
 	f.tap("OK")
 	f.act.err = nil
-	test.Tap(f.toggle("MCP"))
+	sel.SetSelected("Read-only")
 	f.wait()
-	if got := f.act.got(); !slices.Equal(got, []string{"mcp a1 off", "mcp a1 off"}) {
+	sel.SetSelected("Off")
+	f.wait()
+	if got := f.act.got(); !slices.Equal(got, []string{"mcp a1 read-only", "mcp a1 read-only", "mcp a1 off"}) {
 		t.Fatalf("calls = %v", got)
 	}
 	if !f.w.pane.caldav.On {
-		t.Error("the MCP switch turned the CalDAV switch off")
+		t.Error("the MCP selector turned the CalDAV switch off")
 	}
 	test.Tap(f.w.rows[1].btn)
-	if f.w.pane.mcp.On {
-		t.Error("b2's MCP switch is on for an account with MCP off")
+	if sel.Selected != "Off" {
+		t.Errorf("b2's MCP selector shows %q for an account with MCP off", sel.Selected)
+	}
+	v := twoAccounts()
+	v.Accounts[1].MCP, v.Accounts[1].MCPMode = true, service.MCPReadOnly
+	f.w.Update(v)
+	if sel.Selected != "Read-only" {
+		t.Errorf("b2's MCP selector shows %q after an update to read-only", sel.Selected)
+	}
+	if got := f.act.got(); len(got) != 3 {
+		t.Errorf("showing accounts called %v, want no call beyond the three choices", got[3:])
 	}
 }
 
@@ -787,20 +796,23 @@ func TestCalDAVFailureRevertsOnlyTheSameAccount(t *testing.T) {
 
 func TestMCPFailureRevertsOnlyTheSameAccount(t *testing.T) {
 	f := newFixture(t)
-	f.w.Update(twoAccounts()) // a1 has MCP on, b2 off
+	f.w.Update(twoAccounts()) // a1 read-write, b2 off
 	f.w.Show("a1")
 	f.act.err = errors.New("bridge busy")
 	f.act.block = make(chan struct{})
-	test.Tap(f.w.pane.mcp)
+	f.w.pane.mcp.SetSelected("Read-only")
 	test.Tap(f.w.rows[1].btn) // the pane shows b2 while the call is out
 	close(f.act.block)
 	f.wait()
-	if f.w.pane.mcp.On {
-		t.Error("the revert of a1's switch landed on b2's pane")
+	if got := f.w.pane.mcp.Selected; got != "Off" {
+		t.Errorf("b2's selector shows %q: the revert of a1's landed on b2's pane", got)
 	}
 	test.Tap(f.w.rows[0].btn)
-	if !f.w.pane.mcp.On {
-		t.Error("a1's switch does not show its MCP state")
+	if got := f.w.pane.mcp.Selected; got != "Read-write" {
+		t.Errorf("a1's selector shows %q, want its mode Read-write", got)
+	}
+	if got := f.act.got(); !slices.Equal(got, []string{"mcp a1 read-only"}) {
+		t.Errorf("calls = %v, want the one choice", got)
 	}
 }
 

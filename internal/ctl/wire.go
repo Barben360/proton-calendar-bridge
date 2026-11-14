@@ -58,9 +58,11 @@ type CalDAVRequest struct {
 }
 
 // MCPRequest is the body of POST /v2/accounts/{id}/mcp: the account's MCP
-// switch.
+// mode. On is the body before the read-only mode, still taken: false is
+// off, true read-write; a body gives one of them.
 type MCPRequest struct {
-	On bool `json:"on"`
+	Mode service.MCPMode `json:"mode,omitempty"`
+	On   *bool           `json:"on,omitempty"`
 }
 
 // TOTPRequest is the body of POST /v2/accounts/{id}/login/totp: the 2FA

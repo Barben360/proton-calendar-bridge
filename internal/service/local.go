@@ -407,7 +407,7 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	// The address, the adapter switches and the creation time are not login
 	// fields: they stay. A state.json too damaged to read loses them.
 	kept, _ := store.LoadState(l.o.Dirs.State)
-	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, MCP: kept.MCP, Created: kept.Created}
+	reset := store.State{Phase: store.PhaseLoggedOut, SecretsGeneration: next, Address: kept.Address, CalDAV: kept.CalDAV, MCP: kept.MCP, MCPReadOnly: kept.MCPReadOnly, Created: kept.Created}
 	if err := store.SaveStateContext(wipe, l.o.Dirs.State, reset); err != nil {
 		return LogoutResult{}, l.stateWriteError(err)
 	}

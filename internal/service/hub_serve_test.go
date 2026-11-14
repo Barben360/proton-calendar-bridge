@@ -514,7 +514,13 @@ func TestBothAdaptersOffPausesTheLoop(t *testing.T) {
 	if lockFree(t, syncLock(e, a)) {
 		t.Error("a's loop stopped with CalDAV off and MCP on (its sync.lock is free)")
 	}
-	if _, err := h.SetMCP(t.Context(), a, false); err != nil {
+	if _, err := h.SetMCP(t.Context(), a, service.MCPReadOnly); err != nil {
+		t.Fatal(err)
+	}
+	if lockFree(t, syncLock(e, a)) {
+		t.Error("a's loop stopped with CalDAV off and MCP read-only (its sync.lock is free)")
+	}
+	if _, err := h.SetMCP(t.Context(), a, service.MCPOff); err != nil {
 		t.Fatal(err)
 	}
 	if !lockFree(t, syncLock(e, a)) {
@@ -527,11 +533,11 @@ func TestBothAdaptersOffPausesTheLoop(t *testing.T) {
 		t.Errorf("a.Stopped = %+v with both adapters off, want nil (paused, not parked)", info.Stopped)
 	}
 	n := r.passCount(a)
-	if _, err := h.SetMCP(t.Context(), a, true); err != nil {
+	if _, err := h.SetMCP(t.Context(), a, service.MCPReadWrite); err != nil {
 		t.Fatal(err)
 	}
 	r.waitPassed(t, a, n)
-	if _, err := h.SetMCP(t.Context(), a, false); err != nil {
+	if _, err := h.SetMCP(t.Context(), a, service.MCPOff); err != nil {
 		t.Fatal(err)
 	}
 	if !lockFree(t, syncLock(e, a)) {
@@ -796,10 +802,17 @@ var (
 		func(st store.State) *bool { return st.CalDAV }}
 	mcpSwitch = adapterSwitch{"MCP",
 		func(ctx context.Context, h *service.Hub, id string) error {
-			_, err := h.SetMCP(ctx, id, false)
+			_, err := h.SetMCP(ctx, id, service.MCPOff)
 			return err
 		},
 		func(st store.State) *bool { return st.MCP }}
+	// mcpReadOnlySwitch's "on" is the right to write: read-only is off.
+	mcpReadOnlySwitch = adapterSwitch{"MCP writes",
+		func(ctx context.Context, h *service.Hub, id string) error {
+			_, err := h.SetMCP(ctx, id, service.MCPReadOnly)
+			return err
+		},
+		func(st store.State) *bool { w := !st.MCPReadOnly; return &w }}
 )
 
 // Ruling R19: a switch made while an unattended relogin runs is kept: the
@@ -873,6 +886,18 @@ func switchDuringARelogin(t *testing.T, sw adapterSwitch) {
 func TestCalDAVSwitchDuringACaptchaReloginIsKept(t *testing.T) {
 	t.Parallel()
 	switchDuringACaptchaRelogin(t, caldavSwitch)
+}
+
+// The MCP read-only mode is kept by a relogin as the switch is.
+func TestMCPReadOnlyDuringAReloginIsKept(t *testing.T) {
+	t.Parallel()
+	switchDuringARelogin(t, mcpReadOnlySwitch)
+}
+
+// The MCP read-only mode is kept by a CAPTCHA relogin too.
+func TestMCPReadOnlyDuringACaptchaReloginIsKept(t *testing.T) {
+	t.Parallel()
+	switchDuringACaptchaRelogin(t, mcpReadOnlySwitch)
 }
 
 // Design §5.5b: the MCP switch is kept by a CAPTCHA relogin too.
