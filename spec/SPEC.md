@@ -74,8 +74,7 @@ accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (
 Windows only build, and the CLI there runs offline (§13, "Platforms").
 
 Not planned (not designed here): REST API, `.ics` feeds, event
-commands in the CLI (Thunderbird is the client), updates/signed
-releases (while private), shared calendars, invitations, two-password mode,
+commands in the CLI (Thunderbird is the client), auto-update, shared calendars, invitations, two-password mode,
 FIDO2, CardDAV, macOS/Windows service management, a GUI on Windows or macOS (`pcb-ui` is Linux only; Windows is next, macOS is not planned). The desktop app
 `pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
 `spec/designs/2026-11-12-multi-account-and-ui-design.md`. MCP is built (M8; "not planned"
@@ -1816,14 +1815,19 @@ M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal
   `TestTokenLastUsedFollowsRequestsOnceAMinute`, `TestMCPTokenListHelpSaysWhatLastUsedIs`; O3: live on 2026-11-14 calls
   ran 40 s after the first, within the minute, and LAST USED stayed at the first].
 
-Until the repository is public [call]: install from source (`make install` in a clone, then `pcb install`), or build
-the container image locally (`make image`; the GHCR package `ghcr.io/barben360/proton-calendar-bridge` is published by CI on main (`:main`
-and `:sha-<12 hex>`, first success 2026-11-12) and stays private, confirmed Private by the author on 2026-11-12 (`HUMAN-CHECKS.md` 7.8): pulling it needs
-`docker login ghcr.io` with a token that can read packages, and everyone else builds it with `make image`; the model is the author's headless Proton Mail Bridge container:
-one volume, `docker exec -it`). Updates and signed releases are not planned yet.
+Releases (decision 0017, `spec/designs/2026-11-14-release-process-design.md`): the repository is public. A protected tag `vX.Y.Z`
+runs `.github/workflows/release.yml`, which refuses a tag off main, a tag whose `ci` run did not succeed and a tag already released,
+builds the archives `pcb_<os>_<arch>.tar.gz` (Linux and macOS, amd64 and arm64; `pcb-ui` on Linux only), pushes the image and
+publishes the Release with `checksums.txt` and `install.sh`. The files and the image carry GitHub artifact attestations
+(`gh attestation verify`), which replace the minisign [call] this section made earlier. `install.sh` downloads an archive, checks its
+SHA-256 (and the attestation when `gh` is logged in), and places the files under `~/.local`; it does not run `pcb install`.
+Install from source (`make install` in a clone, then `pcb install`) still works.
 
-Later, when public: `install.sh` downloads a signed release (minisign, as
-backsight [call]), verifies it, places the binary, then runs `pcb install`.
+Container: `ghcr.io/barben360/proton-calendar-bridge`, a public package (amd64 and arm64), pushed on a release (`X.Y.Z`, `X.Y`,
+`latest`; a pre-release only its own tag) and by hand for a commit (`sha-<12 hex>`), never from main. Before 2026-11-14 CI pushed
+`:main` and `:sha-<12 hex>` from main to a private package (first success 2026-11-12; private confirmed by the author, `HUMAN-CHECKS.md` 7.8);
+the model is the author's headless Proton Mail Bridge container: one volume, `docker exec -it`.
+
 Services: systemd `--user` unit (with lingering instructions) or system unit
 with a dedicated user [call]; container image with the same binary and
 `pcb serve`.

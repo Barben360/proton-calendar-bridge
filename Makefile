@@ -17,7 +17,7 @@ PREFIX  ?= $(HOME)/.local
 # GOMAXPROCS sets go's -p (packages at once), -parallel (tests at once per
 # package) and the threads of each test binary and child. JOBS is 4, or the
 # machine's CPUs when fewer: more than the CPUs starves the same way (CI's
-# private-repo runners have 2). At 4 locally the suite takes about 250 s
+# runners have 2). At 4 locally the suite takes about 250 s
 # against 200 s uncapped, for half the CPU time (contention under -race
 # doubles the work).
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)

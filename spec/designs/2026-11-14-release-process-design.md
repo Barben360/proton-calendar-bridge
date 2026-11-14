@@ -1,7 +1,7 @@
 # Release process — design
 
 - **Date**: 2026-11-14
-- **Status**: design approved by the author 2026-11-14; not built yet
+- **Status**: approved 2026-11-14; implementation in progress on branch `release-process`
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 ("updates/signed releases (while private)" leaves "not planned"), SPEC §13 "Until the repository is public" and "Later, when public" (the minisign [call] is replaced by GitHub attestations, and `install.sh` does not run `pcb install`), via a new decision 0017; `docs/install.md`, `docs/container.md`, `docs/development.md`, the README; the "private" wording left in SPEC §3, §13 and the `Makefile`'s `JOBS` comment (the repository is public now).
 

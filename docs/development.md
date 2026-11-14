@@ -43,10 +43,58 @@ make container-smoke systemd-smoke   # throwaway containers; each prints PASS la
 ```sh
 make rehearse             # the real pcb against pcb-fake; prints PASS last
 make live-preflight-test  # the live-session guard's own test; make live-preflight checks a run root
-make shellcheck           # the live-session scripts, with the pinned shellcheck image CI uses (needs docker)
+make shellcheck           # the live-session and install scripts, with the pinned shellcheck image CI uses (needs docker)
 ```
 
 `make rehearse` also drives `pcb mcp` against `pcb-fake`. A red rehearsal stops a live run.
+
+## Release
+
+Only the repository owner can create a `v*` tag (a repository ruleset). Releases follow semver: `vX.Y.Z`, or `vX.Y.Z-rc.N` for a pre-release, which never becomes `latest`.
+
+1. Merge to main and wait for main's `ci` run to finish green.
+2. Tag that commit, signed, and push the tag:
+
+```sh
+git tag -s vX.Y.Z <sha>
+git push origin vX.Y.Z
+```
+
+3. Watch the one `release` run (`gh run watch`). It builds the archives and the image, attests them, and publishes the Release last, so `releases/latest` (what `install.sh` uses) changes only when everything is out.
+
+The `release` workflow refuses a tag that is not on main, a tag whose `ci` run did not succeed (still running counts), a tag already released, and anyone but the owner. A refused tag published nothing: delete it, fix the cause, push it again.
+
+```sh
+git push origin :refs/tags/vX.Y.Z   # delete the remote tag
+git tag -d vX.Y.Z                   # and the local one
+```
+
+Release notes come from the pull request titles; edit them on GitHub afterwards when needed.
+
+### A development image
+
+An image of any commit, branch or tag, tagged `sha-<12 hex>` of the commit it resolves to:
+
+```sh
+gh workflow run image.yml -f ref=<sha>
+```
+
+### Testing the release scripts
+
+```sh
+make release-test    # the tag rules and the archives
+make install-test    # install.sh against a fake release
+make actionlint      # lint the workflow files
+make shellcheck      # shellcheck the shell scripts
+```
+
+`install.sh` has test hooks, for these tests only:
+
+| Variable | Effect |
+|---|---|
+| `PCB_INSTALL_BASE_URL` | replaces `https://github.com/Barben360/proton-calendar-bridge/releases`; a `file://` URL works through curl |
+| `PCB_INSTALL_OS` | the system name, instead of `uname -s` |
+| `PCB_INSTALL_ARCH` | the architecture, instead of `uname -m` |
 
 ## Live sessions
 

@@ -6,19 +6,76 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 ## Requirements
 
-- **Linux, amd64 or arm64.** These are the supported platforms.
-- **Go** (the version in `go.mod`) and `make`, to build from a clone. There are no prebuilt release binaries.
+- **Linux, amd64 or arm64.** These are the supported platforms. macOS (`pcb` only) is untested ([below](#macos-and-windows)).
+- **`curl` or `wget`**, to install a release.
+- **Go** (the version in `go.mod`) and `make`, only to [build from a clone](#build-from-a-clone).
 - **systemd 252 or later** (Debian 12 or 13) to run pcb as a service ([service](service.md)).
 - **Docker** with Compose to run the container image ([container](container.md)).
 - For the desktop app only: a C compiler and the OpenGL and X11/Wayland headers ([build dependencies](#build-dependencies-of-the-desktop-app)), and a desktop with a StatusNotifierItem tray ([desktop](desktop.md)).
 
 ### macOS and Windows
 
-macOS and Windows only build: `GOOS=darwin` and `GOOS=windows` compile `./cmd/pcb`, but neither is tested and neither has service management.
+**macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux only for now), no desktop entry, no service management. It is untested by the author: the install and `pcb version` are checked on every release, but not logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
-Off Unix there is no file lock and no control socket, so on Windows `pcb login`, `pcb sync` and `pcb serve` exit 20 (`run pcb on Linux or macOS`). The rest of the CLI runs offline on the files.
+**Windows** only builds: `GOOS=windows` compiles `./cmd/pcb`, with no release archive, no `pcb-ui` and no service management. There is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 (`run pcb on Linux or macOS`). The rest of the CLI runs offline on the files.
+
+## Install a release
+
+```sh
+curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/download/install.sh | sh
+```
+
+This installs the latest stable release for your system, with no sudo, under `~/.local`. Add flags after `sh -s --`:
+
+```sh
+curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/download/install.sh | sh -s -- --no-desktop
+```
+
+| Flag | Effect | Default |
+|---|---|---|
+| `--prefix DIR` (or `--prefix=DIR`) | install under `DIR/bin` and `DIR/share` | `~/.local` |
+| `--version vX.Y.Z` | that release instead of the latest stable (the `v` is optional) | latest stable |
+| `--no-desktop` | no desktop entry and no icon | both installed |
+| `--no-ui` | `pcb` only, no `pcb-ui` and no desktop entry (servers) | both binaries |
+| `--verify` | require the attestation check: fail when `gh` is missing or not logged in | check when `gh` is logged in, else skip with a line |
+| `-h`, `--help` | usage | |
+
+A prefix containing `%`, `"`, `$`, `\` or a backtick is refused. Exit codes: `0` done, `1` failed, `2` bad invocation.
+
+It installs:
+
+| File | Where |
+|---|---|
+| `pcb` | `PREFIX/bin/pcb` |
+| `pcb-ui` | `PREFIX/bin/pcb-ui` |
+| the desktop entry | `PREFIX/share/applications/pcb-ui.desktop`, with `Exec=` set to the absolute path |
+| the icon | `PREFIX/share/icons/hicolor/scalable/apps/pcb-ui.svg` |
+
+What it checks: the archive's SHA-256 against the release's `checksums.txt`, and then its attestation. A failed check stops the install and leaves the previous files as they were. If `PREFIX/bin` is not on your `PATH`, or `pcb-ui` lacks a system library, it says so and names the fix.
+
+It does not set up the service: next, run `pcb-ui`, or `pcb install` for a service, then `pcb login`.
+
+### Prebuilt `pcb-ui`
+
+The release's `pcb-ui` is built on Ubuntu 22.04 (glibc 2.35). It runs on Ubuntu 22.04 and later, Debian 12 and later, Fedora 36 and later, and Arch. It does not run on RHEL 9 or Debian 11: [build from a clone](#build-from-a-clone) there, or install with `--no-ui`.
+
+### Check a download yourself
+
+Every archive, `checksums.txt` and `install.sh` carry a GitHub attestation: proof that this repository's release workflow built the file from a given commit. With the [GitHub CLI](https://cli.github.com/), logged in:
+
+```sh
+gh attestation verify pcb_linux_amd64.tar.gz --repo Barben360/proton-calendar-bridge
+```
+
+The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).
+
+### Remove
+
+There is no uninstall command. Stop whatever runs pcb first (`pcb uninstall` for a service, then quit `pcb-ui`), then delete the files in the table above, from the prefix you used.
 
 ## Build from a clone
+
+For a platform with no release, or to run your own changes.
 
 ```sh
 make install                 # bin/pcb -> ~/.local/bin/pcb (PREFIX=/usr/local to change it)
@@ -55,9 +112,13 @@ Developers need them too: `make lint test` compiles `cmd/pcb-ui` ([development](
 
 ## The container image
 
-The image is published at `ghcr.io/barben360/proton-calendar-bridge`, with the tags `:main` and `:sha-<12 hex>`. CI pushes it only from main.
+The image is a public package, so pulling it needs no login:
 
-It is a **private** package: pulling it needs `docker login ghcr.io` with a token that can read packages. Everyone else builds it from a clone:
+```sh
+docker pull ghcr.io/barben360/proton-calendar-bridge:latest
+```
+
+`latest` is the newest stable release; the other tags are in [container](container.md#tags). Or build it from a clone:
 
 ```sh
 make image                   # the image, tagged pcb:local
@@ -91,7 +152,7 @@ Where the password and the 2FA code can come from, and what to do when Proton as
 
 ## Upgrade
 
-Pull, rebuild and reinstall (`make install`, and `make install-ui` for the desktop app), then restart what runs pcb: `pcb service restart`, Quit and start `pcb-ui` again, or recreate the container from the new image.
+Run the install line again: it replaces the files with the latest release (or the one you name with `--version`), and says to restart a running pcb. From a clone, pull, rebuild and reinstall (`make install`, and `make install-ui` for the desktop app). Then restart what runs pcb: `pcb service restart`, Quit and start `pcb-ui` again, or recreate the container from the new image.
 
 ### No downgrade after the multi-account layout
 

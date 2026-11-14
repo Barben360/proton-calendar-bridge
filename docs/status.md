@@ -9,7 +9,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 - **Core** (Go): accounts and login (as unattended as Proton allows), a sync engine on Proton's change feed, an encrypted local cache, an access policy, and an iCalendar-native event model ([decision 0012](../spec/decisions/0012-icalendar-native-model.md); JSCalendar deferred).
 - **Adapters:** CalDAV (Thunderbird first; read and write), MCP for AI agents (`pcb mcp` over stdio, or `/mcp` with a bearer token; [decision 0016](../spec/decisions/0016-mcp-adapter.md)) and a CLI. A REST adapter is out of scope ([decision 0007](../spec/decisions/0007-scope-caldav-only.md)).
 - **Runs** headless (systemd, Docker), one process for any number of Proton accounts. On a Linux desktop the same daemon runs inside `pcb-ui`, a tray icon and a window.
-- **Platforms:** Linux amd64 and arm64 are supported; macOS and Windows only build ([install](install.md#macos-and-windows)).
+- **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested, Windows only builds ([install](install.md#macos-and-windows)).
 
 ## How things are checked
 
