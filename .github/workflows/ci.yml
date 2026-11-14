@@ -253,7 +253,8 @@ jobs:
   # Both binaries on Windows (the Windows port): pcb and pcb-ui are built and
   # run, and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
   # release's ui-windows job) gives cgo its gcc and the steps their make; with
-  # path-type: inherit the runner's go and jq stay on PATH. The runner's user
+  # path-type: inherit the runner's go stays on PATH, and so does its jq (from the
+  # runner image, not an msys2 package: a change of image shows up there). The runner's user
   # is an elevated administrator: tests that only hold for a standard user
   # skip themselves when acl.Elevated() reports true.
   windows:
@@ -343,7 +344,7 @@ jobs:
           case "${{ matrix.shard }}" in
             service) pkgs=./internal/service ;;
             cli) pkgs=./internal/cli ;;
-            *) pkgs="./internal/filelock ./internal/ctl ./internal/paths ./internal/store/... ./internal/tlsutil ./internal/doctor ./internal/shellquote ./internal/atomicfile ./internal/acl ./internal/winzone ./internal/runkey ./internal/wingui ./internal/daemon ./internal/mcp ./internal/ui/... ./cmd/pcb ./cmd/pcb-ui/..." ;;
+            *) pkgs="./internal/filelock ./internal/ctl ./internal/paths ./internal/store/... ./internal/tlsutil ./internal/doctor ./internal/shellquote ./internal/atomicfile ./internal/access ./internal/acl ./internal/winzone ./internal/runkey ./internal/wingui ./internal/daemon ./internal/mcp ./internal/ui/... ./cmd/pcb ./cmd/pcb-fake ./cmd/pcb-ui/..." ;;
           esac
           # shellcheck disable=SC2086
           CGO_ENABLED=1 go test -race -timeout 20m $pkgs
