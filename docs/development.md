@@ -27,7 +27,7 @@ Tests must bite: each fails when the behaviour it guards breaks. Write the faili
 
 ### Windows
 
-`make build GOOS=windows` cross-compiles `bin/pcb.exe` from Linux. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
+The Windows code compiles on Linux: `GOOS=windows go vet ./...` type-checks it (CI's `check` job runs it), and `make build GOOS=windows` cross-compiles `bin/pcb.exe`. Only the files that call Windows carry the `windows` build tag; the logic around them stays untagged, so the Linux tests cover it too. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
 
 ```sh
 make ui    # bin/pcb-ui.exe: a GUI binary (-H=windowsgui), with its icon and version
@@ -41,10 +41,23 @@ From Linux, `scripts/win/vmtest.sh` runs the tests on a Windows machine over SSH
 export PCB_WIN_SSH='-p PORT user@host'                       # the ssh arguments, never written in the repository
 scripts/win/vmtest.sh test ./internal/ctl/ -run Pipe -v       # go test with CGO_ENABLED=0, as pcb
 scripts/win/vmtest.sh test -ui ./cmd/pcb-ui/ ./internal/wingui/  # CGO_ENABLED=1, as pcb-ui (the first cgo build takes minutes)
+scripts/win/vmtest.sh test -ui -race ./internal/ctl/          # the race detector needs cgo, hence -ui
 scripts/win/vmtest.sh run 'go build -o pcb.exe ./cmd/pcb && pcb.exe version'  # a raw cmd.exe line in the copy
 ```
 
-Run the tests as a standard user, not elevated: elevation hides the permission problems a real user meets. `make vmtest-test` tests the script itself against a fake ssh.
+Each argument reaches `go test` as typed (one containing `"`, `%` or a newline is refused); `run` passes its line to `cmd.exe` as is. Run the tests as a standard user, not elevated: elevation hides the permission problems a real user meets. `make vmtest-test` tests the script itself against a fake ssh.
+
+CI's `windows` job vets, builds both binaries with `make build ui` and runs `pcb.exe version`, `pcb.exe doctor` and `pcb-ui.exe --version`; `windows-test` runs `go test -race` on a Windows runner, in three shards (`service`, `cli`, the rest).
+
+The Windows time zone table (`internal/winzone/zones_gen.go`) is generated from Unicode CLDR's `windowsZones.xml`. To adopt a new CLDR release, download that release's `common/supplemental/windowsZones.xml`, add its SHA-256 to `known` in `internal/winzone/gen.go`, then:
+
+```sh
+CLDR_XML=/path/to/windowsZones.xml go generate ./internal/winzone
+```
+
+The generator refuses a file whose SHA-256 it does not know; the release goes into `winzone.CLDRVersion` and the README's Credits.
+
+The release's `pcb_windows_amd64.zip` is written by `scripts/release/mkzip.py` (Python's `zipfile`; `scripts/release/package.sh windows amd64 BINDIR OUTDIR` calls it): sorted entries, a fixed time (`SOURCE_DATE_EPOCH`), fixed modes, so the same inputs give the same bytes with the same zlib build (zlib-ng, the default of some distributions, compresses differently, so a workstation may not match the runners). `make release-test` checks it and needs `python3` and `unzip`.
 
 ### Smoke tests
 

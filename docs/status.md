@@ -8,8 +8,8 @@ What is built, how each part was tested, and which checks against a real Proton 
 
 - **Core** (Go): accounts and login (as unattended as Proton allows), a sync engine on Proton's change feed, an encrypted local cache, an access policy, and an iCalendar-native event model ([decision 0012](../spec/decisions/0012-icalendar-native-model.md); JSCalendar deferred).
 - **Adapters:** CalDAV (Thunderbird first; read and write), MCP for AI agents (`pcb mcp` over stdio, or `/mcp` with a bearer token; [decision 0016](../spec/decisions/0016-mcp-adapter.md)) and a CLI. A REST adapter is out of scope ([decision 0007](../spec/decisions/0007-scope-caldav-only.md)).
-- **Runs** headless (systemd, Docker), one process for any number of Proton accounts. On a Linux desktop the same daemon runs inside `pcb-ui`, a tray icon and a window.
-- **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested, Windows only builds ([install](install.md#macos-and-windows)).
+- **Runs** headless (systemd, Docker), one process for any number of Proton accounts. On a Linux or Windows desktop the same daemon runs inside `pcb-ui`, a tray icon and a window.
+- **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested; Windows 10 and 11 (amd64) run `pcb-ui` and `pcb`, untested: built and tested in CI on Windows, never used live yet ([install](install.md#macos-and-windows)).
 
 ## How things are checked
 
@@ -89,8 +89,18 @@ What is built, how each part was tested, and which checks against a real Proton 
 | Fixed | its three defects, and a fourth the fixes found |
 | Design | [decision 0016](../spec/decisions/0016-mcp-adapter.md), [SPEC §12](../spec/SPEC.md) |
 
+### The Windows port
+
+| | |
+|---|---|
+| Built | `pcb-ui.exe` and `pcb.exe` on Windows 10 and 11 (amd64): the tray, the window, "Start at login", the bridge inside `pcb-ui`, the CLI talking to it over a pipe only your Windows account can open, the sealing key protected by Windows (DPAPI), files only your account can open; a `pcb_windows_amd64.zip` in each release ([install](install.md#windows)) |
+| Tested | on a Windows runner in CI and on a Windows 11 virtual machine as a standard user, against the fake Proton; a release runs both binaries from the zip before publishing |
+| Live | not yet: still to check (below) |
+| Design | [the Windows port](../spec/decisions/0018-windows-port.md) |
+
 ## Still to check live
 
+- **Windows:** the whole bridge on a Windows 11 desktop as a standard user: the zip, an account added in `pcb-ui`, Thunderbird, `pcb status` through the running `pcb-ui`, the tray and notifications, "Start at login" across a real sign-out and sign-in, a second Windows user kept out of the files and of the bridge, `pcb uninstall --delete-data`. Until then Windows stays "runs, untested".
 - **Write-up of the multi-account run** (the migration of an M5 state, Thunderbird on its per-account URL, two accounts in one Thunderbird profile): run, reported by the author on 2026-11-14, results still to be recorded.
 - **Desktop app:** the uninstall's removal of the real keyring item, a notification click with the window hidden, the tray without the AppIndicator extension (the author reports on 2026-11-14 that every live check has been run; the results of these three are not recorded here).
 - **Agents:** remote `/mcp` over TLS with an agent trusting pcb's certificate (skipped on 2026-11-14).

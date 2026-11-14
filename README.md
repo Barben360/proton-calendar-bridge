@@ -15,7 +15,7 @@
 
 Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI agents. The calendar counterpart of Proton Mail Bridge.
 
-- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a Linux desktop app.
+- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux (and Windows, untested).
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
 - **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container.
 
@@ -51,7 +51,7 @@ flowchart LR
     pcb <-->|"CLI, --json"| you["You, scripts"]
 ```
 
-One process serves every account: the desktop app, the `pcb serve` daemon (systemd or container), or `pcb mcp` started by an agent. The CLI (`pcb status`, `pcb login`, `pcb client show`) talks to whichever one runs, over a local socket only your user can open.
+One process serves every account: the desktop app, the `pcb serve` daemon (systemd or container), or `pcb mcp` started by an agent. The CLI (`pcb status`, `pcb login`, `pcb client show`) talks to whichever one runs, over a local socket (a named pipe on Windows) only your user can open.
 
 ## Choose how to run it
 
@@ -61,6 +61,7 @@ One process serves every account: the desktop app, the `pcb serve` daemon (syste
 | An always-on bridge on a server or a home lab | `pcb install` (systemd) | [service](docs/service.md) |
 | The same, in Docker | the container image | [container](docs/container.md) |
 | Only an AI agent on this machine, no daemon | `pcb mcp`, started by the agent | [agents](docs/agents.md) |
+| The bridge on Windows 10 or 11 (untested so far) | `pcb-ui.exe` from the release zip | [Windows](docs/install.md#windows) |
 
 Install a release (Linux and macOS, amd64 and arm64; no sudo):
 
@@ -152,7 +153,7 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **fyne-io/oksvg** (BSD-3-Clause, Fyne's fork of srwiley/oksvg) and **srwiley/rasterx** (BSD-3-Clause), both already in Fyne's dependencies: they render `pcb-ui`'s SVG icon to the PNG that becomes `pcb-ui.exe`'s icon at build time (`cmd/pcb-ui/winres`), used as libraries, nothing copied.
 - **tc-hib/go-winres** v0.3.3 (0BSD): writes `pcb-ui.exe`'s icon and version resource at build time (`make winres`), run as a pinned tool, never linked into a binary.
 - **Microsoft/go-winio** v0.6.2 (MIT): the named pipe of the control channel on Windows, private to the user (`internal/ctl`), used as a library, nothing copied.
-- **golang.org/x/sys/windows** (BSD-3-Clause): the Windows calls for the file locks, DPAPI, the access lists, the registry and the time zone, used as a library, nothing copied.
+- **golang.org/x/sys/windows** (BSD-3-Clause): the Windows calls for the file locks, the replacement of files, DPAPI, the access lists, the registry, the time zone, and `pcb-ui`'s console, session end and file opening, used as a library, nothing copied.
 - **godbus/dbus** v5.2.4 (BSD-2-Clause): the D-Bus client of the Secret Service sealer and of the desktop notifications, used as a dependency, nothing copied. The Secret Service client is written from the freedesktop.org specification, with no other implementation read (`internal/store/seal`).
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
 - **develonrails/carbonate** (MIT), **jmdlab/cal-gateway** (MIT) and **WentTheFox/caloxide** (MIT; derives from hydroxide, ferroxide and protoxide, all MIT), for the sync design notes (ideas audited, no code copied; the feed research is in `spec/experiments/raw/m2-feed-research.md`, citations by file and line): carbonate's measured pitfall that a cursor derived at `latest` loses events and its ID-driven re-read that ignores `Action`; jmdlab's order (read the feed head before the full listing) and its rule that a re-read row answering 404 is a delete; caloxide's feed endpoint shapes and its 30 s poll with exponential backoff. Rewritten with our own tests (`internal/syncer`, `internal/store/cache`).

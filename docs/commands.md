@@ -67,6 +67,8 @@ Details: [Thunderbird](thunderbird.md#caldav-app-passwords).
 | `pcb uninstall [--delete-data] [--plan]` | Removes the service, and with `--delete-data` the data ([service](service.md#uninstall)). |
 | `pcb service start\|stop\|restart\|status\|logs [-f]` | Manages the installed service. |
 
+On Windows there is no service: `pcb install` and every `pcb service` command exit 20 with `no service on Windows`, hint `use pcb-ui; "Start at login" runs it at each login`. `pcb serve` runs in a terminal (Ctrl-C stops it). `pcb uninstall` stops nothing and refuses (exit 20) while `pcb-ui` or `pcb serve` serves the state; it turns `pcb-ui`'s "Start at login" off (deletes its Run value) when that value starts the `pcb-ui.exe` beside this `pcb.exe` on the default directories, and keeps it otherwise, saying why. With `--delete-data` it also logs out and deletes the config and state directories, the sealing key included ([install](install.md#remove-it-from-windows)).
+
 ### Agents
 
 | Command | What it does |
