@@ -11,8 +11,9 @@
 # pcb version --json must both equal it, and its revision label the commit
 # pcb was stamped with; with PCB_SMOKE_REVISION set too (a full SHA, as
 # image-build.yml labels it), the revision label must equal it and pcb's
-# (short) commit be its prefix. The container, its volume and a throwaway
-# image are removed on any exit. The last line is PASS.
+# (short) commit be its prefix; set without PCB_SMOKE_VERSION, it is
+# refused. The container, its volume and a throwaway image are removed on
+# any exit. The last line is PASS.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -78,6 +79,11 @@ wait_healthy() {
 	done
 }
 
+# PCB_SMOKE_REVISION is checked in step 1b, which PCB_SMOKE_VERSION enables.
+if [ -n "${PCB_SMOKE_REVISION:-}" ] && [ -z "${PCB_SMOKE_VERSION:-}" ]; then
+	fail "PCB_SMOKE_REVISION needs PCB_SMOKE_VERSION: without it the labels are not checked"
+fi
+
 step "1. build"
 if [ -z "$image" ]; then
 	built="pcb:$id"
@@ -86,7 +92,11 @@ if [ -z "$image" ]; then
 fi
 
 if [ -n "${PCB_SMOKE_VERSION:-}" ]; then
-	step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label pcb's commit"
+	if [ -n "${PCB_SMOKE_REVISION:-}" ]; then
+		step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label $PCB_SMOKE_REVISION (pcb's commit its prefix)"
+	else
+		step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label pcb's commit"
+	fi
 	labels=$(docker image inspect -f '{{json .Config.Labels}}' "$image")
 	ver=$(docker run --rm --network none "$image" version --json) || fail "pcb version --json failed: $ver"
 	jq -e --arg v "$PCB_SMOKE_VERSION" '.ok == true and .data.version == $v' <<<"$ver" >/dev/null ||
