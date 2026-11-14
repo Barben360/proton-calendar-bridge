@@ -43,6 +43,14 @@ func TestStateAndStoreMessages(t *testing.T) {
 		{"dpapi protect, mapped", mapError(&seal.ProtectError{Err: errors.New("denied")}, filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
 			"DPAPI could not protect the sealing key for this Windows user: denied",
 			"sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move state aside before the next pcb login"},
+		// Windows could not unprotect the existing key in this session: a
+		// person signs in, and nothing suggests a logout.
+		{"dpapi unprotect", storeError(fmt.Errorf("load: %w", &seal.ProtectError{Unprotect: true, Err: errors.New("key not valid for use in specified state")}), filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not unprotect the sealing key for this Windows user: key not valid for use in specified state",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"},
+		{"dpapi unprotect, mapped", mapError(&seal.ProtectError{Unprotect: true, Err: errors.New("access is denied")}, filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not unprotect the sealing key for this Windows user: access is denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"},
 		{"store unusable", storeError(errors.New("odd"), keyFile), exitcode.Blocked,
 			"cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)"},
 	} {

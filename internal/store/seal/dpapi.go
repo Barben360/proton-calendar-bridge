@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
+	"syscall"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
@@ -17,15 +19,26 @@ const DPAPIKeyName = "secrets.key.dpapi"
 var ErrNoDPAPI = errors.New("DPAPI is Windows only")
 
 // ErrProtect means Windows could not protect a new key for this user
-// (CryptProtectData failed): typically a logon without the user's
-// password, such as SSH with a key, where DPAPI cannot reach the user's
-// master key. Nothing was written. The error is a *ProtectError.
+// (CryptProtectData failed), or could not unprotect the existing one for a
+// reason other than a damaged or foreign blob: typically a logon without
+// the user's password, such as SSH with a key, where DPAPI cannot reach the
+// user's master key. Nothing was written or lost: signing in with the
+// password lets it work. The error is a *ProtectError.
 var ErrProtect = errors.New("DPAPI could not protect the sealing key for this Windows user")
 
-// ProtectError is ErrProtect with Windows' cause.
-type ProtectError struct{ Err error }
+// ProtectError is ErrProtect with Windows' cause; Unprotect is set when it
+// was the existing key that could not be unprotected.
+type ProtectError struct {
+	Unprotect bool
+	Err       error
+}
 
-func (e *ProtectError) Error() string { return ErrProtect.Error() + ": " + e.Err.Error() }
+func (e *ProtectError) Error() string {
+	if e.Unprotect {
+		return "DPAPI could not unprotect the sealing key for this Windows user: " + e.Err.Error()
+	}
+	return ErrProtect.Error() + ": " + e.Err.Error()
+}
 
 // Unwrap is the cause.
 func (e *ProtectError) Unwrap() error { return e.Err }
@@ -33,13 +46,40 @@ func (e *ProtectError) Unwrap() error { return e.Err }
 // Is makes errors.Is(err, ErrProtect) hold.
 func (e *ProtectError) Is(target error) bool { return target == ErrProtect }
 
+// integrityErrnos are the CryptUnprotectData failures that say the blob
+// itself is damaged or not pcb's (other entropy, not a DPAPI blob; the
+// codes seen on Windows 11 are in TestDPAPIForeignBlobIsRefused): those are
+// ErrCorrupt. Any other failure (ERROR_ACCESS_DENIED in a logon
+// without the password, NTE_BAD_KEY_STATE for another user's blob or a
+// profile without its master key, an unknown code) is a *ProtectError: the
+// key may open in another session, so nothing must call it lost.
+var integrityErrnos = []syscall.Errno{
+	13,         // ERROR_INVALID_DATA: other entropy, altered blob
+	87,         // ERROR_INVALID_PARAMETER: not a DPAPI blob at all (a raw key, a short file)
+	0x80090002, // NTE_BAD_HASH
+	0x80090005, // NTE_BAD_DATA
+	0x80090006, // NTE_BAD_SIGNATURE
+	0x80091007, // CRYPT_E_HASH_VALUE
+}
+
+// corruptBlob reports whether err, an unprotect failure, is an integrity
+// failure (integrityErrnos).
+func corruptBlob(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno) && slices.Contains(integrityErrnos, errno)
+}
+
 // errMachineScope is a key protected for the whole machine
 // (CRYPTPROTECT_LOCAL_MACHINE), which any local account unprotects: pcb
 // only writes user-scoped keys, so another account planted it.
 var errMachineScope = errors.New("protected for the whole machine, not this user")
 
-// protectKey is protect; tests replace it.
-var protectKey = protect
+// protectKey and unprotectKey are protect and unprotect; tests replace
+// them.
+var (
+	protectKey   = protect
+	unprotectKey = unprotect
+)
 
 // maxDPAPIBlob bounds what is read of a DPAPI key file: a protected 32-byte
 // key takes a few hundred bytes.
@@ -77,8 +117,9 @@ func (d *DPAPI) Open(sealed, aad []byte) ([]byte, error) {
 
 // Check reads the key as Seal and Open do, without creating it: nil when it
 // is usable, else why not (fs.ErrNotExist, a *fs.PathError, a
-// *KeyModeError, ErrCorrupt for a blob this user cannot unprotect or a key
-// of the wrong size, ErrNoDPAPI off Windows). The key is not kept.
+// *KeyModeError, ErrCorrupt for a damaged or foreign blob or a key of the
+// wrong size, a *ProtectError when Windows cannot unprotect it in this
+// session, ErrNoDPAPI off Windows). The key is not kept.
 func (d *DPAPI) Check() error {
 	key, err := d.read()
 	clear(key)
@@ -119,14 +160,16 @@ func (d *DPAPI) read() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := unprotect(blob)
+	key, err := unprotectKey(blob)
 	switch {
 	case errors.Is(err, ErrNoDPAPI):
 		return nil, err
 	case errors.Is(err, errMachineScope):
 		return nil, fmt.Errorf("%w: key file %s is %w", ErrCorrupt, d.Path, err)
+	case corruptBlob(err):
+		return nil, fmt.Errorf("%w: key file %s is damaged or not pcb's: %w", ErrCorrupt, d.Path, err)
 	case err != nil:
-		return nil, fmt.Errorf("%w: key file %s cannot be unprotected by this Windows user: %w", ErrCorrupt, d.Path, err)
+		return nil, &ProtectError{Unprotect: true, Err: err}
 	case len(key) != keySize:
 		clear(key)
 		return nil, &KeySizeError{Path: d.Path, Size: int64(len(key))}

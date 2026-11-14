@@ -17,3 +17,11 @@ func SetProtect(f func([]byte) ([]byte, error)) (restore func()) {
 	protectKey = f
 	return func() { protectKey = old }
 }
+
+// SetUnprotect replaces the DPAPI sealer's CryptUnprotectData and returns a
+// restore function.
+func SetUnprotect(f func([]byte) ([]byte, error)) (restore func()) {
+	old := unprotectKey
+	unprotectKey = f
+	return func() { unprotectKey = old }
+}

@@ -289,6 +289,8 @@ func mapError(err error, keyFile string) error {
 		return keyringLockedError()
 	case errors.Is(err, seal.ErrNoService):
 		return keyringUnavailableError()
+	case errors.As(err, &pe) && pe.Unprotect:
+		return mustAct(pe.Error(), dpapiUnprotectFix)
 	case errors.As(err, &pe):
 		return mustAct(pe.Error(), dpapiProtectFix(keyFile))
 	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
@@ -404,6 +406,11 @@ func dpapiProtectFix(keyFile string) string {
 	return "sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move " +
 		filepath.Dir(keyFile) + " aside before the next pcb login"
 }
+
+// dpapiUnprotectFix is the hint when Windows could not unprotect the DPAPI
+// key in this session (not a damaged key): it never suggests a logout,
+// which would discard secrets a password logon still opens.
+const dpapiUnprotectFix = "sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"
 
 // keyFix is the hint for a key file that cannot be used.
 const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, " + privateFile + " (pcb doctor)"

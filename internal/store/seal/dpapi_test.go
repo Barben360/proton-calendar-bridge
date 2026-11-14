@@ -1,13 +1,18 @@
 package seal_test
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -62,5 +67,59 @@ func TestDPAPIProtectFailureIsErrProtect(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a key was written (%v)", err)
+	}
+}
+
+// An existing key Windows cannot unprotect is corrupt only for an
+// integrity failure; any other failure (a logon without the password,
+// another user's blob, an unknown code) is a *ProtectError: the key may
+// open in another session, so nothing calls it lost, and Seal never
+// replaces it.
+func TestDPAPIUnprotectFailuresAreClassified(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cause   error
+		corrupt bool
+	}{
+		{"access denied", syscall.Errno(5), false},          // ERROR_ACCESS_DENIED: a key logon
+		{"bad key state", syscall.Errno(0x8009000B), false}, // NTE_BAD_KEY_STATE: another user, no master key
+		{"unknown", errors.New("odd"), false},               // anything else
+		{"bad data", syscall.Errno(0x80090005), true},       // NTE_BAD_DATA
+		{"invalid data", syscall.Errno(13), true},           // ERROR_INVALID_DATA
+		{"hash value", syscall.Errno(0x80091007), true},     // CRYPT_E_HASH_VALUE
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state", seal.DPAPIKeyName)
+			if err := acl.MkdirAll(filepath.Dir(path)); err != nil {
+				t.Fatal(err)
+			}
+			blob := bytes.Repeat([]byte{1}, 200)
+			if err := os.WriteFile(path, blob, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cause := fmt.Errorf("CryptUnprotectData: %w", tc.cause)
+			defer seal.SetUnprotect(func([]byte) ([]byte, error) { return nil, cause })()
+			d := &seal.DPAPI{Path: path}
+			for name, run := range map[string]func() error{
+				"check": d.Check,
+				"open":  func() error { _, err := d.Open(make([]byte, 64), nil); return err },
+				"seal":  func() error { _, err := d.Seal([]byte("x"), nil); return err },
+			} {
+				err := run()
+				var pe *seal.ProtectError
+				switch {
+				case !errors.Is(err, tc.cause):
+					t.Errorf("%s = %v: the cause is lost", name, err)
+				case tc.corrupt && (!errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrProtect)):
+					t.Errorf("%s = %v, want ErrCorrupt", name, err)
+				case !tc.corrupt && (!errors.As(err, &pe) || !pe.Unprotect || errors.Is(err, seal.ErrCorrupt) ||
+					!strings.HasPrefix(err.Error(), "DPAPI could not unprotect the sealing key for this Windows user: ")):
+					t.Errorf("%s = %v, want an unprotect ProtectError, not ErrCorrupt", name, err)
+				}
+			}
+			if again, _ := os.ReadFile(path); !bytes.Equal(again, blob) {
+				t.Error("Seal replaced a key it could not unprotect")
+			}
+		})
 	}
 }

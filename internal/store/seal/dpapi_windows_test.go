@@ -153,6 +153,14 @@ func TestDPAPIForeignBlobIsRefused(t *testing.T) {
 		if name == "machine scope" && (err == nil || !strings.Contains(err.Error(), "protected for the whole machine, not this user")) {
 			t.Errorf("machine scope: Check = %v, want the scope named", err)
 		}
+		// Windows' own codes for these, which make them corrupt rather
+		// than a key this session cannot reach.
+		var errno windows.Errno
+		_ = errors.As(err, &errno)
+		if want := map[string]windows.Errno{"other entropy": windows.ERROR_INVALID_DATA, "no entropy": windows.ERROR_INVALID_DATA,
+			"raw key": windows.ERROR_INVALID_PARAMETER}[name]; want != 0 && errno != want {
+			t.Errorf("%s: CryptUnprotectData errno %#x, want %#x", name, uint32(errno), uint32(want))
+		}
 	}
 	// The same key under pcb's entropy opens: the refusals above are the
 	// entropy's, not the key's.
