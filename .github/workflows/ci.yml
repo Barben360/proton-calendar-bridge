@@ -215,8 +215,12 @@ jobs:
       - name: Install GNU tar
         # package.sh needs GNU tar (--sort, --mtime): macOS has bsdtar. gtar's
         # gnubin directory (tar without the g) goes first on PATH from here on.
+        # Not pinned: brew installs only the formula's current version (it
+        # has no versioned gnu-tar@X formula), so the version is logged.
         run: |
           brew install gnu-tar
+          command -v gtar >/dev/null || { echo "::error::brew install gnu-tar left no gtar on PATH"; exit 1; }
+          gtar --version | head -1
           echo "$(brew --prefix gnu-tar)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Build and package darwin
         run: |
