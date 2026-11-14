@@ -584,12 +584,12 @@ equal "$(jq -r .data.password "$RUN/out")" "$PASS2" "default client's password a
 
 # --------------------------------------------------------------------------
 step 19 "pcb mcp relayed to pcb serve: list, create, update, delete"
-mcp_open --profile full
+mcp_open
 equal "$(jq -c '.result.capabilities.tools != null' "$RUN/mcp.json")" true "the server offers tools"
 mcp_rpc tools/list '{}'
 equal "$(jq -c '[.result.tools[].name] | sort' "$RUN/mcp.json")" \
 	'["calendars_list","event_create","event_delete","event_get","event_update","events_list","events_search","free_busy","login","logout","status"]' \
-	"tools of the full profile over stdio"
+	"tools of the full profile (the default) over stdio"
 run 0 "$PCB" status --json
 equal "$(jq -c '[.data.daemon.kind, .data.daemon.pid, .data.mcp.sessions.relay]' "$RUN/out")" "[\"serve\",$PID,1]" "the daemon serves the relayed session"
 mcp_tool status '{}'
@@ -675,11 +675,11 @@ lacks "$RUN/serve.log" "$PASS2" "serve.log never holds the CalDAV password"
 
 # --------------------------------------------------------------------------
 step 22 "pcb mcp with no daemon serves the session itself (kind mcp, no listener)"
-mcp_open
+mcp_open --profile read-only
 mcp_rpc tools/list '{}'
 equal "$(jq -c '[.result.tools[].name] | sort' "$RUN/mcp.json")" \
 	'["calendars_list","event_get","events_list","events_search","free_busy","login","status"]' \
-	"tools of the read-only profile (the default)"
+	"tools of the read-only profile"
 run 0 "$PCB" status --json
 equal "$(jq -c '[.data.daemon.kind, .data.listener, .data.mcp.sessions.stdio]' "$RUN/out")" '["mcp",null,1]' "the session daemon"
 MCP_DAEMON=$(jq -r .data.daemon.pid "$RUN/out")

@@ -1383,8 +1383,8 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
 - **Grants.** Capabilities `freebusy` < `read` < `write`, plus `delete` (needs `write`: refused otherwise),
   `login` and `manage` (stdio only, refused on tokens); `read` brings `freebusy`, `write` brings `read`
   [verified: `TestParseCapsAppliesImplications`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`].
-  stdio profiles: `read-only` (`read` + `login`, the default) and `full` (all six); `--allow` replaces the profile
-  [verified: `TestProfiles`]. A grant names accounts (address, case-insensitive, or local ID; none: every account,
+  stdio profiles: `full` (all six, the default since 2026-11-14) and `read-only` (`read` + `login`); `--allow` replaces
+  the profile [verified: `TestProfiles`, `TestMCPStdioBecomesTheDaemon`, `TestMCPStdioRelaysToARunningDaemon`]. A grant names accounts (address, case-insensitive, or local ID; none: every account,
   later ones included) and, for a token, calendar IDs (none: all). An account outside the grant, pending, with
   MCP off (`pcb account mcp off`, the person's kill switch for every agent) or signed out (`logged-out`) is
   invisible: a call naming it or one of its `event_id`s answers as for something that does not exist (`no account
@@ -1573,7 +1573,7 @@ pcb client rotate NAME|ID                    # M5, decision 0013: a new password
 pcb account list                            # M6: local ID, address, phase, CalDAV on/off (M8: and MCP off/read-only/read-write), last sync; pending adds included; the daemon's view when one answers
 pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
 pcb account mcp off|read-only|read-write    # M8: the account's MCP switch (§4.1); read-only since 2026-11-14, on = read-write
-pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
+pcb mcp [--profile full|read-only] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12; full the default since 2026-11-14): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
 pcb mcp token add NAME --allow CAPS [--account A]... [--calendar ID]... [--expires D] [--plan]   # M8: a remote agent's bearer token, printed once (§12)
 pcb mcp token list                          # M8: name, grants, created, last used, expiry (expired ones marked)
 pcb mcp token remove NAME [--yes]           # M8: the token stops working at once

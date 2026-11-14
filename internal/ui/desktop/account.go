@@ -108,8 +108,11 @@ type accountPane struct {
 	statusDot          *canvas.Circle
 	signBtn, removeBtn *widget.Button
 	caldav             *toggle
-	mcp                *widget.Select // off, read-only, read-write (mcpChoices)
-	mcpSilent          bool           // setAccount is selecting: no call
+	mcp                *widget.Select  // off, read-only, read-write (mcpChoices)
+	mcpSilent          bool            // setAccount is selecting: no call
+	agentRow           *fyne.Container // the agent command and the mode's hint, hidden when MCP is off
+	agentCopy          *widget.Button
+	agentHint          *widget.Label
 	conn               *fyne.Container
 	url, user, fp      *textLine
 	urlCopy, userCopy  *widget.Button // the URL's and the username's Copy (F6)
@@ -154,6 +157,11 @@ func newAccountPane(w *Window) *accountPane {
 	p.removeBtn.Importance = widget.DangerImportance
 	p.caldav = newToggle("CalDAV", p.setCalDAV)
 	p.mcp = widget.NewSelect(mcpLabels(), p.setMCP)
+	agentCmd := mono(agentCommand)
+	p.agentCopy = w.copyOf(agentCmd)
+	p.agentHint = wrapped("")
+	p.agentHint.Importance = widget.LowImportance
+	p.agentHint.SizeName = theme.SizeNameCaptionText
 	p.url, p.user, p.fp = mono(""), mono(""), mono("")
 	p.urlCopy, p.userCopy = w.copyOf(p.url), w.copyOf(p.user)
 	p.pw = newPwBox(w)
@@ -170,9 +178,11 @@ func newAccountPane(w *Window) *accountPane {
 
 	header := container.NewBorder(nil, nil, nil, vcenter(container.NewHBox(p.signBtn, p.removeBtn)),
 		vbox(0, p.addr, container.NewBorder(nil, nil, pad(0, 0, 8, 0, dotObj), nil, p.status)))
+	p.agentRow = divided(vbox(0, groupRow(nil, 0, agentCmd, p.agentCopy), pad(0, 6, 4, 8, p.agentHint)))
 	adapters := group("ADAPTERS",
 		groupRow(adapterKey("CalDAV", "calendar apps"), 0, nil, vcenter(p.caldav)),
 		divided(groupRow(adapterKey("MCP", "AI agents"), 0, nil, vcenter(p.mcp))),
+		p.agentRow,
 	)
 	p.fpRow = divided(groupRow(key("Fingerprint"), keyWidth, p.fp))
 	p.conn = group("CALDAV CONNECTION",
@@ -214,6 +224,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	p.mcpSilent = true
 	p.mcp.SetSelected(mcpLabel(av.MCPMode))
 	p.mcpSilent = false
+	p.showAgentHint(av.MCPMode)
 	p.url.SetText(av.URL)
 	p.user.SetText(av.Username)
 	p.fp.SetText(av.Fingerprint)
@@ -285,6 +296,29 @@ func mcpLabels() []string {
 	return out
 }
 
+// agentCommand adds pcb to Claude Code, for every project, with the
+// default (full) profile.
+const agentCommand = "claude mcp add --scope user pcb -- pcb mcp"
+
+// agentHints say what the agents may do under each mode that lets them see
+// the account: the account's mode and the agent's profile both apply.
+var agentHints = map[service.MCPMode]string{
+	service.MCPReadWrite: "Agents read and edit this account, unless you add them with --profile read-only.",
+	service.MCPReadOnly:  "Agents only read this account: every change is refused, whatever their profile.",
+}
+
+// showAgentHint shows the agent command and mode's hint, or hides them
+// when agents do not see the account.
+func (p *accountPane) showAgentHint(mode service.MCPMode) {
+	hint, ok := agentHints[mode]
+	if !ok {
+		p.agentRow.Hide()
+		return
+	}
+	p.agentHint.SetText(hint)
+	p.agentRow.Show()
+}
+
 // mcpLabel is mode's choice; an unknown mode selects none.
 func mcpLabel(mode service.MCPMode) string {
 	for _, c := range mcpChoices {
@@ -323,6 +357,7 @@ func (p *accountPane) setMCP(label string) {
 		}
 		if p.av.ID == id { // the next Update brings the same; until then, a second choice compares with this one
 			p.av.MCPMode = mode
+			p.showAgentHint(mode)
 		}
 	})
 }

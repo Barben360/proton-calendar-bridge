@@ -36,7 +36,7 @@ After `make install-ui` it is also in your applications menu.
 | Part | What it does |
 |---|---|
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
-| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
+| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account, with the Claude Code command to copy under it), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
 | Add-account wizard | Password, 2FA code, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you. |
 | Settings | "Start at login", "Open config.toml", "Restart bridge", the log level. |
@@ -56,13 +56,13 @@ The window then shows the account's connection details. Copy them into Thunderbi
 For Claude Code:
 
 ```sh
-claude mcp add --scope user pcb -- pcb mcp                    # read-only (the default)
-claude mcp add --scope user pcb -- pcb mcp --profile full     # also create, edit, delete
+claude mcp add --scope user pcb -- pcb mcp                         # read, create, edit, delete (the default)
+claude mcp add --scope user pcb -- pcb mcp --profile read-only     # read only
 ```
 
 `--scope user` makes it available in every Claude Code session, not only in the directory you ran the command in ([scopes](agents.md#set-up-claude-code)). Give the absolute path of `pcb` (`~/.local/bin/pcb`) when the agent's `PATH` lacks it.
 
-The MCP selector in the window is not a server switch: it says what any agent may do with that account. The agent's profile says what that agent may do. Both apply, and the stricter wins: Read-write in the window lets an agent edit only if you also added it with `--profile full` ([the two settings](agents.md#two-settings-the-stricter-wins)).
+The MCP selector in the window is not a server switch: it says what any agent may do with that account. The agent's profile says what that agent may do. Both apply, and the stricter wins: on Read-write, an agent added with the first command edits and one added with `--profile read-only` only reads; on Read-only, every agent only reads ([the two settings](agents.md#two-settings-the-stricter-wins)). Under the selector, the window shows the first command with a Copy button, and what agents may do with the setting chosen.
 
 An agent on another machine uses the remote `/mcp` with a token: turn it on in `config.toml` (Settings, "Open config.toml", then "Restart bridge") and create the token with `pcb mcp token add` ([remote](agents.md#from-another-machine-remote-with-a-token)).
 
