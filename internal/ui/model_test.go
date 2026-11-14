@@ -242,7 +242,7 @@ func TestNotifyTitleAndBody(t *testing.T) {
 func TestNotifyCodes(t *testing.T) {
 	for code, want := range map[string]bool{
 		ctl.CodeNeedsLogin: true, ctl.CodeNeedsCaptcha: true, ctl.CodeHumanVerification: true,
-		ctl.CodeKeyringLocked: true, ctl.CodeKeyringUnavailable: true,
+		ctl.CodeKeyringLocked: true, ctl.CodeKeyringUnavailable: true, ctl.CodeKeyUnavailable: true,
 		ctl.CodeAccountStopped: false, ctl.CodeTLSExpired: false, ctl.CodeClientsUnreadable: false,
 	} {
 		var n ui.Notifier

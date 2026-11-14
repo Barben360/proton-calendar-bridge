@@ -303,6 +303,7 @@ func loginText(s service.Status) string {
 	optional("username", s.Username)
 	optional("account_id", s.AccountID)
 	line("secrets", s.Secrets)
+	optional("secrets_cause", s.SecretsCause)
 	if s.KeyFileAbsent {
 		line("key_file", s.KeyFile+" (absent)")
 	} else {

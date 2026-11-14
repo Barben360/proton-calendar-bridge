@@ -121,7 +121,8 @@ On Windows a new state keeps its sealing key in `secrets.key.dpapi` in the state
 | `secret-service` | refused, exit 10: the desktop keyring exists on Linux only |
 
 - As with the key file, any program running as you can use the key: DPAPI protects it against other accounts and against a copy of the disk, not against your own processes.
-- A reset Windows password (by an administrator, not changed by you) or a new Windows profile loses the key: `pcb` then says the stored secrets cannot be opened; run `pcb logout`, then `pcb login`.
+- When Windows cannot decrypt the key in the current session (you signed in without your password, for example over SSH with a key), commands exit 20 with `DPAPI could not unprotect the sealing key for this Windows user`, and `pcb status` shows `secrets: key-unavailable` and the alert `key-unavailable`, never `needs-login`. Nothing is lost: sign in to Windows once with your password, then retry. Do not log out. Creating the key at the first login fails the same way (exit 10, `DPAPI could not protect the sealing key`).
+- A reset Windows password (by an administrator, not changed by you) or a new Windows profile loses the key for good: if `key-unavailable` stays after a sign-in with your password, run `pcb logout`, then `pcb login`.
 - `pcb uninstall --delete-data` deletes the key with the state directory.
 
 ### A state moved between systems

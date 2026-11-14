@@ -479,6 +479,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		var (
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
+			pe *seal.ProtectError
 		)
 		unreadable := "the stored secrets cannot be opened; see the key file"
 		if l.keyFile() == keyringRef {
@@ -493,6 +494,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
 		case errors.Is(err, seal.ErrNoService):
 			s.Secrets = SecretsKeyringUnavailable // no keyring answers here: nothing is lost either (R15)
+		case errors.As(err, &pe) && pe.Unprotect:
+			s.Secrets, s.SecretsCause = SecretsKeyUnavailable, pe.Error() // the key opens in a password logon: nothing is lost
 		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:

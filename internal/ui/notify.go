@@ -18,6 +18,7 @@ type Notification struct{ Account, Code, Title, Body string }
 var notified = map[string]bool{
 	ctl.CodeNeedsLogin: true, ctl.CodeNeedsCaptcha: true, ctl.CodeHumanVerification: true,
 	ctl.CodeSyncStalled: true, ctl.CodeKeyringLocked: true, ctl.CodeKeyringUnavailable: true,
+	ctl.CodeKeyUnavailable: true,
 }
 
 // Notifier decides which alerts of a View are new.

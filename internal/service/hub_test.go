@@ -17,6 +17,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
@@ -1493,5 +1494,85 @@ func TestOpenHubRemovesStaleKeyTempsAtTheRoot(t *testing.T) {
 		if gone := errors.Is(err, os.ErrNotExist); gone == keep {
 			t.Errorf("%s: gone %v, want kept %v (%v)", name, gone, keep, err)
 		}
+	}
+}
+
+// flakySealer is a key-file sealer that names itself dpapi and, once fail
+// is set, cannot open its key as Windows cannot in a logon without the
+// password (an unprotect *seal.ProtectError).
+type flakySealer struct {
+	seal.KeyFile
+	fail atomic.Bool
+}
+
+func (*flakySealer) Name() string { return service.SealerDPAPI }
+
+func (s *flakySealer) Open(sealed, aad []byte) ([]byte, error) {
+	if s.fail.Load() {
+		return nil, &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+	}
+	return s.KeyFile.Open(sealed, aad)
+}
+
+func (s *flakySealer) Seal(plaintext, aad []byte) ([]byte, error) {
+	if s.fail.Load() {
+		return nil, &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+	}
+	return s.KeyFile.Seal(plaintext, aad)
+}
+
+// A DPAPI key Windows cannot unprotect in this session is treated as an
+// unavailable keyring: a pass fails Blocked with the cause and the
+// sign-in hint (never a logout), Status keeps the phase and names the
+// cause, the alert is key-unavailable without needs-login, and state.json
+// keeps its phase.
+func TestUnavailableDPAPIKeyIsNotANeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	sealer := &flakySealer{KeyFile: seal.KeyFile{Path: e.cfg.Secrets.KeyFile}}
+	o := e.options()
+	o.Sealer = sealer
+	h, err := service.OpenHub(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer.fail.Store(true)
+
+	const cause = "DPAPI could not unprotect the sealing key for this Windows user: CryptUnprotectData: Access is denied"
+	_, err = api.Sync(t.Context(), service.SyncRequest{})
+	if got := exitcode.From(err); got != exitcode.Blocked || err.Error() != cause {
+		t.Errorf("Sync = %v (exit %d), want exit 20 %q", err, got, cause)
+	}
+	if hint := exitcode.HintOf(err); hint != service.DPAPIUnprotectFix || strings.Contains(hint, "logout") {
+		t.Errorf("hint = %q, want %q", hint, service.DPAPIUnprotectFix)
+	}
+	st := accountStatus(t, h, a)
+	if st.Secrets != service.SecretsKeyUnavailable || st.Phase != "ready" || st.SecretsCause != cause {
+		t.Errorf("Status = secrets %q phase %q cause %q, want key-unavailable, the phase kept (ready), the cause", st.Secrets, st.Phase, st.SecretsCause)
+	}
+	var codes []string
+	for _, al := range ctl.Alerts(ctl.AlertInput{Account: a, Login: st, Now: e.clk.Now()}) {
+		codes = append(codes, al.Code)
+		if al.Code == ctl.CodeKeyUnavailable && (al.Message != cause || al.Fix != service.DPAPIUnprotectFix) {
+			t.Errorf("alert = %+v, want the cause and the sign-in fix", al)
+		}
+	}
+	if !slices.Contains(codes, ctl.CodeKeyUnavailable) || slices.Contains(codes, ctl.CodeNeedsLogin) {
+		t.Errorf("alerts = %v, want %s and no %s", codes, ctl.CodeKeyUnavailable, ctl.CodeNeedsLogin)
+	}
+	if stored, err := store.LoadState(store.AccountDir(e.dirs.State, a)); err != nil || stored.Phase != store.PhaseReady {
+		t.Errorf("state.json phase = %q (%v), want ready kept", stored.Phase, err)
+	}
+	// Once the key opens again, the account serves with nothing re-sealed.
+	sealer.fail.Store(false)
+	if _, err := api.Sync(t.Context(), service.SyncRequest{}); err != nil {
+		t.Errorf("Sync after the key opens again = %v", err)
 	}
 }
