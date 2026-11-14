@@ -56,11 +56,11 @@ The window then shows the account's connection details. Copy them into Thunderbi
 For Claude Code:
 
 ```sh
-claude mcp add pcb -- pcb mcp                    # read-only (the default)
-claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete
+claude mcp add --scope user pcb -- pcb mcp                    # read-only (the default)
+claude mcp add --scope user pcb -- pcb mcp --profile full     # also create, edit, delete
 ```
 
-Give the absolute path of `pcb` (`~/.local/bin/pcb`) when the agent's `PATH` lacks it.
+`--scope user` makes it available in every Claude Code session, not only in the directory you ran the command in ([scopes](agents.md#set-up-claude-code)). Give the absolute path of `pcb` (`~/.local/bin/pcb`) when the agent's `PATH` lacks it.
 
 The MCP selector in the window is not a server switch: it says what any agent may do with that account. The agent's profile says what that agent may do. Both apply, and the stricter wins: Read-write in the window lets an agent edit only if you also added it with `--profile full` ([the two settings](agents.md#two-settings-the-stricter-wins)).
 
