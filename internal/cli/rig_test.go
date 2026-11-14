@@ -255,6 +255,8 @@ func newRig(t *testing.T, o *protontest.Options) *rig {
 	r.f, r.dirs, r.env = f, dirs, map[string]string{
 		"XDG_CONFIG_HOME": filepath.Dir(dirs.Config),
 		"XDG_STATE_HOME":  filepath.Dir(dirs.State),
+		"APPDATA":         filepath.Dir(dirs.Config), // Windows' base of the same directories
+		"LOCALAPPDATA":    filepath.Dir(dirs.State),
 		"PCB_USERNAME":    user,
 		"PCB_PASSWORD":    password,
 	}

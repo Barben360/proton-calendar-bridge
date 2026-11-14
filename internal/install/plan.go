@@ -394,12 +394,17 @@ func PlanUninstall(ctx context.Context, h Host, req UninstallRequest) ([]Step, e
 // AutostartNote is the note of the step removing pcb-ui's autostart entry.
 const AutostartNote = "pcb-ui's autostart entry"
 
-// AutostartStep is the step removing pcb-ui's Run value (Windows), or
-// skipping it when absent.
-func AutostartStep(present bool) Step {
+// AutostartStep is the step removing pcb-ui's Run value (Windows), skipped
+// when absent. keepWhy, when set, keeps a present value instead, saying why
+// in the note: the value carries no environment and names one executable,
+// so it is not this invocation's to delete.
+func AutostartStep(present bool, keepWhy string) Step {
 	st := Step{Action: ActionRemove, Kind: KindAutostart, Path: `HKCU\` + runkey.KeyPath + `\` + runkey.Value, Note: AutostartNote}
-	if !present {
+	switch {
+	case !present:
 		st.Action, st.Note = ActionSkip, "absent"
+	case keepWhy != "":
+		st.Action, st.Note = ActionKeep, AutostartNote+" "+keepWhy+": kept"
 	}
 	return st
 }

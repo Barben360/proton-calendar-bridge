@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -98,6 +99,9 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 		}
 	}, ""}
 	unreadable := fault{"key file unreadable", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("chmod 000 makes no file unreadable on Windows; needs the ACL-based readability (Tasks 4 and 5)")
+		}
 		if err := os.Chmod(key, 0o000); err != nil {
 			t.Fatal(err)
 		}

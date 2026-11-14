@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite" // the "sqlite" driver
@@ -144,6 +145,17 @@ type Cache struct {
 	noPins bool
 }
 
+// uriPath is abs as the path of a file: URI. A Windows drive path gets the
+// leading slash its URI form needs (file:/C:/dir/pcb.db), else C: reads as
+// the authority and SQLite refuses it.
+func uriPath(abs string) string {
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
 // Path is the cache file inside the state directory.
 func Path(stateDir string) string { return filepath.Join(stateDir, "pcb.db") }
 
@@ -183,7 +195,7 @@ func Open(path, accountID string) (*Cache, error) {
 			return nil, ioError(err)
 		}
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "_txlock=immediate" +
+	u := url.URL{Scheme: "file", Path: uriPath(abs), RawQuery: "_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -481,7 +493,7 @@ func openReadOnly(abs, accountID string) (*Cache, error) {
 	if _, err := os.Stat(abs + "-wal"); errors.Is(err, os.ErrNotExist) {
 		query = "immutable=1&_pragma=query_only(1)"
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: query}
+	u := url.URL{Scheme: "file", Path: uriPath(abs), RawQuery: query}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("cache: %w", err)

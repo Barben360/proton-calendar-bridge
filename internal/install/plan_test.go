@@ -71,6 +71,9 @@ func (s *sys) mode(p string) os.FileMode {
 
 func newSys(t *testing.T) *sys {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("sys fakes a Linux host (systemd, /home/alice, /etc/pcb and /var/lib/pcb paths, uid ownership, hard links)")
+	}
 	s := &sys{t: t, root: t.TempDir(), euid: 1000,
 		env:   map[string]string{"HOME": "/home/alice", "USER": "alice"},
 		users: map[string]bool{"root": true}, out: map[string]string{}, codes: map[string]int{}, ids: map[string][2]int{}}
@@ -620,7 +623,7 @@ func TestRemoveHeldDirMatchesThroughRoot(t *testing.T) {
 
 func TestAutostartStep(t *testing.T) {
 	t.Parallel()
-	on, off := install.AutostartStep(true), install.AutostartStep(false)
+	on, off := install.AutostartStep(true, ""), install.AutostartStep(false, "")
 	const path = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\pcb-ui`
 	if on.Action != install.ActionRemove || on.Kind != install.KindAutostart || on.Path != path || on.Note != install.AutostartNote {
 		t.Errorf("present = %+v", on)
@@ -628,8 +631,15 @@ func TestAutostartStep(t *testing.T) {
 	if off.Action != install.ActionSkip || off.Kind != install.KindAutostart || off.Note != "absent" {
 		t.Errorf("absent = %+v", off)
 	}
+	kept := install.AutostartStep(true, "starts pcb-ui on the default directories, not these")
+	if kept.Action != install.ActionKeep || !strings.Contains(kept.Note, "not these: kept") {
+		t.Errorf("kept = %+v", kept)
+	}
+	if install.AutostartStep(false, "x").Action != install.ActionSkip {
+		t.Error("an absent value is skipped whatever keepWhy says")
+	}
 	called := false
-	if err := install.Apply(t.Context(), install.Host{}, []install.Step{on, off}, install.Hooks{Autostart: func() error { called = true; return nil }}); err != nil || !called {
+	if err := install.Apply(t.Context(), install.Host{}, []install.Step{on, off, kept}, install.Hooks{Autostart: func() error { called = true; return nil }}); err != nil || !called {
 		t.Errorf("Apply: called=%v err=%v", called, err)
 	}
 	steps := []install.Step{on}

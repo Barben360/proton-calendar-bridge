@@ -14,6 +14,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -363,17 +364,18 @@ func (a *app) uninstallWindows(cmd *cobra.Command, deleteData, yes, plan bool) e
 			return Finish(cmd, nil, "", err)
 		}
 	}
+	ours := defaultState(a.Env) == dirs.State
 	var steps []install.Step
 	if deleteData {
-		if steps, err = install.PlanDeleteDesktop(h, dirs, "", true); err != nil {
+		if steps, err = install.PlanDeleteDesktop(h, dirs, "", ours); err != nil {
 			return Finish(cmd, nil, "", err)
 		}
 	}
-	_, present, err := a.RunKey.Get()
+	data0, present, err := a.RunKey.Get()
 	if err != nil {
 		return Finish(cmd, nil, "", fmt.Errorf("reading pcb-ui's Run value: %w", err))
 	}
-	steps = append(steps, install.AutostartStep(present))
+	steps = append(steps, install.AutostartStep(present, a.runValueNotOurs(data0, ours)))
 	data := installData{Plan: plan, Steps: steps, Next: []string{}}
 	if plan {
 		if held {
@@ -400,6 +402,25 @@ func (a *app) uninstallWindows(cmd *cobra.Command, deleteData, yes, plan bool) e
 		}
 	}
 	return a.applyUninstall(cmd, steps, data, hooks)
+}
+
+// runValueNotOurs is why pcb-ui's Run value is not this invocation's to
+// delete, "" when it is: it carries no environment, so it starts pcb-ui on
+// the default directories (ours false: other ones here), and it names one
+// executable (another copy's entry is kept).
+func (a *app) runValueNotOurs(data string, ours bool) string {
+	if !ours {
+		return "starts pcb-ui on the default directories, not these"
+	}
+	exe, err := a.Host.Executable()
+	if err != nil {
+		return ""
+	}
+	want := filepath.Join(filepath.Dir(exe), "pcb-ui.exe")
+	if got, ok := runkey.Exe(data); ok && !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		return "starts " + got + ", not the pcb-ui.exe beside this pcb (" + want + ")"
+	}
+	return ""
 }
 
 // defaultState is the state directory pcb resolves for env without

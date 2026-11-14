@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -96,6 +97,9 @@ func TestLogoutOfAStoreItCannotReadAsksOnATerminal(t *testing.T) {
 // that user could no longer read them (state Minor). pcb install, uninstall
 // and service, which run as root, are not concerned.
 func TestRootRefusesAnotherUsersState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership: os.Geteuid is -1 on Windows, whose state owner check is the ACL's (Tasks 4 and 5)")
+	}
 	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("the state directory would be root's own")

@@ -70,6 +70,8 @@ type winRig struct {
 	t             *testing.T
 	config, state string
 	key           *fakeRunKey
+	exe           string // this pcb's executable
+	override      map[string]string
 	api           *winLogoutAPI
 	stdout        strings.Builder
 }
@@ -77,8 +79,9 @@ type winRig struct {
 func newWinRig(t *testing.T) *winRig {
 	t.Helper()
 	base := t.TempDir()
-	w := &winRig{t: t, config: filepath.Join(base, "cfg", "pcb"), state: filepath.Join(base, "state", "pcb"),
-		key: &fakeRunKey{data: runkey.Data(`C:\pcb\pcb-ui.exe`), set: true}, api: &winLogoutAPI{}}
+	exe := filepath.Join(base, "bin", "pcb.exe")
+	w := &winRig{t: t, config: filepath.Join(base, "cfg", "pcb"), state: filepath.Join(base, "state", "pcb"), exe: exe,
+		key: &fakeRunKey{data: runkey.Data(filepath.Join(base, "bin", "pcb-ui.exe")), set: true}, api: &winLogoutAPI{}}
 	for _, f := range []string{
 		filepath.Join(w.config, "config.toml"),
 		filepath.Join(w.state, "layout.json"),
@@ -98,9 +101,17 @@ func newWinRig(t *testing.T) *winRig {
 func (w *winRig) run(args ...string) exitcode.Code {
 	w.t.Helper()
 	var out strings.Builder
-	env := map[string]string{"PCB_CONFIG_DIR": w.config, "PCB_STATE_DIR": w.state}
+	// The default directories of every OS are the rig's: an invocation
+	// without override is "ours" (the one pcb-ui's Run value starts).
+	base := filepath.Dir(w.config)
+	env := map[string]string{"XDG_CONFIG_HOME": base, "XDG_STATE_HOME": filepath.Dir(w.state), "HOME": filepath.Dir(base),
+		"APPDATA": base, "LOCALAPPDATA": filepath.Dir(w.state)}
+	for k, v := range w.override {
+		env[k] = v
+	}
 	h := noSystemHost()
 	h.Root = ""
+	h.Executable = func() (string, error) { return w.exe, nil }
 	code := cli.Main(w.t.Context(), args, cli.IO{Stdout: &out, Stderr: &strings.Builder{}, Term: &fakeTerm{}, GOOS: "windows", RunKey: w.key,
 		Env: func(k string) string { return env[k] }, Host: h,
 		OpenHub: func(context.Context, func(string) string) (cli.Hub, error) { return newStubHub(w.api), nil }})
@@ -190,6 +201,46 @@ func TestUninstallOnWindowsRemovesOnlyTheRunValue(t *testing.T) {
 	}
 	if w.api.calls != 0 {
 		t.Error("logged out without --delete-data")
+	}
+}
+
+// The value carries no environment: it starts pcb-ui on the default
+// directories, so an invocation on other ones keeps it.
+func TestUninstallOnWindowsOnOtherDirsKeepsTheRunValue(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"uninstall", "--json"}, {"uninstall", "--delete-data", "--yes", "--json"}} {
+		w := newWinRig(t)
+		other := filepath.Join(t.TempDir(), "pcb")
+		if err := os.MkdirAll(other, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		w.override = map[string]string{"PCB_STATE_DIR": other}
+		w.want(exitcode.OK, args...)
+		if !w.key.present() {
+			t.Errorf("%v: the default install's Run value was deleted", args)
+		}
+		st := w.step(install.KindAutostart)
+		if st.Action != install.ActionKeep || !strings.Contains(st.Note, "default directories") {
+			t.Errorf("%v: autostart step = %+v", args, st)
+		}
+		if !exists(w.state) {
+			t.Errorf("%v: the default state was touched", args)
+		}
+	}
+}
+
+// Another copy's entry (a pcb-ui.exe not beside this pcb) is not ours.
+func TestUninstallOnWindowsKeepsAnotherCopysRunValue(t *testing.T) {
+	t.Parallel()
+	w := newWinRig(t)
+	foreign := filepath.Join(t.TempDir(), "elsewhere", "pcb-ui.exe")
+	w.key = &fakeRunKey{data: runkey.Data(foreign), set: true}
+	w.want(exitcode.OK, "uninstall", "--json")
+	if !w.key.present() {
+		t.Error("another copy's Run value was deleted")
+	}
+	if st := w.step(install.KindAutostart); st.Action != install.ActionKeep || !strings.Contains(st.Note, foreign) {
+		t.Errorf("autostart step = %+v, want keep naming %s", st, foreign)
 	}
 }
 

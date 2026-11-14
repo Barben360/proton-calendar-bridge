@@ -392,6 +392,9 @@ func TestStatusDaemonHintFitsTheHost(t *testing.T) {
 // Only "no daemon" falls back offline: any other dial failure exits 20,
 // in status and in doctor (a daemon ✗).
 func TestOnlyNoDaemonFallsBackOffline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+	}
 	t.Parallel()
 	r := stubRig(t, &stubAPI{statusPhase: "ready"})
 	r.dial = func(context.Context, string) (*ctl.Client, error) {

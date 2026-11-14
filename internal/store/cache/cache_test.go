@@ -966,3 +966,16 @@ func TestTombstonesCarryTheUIDAndChangesReadsThem(t *testing.T) {
 		t.Errorf("Changes since the head = %+v, %v; want none", none, err)
 	}
 }
+
+// A Windows drive path must not read as the URI's authority (file:C:/x
+// fails with "invalid uri authority"): it gets the leading slash.
+func TestURIPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/var/lib/pcb/pcb.db":     "/var/lib/pcb/pcb.db",
+		"C:/Users/a b/pcb/pcb.db": "/C:/Users/a b/pcb/pcb.db",
+	} {
+		if got := uriPath(in); got != want {
+			t.Errorf("uriPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -120,6 +121,9 @@ func keyringRig(t *testing.T) *rig {
 }
 
 func TestDoctorChecksSecretsWithTheKeyring(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+	}
 	t.Parallel()
 	r := keyringRig(t)
 	res := doctorResults(t, r)
@@ -147,6 +151,9 @@ func TestDoctorChecksSecretsWithTheKeyring(t *testing.T) {
 }
 
 func TestDoctorWarnsLockedKeyring(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+	}
 	t.Parallel()
 	r := keyringRig(t)
 	r.keyring.setLocked(true)
@@ -163,6 +170,9 @@ func TestDoctorWarnsLockedKeyring(t *testing.T) {
 }
 
 func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive")
@@ -184,6 +194,9 @@ func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
 // set and a pcb user unit installed when unit is.
 func desktopRig(t *testing.T, ui, unit bool) *rig {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fakes XDG desktop entries and a systemd unit under a host root joined with drive paths; Windows has neither")
+	}
 	r := stubRig(t, &stubAPI{})
 	r.hostRoot = t.TempDir()
 	data := t.TempDir()

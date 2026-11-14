@@ -592,7 +592,7 @@ func TestUserCertIsUsed(t *testing.T) {
 	r := stubRig(t, &stub.stubAPI)
 	r.svc = stub
 	toml := "[proton]\nbase_url = \"http://127.0.0.1:1\"\n[caldav]\nlisten = \"0.0.0.0:8443\"\nhostnames = [\"pcb.example\"]\n" +
-		"tls_cert = \"" + tlsutil.CertPath(certDir) + "\"\ntls_key = \"" + tlsutil.KeyPath(certDir) + "\"\n"
+		"tls_cert = '" + tlsutil.CertPath(certDir) + "'\ntls_key = '" + tlsutil.KeyPath(certDir) + "'\n" // literal strings: a Windows path holds backslashes
 	if err := os.WriteFile(config.Path(r.dirs), []byte(toml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +760,7 @@ func TestServeWarnsAboutCertificatesToCheck(t *testing.T) {
 			Now: func() time.Time { return issued }, InterfaceAddrs: func() ([]net.Addr, error) { return nil, nil }}); err != nil {
 			t.Fatal(err)
 		}
-		return "[caldav]\ntls_cert = \"" + tlsutil.CertPath(dir) + "\"\ntls_key = \"" + tlsutil.KeyPath(dir) + "\"\n"
+		return "[caldav]\ntls_cert = '" + tlsutil.CertPath(dir) + "'\ntls_key = '" + tlsutil.KeyPath(dir) + "'\n"
 	}
 	run := func(t *testing.T, r *rig, wrap func(net.Listener) net.Listener) string {
 		r.svc = newServeStub()

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -83,6 +84,9 @@ type sysRig struct {
 
 func newSysRig(t *testing.T) *sysRig {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("sysRig fakes a Linux host (systemd, /home/alice and /opt/pcb paths, chown, Unix modes); the Windows commands are windows_test.go's")
+	}
 	s := &sysRig{t: t, root: t.TempDir(), euid: 1000, term: &fakeTerm{},
 		// $USER is not the effective user (su without -): the linger
 		// hint must name alice, the euid's user (M7).
@@ -210,7 +214,7 @@ func (s *sysRig) run(args ...string) exitcode.Code {
 	s.t.Helper()
 	s.stdout.Reset()
 	s.errb.Reset()
-	io := cli.IO{Stdout: &s.stdout, Stderr: &s.errb, Term: s.term, Env: func(k string) string { return s.env[k] }, Host: s.host(),
+	io := cli.IO{GOOS: "linux", Stdout: &s.stdout, Stderr: &s.errb, Term: s.term, Env: func(k string) string { return s.env[k] }, Host: s.host(),
 		OpenHub: func(_ context.Context, env func(string) string) (cli.Hub, error) {
 			s.logoutEnv = [2]string{env("PCB_CONFIG_DIR"), env("PCB_STATE_DIR")}
 			if s.openHub != nil {
