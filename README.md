@@ -102,8 +102,8 @@ Proton cannot store everything Thunderbird can: pcb refuses what it cannot keep 
 ## Give an AI agent your calendar
 
 ```sh
-claude mcp add pcb -- pcb mcp                    # read-only: read events, start a login
-claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete
+claude mcp add --scope user pcb -- pcb mcp                    # read-only: read events, start a login
+claude mcp add --scope user pcb -- pcb mcp --profile full     # also create, edit, delete
 ```
 
 The same commands work with `pcb-ui` running: `pcb mcp` hands the session to it, with no port to set. The account's MCP setting (`pcb account mcp`, or the selector in `pcb-ui`) and the agent's profile both apply, and the stricter wins: an agent edits only with `--profile full` on a Read-write account ([details](docs/agents.md#two-settings-the-stricter-wins)).

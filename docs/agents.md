@@ -48,9 +48,11 @@ pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]
 ### Set up Claude Code
 
 ```sh
-claude mcp add pcb -- pcb mcp                    # read-only (the default): read, plus starting a login
-claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete, log out
+claude mcp add --scope user pcb -- pcb mcp                    # read-only (the default): read, plus starting a login
+claude mcp add --scope user pcb -- pcb mcp --profile full     # also create, edit, delete, log out
 ```
+
+`--scope user` makes `pcb` available in every Claude Code session. Without it, Claude Code keeps the server for the directory you ran the command in only (its `local` scope), and a session started elsewhere does not list it. `claude mcp list` shows what a session sees; restart a running session after adding the server.
 
 To give the server an environment, `-e KEY=value` goes after its name: `-e` takes every following word.
 
