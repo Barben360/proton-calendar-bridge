@@ -86,7 +86,33 @@ test_on_main() {
   want_status "other-branch commit" 1 bash -c 'cd "$1" && "$2" on-main "$3" main' _ "$r" "$check" "$other_sha"
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_on_main; do
+# image_tag_list STDIN: stdout of `check.sh image-tag-list` fed STDIN.
+image_tag_list() { printf '%s' "$1" | "$check" image-tag-list; }
+
+test_image_tag_list() {
+  [ "$(image_tag_list $'1.2.3\n1.2\nlatest\n')" = $'1.2.3\n1.2\nlatest' ] || fail "release tags"
+  # Blank lines are skipped; a last line with no newline counts.
+  [ "$(image_tag_list $'\nsha-0123456789ab\n\n')" = sha-0123456789ab ] || fail "blank lines"
+  [ "$(image_tag_list 'a_b.c-d')" = a_b.c-d ] || fail "no trailing newline"
+  local max; max=$(printf 'a%.0s' {1..128})
+  [ "$(image_tag_list "$max")" = "$max" ] || fail "128 characters refused"
+  local bad
+  for bad in "${max}a" 'bad tag' -lead .lead a/b a:b ' x' $'ok\nb@d' $'ok\n\t'; do
+    printf '%s' "$bad" | want_status "refuse [$bad]" 2 "$check" image-tag-list
+  done
+  local err
+  err=$(image_tag_list $'1.2.3\nbad tag\n' 2>&1 >/dev/null || true)
+  [ "$err" = "check: not an image tag: 'bad tag'" ] || fail "message: $err"
+  for bad in '' $'\n\n'; do
+    printf '%s' "$bad" | want_status "refuse no tag [$bad]" 2 "$check" image-tag-list
+  done
+  err=$(image_tag_list $'\n' 2>&1 >/dev/null || true)
+  [ "$err" = "check: no tag given" ] || fail "message: $err"
+  # Nothing is printed when any tag is refused: no partial list.
+  [ -z "$(image_tag_list $'1.2.3\nbad tag\n' 2>/dev/null)" ] || fail "partial list printed"
+}
+
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_on_main; do
   "$case_name"
   echo "ok   $case_name"
 done

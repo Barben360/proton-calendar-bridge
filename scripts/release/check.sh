@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Release tag rules (spec/designs/2026-11-14-release-process-design.md §5.1-5.2),
-# called by .github/workflows/release.yml. Linux runners only.
+# called by .github/workflows/release.yml and image-build.yml.
+# Linux runners only.
 #
 #   check.sh tag-kind TAG                       stable | prerelease
 #   check.sh is-latest TAG                      existing tags on stdin; 0 when TAG is the newest stable
 #   check.sh is-latest-minor TAG                same, among the tags of TAG's MAJOR.MINOR line
 #   check.sh image-tags TAG LATEST MINOR_LATEST image tags, one per line (flags: yes|no)
+#   check.sh image-tag-list                     tags on stdin, one per line; prints the non-blank ones, refuses
+#                                               a bad one or none (image-build.yml's tags input)
 #   check.sh on-main SHA [BASE]                 0 when SHA is an ancestor of BASE (default origin/main)
 set -eu
 
@@ -74,11 +77,22 @@ case $cmd in
       if [[ $2 == yes ]]; then echo latest; fi
     fi
     ;;
+  image-tag-list)
+    [[ $# -eq 0 ]] || die "usage: image-tag-list (tags on stdin)"
+    tags=()
+    while IFS= read -r t || [[ -n $t ]]; do
+      [[ -n $t ]] || continue
+      [[ $t =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "not an image tag: '$t'"
+      tags+=("$t")
+    done
+    ((${#tags[@]} > 0)) || die "no tag given"
+    printf '%s\n' "${tags[@]}"
+    ;;
   on-main)
     [[ $# -ge 1 && $# -le 2 ]] || die "usage: on-main SHA [BASE]"
     git merge-base --is-ancestor "$1" "${2:-origin/main}"
     ;;
   *)
-    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|on-main ..."
+    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|on-main ..."
     ;;
 esac

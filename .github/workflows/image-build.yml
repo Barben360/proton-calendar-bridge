@@ -72,6 +72,13 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      # The tags are put on the list by publish; a bad one fails here,
+      # before anything is built or pushed.
+      - name: Check the tags
+        env:
+          TAGS: ${{ inputs.tags }}
+        run: |
+          scripts/release/check.sh image-tag-list <<<"$TAGS" >/dev/null 2>"$RUNNER_TEMP/tags.err" || { echo "::error::tags input: $(cat "$RUNNER_TEMP/tags.err")"; exit 1; }
       - name: Set up the builder
         run: docker buildx create --name "$BUILDX_BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --bootstrap
       - name: Log in to GHCR
@@ -121,12 +128,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      contents: read
       packages: write
       id-token: write
       attestations: write
     outputs:
       digest: ${{ steps.list.outputs.digest }}
     steps:
+      # For scripts/release/check.sh, at the commit that was built.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - name: Log in to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -141,13 +154,9 @@ jobs:
           for d in "$AMD64" "$ARM64"; do
             [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::an architecture's digest is missing: '$d'"; exit 1; }
           done
+          list=$(scripts/release/check.sh image-tag-list <<<"$TAGS" 2>"$RUNNER_TEMP/tags.err") || { echo "::error::tags input: $(cat "$RUNNER_TEMP/tags.err")"; exit 1; }
           args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "::error::not an image tag: '$tag'"; exit 1; }
-            args+=(-t "$REPO:$tag")
-          done <<<"$TAGS"
-          [ "${#args[@]}" -gt 0 ] || { echo "::error::no tag given"; exit 1; }
+          while IFS= read -r tag; do args+=(-t "$REPO:$tag"); done <<<"$list"
           meta="$RUNNER_TEMP/list-metadata.json"
           docker buildx imagetools create --metadata-file "$meta" "${args[@]}" "$REPO@$AMD64" "$REPO@$ARM64"
           digest=$(jq -r '."containerimage.descriptor".digest // ""' "$meta")
