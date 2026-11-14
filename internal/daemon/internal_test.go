@@ -337,6 +337,19 @@ func TestControlHintForATakenPipe(t *testing.T) {
 	}
 }
 
+// A pipe name nothing answers on, still held after Listen's wait, is most
+// likely the previous pcb of this state still ending: try again, and only
+// then step around it; never "stop the other pcb".
+func TestControlHintForAHeldPipe(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("%w: %s", ctl.ErrPipeHeld, `\\.\pipe\pcb-0123456789abcdef`)
+	got := controlHint(err, filepath.Join("state", "pcb.sock"))
+	want := "the previous pcb-ui or pcb serve of this state may still be ending: start again in a moment; if this persists, another process holds the name: set PCB_STATE_DIR to another directory"
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
 // The start line names the socket's path, and on Windows the pipe that
 // serves it (its name is a hash of the state directory): the live check
 // reads it there.

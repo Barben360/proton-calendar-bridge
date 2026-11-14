@@ -498,6 +498,9 @@ func controlHint(err error, socket string) string {
 		return "chmod 700 " + dir
 	case errors.Is(err, ctl.ErrNotASocket):
 		return "move " + socket + " away: pcb serve keeps its control socket there"
+	case errors.Is(err, ctl.ErrPipeHeld):
+		return "the previous pcb-ui or pcb serve of this state may still be ending: start again in a moment; if this persists, another process holds the name: set " +
+			paths.EnvStateDir + " to another directory"
 	case errors.Is(err, ctl.ErrPipeTaken):
 		return "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set " +
 			paths.EnvStateDir + " to another directory"

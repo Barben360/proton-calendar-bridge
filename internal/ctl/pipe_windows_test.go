@@ -172,9 +172,24 @@ func TestPipeDACLIsTheUserOnly(t *testing.T) {
 }
 
 // A pipe name already served (a second pcb-ui, or another user's process
-// squatting it) fails Listen at once with ErrPipeTaken; never shared.
+// squatting it) fails Listen with ErrPipeTaken; never shared. A server
+// that answers on it fails Listen at once.
 func TestSecondListenIsTaken(t *testing.T) {
 	t.Parallel()
+	s := servePipe(t, &ctl.Server{Hub: newHub(service.Status{}), Daemon: daemon()})
+	start := time.Now()
+	ln, err := ctl.Listen(s.path)
+	took := time.Since(start)
+	if ln != nil {
+		_ = ln.Close()
+	}
+	if !errors.Is(err, ctl.ErrPipeTaken) || errors.Is(err, ctl.ErrPipeHeld) {
+		t.Fatalf("Listen while a server answers: %v, want ErrPipeTaken, not ErrPipeHeld", err)
+	}
+	if took > 250*time.Millisecond {
+		t.Errorf("Listen while a server answers took %v, want under 250 ms", took)
+	}
+
 	dir := t.TempDir()
 	first, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
 	if err != nil {
@@ -184,8 +199,8 @@ func TestSecondListenIsTaken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+	start = time.Now()
+	ln, err = ctl.Listen(filepath.Join(dir, "pcb.sock"))
 	if took := time.Since(start); took > 2*time.Second {
 		t.Errorf("the second Listen took %v, want under 2 s", took)
 	}
@@ -205,6 +220,86 @@ func TestSecondListenIsTaken(t *testing.T) {
 		t.Fatalf("Listen after the first closed: %v", err)
 	}
 	_ = again.Close()
+}
+
+// openEnds connects a client to a listener on dir's pipe and closes the
+// listener: the pipe's name lives on in the server's end of that
+// connection, which the caller closes (and the client's, which never holds
+// the name).
+func openEnds(t *testing.T, dir string) (server, client net.Conn) {
+	t.Helper()
+	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		accepted <- c
+	}()
+	name, err := ctl.PipeName(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err = winio.DialPipe(name, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if server = <-accepted; server == nil {
+		t.Fatal("accept failed")
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return server, client
+}
+
+// A restart on the same state: the previous server's end of a connection
+// may still be closing when Listen runs again (go-winio's Close returns at
+// once to a second caller while the first is still closing the handle, as
+// net/http's Close and a connection's own goroutine do). Listen waits for
+// the name, within its bound, instead of calling it served.
+func TestListenWaitsForThePreviousServerEnd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	server, _ := openEnds(t, dir)
+	time.AfterFunc(100*time.Millisecond, func() { _ = server.Close() })
+	start := time.Now()
+	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+	if err != nil {
+		t.Fatalf("Listen while the previous server's end closes: %v, want the pipe once it has closed", err)
+	}
+	_ = ln.Close()
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("Listen took %v, want under 1 s", took)
+	}
+}
+
+// A name nothing answers on that stays held past Listen's bound is
+// ErrPipeHeld, an ErrPipeTaken, under 1 s: the restart may be retried in a
+// moment.
+func TestListenGivesUpOnAHeldName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	openEnds(t, dir)
+	name, err := ctl.PipeName(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+	took := time.Since(start)
+	if ln != nil {
+		_ = ln.Close()
+	}
+	if !errors.Is(err, ctl.ErrPipeHeld) || !errors.Is(err, ctl.ErrPipeTaken) || !strings.Contains(err.Error(), name) {
+		t.Fatalf("Listen on a held name: %v, want ErrPipeHeld (an ErrPipeTaken) naming %s", err, name)
+	}
+	if took < 200*time.Millisecond || took > time.Second {
+		t.Errorf("Listen on a held name gave up after %v, want a wait under 1 s", took)
+	}
 }
 
 // The server reads its client's SID (the pipe client's process token) and

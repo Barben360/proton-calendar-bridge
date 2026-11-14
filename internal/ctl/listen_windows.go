@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -25,7 +26,15 @@ import (
 // refuses remote clients (PIPE_REJECT_REMOTE_CLIENTS). A name already
 // served, by a second pcb of this state or another user's process
 // squatting it, is ErrPipeTaken at once: never shared. Closing the listener
-// removes the pipe.
+// removes the pipe once the server's end of every connection has closed
+// too (a client's end never holds the name).
+//
+// A name nothing answers on may be the previous server of this state still
+// closing its end of a connection (a restart: go-winio's Close returns at
+// once to a second caller while the first still closes the handle).
+// Listen waits for it, up to relistenFor, probing between tries: a server
+// that answers, or a pipe this user may not open, ends the wait at once.
+// A name still held then is ErrPipeHeld.
 func Listen(path string) (net.Listener, error) {
 	name, err := pipeName(filepath.Dir(path))
 	if err != nil {
@@ -35,14 +44,56 @@ func Listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading this user's SID: %w", err)
 	}
-	ln, err := winio.ListenPipe(name, &winio.PipeConfig{SecurityDescriptor: "O:" + sid + "D:P(A;;GA;;;" + sid + ")"})
-	switch {
-	case errors.Is(err, windows.ERROR_ACCESS_DENIED), errors.Is(err, windows.ERROR_PIPE_BUSY):
-		return nil, fmt.Errorf("%w: %s", ErrPipeTaken, name)
-	case err != nil:
-		return nil, fmt.Errorf("opening the control pipe %s: %w", name, err)
+	conf := &winio.PipeConfig{SecurityDescriptor: "O:" + sid + "D:P(A;;GA;;;" + sid + ")"}
+	deadline := time.Now().Add(relistenFor)
+	for {
+		ln, err := winio.ListenPipe(name, conf)
+		switch {
+		case err == nil:
+			return ln, nil
+		case errors.Is(err, windows.ERROR_PIPE_BUSY):
+			return nil, fmt.Errorf("%w: %s", ErrPipeTaken, name)
+		case !errors.Is(err, windows.ERROR_ACCESS_DENIED):
+			return nil, fmt.Errorf("opening the control pipe %s: %w", name, err)
+		}
+		// The name exists (or another user's pipe denies this one).
+		if probePipe(name) {
+			return nil, fmt.Errorf("%w: %s", ErrPipeTaken, name)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("%w: %s", ErrPipeHeld, name)
+		}
 	}
-	return ln, nil
+}
+
+// relistenFor bounds Listen's wait for a name nothing answers on;
+// probeFor bounds each probe, the step between two tries.
+const (
+	relistenFor = 500 * time.Millisecond
+	probeFor    = 25 * time.Millisecond
+)
+
+// probePipe tells whether the pipe name is taken for good: a server
+// answers on it (the probe connects, and closes at once, sending nothing),
+// or it is a pipe this user may not open (another user's). A name that is
+// gone, or whose every instance is busy or closing (the probe times out),
+// is worth another try. A pcb server always has an instance listening
+// while it serves (go-winio makes the next one at each Accept), so it
+// answers within the probe.
+func probePipe(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), probeFor)
+	defer cancel()
+	c, err := winio.DialPipeContext(ctx, name)
+	switch {
+	case err == nil:
+		_ = c.Close()
+		return true
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
+		return true
+	case !errors.Is(err, fs.ErrNotExist):
+		<-ctx.Done() // a step, not a busy loop, on any other failure
+	}
+	return false
 }
 
 // dialSocket connects to the control pipe of path's directory: ErrNoDaemon

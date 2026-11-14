@@ -335,8 +335,9 @@ func TestRelayAnswersRetryWhenItsDaemonEnds(t *testing.T) {
 
 	// The next call: RelayDial returns ErrDaemonGone, keeping the message;
 	// relayed to a new daemon, it is answered there. The new daemon has a
-	// socket of its own: on Windows a pipe just closed may not be served
-	// again at once (ErrPipeTaken), which is not what this test is about.
+	// socket of its own: on Windows the old daemon's end of a connection
+	// may still be closing when its Close returns, and ctl.Listen then
+	// waits for the pipe's name, which is not what this test is about.
 	second := newRig(t, newHub())
 	socket = socketPath(t)
 	startDaemon(t, second.srv, socket)

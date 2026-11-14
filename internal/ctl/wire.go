@@ -138,6 +138,11 @@ var (
 	// ErrPipeTaken: the control pipe's name is already served on Windows,
 	// by another pcb of the same state or another user's process.
 	ErrPipeTaken = errors.New("the control pipe is already served")
+	// ErrPipeHeld, an ErrPipeTaken: nothing answers on the control pipe's
+	// name, and it stayed held while Listen waited: the previous pcb of
+	// this state still closing it, or a process that holds it without
+	// serving.
+	ErrPipeHeld error = pipeHeld{}
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 	// ErrRefused: Dial refuses the control socket: not a socket, another
@@ -172,3 +177,13 @@ type ShowUIRequest struct {
 type ShowUI struct {
 	Shown bool `json:"shown"`
 }
+
+// pipeHeld is ErrPipeHeld.
+type pipeHeld struct{}
+
+func (pipeHeld) Error() string {
+	return "the control pipe's name is still held, and nothing answers on it"
+}
+
+// Is makes ErrPipeHeld an ErrPipeTaken.
+func (pipeHeld) Is(target error) bool { return target == ErrPipeTaken }
