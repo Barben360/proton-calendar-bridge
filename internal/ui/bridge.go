@@ -51,6 +51,10 @@ type BridgeOptions struct {
 	// Keyring is the desktop keyring a state sealed with it uses (nil: the
 	// session bus's).
 	Keyring service.Keyring
+	// SessionEnd closed marks the end of the desktop session (logoff,
+	// shutdown): a Stop then drains for 2 s, not 5 s (daemon.Options
+	// SessionEnd). nil: never.
+	SessionEnd <-chan struct{}
 }
 
 // Bridge runs the daemon (what pcb serve runs) inside the desktop app.
@@ -215,7 +219,7 @@ func (b *Bridge) startRun(ctx context.Context) error {
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
 			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
 				ShowLogin: showLogin, LoginBusy: hub.LoginInProgress}),
-			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI,
+			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI, SessionEnd: b.o.SessionEnd,
 			OnState: func(string, service.ServeState) { b.poke() },
 			// The same records as pcb serve's, for the same log file content.
 			OnPass: func(id string, p service.WatchPass) {

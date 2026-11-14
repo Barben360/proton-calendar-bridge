@@ -1189,6 +1189,47 @@ func TestOneSignalOnBothPathsStopsCleanly(t *testing.T) {
 	}
 }
 
+// One SIGTERM on both paths (Execute's context first, ruling F4) with a
+// request that never ends: on Windows SIGTERM is a console close, logoff
+// or shutdown, so the drain is cut after 2 s, before Windows ends the
+// process (spec §5.11); elsewhere it waits the full 5 s.
+func TestServeDrainsTwoSecondsOnASessionEnd(t *testing.T) {
+	t.Parallel()
+	stub := newServeStub()
+	stub.blockCheck = true
+	r := stubRig(t, &stub.stubAPI)
+	r.svc = stub
+	closed := make(chan struct{})
+	sigs := make(chan os.Signal) // unbuffered: a send returns once pcb serve took it
+	s := startServeWith(t, r, func(ln net.Listener) net.Listener { return &closeSignal{Listener: ln, closed: closed} }, sigs)
+	addr := s.listening()
+	cut := make(chan time.Time, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(context.Background(), "PROPFIND", "http://"+addr+"/dav/calendars/me/", nil)
+		req.SetBasicAuth("u", "p")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+		cut <- time.Now()
+	}()
+	<-stub.checkEntered
+	start := time.Now()
+	s.stop()                // SIGTERM through NotifyContext
+	<-closed                // the drain has begun
+	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
+	if code := s.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d, want 0\nstderr: %s", code, s.errb.String())
+	}
+	d := (<-cut).Sub(start)
+	minD, maxD := 4500*time.Millisecond, 6*time.Second
+	if runtime.GOOS == "windows" {
+		minD, maxD = 1800*time.Millisecond, 3*time.Second
+	}
+	if d < minD || d >= maxD {
+		t.Errorf("the request in flight was cut %v after SIGTERM, want within [%v, %v) on %s", d, minD, maxD, runtime.GOOS)
+	}
+}
+
 // ux-I1: while pcb serve serves the account (its loop holds the
 // account's sync lock) and answers on the control socket, pcb sync has
 // nothing to do (exit 0, it says so).

@@ -247,7 +247,12 @@ a second account is a second `service.Local` in the same process, held by
   CalDAV listener with TLS, the 5 s drain), used by `pcb serve` and, later, `pcb-ui`; it follows the
   `cli` import rule and owns no account (the caller opens and closes the Hub, and closes it only after
   `Run` returns) [verified: `TestRunServesCalDAVAndControl`, `TestRunDrainsOnCancel`,
-  `TestDaemonArch`].
+  `TestDaemonArch`]. When the session ends (`Options.SessionEnd`: on Windows a console close, logoff or
+  shutdown, which reach `pcb serve` as SIGTERM, and `pcb-ui`'s session-end message) the whole drain is
+  2 s, before Windows ends the process; a cut drain loses only what a crash would (atomic files, a WAL
+  cache), and a killed `pcb serve` restarts clean [verified: `TestSessionEndCutsTheDrainToTwoSeconds`,
+  `TestSessionEndDuringTheDrainCutsItToTwoSeconds`, `TestStopSignalsMarksASessionEndWhenTheContextEndsFirst`,
+  `TestSessionEndCutsTheBridgesDrain`, `TestKilledServeRestartsClean`].
 - **Daemon kinds (M8).** `serve` (`pcb serve`), `ui` (`pcb-ui`) and `mcp` (`pcb mcp` serving one agent's
   session itself, §12): `daemon.Run` with `NoListener` opens the control socket only, no CalDAV listener
   and no remote `/mcp`, even with `[mcp] remote = true`. `serve.lock` holds `<pid> <kind>` (an older
@@ -1558,7 +1563,7 @@ Command tree:
 pcb install [--system|--user] [--plan]     # M5: unit file, dirs, default config; --user (default) needs no root
 pcb uninstall [--system|--user] [--delete-data [--yes]] [--plan]   # M5
 pcb doctor                                  # every check, with the fix to apply (M3: listener, TLS certificate expiry and fingerprint, CalDAV clients; M5: service, daemon, alerts)
-pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level L]   # sync loop (30 s, 5 min idle) + CalDAV listener + control socket in one process (M3 reads, M4 writes, M5 daemon; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Without --wait-for-login: refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20), stops with Proton's error code when the session ends (M3-R28); with it: waits for a login (§8.1). Prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s, exit 0, a second one exits 20
+pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level L]   # sync loop (30 s, 5 min idle) + CalDAV listener + control socket in one process (M3 reads, M4 writes, M5 daemon; foreground; the unit and the container run it); not with --json. CalDAV writes are accepted only while it runs. Without --wait-for-login: refuses to start logged out (exit 10) or while `pcb sync` runs (exit 20), stops with Proton's error code when the session ends (M3-R28); with it: waits for a login (§8.1). Prints `Thunderbird URL: ...` and, over TLS, `TLS certificate SHA-256 fingerprint: ...`; SIGINT/SIGTERM drain in-flight requests for 5 s (2 s on Windows for SIGTERM: a console close, logoff or shutdown), exit 0, a second one exits 20
 pcb service start|stop|restart|status|logs [-f] [--system|--user]   # M5: systemctl and journalctl, scope from what is installed
 pcb login [--username U] [--password-fd N] [--unattended-relogin]   # M5: through the running daemon when there is one; M6: no --account, the username decides: a known address is relogged, a new one adds an account (§4.1)
 pcb login resume (--captcha-token T | --totp)   # --totp takes no value: the 2FA code of the login the daemon holds comes from PCB_TOTP or a prompt, never argv (M5-P11)

@@ -64,7 +64,9 @@ func TestStopListenerDrainsARequestInFlight(t *testing.T) {
 	<-entered
 	stopped := make(chan struct{})
 	go func() {
-		stopListener(srv, slog.New(slog.DiscardHandler), drainTimeout)
+		ctx, cancel := (&drain{}).context()
+		defer cancel()
+		stopListener(ctx, srv, slog.New(slog.DiscardHandler))
 		close(stopped)
 	}()
 	select {
@@ -95,7 +97,9 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 	res := make(chan error, 1)
 	go get(url, res)
 	<-entered
-	stopListener(srv, slog.New(slog.DiscardHandler), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	stopListener(ctx, srv, slog.New(slog.DiscardHandler))
 	select {
 	case err := <-res:
 		if err == nil {
@@ -103,6 +107,39 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the stuck request still runs after stopListener returned")
+	}
+}
+
+// The session-end cut is one 2 s budget for every stop of a Run, counted
+// from the first: the control socket's stop after the listener's gets what
+// is left of it, not 2 s more.
+func TestSessionEndDrainIsSharedByTheStops(t *testing.T) {
+	t.Parallel()
+	ended := make(chan struct{})
+	d := &drain{ended: ended}
+	start := time.Now()
+	first, cancel := d.context()
+	defer cancel()
+	close(ended)
+	time.Sleep(time.Second)
+	second, cancel2 := d.context()
+	defer cancel2()
+	for _, ctx := range []context.Context{first, second} {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("a stop's drain outlived the session-end cut")
+		}
+	}
+	if e := time.Since(start); e < 1900*time.Millisecond || e > 2500*time.Millisecond {
+		t.Errorf("the stops ended %v after the first began, want 2 s", e)
+	}
+	late, cancel3 := d.context()
+	defer cancel3()
+	select {
+	case <-late.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Error("a stop begun after the 2 s waits; want it cut at once")
 	}
 }
 
@@ -312,7 +349,7 @@ func TestControlStartLogNamesThePipeOnWindows(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "pcb.sock")
 	var logs bytes.Buffer
-	stop, err := startControl(slog.New(slog.NewJSONHandler(&logs, nil)), nil, ctl.Daemon{Socket: socket}, nil, nil, nil, nil)
+	stop, err := startControl(slog.New(slog.NewJSONHandler(&logs, nil)), nil, ctl.Daemon{Socket: socket}, nil, nil, nil, nil, &drain{})
 	if err != nil {
 		t.Fatal(err)
 	}

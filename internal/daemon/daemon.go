@@ -52,7 +52,47 @@ const (
 	// drainTimeout bounds the wait for requests in flight when the daemon
 	// stops; what still runs then is cut.
 	drainTimeout = 5 * time.Second
+	// sessionEndDrain is the whole drain when the session ends (logoff,
+	// shutdown, a console closed: Options.SessionEnd): Windows ends the
+	// process about 5 s after the event (spec §5.11). A cut drain loses only
+	// what a crash would: files are replaced atomically and the cache is
+	// SQLite in WAL mode, so the next start recovers.
+	sessionEndDrain = 2 * time.Second
 )
+
+// drain bounds the stops of one Run (the listener's, the control socket's):
+// each waits up to drainTimeout for what is in flight; once ended is closed,
+// before or during them, all end sessionEndDrain after the first began (at
+// once if that is past). A nil ended never closes.
+type drain struct {
+	ended <-chan struct{}
+	once  sync.Once
+	start time.Time
+}
+
+// context is the context one stop waits under; cancel releases it.
+func (d *drain) context() (context.Context, context.CancelFunc) {
+	d.once.Do(func() { d.start = time.Now() })
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	if d.ended == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.ended:
+		}
+		t := time.NewTimer(time.Until(d.start.Add(sessionEndDrain)))
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+			cancel()
+		}
+	}()
+	return ctx, cancel
+}
 
 // Hub is what the daemon needs of the accounts: *service.Hub.
 type Hub interface {
@@ -99,9 +139,13 @@ type Options struct {
 	// /mcp included, still opens; Ready gets a zero Info.
 	NoListener bool
 	// Cut closing while Run stops ends the stop at once with ErrCut.
-	Cut     <-chan struct{}
-	OnState func(accountID string, s service.ServeState)
-	OnPass  func(accountID string, p service.WatchPass)
+	Cut <-chan struct{}
+	// SessionEnd closed before or while Run stops marks the end of the
+	// session (logoff, shutdown, a console closed): the drain lasts 2 s in
+	// all instead of up to 5 s per stop. nil: never.
+	SessionEnd <-chan struct{}
+	OnState    func(accountID string, s service.ServeState)
+	OnPass     func(accountID string, p service.WatchPass)
 	// Ready is called once the control socket and the CalDAV listener are
 	// bound, before the listener accepts (NoListener: once the control
 	// socket is, with a zero Info).
@@ -141,8 +185,8 @@ func (i Info) AccountURL(localID string) string { return i.Base + service.Accoun
 // holds its locks and found a login to serve (with WaitForLogin: its locks
 // only), the control socket then the CalDAV listener (a refused start binds
 // neither; NoListener: the control socket only). The end of ctx drains the
-// listener for up to 5 s, stops the control socket then Hub.Serve and
-// returns nil. Hub.Serve ending on its
+// listener for up to 5 s (2 s once o.SessionEnd is closed), stops the
+// control socket then Hub.Serve and returns nil. Hub.Serve ending on its
 // own ends Run the same way, with its error; so does a failed listener
 // (Blocked), unless Hub.Serve's error is one a person must act on. Closing
 // o.Cut meanwhile makes Run return at once with ErrCut. The control socket
@@ -162,6 +206,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	cc := o.Config.CalDAV
 	started := time.Now()
+	drained := &drain{ended: o.SessionEnd}
 	// The sync loops outlive ctx until the listener is drained, so the
 	// requests in flight still read their cache handles.
 	syncCtx, stopSync := context.WithCancel(context.WithoutCancel(ctx))
@@ -211,7 +256,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	var published atomic.Pointer[ctl.Listener]
 	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI,
-		mcpStatus(o.MCP, remoteMCP), relay)
+		mcpStatus(o.MCP, remoteMCP), relay, drained)
 	if err != nil {
 		return finish(err)
 	}
@@ -300,7 +345,12 @@ func Run(ctx context.Context, o Options) error {
 		result = &exitcode.Error{Code: exitcode.Blocked, Err: causeError("the CalDAV listener failed", err),
 			Hint: "run pcb serve again"}
 	}
-	if err := unlessCut(log, o.Cut, func() error { stopListener(srv, log, drainTimeout); return nil }); err != nil {
+	if err := unlessCut(log, o.Cut, func() error {
+		ctx, cancel := drained.context()
+		defer cancel()
+		stopListener(ctx, srv, log)
+		return nil
+	}); err != nil {
 		return err
 	}
 	return finish(result)
@@ -355,12 +405,13 @@ func (w *wrapped) Error() string { return w.msg }
 func (w *wrapped) Unwrap() error { return w.err }
 
 // startControl serves the control socket of d (d.Socket) on hub and
-// returns what stops it: it closes the socket, which removes it. Off Unix
+// returns what stops it: it closes the socket, which removes it, after
+// waiting for the requests in flight under drained. Off Unix
 // and Windows there is no control socket (ruling M5-P3); on Windows it is a
 // named pipe (ctl.Listen). Any other failure to open it is exit 20 with a
 // hint for its cause.
 func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error,
-	mcpStatus func() *ctl.MCP, relay http.Handler) (stop func(), err error) {
+	mcpStatus func() *ctl.MCP, relay http.Handler, drained *drain) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
 	switch {
 	case errors.Is(err, ctl.ErrUnsupported):
@@ -387,7 +438,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			ctx, cancel := drained.context()
 			defer cancel()
 			_ = srv.Shutdown(ctx)
 			<-done
@@ -459,14 +510,13 @@ func certNotAfter(conf *tls.Config) *time.Time {
 	return &t
 }
 
-// stopListener stops accepting, waits up to timeout for the requests in
+// stopListener stops accepting, waits until ctx ends for the requests in
 // flight, then cuts what is left.
-func stopListener(srv *http.Server, log *slog.Logger, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func stopListener(ctx context.Context, srv *http.Server, log *slog.Logger) {
+	start := time.Now()
 	if err := srv.Shutdown(ctx); err != nil {
 		_ = srv.Close()
-		log.Warn("listener stopped, requests still running after the drain were cut", "drain", timeout)
+		log.Warn("listener stopped, requests still running after the drain were cut", "drain", time.Since(start).Round(100*time.Millisecond))
 		return
 	}
 	log.Info("listener stopped")
