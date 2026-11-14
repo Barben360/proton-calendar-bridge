@@ -111,9 +111,11 @@ shellcheck:
 		docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(SHELLCHECK_IMAGE) -x $$files; \
 	fi
 
-# The release tag rules (scripts/release/check.sh); prints PASS last.
+# The release scripts (scripts/release): the tag rules and the archives;
+# each prints PASS last.
 release-test:
 	bash scripts/release/check_test.sh
+	bash scripts/release/package_test.sh
 
 # The live session rehearsed offline against pcb-fake (plan R2): builds pcb
 # and pcb-fake into a temporary run root and prints PASS last.
