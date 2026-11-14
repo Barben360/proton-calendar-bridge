@@ -262,6 +262,19 @@ func (l *Local) keyFix() string {
 	return keyFix
 }
 
+// keyHint is keyFix for err, a failure to use the key: DPAPI's own fixes
+// when Windows could not protect or unprotect the key.
+func (l *Local) keyHint(err error) string {
+	var dp *seal.ProtectError
+	switch {
+	case errors.As(err, &dp) && dp.Unprotect:
+		return DPAPIUnprotectFix
+	case errors.As(err, &dp):
+		return dpapiProtectFix(l.keyFile())
+	}
+	return l.keyFix()
+}
+
 // keyWhat names where the sealing key lives, for a message: "the key file
 // <path>" or "the desktop keyring".
 func (l *Local) keyWhat() string {
@@ -381,7 +394,12 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 		if cause := keyCause(err); cause != "" {
 			msg = "cannot read the stored secrets (" + cause + "), so they were kept"
 		}
-		return LogoutResult{}, keyFailure(err, msg, "make secrets.sealed in "+l.o.Dirs.State+" readable by the user pcb runs as, then run pcb logout again")
+		hint := "make secrets.sealed in " + l.o.Dirs.State + " readable by the user pcb runs as, then run pcb logout again"
+		var dp *seal.ProtectError
+		if errors.As(err, &dp) {
+			hint = l.keyHint(err) // the DPAPI key is out of this session's reach
+		}
+		return LogoutResult{}, keyFailure(err, msg, hint)
 	default:
 		res.WasLoggedIn = len(accounts) > 0
 		res.Revoked = len(accounts) > 0

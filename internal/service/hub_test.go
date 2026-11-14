@@ -1499,36 +1499,39 @@ func TestOpenHubRemovesStaleKeyTempsAtTheRoot(t *testing.T) {
 
 // flakySealer is a key-file sealer that names itself dpapi and, once fail
 // is set, cannot open its key as Windows cannot in a logon without the
-// password (an unprotect *seal.ProtectError).
+// password (an unprotect *seal.ProtectError); with failSeal, only sealing
+// fails, as a new key Windows cannot protect.
 type flakySealer struct {
 	seal.KeyFile
-	fail atomic.Bool
+	fail, failSeal atomic.Bool
 }
 
 func (*flakySealer) Name() string { return service.SealerDPAPI }
 
+func unprotectFailure() error {
+	return &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+}
+
 func (s *flakySealer) Open(sealed, aad []byte) ([]byte, error) {
 	if s.fail.Load() {
-		return nil, &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+		return nil, unprotectFailure()
 	}
 	return s.KeyFile.Open(sealed, aad)
 }
 
 func (s *flakySealer) Seal(plaintext, aad []byte) ([]byte, error) {
-	if s.fail.Load() {
-		return nil, &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+	switch {
+	case s.fail.Load():
+		return nil, unprotectFailure()
+	case s.failSeal.Load():
+		return nil, &seal.ProtectError{Err: errors.New("CryptProtectData: Access is denied")}
 	}
 	return s.KeyFile.Seal(plaintext, aad)
 }
 
-// A DPAPI key Windows cannot unprotect in this session is treated as an
-// unavailable keyring: a pass fails Blocked with the cause and the
-// sign-in hint (never a logout), Status keeps the phase and names the
-// cause, the alert is key-unavailable without needs-login, and state.json
-// keeps its phase.
-func TestUnavailableDPAPIKeyIsNotANeedsLogin(t *testing.T) {
-	t.Parallel()
-	e := newHubEnv(t)
+// openFlaky opens a Hub sealed by a flakySealer, logged in as userA.
+func openFlaky(t *testing.T, e *hubEnv) (*flakySealer, *service.Hub, string, service.API) {
+	t.Helper()
 	sealer := &flakySealer{KeyFile: seal.KeyFile{Path: e.cfg.Secrets.KeyFile}}
 	o := e.options()
 	o.Sealer = sealer
@@ -1543,10 +1546,52 @@ func TestUnavailableDPAPIKeyIsNotANeedsLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sealer, h, a, api
+}
+
+// The CalDAV client commands give DPAPI's own fixes, never the key file's:
+// a key out of this session's reach is Blocked with the sign-in hint (add
+// and show), a new password Windows cannot protect is a MustAct with the
+// protect hint (add).
+func TestClientCommandsNameDPAPIFailures(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	sealer, _, _, api := openFlaky(t, e)
+	if _, err := api.AddClient(t.Context(), "phone"); err != nil {
+		t.Fatal(err)
+	}
+	check := func(what string, err error, code exitcode.Code, hint string) {
+		t.Helper()
+		if got := exitcode.From(err); got != code || exitcode.HintOf(err) != hint || !strings.Contains(err.Error(), "DPAPI could not") {
+			t.Errorf("%s = %v (exit %d, hint %q), want exit %d, hint %q", what, err, got, exitcode.HintOf(err), code, hint)
+		}
+	}
+	sealer.failSeal.Store(true)
+	_, err := api.AddClient(t.Context(), "tablet")
+	protectHint := "sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move " +
+		filepath.Dir(e.cfg.Secrets.KeyFile) + " aside before the next pcb login"
+	check("add, protect failure", err, exitcode.MustAct, protectHint)
+	sealer.failSeal.Store(false)
+	sealer.fail.Store(true)
+	_, err = api.AddClient(t.Context(), "tablet")
+	check("add, unprotect failure", err, exitcode.Blocked, service.DPAPIUnprotectFix)
+	_, err = api.ShowClient(t.Context(), "phone")
+	check("show, unprotect failure", err, exitcode.Blocked, service.DPAPIUnprotectFix)
+}
+
+// A DPAPI key Windows cannot unprotect in this session is treated as an
+// unavailable keyring: a pass fails Blocked with the cause and the
+// sign-in hint (never a logout), Status keeps the phase and names the
+// cause, the alert is key-unavailable without needs-login, and state.json
+// keeps its phase.
+func TestUnavailableDPAPIKeyIsNotANeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	sealer, h, a, api := openFlaky(t, e)
 	sealer.fail.Store(true)
 
 	const cause = "DPAPI could not unprotect the sealing key for this Windows user: CryptUnprotectData: Access is denied"
-	_, err = api.Sync(t.Context(), service.SyncRequest{})
+	_, err := api.Sync(t.Context(), service.SyncRequest{})
 	if got := exitcode.From(err); got != exitcode.Blocked || err.Error() != cause {
 		t.Errorf("Sync = %v (exit %d), want exit 20 %q", err, got, cause)
 	}

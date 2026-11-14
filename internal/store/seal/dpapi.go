@@ -1,7 +1,9 @@
 package seal
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -49,24 +51,46 @@ func (e *ProtectError) Is(target error) bool { return target == ErrProtect }
 // integrityErrnos are the CryptUnprotectData failures that say the blob
 // itself is damaged or not pcb's (other entropy, not a DPAPI blob; the
 // codes seen on Windows 11 are in TestDPAPIForeignBlobIsRefused): those are
-// ErrCorrupt. Any other failure (ERROR_ACCESS_DENIED in a logon
+// ErrCorrupt, as is ERROR_INVALID_PARAMETER for a file without a DPAPI
+// header (corruptBlob). Any other failure (ERROR_ACCESS_DENIED in a logon
 // without the password, NTE_BAD_KEY_STATE for another user's blob or a
 // profile without its master key, an unknown code) is a *ProtectError: the
 // key may open in another session, so nothing must call it lost.
 var integrityErrnos = []syscall.Errno{
 	13,         // ERROR_INVALID_DATA: other entropy, altered blob
-	87,         // ERROR_INVALID_PARAMETER: not a DPAPI blob at all (a raw key, a short file)
 	0x80090002, // NTE_BAD_HASH
 	0x80090005, // NTE_BAD_DATA
 	0x80090006, // NTE_BAD_SIGNATURE
 	0x80091007, // CRYPT_E_HASH_VALUE
 }
 
-// corruptBlob reports whether err, an unprotect failure, is an integrity
-// failure (integrityErrnos).
-func corruptBlob(err error) bool {
+// errInvalidParameter is ERROR_INVALID_PARAMETER, what CryptUnprotectData
+// gives for a file that is no DPAPI blob at all (a raw key, a short file).
+const errInvalidParameter = syscall.Errno(87)
+
+// dpapiProvider is the provider GUID every DPAPI blob names at offset 4,
+// df9d8cd0-1501-11d1-8c7a-00c04fc297eb, in its byte order there.
+var dpapiProvider = []byte{0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2, 0x97, 0xeb}
+
+// dpapiHeader reports whether blob starts as a DPAPI blob does: dwVersion
+// 1, then the provider GUID.
+func dpapiHeader(blob []byte) bool {
+	return len(blob) >= 20 && binary.LittleEndian.Uint32(blob) == 1 && bytes.Equal(blob[4:20], dpapiProvider)
+}
+
+// corruptBlob reports whether err, the failure to unprotect blob, is an
+// integrity failure: one of integrityErrnos, or ERROR_INVALID_PARAMETER
+// for a file without a DPAPI header (with one, the parameter Windows
+// refused may be of this session: the safe side is not to call it lost).
+func corruptBlob(blob []byte, err error) bool {
 	var errno syscall.Errno
-	return errors.As(err, &errno) && slices.Contains(integrityErrnos, errno)
+	if !errors.As(err, &errno) {
+		return false
+	}
+	if errno == errInvalidParameter {
+		return !dpapiHeader(blob)
+	}
+	return slices.Contains(integrityErrnos, errno)
 }
 
 // errMachineScope is a key protected for the whole machine
@@ -166,7 +190,7 @@ func (d *DPAPI) read() ([]byte, error) {
 		return nil, err
 	case errors.Is(err, errMachineScope):
 		return nil, fmt.Errorf("%w: key file %s is %w", ErrCorrupt, d.Path, err)
-	case corruptBlob(err):
+	case corruptBlob(blob, err):
 		return nil, fmt.Errorf("%w: key file %s is damaged or not pcb's: %w", ErrCorrupt, d.Path, err)
 	case err != nil:
 		return nil, &ProtectError{Unprotect: true, Err: err}

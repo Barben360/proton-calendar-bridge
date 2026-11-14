@@ -73,8 +73,8 @@ func TestDPAPIKeyFileIsProtectedNotRaw(t *testing.T) {
 	// The blob's header (DPAPI_BLOB: version, provider GUID, master-key
 	// version and GUID, then dwFlags at offset 40) records the scope: no
 	// CRYPTPROTECT_LOCAL_MACHINE, so only this user's master key opens it.
-	if len(blob) < 44 {
-		t.Fatalf("blob of %d bytes has no header", len(blob))
+	if len(blob) < 44 || !seal.HasDPAPIHeader(blob) {
+		t.Fatalf("blob of %d bytes has no DPAPI header (version 1, provider GUID): % x", len(blob), blob[:min(len(blob), 20)])
 	}
 	if flags := binary.LittleEndian.Uint32(blob[40:44]); flags&windows.CRYPTPROTECT_LOCAL_MACHINE != 0 {
 		t.Fatalf("blob flags %#x: protected in the machine's scope", flags)

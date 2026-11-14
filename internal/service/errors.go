@@ -357,8 +357,11 @@ func keyCause(err error) string {
 		se *seal.KeySizeError
 		pe *fs.PathError
 		le *os.LinkError
+		dp *seal.ProtectError
 	)
 	switch {
+	case errors.As(err, &dp):
+		return dp.Error()
 	case errors.As(err, &me) && me.Dir && me.Owner != "":
 		return "its directory belongs to " + me.Owner + ", and pcb refuses to make a key there"
 	case errors.As(err, &me) && me.Dir:
@@ -384,7 +387,13 @@ func keyCause(err error) string {
 // systemd does not restart pcb serve); any other cause (a full disk) stays
 // Blocked, as it may pass.
 func keyFault(err error) bool {
-	var me *seal.KeyModeError
+	var (
+		me *seal.KeyModeError
+		dp *seal.ProtectError
+	)
+	if errors.As(err, &dp) { // DPAPI: a new key it cannot protect needs a person, a key out of this session's reach does not
+		return !dp.Unprotect
+	}
 	return errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || // a wrong size is ErrCorrupt
 		errors.As(err, &me) || errors.Is(err, fs.ErrPermission)
 }

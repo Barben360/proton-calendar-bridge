@@ -76,24 +76,37 @@ func TestDPAPIProtectFailureIsErrProtect(t *testing.T) {
 // open in another session, so nothing calls it lost, and Seal never
 // replaces it.
 func TestDPAPIUnprotectFailuresAreClassified(t *testing.T) {
+	// header is a blob that starts as a DPAPI blob does (dwVersion 1, the
+	// provider GUID), the rest garbage.
+	header := append([]byte{1, 0, 0, 0, 0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2, 0x97, 0xeb},
+		bytes.Repeat([]byte{1}, 180)...)
+	if !seal.HasDPAPIHeader(header) || seal.HasDPAPIHeader(bytes.Repeat([]byte{1}, 200)) {
+		t.Fatal("the DPAPI header is not recognised")
+	}
 	for _, tc := range []struct {
 		name    string
 		cause   error
 		corrupt bool
+		blob    []byte // nil: no DPAPI header
 	}{
-		{"access denied", syscall.Errno(5), false},          // ERROR_ACCESS_DENIED: a key logon
-		{"bad key state", syscall.Errno(0x8009000B), false}, // NTE_BAD_KEY_STATE: another user, no master key
-		{"unknown", errors.New("odd"), false},               // anything else
-		{"bad data", syscall.Errno(0x80090005), true},       // NTE_BAD_DATA
-		{"invalid data", syscall.Errno(13), true},           // ERROR_INVALID_DATA
-		{"hash value", syscall.Errno(0x80091007), true},     // CRYPT_E_HASH_VALUE
+		{"access denied", syscall.Errno(5), false, nil},           // ERROR_ACCESS_DENIED: a key logon
+		{"bad key state", syscall.Errno(0x8009000B), false, nil},  // NTE_BAD_KEY_STATE: another user, no master key
+		{"unknown", errors.New("odd"), false, nil},                // anything else
+		{"bad data", syscall.Errno(0x80090005), true, nil},        // NTE_BAD_DATA
+		{"invalid data", syscall.Errno(13), true, nil},            // ERROR_INVALID_DATA
+		{"hash value", syscall.Errno(0x80091007), true, nil},      // CRYPT_E_HASH_VALUE
+		{"not a blob", syscall.Errno(87), true, nil},              // ERROR_INVALID_PARAMETER, no DPAPI header
+		{"parameter of a blob", syscall.Errno(87), false, header}, // the same code on a well-formed blob
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state", seal.DPAPIKeyName)
 			if err := acl.MkdirAll(filepath.Dir(path)); err != nil {
 				t.Fatal(err)
 			}
-			blob := bytes.Repeat([]byte{1}, 200)
+			blob := tc.blob
+			if blob == nil {
+				blob = bytes.Repeat([]byte{1}, 200)
+			}
 			if err := os.WriteFile(path, blob, 0o600); err != nil {
 				t.Fatal(err)
 			}
