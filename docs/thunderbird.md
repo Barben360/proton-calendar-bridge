@@ -93,7 +93,7 @@ Logs go to stderr, IDs only. `--log-level debug` (or `[log] level` in `config.to
 - Each account has its own CalDAV passwords, its own cache and its own sync loop, so one account's CAPTCHA, damaged cache or expired session never stops another's.
 - A stopped account shows an `account-stopped` alert, answers 503, and starts again with `pcb account restart` or a login.
 - Use the per-account URL in Thunderbird. The older URL (`/`, `/dav/calendars/me/...`) still works, the password alone choosing the account, so an upgraded install keeps syncing with no change.
-- Two accounts in one Thunderbird profile have distinct realms (`pcb <local-id>`) and paths, so its HTTP auth cache should keep their passwords apart. That is not checked live yet ([status](status.md#still-to-check-live)).
+- Two accounts in one Thunderbird profile have distinct realms (`pcb <local-id>`) and paths, and Thunderbird keeps their passwords apart: it saves one password per URL and, after `pcb client rotate`, asks for each one again (checked with Thunderbird 153). Its password prompt names only `http://localhost`, so check which calendar is refreshing before you type; tick *Use Password Manager to remember this password*, unticked by default, or it asks again after a restart.
 - Wrong passwords count against one limiter shared by all accounts.
 
 Per-account switches: `pcb account caldav off` refuses an account's CalDAV clients ([commands](commands.md)).
