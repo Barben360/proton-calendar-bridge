@@ -35,7 +35,12 @@ parse_args() {
   prefix='' prefix_set=0 version='' version_set=0 no_desktop=0 no_ui=0 verify=0
   while [ $# -gt 0 ]; do
     case $1 in
-    --prefix) [ $# -ge 2 ] || die_usage "--prefix needs a directory"; prefix=$2 prefix_set=1; shift ;;
+    --prefix)
+      [ $# -ge 2 ] || die_usage "--prefix needs a directory"
+      case $2 in -*) die_usage "--prefix needs a directory, not the option $2" ;; esac
+      prefix=$2 prefix_set=1
+      shift
+      ;;
     --prefix=*) prefix=${1#--prefix=} prefix_set=1 ;;
     --version) [ $# -ge 2 ] || die_usage "--version needs a version"; version=$2 version_set=1; shift ;;
     --version=*) version=${1#--version=} version_set=1 ;;
@@ -66,9 +71,16 @@ check_version() {
     die_usage "bad --version '$version': want vX.Y.Z or vX.Y.Z-PRERELEASE"
 }
 
-# check_prefix: refuses the characters a desktop entry's Exec= cannot take
-# safely. make_prefix makes it absolute.
+# check_prefix: makes the prefix absolute (as text: it may not exist yet),
+# then refuses the characters a desktop entry's Exec= cannot take safely.
 check_prefix() {
+  case $prefix in
+  /*) ;;
+  *)
+    while :; do case $prefix in ./*) prefix=${prefix#./} ;; *) break ;; esac; done
+    case $prefix in . | ./) prefix=$PWD ;; *) prefix=${PWD%/}/$prefix ;; esac
+    ;;
+  esac
   case $prefix in
   *[%\"\$\\\`]* | *"
 "*) die_usage "--prefix must not contain % \" \$ \\ \` or a newline: $prefix" ;;
@@ -111,7 +123,10 @@ fetch() {
   base=${PCB_INSTALL_BASE_URL:-https://github.com/$REPO/releases}
   if [ -n "$tag" ]; then url=$base/download/$tag/$1; else url=$base/latest/download/$1; fi
   if [ "$dl" = curl ]; then
-    curl -fsSL -o "$stage/$1" "$url"
+    case $url in
+    https://*) curl -fsSL --proto '=https' --tlsv1.2 -o "$stage/$1" "$url" ;;
+    *) curl -fsSL -o "$stage/$1" "$url" ;;
+    esac
   else
     wget -q -O "$stage/$1" "$url"
   fi || die "cannot download $1 of ${tag:-the latest release} ($url): no such release, or a network error"
@@ -166,12 +181,12 @@ items() {
 }
 items_src() { items | cut -d: -f1; }
 
-# make_prefix: creates the target directories, then makes the prefix absolute.
+# make_prefix: creates the target directories, then resolves the prefix.
 make_prefix() {
   for it in $(items); do
     rest=${it#*:}
     dest=${rest%:*}
-    mkdir -p "$prefix/${dest%/*}" 2>/dev/null || unwritable
+    mkdir -p "$prefix/${dest%/*}" || unwritable
   done
   prefix=$(CDPATH='' cd -- "$prefix" && pwd) || unwritable
 }
@@ -200,7 +215,7 @@ install_files() {
   for it in $(items); do
     src=${it%%:*} rest=${it#*:}
     dest=$prefix/${rest%:*} mode=${rest#*:}
-    { cp "$stage/x/$src" "$dest.new.$$" && chmod "$mode" "$dest.new.$$"; } 2>/dev/null || unwritable
+    { cp "$stage/x/$src" "$dest.new.$$" && chmod "$mode" "$dest.new.$$"; } || unwritable
   done
   for it in $(items); do
     rest=${it#*:}

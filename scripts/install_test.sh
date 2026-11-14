@@ -107,6 +107,7 @@ new_case() {
   mkdir -p "$c/home" "$c/cwd" "$c/stubs"
   cp -R "$tmp/release" "$c/rel"
   p=$c/prefix
+  cwd=$c/cwd
   run_path=$tmp/tools
   os=Linux arch=x86_64
   export GH_STUB_AUTH=0 GH_STUB_VERIFY=0 GH_STUB_LOG="$c/gh.log"
@@ -127,9 +128,9 @@ case $1 in auth) exit "$GH_STUB_AUTH" ;; attestation) exit "$GH_STUB_VERIFY" ;; 
 exit 3'
 }
 
-# run ARGS...: install.sh ARGS from the case's cwd; sets rc, writes $c/out and $c/err.
+# run ARGS...: install.sh ARGS from $cwd; sets rc, writes $c/out and $c/err.
 run() {
-  (cd "$c/cwd" && env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
+  (cd "$cwd" && env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
     PCB_INSTALL_OS="$os" PCB_INSTALL_ARCH="$arch" "$SH" "$inst" "$@" >"$c/out" 2>"$c/err")
   rc=$?
 }
@@ -304,6 +305,7 @@ test_prefix_forms() {
   want_rc 0
   same "$c/cwd/rel-p/bin/pcb" "$v2/pcb"
   line "$c/cwd/rel-p/share/applications/pcb-ui.desktop" "Exec=$c/cwd/rel-p/bin/pcb-ui"
+  has "$c/out" "under $c/cwd/rel-p"
   run --prefix "$p/with space"
   want_rc 0
   same "$p/with space/bin/pcb" "$v2/pcb"
@@ -311,30 +313,43 @@ test_prefix_forms() {
   run --prefix=
   want_rc 2
   absent "$c/home/.local"
+  run --prefix --no-ui
+  want_rc 2
+  has "$c/err" "--prefix needs a directory, not the option --no-ui"
+  absent "$c/home/.local" "$c/cwd/--no-ui"
   end_case
 }
 
 test_prefix_refused_chars() {
   new_case prefix_refused_chars
+  mkdir "$c/cw\$d" "$c/cw%x"
   before=$(ls -A "$c")
   for ch in % '"' '$' "\\" '`'; do
     run --prefix "$c/a${ch}b"
     want_rc 2
-    has "$c/err" "--prefix"
+    has "$c/err" "--prefix must not contain"
     rm -f "$c/out" "$c/err"
     [ "$(ls -A "$c")" = "$before" ] || fail "'$ch' wrote: $(ls -A "$c")"
     [ -z "$(ls -A "$c/home")$(ls -A "$c/cwd")" ] || fail "'$ch' wrote in home or cwd"
+  done
+  # A relative prefix is checked once made absolute: the cwd's name counts.
+  for cwd in "$c/cw\$d" "$c/cw%x"; do
+    run --prefix ./p
+    want_rc 2
+    has "$c/err" "--prefix must not contain"
+    [ -z "$(ls -A "$cwd")$(ls -A "$c/home")" ] || fail "relative prefix from $cwd wrote"
   done
   end_case
 }
 
 test_unwritable_prefix() {
   new_case unwritable_prefix
+  if [ "$(id -u)" = 0 ]; then echo "SKIP $case_name: root can write a 0555 directory"; return 0; fi
   mkdir -p "$p"
   chmod 0555 "$p"
   run --prefix "$p"
   want_rc 1
-  has "$c/err" "--prefix"
+  has "$c/err" "choose another directory with --prefix"
   absent "$p/bin"
   end_case
 }
@@ -423,6 +438,7 @@ test_ldd_warning() {
   lacks "$c/err" "libc.so.6"
   has "$c/err" "libgl1-mesa-dev"
   run --prefix "$p" --no-ui
+  want_rc 0
   lacks "$c/err" "libGL.so.1"
   end_case
 }
@@ -439,10 +455,14 @@ test_update_desktop_database() {
 
 test_truncated_script_does_nothing() {
   new_case truncated_script_does_nothing
-  n=$(($(wc -l <"$inst") / 2))
-  (cd "$c/cwd" && head -n "$n" "$inst" | env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
-    PCB_INSTALL_OS="$os" PCB_INSTALL_ARCH="$arch" "$SH" -s -- --prefix "$p" >"$c/out" 2>"$c/err")
-  absent "$p"
+  total=$(wc -l <"$inst")
+  n=1
+  while [ "$n" -lt "$total" ]; do
+    (cd "$c/cwd" && head -n "$n" "$inst" | env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
+      PCB_INSTALL_OS="$os" PCB_INSTALL_ARCH="$arch" "$SH" -s -- --prefix "$p" >"$c/out" 2>"$c/err")
+    if [ -e "$p" ] || [ -n "$(ls -A "$c/home")$(ls -A "$c/cwd")" ]; then fail "the first $n lines wrote"; break; fi
+    n=$((n + 1))
+  done
   # The whole script, piped the same way, does install: the pipe itself works.
   (cd "$c/cwd" && env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
     PCB_INSTALL_OS="$os" PCB_INSTALL_ARCH="$arch" "$SH" -s -- --prefix "$p" <"$inst" >"$c/out" 2>"$c/err")
