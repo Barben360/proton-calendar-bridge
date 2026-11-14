@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -263,18 +264,33 @@ func openEnds(t *testing.T, dir string) (server, client net.Conn) {
 // the name, within its bound, instead of calling it served.
 func TestListenWaitsForThePreviousServerEnd(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	server, _ := openEnds(t, dir)
-	time.AfterFunc(100*time.Millisecond, func() { _ = server.Close() })
-	start := time.Now()
-	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
-	if err != nil {
-		t.Fatalf("Listen while the previous server's end closes: %v, want the pipe once it has closed", err)
+	// The end must close while Listen runs: a Listen scheduled after the
+	// close would pass without waiting, so such a run is set up again.
+	for attempt := 1; attempt <= 3; attempt++ {
+		dir := t.TempDir()
+		server, _ := openEnds(t, dir)
+		var closing atomic.Int64 // when the close began, in Unix nanoseconds
+		time.AfterFunc(100*time.Millisecond, func() {
+			closing.Store(time.Now().UnixNano())
+			_ = server.Close()
+		})
+		start := time.Now()
+		ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+		took := time.Since(start)
+		if err != nil {
+			t.Fatalf("Listen while the previous server's end closes: %v, want the pipe once it has closed", err)
+		}
+		_ = ln.Close()
+		if began := closing.Load(); began == 0 || began < start.UnixNano() {
+			t.Logf("attempt %d: Listen started after the close: set up again", attempt)
+			continue
+		}
+		if took > time.Second {
+			t.Errorf("Listen took %v, want under 1 s", took)
+		}
+		return
 	}
-	_ = ln.Close()
-	if took := time.Since(start); took > time.Second {
-		t.Errorf("Listen took %v, want under 1 s", took)
-	}
+	t.Skip("Listen started after the close in 3 attempts (a loaded host): the wait was not exercised")
 }
 
 // A name nothing answers on that stays held past Listen's bound is
@@ -300,6 +316,29 @@ func TestListenGivesUpOnAHeldName(t *testing.T) {
 	if took < 200*time.Millisecond || took > time.Second {
 		t.Errorf("Listen on a held name gave up after %v, want a wait under 1 s", took)
 	}
+}
+
+// A name ListenPipe is denied while the probe keeps finding it gone (a
+// token that may not create it): Listen steps between tries rather than
+// spinning, and still gives up within its bound. Not parallel: it replaces
+// the package's ListenPipe and probe.
+func TestListenStepsOnANameThatKeepsVanishing(t *testing.T) {
+	tries := ctl.SetDeniedAndGone(t)
+	start := time.Now()
+	_, err := ctl.Listen(filepath.Join(t.TempDir(), "pcb.sock"))
+	took := time.Since(start)
+	if !errors.Is(err, ctl.ErrPipeHeld) {
+		t.Fatalf("Listen: %v, want ErrPipeHeld", err)
+	}
+	if took > time.Second {
+		t.Errorf("Listen gave up after %v, want under 1 s", took)
+	}
+	// 0.5 s in steps of 10 ms is about 50 tries; a busy loop makes
+	// thousands.
+	if *tries > 100 {
+		t.Errorf("Listen tried %d times in %v: a busy loop", *tries, took)
+	}
+	t.Logf("%d tries in %v", *tries, took)
 }
 
 // The server reads its client's SID (the pipe client's process token) and

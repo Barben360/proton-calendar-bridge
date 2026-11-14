@@ -5,6 +5,9 @@ package ctl
 import (
 	"net"
 	"testing"
+
+	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 )
 
 // PipeName is the pipe that serves the state directory dir.
@@ -33,4 +36,20 @@ func SetCurrentSID(t testing.TB, f func() (string, error)) {
 	old := currentSID
 	currentSID = f
 	t.Cleanup(func() { currentSID = old })
+}
+
+// SetDeniedAndGone makes Listen's ListenPipe always fail access denied and
+// its probe always find the name gone, until the test ends, and counts
+// the tries. A test calling it must not run in parallel.
+func SetDeniedAndGone(t testing.TB) (tries *int) {
+	t.Helper()
+	oldListen, oldProbe := listenPipe, probe
+	n := 0
+	listenPipe = func(string, *winio.PipeConfig) (net.Listener, error) {
+		n++
+		return nil, windows.ERROR_ACCESS_DENIED
+	}
+	probe = func(string) pipeProbe { return pipeGone }
+	t.Cleanup(func() { listenPipe, probe = oldListen, oldProbe })
+	return &n
 }

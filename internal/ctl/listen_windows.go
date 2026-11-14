@@ -46,8 +46,8 @@ func Listen(path string) (net.Listener, error) {
 	}
 	conf := &winio.PipeConfig{SecurityDescriptor: "O:" + sid + "D:P(A;;GA;;;" + sid + ")"}
 	deadline := time.Now().Add(relistenFor)
-	for {
-		ln, err := winio.ListenPipe(name, conf)
+	for goneSeen := false; ; {
+		ln, err := listenPipe(name, conf)
 		switch {
 		case err == nil:
 			return ln, nil
@@ -57,8 +57,17 @@ func Listen(path string) (net.Listener, error) {
 			return nil, fmt.Errorf("opening the control pipe %s: %w", name, err)
 		}
 		// The name exists (or another user's pipe denies this one).
-		if probePipe(name) {
+		switch probe(name) {
+		case pipeServed:
 			return nil, fmt.Errorf("%w: %s", ErrPipeTaken, name)
+		case pipeGone:
+			// Gone: try again at once the first time. A name that keeps
+			// vanishing while ListenPipe keeps being denied (a token that
+			// may not create it) gets a step, not a busy loop.
+			if goneSeen {
+				time.Sleep(goneStep)
+			}
+			goneSeen = true
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("%w: %s", ErrPipeHeld, name)
@@ -67,33 +76,52 @@ func Listen(path string) (net.Listener, error) {
 }
 
 // relistenFor bounds Listen's wait for a name nothing answers on;
-// probeFor bounds each probe, the step between two tries.
+// probeFor bounds each probe, the step between two tries; goneStep is the
+// step after a name found gone more than once.
 const (
 	relistenFor = 500 * time.Millisecond
 	probeFor    = 25 * time.Millisecond
+	goneStep    = 10 * time.Millisecond
 )
 
-// probePipe tells whether the pipe name is taken for good: a server
-// answers on it (the probe connects, and closes at once, sending nothing),
-// or it is a pipe this user may not open (another user's). A name that is
-// gone, or whose every instance is busy or closing (the probe times out),
-// is worth another try. A pcb server always has an instance listening
-// while it serves (go-winio makes the next one at each Accept), so it
-// answers within the probe.
-func probePipe(name string) bool {
+// listenPipe and probe are go-winio's ListenPipe and probePipe; tests
+// replace them.
+var (
+	listenPipe = winio.ListenPipe
+	probe      = probePipe
+)
+
+// A probe's finding (probePipe).
+type pipeProbe int
+
+const (
+	pipeBusy   pipeProbe = iota // every instance busy or closing: try again
+	pipeGone                    // the name no longer exists: try again
+	pipeServed                  // taken for good: never shared
+)
+
+// probePipe tells whether the pipe name is taken for good (pipeServed): a
+// server answers on it (the probe connects, and closes at once, sending
+// nothing), or it is a pipe this user may not open (another user's). A
+// name that is gone, or whose every instance is busy or closing (the probe
+// times out), is worth another try. A pcb server always has an instance
+// listening while it serves (go-winio makes the next one at each Accept),
+// so it answers within the probe.
+func probePipe(name string) pipeProbe {
 	ctx, cancel := context.WithTimeout(context.Background(), probeFor)
 	defer cancel()
 	c, err := winio.DialPipeContext(ctx, name)
 	switch {
 	case err == nil:
 		_ = c.Close()
-		return true
+		return pipeServed
 	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
-		return true
-	case !errors.Is(err, fs.ErrNotExist):
-		<-ctx.Done() // a step, not a busy loop, on any other failure
+		return pipeServed
+	case errors.Is(err, fs.ErrNotExist):
+		return pipeGone
 	}
-	return false
+	<-ctx.Done() // a step, not a busy loop, on any other failure
+	return pipeBusy
 }
 
 // dialSocket connects to the control pipe of path's directory: ErrNoDaemon
