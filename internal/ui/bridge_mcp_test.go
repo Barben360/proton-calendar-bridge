@@ -17,6 +17,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -91,8 +92,7 @@ func TestBridgeRaisesTheWizardForAnAgentLogin(t *testing.T) {
 	socket := l.dirs.Socket()
 	hc := &http.Client{Transport: grantHeader{grant: `{"Caps":["freebusy","login"]}`, base: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
+			return ctl.DialConn(ctx, socket) // the named pipe on Windows
 		},
 	}}}
 	cs, err := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).
@@ -150,8 +150,7 @@ func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	socket := l.dirs.Socket()
 	hc := &http.Client{Transport: grantHeader{grant: `{"Caps":["freebusy","login"]}`, base: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
+			return ctl.DialConn(ctx, socket) // the named pipe on Windows
 		},
 	}}}
 	cs, err := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).

@@ -169,9 +169,6 @@ func socketStatus(t *testing.T, r *rig) ctl.Status {
 // read-only profile, and the end of stdin ends it with exit 0, the socket
 // removed.
 func TestMCPStdioBecomesTheDaemon(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the control pipe wired into pcb mcp and the daemon (Tasks 6 and 10): the stdio relay gets EOF on Windows")
-	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
@@ -203,9 +200,6 @@ func TestMCPStdioBecomesTheDaemon(t *testing.T) {
 // With a daemon running (pcb serve), pcb mcp relays to it: same accounts,
 // the daemon counts a relay session, and serve.lock stays the daemon's.
 func TestMCPStdioRelaysToARunningDaemon(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the control pipe wired into pcb mcp and the daemon (Tasks 6 and 10): the stdio relay gets EOF on Windows")
-	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
@@ -238,9 +232,6 @@ func TestMCPStdioRelaysToARunningDaemon(t *testing.T) {
 // Two pcb mcp started together: one becomes the session daemon, the other
 // loses the race for serve.lock, backs off and relays to it.
 func TestTwoMCPStdioEndAsDaemonAndRelay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the control pipe wired into pcb mcp and the daemon (Tasks 6 and 10): the stdio relay gets EOF on Windows")
-	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
@@ -277,9 +268,6 @@ func TestTwoMCPStdioEndAsDaemonAndRelay(t *testing.T) {
 // finds no daemon, and pcb mcp becomes the session daemon itself; the
 // session goes on.
 func TestRelayTakesOverAfterItsDaemonEnds(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the control pipe wired into pcb mcp and the daemon (Tasks 6 and 10): the stdio relay gets EOF on Windows")
-	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
@@ -476,9 +464,6 @@ func TestMCPStdioWritesNothingButProtocolOnStdout(t *testing.T) {
 			r := newRig(t, &protontest.Options{})
 			r.want(exitcode.OK, "login", "--non-interactive", "--json")
 			if mode == "relay" {
-				if runtime.GOOS == "windows" {
-					t.Skip("needs the control pipe wired into pcb mcp and the daemon (Tasks 6 and 10): the stdio relay gets EOF on Windows")
-				}
 				startServe(t, r, nil, "--listen", "127.0.0.1:0").listening()
 			}
 			m := startMCP(t, r, nil, "--profile", "full")

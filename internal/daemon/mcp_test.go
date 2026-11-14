@@ -163,8 +163,7 @@ func (r relayRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set(mcp.RelayGrantHeader, r.grant)
 	return (&http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", r.socket)
+		return ctl.DialConn(ctx, r.socket) // the named pipe on Windows
 	}}).RoundTrip(req)
 }
 
@@ -267,8 +266,7 @@ func TestControlSocketMCPInServe(t *testing.T) {
 	}
 	// Without the grant header the relay is refused.
 	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", e.dirs.Socket())
+		return ctl.DialConn(ctx, e.dirs.Socket())
 	}}}
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://pcb/mcp", strings.NewReader(mcpInitialize))
 	req.Header.Set("Content-Type", "application/json")

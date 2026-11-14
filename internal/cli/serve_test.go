@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -880,9 +881,6 @@ func TestServeRefusesABadLogLevel(t *testing.T) {
 // CalDAV listener there, and removes the socket when it stops.
 func TestServeServesTheControlSocket(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	stub := newServeStub()
 	stub.statusPhase = "ready"
 	r := stubRig(t, &stub.stubAPI)
@@ -907,7 +905,9 @@ func TestServeServesTheControlSocket(t *testing.T) {
 	if st.Listener == nil || st.Listener.URL != "http://localhost:"+port || st.Listener.TLS || !strings.HasSuffix(st.Listener.Addr, ":"+port) {
 		t.Errorf("listener = %+v, want the CalDAV one on port %s", st.Listener, port)
 	}
-	if fi, err := os.Lstat(r.dirs.Socket()); err != nil || fi.Mode().Perm() != 0o600 {
+	// On Windows the channel is a named pipe: no file, its access list
+	// pinned by internal/ctl's tests.
+	if fi, err := os.Lstat(r.dirs.Socket()); runtime.GOOS != "windows" && (err != nil || fi.Mode().Perm() != 0o600) {
 		t.Errorf("socket: %v, %v; want mode 0600", fi, err)
 	}
 
@@ -915,12 +915,37 @@ func TestServeServesTheControlSocket(t *testing.T) {
 	if code := s.exit(); code != exitcode.OK {
 		t.Fatalf("exit %d\nstderr: %s", code, s.errb.String())
 	}
-	if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("the socket is still there after the stop: %v", err)
+	if err := controlGone(t, r.dirs.Socket()); err != nil {
+		t.Errorf("after the stop: %v", err)
 	}
-	if _, err := ctl.Dial(t.Context(), r.dirs.Socket()); !errors.Is(err, ctl.ErrNoDaemon) {
-		t.Errorf("Dial after the stop: %v, want ErrNoDaemon", err)
+}
+
+// controlGone says why the control channel at socket still serves: a
+// socket file left on Unix, or a daemon still answering (the pipe on
+// Windows). nil: gone.
+func controlGone(t *testing.T, socket string) error {
+	t.Helper()
+	if _, err := os.Lstat(socket); runtime.GOOS != "windows" && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the socket is still there: %w", err)
 	}
+	c, err := ctl.Dial(t.Context(), socket)
+	if err == nil {
+		_ = c.Close()
+	}
+	if !errors.Is(err, ctl.ErrNoDaemon) {
+		return fmt.Errorf("Dial = %w, want ErrNoDaemon", err)
+	}
+	return nil
+}
+
+// controlServes fails the test unless a daemon answers at socket.
+func controlServes(t *testing.T, socket string) {
+	t.Helper()
+	c, err := ctl.Dial(t.Context(), socket)
+	if err != nil {
+		t.Fatalf("no control channel while serving: %v", err)
+	}
+	_ = c.Close()
 }
 
 // The socket's directory must grant group and others nothing: pcb serve
@@ -928,7 +953,7 @@ func TestServeServesTheControlSocket(t *testing.T) {
 func TestServeRefusesAnOpenStateDir(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("no mode bits on Windows: the state directory's access list is checked instead, with its own tests")
 	}
 	stub := newServeStub()
 	r := stubRig(t, &stub.stubAPI)
@@ -954,7 +979,7 @@ func TestServeRefusesAnOpenStateDir(t *testing.T) {
 func TestServeRefusesATooLongSocketPath(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("no sun_path limit on Windows: the pipe's name is a hash of the state directory, whatever its length")
 	}
 	stub := newServeStub()
 	r := stubRig(t, &stub.stubAPI)
@@ -976,9 +1001,6 @@ func TestServeRefusesATooLongSocketPath(t *testing.T) {
 // the sync loop stopping on an error, and the CalDAV listener failing.
 func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	t.Run("sync error", func(t *testing.T) {
 		t.Parallel()
 		stub := newServeStub()
@@ -986,15 +1008,13 @@ func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 		r.svc = stub
 		s := startServe(t, r, nil)
 		s.listening()
-		if _, err := os.Lstat(r.dirs.Socket()); err != nil {
-			t.Fatalf("no socket while serving: %v", err)
-		}
+		controlServes(t, r.dirs.Socket())
 		stub.stopWith <- &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("Proton ended the session"), Hint: "run pcb login"}
 		if code := s.exit(); code != exitcode.MustAct {
 			t.Fatalf("exit %d, want 10\nstderr: %s", code, s.errb.String())
 		}
-		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("the socket outlives a sync error: %v", err)
+		if err := controlGone(t, r.dirs.Socket()); err != nil {
+			t.Errorf("after a sync error: %v", err)
 		}
 	})
 	t.Run("listener failure", func(t *testing.T) {
@@ -1009,8 +1029,8 @@ func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 		if !strings.Contains(s.errb.String(), "control socket started") {
 			t.Fatalf("the control socket never started:\n%s", s.errb.String())
 		}
-		if _, err := os.Lstat(r.dirs.Socket()); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("the socket outlives a listener failure: %v", err)
+		if err := controlGone(t, r.dirs.Socket()); err != nil {
+			t.Errorf("after a listener failure: %v", err)
 		}
 	})
 }
@@ -1235,9 +1255,6 @@ func TestServeDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 // nothing to do (exit 0, it says so).
 func TestSyncAndASecondServeNameTheRunningDaemon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	r.f.AddCalendar(r.f.Username, protontest.Calendar{Name: "Work"})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
@@ -1361,9 +1378,6 @@ func TestServePortInUseSaysWhyOnce(t *testing.T) {
 // running; M5 exited 10 there.
 func TestServeWaitForLoginParksAnUnreadableAccount(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive")
 	if err := os.WriteFile(filepath.Join(accountDir(t, r), "state.json"), []byte("{not json"), 0o600); err != nil {
@@ -1414,9 +1428,6 @@ func TestServeWaitForLoginParksAnUnreadableAccount(t *testing.T) {
 // it: one loop per account, the pass lines through daemon.LogPass.
 func TestServeLogsWhatProtonAnsweredWhenTheSessionEnds(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	for _, tc := range []struct {
 		name       string
 		end        func(*protontest.Fake)

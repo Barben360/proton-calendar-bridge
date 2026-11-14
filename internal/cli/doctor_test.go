@@ -331,7 +331,7 @@ func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
 func TestDoctorRefusedControlSocketIsExit10(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("the control channel is a named pipe on Windows: pcb never looks at a file at the socket path (internal/ctl tests a foreign pipe's refusal)")
 	}
 	r := stubRig(t, &stubAPI{})
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {

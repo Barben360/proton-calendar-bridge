@@ -428,3 +428,24 @@ func TestStdioMovesFromARelayToTheProcess(t *testing.T) {
 		t.Errorf("ServeStdio after the end of stdin = %v", err)
 	}
 }
+
+// RelayDial's dial may fail with an error of its own (ctl.DialConn's
+// ErrNoDaemon once the pipe is gone on Windows), not a net.OpError: the
+// daemon is gone all the same, and the agent's message is kept for the
+// next backend, never refused.
+func TestRelayDialFailureIsTheDaemonGone(t *testing.T) {
+	t.Parallel()
+	dial := func(context.Context) (net.Conn, error) { return nil, errors.New("no pcb daemon answers") }
+	p := newPipes()
+	st := mcp.NewStdio(p.stdin, p.stdout)
+	relayed := make(chan error, 1)
+	go func() { relayed <- st.RelayDial(t.Context(), dial, fullGrant) }()
+	go func() { // the agent's initialize: it waits for the next backend
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		_, _ = sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).Connect(ctx, p.t, nil)
+	}()
+	if err := ended(t, relayed); !errors.Is(err, mcp.ErrDaemonGone) {
+		t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
+	}
+}

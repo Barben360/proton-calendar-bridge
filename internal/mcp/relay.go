@@ -45,14 +45,28 @@ func Relay(ctx context.Context, socket string, g Grant, in io.Reader, out io.Wri
 // initialised itself (E19): Relay adds the version the agent's initialize
 // settled to every request that lacks one.
 func (st *Stdio) Relay(ctx context.Context, socket string, g Grant) error {
+	return st.RelayDial(ctx, func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socket)
+	}, g)
+}
+
+// RelayDial is Relay over the connections dial opens (ctl.DialConn: the
+// control socket, or its named pipe on Windows). A dial failure counts as
+// the daemon gone, as a Unix socket that cannot be dialled does.
+func (st *Stdio) RelayDial(ctx context.Context, dial func(context.Context) (net.Conn, error), g Grant) error {
 	grant, err := json.Marshal(g)
 	if err != nil {
 		return err
 	}
 	base := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
+			c, err := dial(ctx)
+			var op *net.OpError
+			if err != nil && !errors.As(err, &op) {
+				err = &net.OpError{Op: "dial", Net: "pipe", Err: err}
+			}
+			return c, err
 		},
 		DisableCompression: true,
 	}

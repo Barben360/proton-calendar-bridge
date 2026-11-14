@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -87,7 +89,7 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 		}
 		if up {
 			log.Info("relaying to the daemon on the control socket", "socket", socket)
-			err := st.Relay(ctx, socket, g)
+			err := st.RelayDial(ctx, func(ctx context.Context) (net.Conn, error) { return ctl.DialConn(ctx, socket) }, g)
 			switch {
 			case errors.Is(err, mcp.ErrDaemonGone):
 				log.Info("the daemon went away: looking for another, or serving the session here")

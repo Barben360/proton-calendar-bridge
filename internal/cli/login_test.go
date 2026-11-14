@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -548,9 +547,6 @@ func serveWaiting(t *testing.T, r *rig) *serveRun {
 // account address in state want, and returns that account's status.
 func waitForServe(t *testing.T, r *rig, address string, want service.ServeState) ctl.AccountStatus {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	deadline := time.Now().Add(30 * time.Second)
 	var last ctl.Status
 	for {
@@ -580,9 +576,6 @@ const noDaemonNote = "Note: no pcb daemon is running; this command runs on its o
 // account the login adds is served at once.
 func TestLoginGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	s := serveWaiting(t, r)
 	noInProcess(t, r)
@@ -608,9 +601,6 @@ func TestLoginGoesThroughTheDaemon(t *testing.T) {
 // back to waiting for a login (ruling M5-R8).
 func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive") // no daemon yet: in process
 	serveWaiting(t, r)

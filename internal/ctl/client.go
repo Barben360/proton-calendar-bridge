@@ -54,6 +54,14 @@ func Dial(ctx context.Context, path string) (*Client, error) {
 	return dial(ctx, path, defaultPeerUID)
 }
 
+// DialConn opens one connection to the daemon at path, with Dial's checks
+// (ErrNoDaemon; a foreign socket or pipe refused, blocked, before anything
+// is sent): the control socket on Unix, its named pipe on Windows. pcb
+// mcp's relay speaks HTTP to /mcp over it.
+func DialConn(ctx context.Context, path string) (net.Conn, error) {
+	return dialSocket(ctx, path, defaultPeerUID)
+}
+
 // dial is Dial with peer reading a connection's server UID.
 func dial(ctx context.Context, path string, peer func(net.Conn) (int, bool)) (*Client, error) {
 	first, err := dialSocket(ctx, path, peer)
