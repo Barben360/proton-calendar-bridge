@@ -76,11 +76,13 @@ lint:
 	go vet ./...
 	golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
 
-# The container image (M5-Rpre7), stamped like make build.
+# The container image (M5-Rpre7), stamped like make build. IMAGE_FLAGS adds
+# docker build flags (.github/workflows/image-build.yml pushes by digest).
 IMAGE ?= pcb:local
+IMAGE_FLAGS ?=
 
 image:
-	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(IMAGE_FLAGS) .
 
 # Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
 container-smoke:

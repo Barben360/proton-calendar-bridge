@@ -6,9 +6,11 @@
 # call is made: nobody logs in.
 #
 # Needs docker, curl and jq. Builds a throwaway image (make image), or tests
-# PCB_SMOKE_IMAGE when set (CI tests the image it pushes; it is kept). The
-# container, its volume and a throwaway image are removed on any exit. The
-# last line is PASS.
+# PCB_SMOKE_IMAGE when set (CI tests the image it pushed, by digest; it is
+# kept). With PCB_SMOKE_VERSION set, the image's version label and
+# pcb version --json must both equal it, and its revision label the commit
+# pcb was stamped with. The container, its volume and a throwaway image are
+# removed on any exit. The last line is PASS.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -79,6 +81,18 @@ if [ -z "$image" ]; then
 	built="pcb:$id"
 	make -C "$root" --no-print-directory image IMAGE="$built"
 	image=$built
+fi
+
+if [ -n "${PCB_SMOKE_VERSION:-}" ]; then
+	step "1b. the version label and pcb version --json say $PCB_SMOKE_VERSION, the revision label pcb's commit"
+	labels=$(docker image inspect -f '{{json .Config.Labels}}' "$image")
+	ver=$(docker run --rm --network none "$image" version --json) || fail "pcb version --json failed: $ver"
+	jq -e --arg v "$PCB_SMOKE_VERSION" '.ok == true and .data.version == $v' <<<"$ver" >/dev/null ||
+		fail "pcb version --json: want version $PCB_SMOKE_VERSION: $ver"
+	jq -e --arg v "$PCB_SMOKE_VERSION" '.["org.opencontainers.image.version"] == $v' <<<"$labels" >/dev/null ||
+		fail "org.opencontainers.image.version: want $PCB_SMOKE_VERSION: $labels"
+	jq -e --arg c "$(jq -r .data.commit <<<"$ver")" '.["org.opencontainers.image.revision"] == $c' <<<"$labels" >/dev/null ||
+		fail "org.opencontainers.image.revision: want pcb's commit $(jq -r .data.commit <<<"$ver"): $labels"
 fi
 
 step "2. run $image with a fresh volume on 127.0.0.1:$port"
