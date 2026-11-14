@@ -10,9 +10,13 @@ on:
         default: ""
 permissions:
   contents: read
-# A newer pull request run cancels the older. Dispatches of one ref queue,
-# never cancelled: a cancelled run could stop between pushing the digests
-# and tagging them. Release images come from release.yml; main pushes none.
+# A newer pull request run cancels the older. Dispatches are never
+# cancelled while running: a cancelled run could stop between pushing the
+# digests and tagging them. The group is the branch the dispatch runs on,
+# so dispatches of different refs from one branch share it; it holds one
+# running and one pending run, and a newer dispatch makes GitHub cancel the
+# older pending one (dispatch it again). Release images come from
+# release.yml; main pushes none.
 concurrency:
   group: image-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
