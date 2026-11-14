@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync/atomic"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -58,7 +60,10 @@ func (st *Stdio) RelayDial(ctx context.Context, dial func(context.Context) (net.
 			if err != nil && !errors.As(err, &op) {
 				err = &net.OpError{Op: "dial", Net: "pipe", Err: err}
 			}
-			return c, err
+			if err != nil {
+				return nil, err
+			}
+			return &sentConn{Conn: c}, nil
 		},
 		DisableCompression: true,
 	}
@@ -101,22 +106,56 @@ type relayTransport struct {
 	st    *Stdio
 }
 
+// A request that fails before a byte of it was written on its connection
+// is unsent: the HTTP client does not retry a POST on an idle connection
+// the daemon closed as the request took it ("server closed idle
+// connection"), though the daemon never saw it.
 func (t *relayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
+	var conn *sentConn
+	var before int64
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		if c, ok := info.Conn.(*sentConn); ok {
+			conn, before = c, c.n.Load()
+		}
+	}}
+	req = req.Clone(httptrace.WithClientTrace(req.Context(), trace))
 	req.Header.Set(RelayGrantHeader, t.grant)
 	if req.Header.Get(protocolVersionHeader) == "" {
 		if v := t.st.negotiated(); v != "" {
 			req.Header.Set(protocolVersionHeader, v)
 		}
 	}
-	return t.base.RoundTrip(req)
+	resp, err := t.base.RoundTrip(req)
+	if err != nil && conn != nil && conn.n.Load() == before {
+		err = &unsentError{err}
+	}
+	return resp, err
 }
+
+// sentConn counts the bytes written on a connection to the daemon.
+type sentConn struct {
+	net.Conn
+	n atomic.Int64
+}
+
+func (c *sentConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// unsentError is a request that failed before any of it was written.
+type unsentError struct{ err error }
+
+func (e *unsentError) Error() string { return e.err.Error() }
+func (e *unsentError) Unwrap() error { return e.err }
 
 // undelivered reports whether a failed write never reached the daemon, so
 // the message may go to the next backend: the socket could not be dialled,
-// or the daemon no longer knows the session (it restarted, or the session
-// idled out).
+// the request failed before any of it was written, or the daemon no longer
+// knows the session (it restarted, or the session idled out).
 func undelivered(err error) bool {
 	var op *net.OpError
-	return errors.Is(err, sdkmcp.ErrSessionMissing) || (errors.As(err, &op) && op.Op == "dial")
+	var unsent *unsentError
+	return errors.Is(err, sdkmcp.ErrSessionMissing) || errors.As(err, &unsent) || (errors.As(err, &op) && op.Op == "dial")
 }

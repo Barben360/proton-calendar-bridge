@@ -7,11 +7,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -437,6 +439,114 @@ func TestStdioMovesFromARelayToTheProcess(t *testing.T) {
 	}
 	if n := own.srv.LiveSessions()[mcp.EntryStdio]; n != 1 {
 		t.Errorf("stdio sessions in process = %d, want 1", n)
+	}
+	_ = cs.Close()
+	if err := ended(t, served); err != nil {
+		t.Errorf("ServeStdio after the end of stdin = %v", err)
+	}
+}
+
+// closeWatch is a connection that reports its Close.
+type closeWatch struct {
+	net.Conn
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *closeWatch) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// A call the relay picks an idle connection for just as its daemon ends,
+// and that fails before a byte of it was written (the HTTP client sees
+// the daemon's close on that connection first: "server closed idle
+// connection", which it does not retry for a POST), never reached the
+// daemon: it goes to the next backend, here the process itself, instead
+// of being answered retry.
+func TestCallUnsentAsTheDaemonEndsMovesToTheProcess(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, newHub())
+	socket := socketPath(t)
+	d := startDaemon(t, r.srv, socket)
+	var mu sync.Mutex
+	var conns []*closeWatch
+	dial := func(ctx context.Context) (net.Conn, error) {
+		c, err := ctl.DialConn(ctx, socket)
+		if err != nil {
+			return nil, err
+		}
+		w := &closeWatch{Conn: c, closed: make(chan struct{})}
+		mu.Lock()
+		conns = append(conns, w)
+		mu.Unlock()
+		return w, nil
+	}
+	// Armed, the next request given an idle connection kills the daemon
+	// and waits until the client has closed every connection on seeing
+	// the daemon's close, before the request is written.
+	var armed atomic.Bool
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		if !info.Reused || !armed.CompareAndSwap(true, false) {
+			return
+		}
+		d.kill()
+		mu.Lock()
+		open := slices.Clone(conns)
+		mu.Unlock()
+		for _, c := range open {
+			select {
+			case <-c.closed:
+			case <-time.After(10 * time.Second):
+				t.Error("a connection to the killed daemon is still open after 10 s")
+			}
+		}
+		// The client's writer goroutine ends on that close: let it, so
+		// the request fails as unsent instead of being written to a
+		// closed connection (which the client retries on a new one).
+		time.Sleep(50 * time.Millisecond)
+	}})
+
+	p := newPipes()
+	st := mcp.NewStdio(p.stdin, p.stdout)
+	relayed := make(chan error, 1)
+	go func() { relayed <- st.RelayDial(ctx, dial, fullGrant) }()
+	cs := connectAgent(t, p, "2025-11-25", "")
+	mustCall(t, cs, "status", nil)
+
+	armed.Store(true)
+	type answer struct {
+		out  map[string]any
+		terr *toolErr
+	}
+	next := make(chan answer, 1)
+	go func() {
+		out, terr := call(t, cs, "calendars_list", nil)
+		next <- answer{out, terr}
+	}()
+	select {
+	case err := <-relayed:
+		if !errors.Is(err, mcp.ErrDaemonGone) {
+			t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
+		}
+	case a := <-next:
+		t.Fatalf("calendars_list answered by the relay: %v, %+v; want it moved to the next backend", a.out, a.terr)
+	case <-time.After(15 * time.Second):
+		t.Fatal("RelayDial still running 15 s after its daemon ended")
+	}
+	if armed.Load() {
+		t.Fatal("the call never got an idle connection: the race was not set up")
+	}
+	own := newRig(t, newHub())
+	served := make(chan error, 1)
+	go func() { served <- own.srv.ServeStdio(t.Context(), st, fullGrant) }()
+	select {
+	case a := <-next:
+		if a.terr != nil || a.out["calendars"] == nil {
+			t.Errorf("calendars_list in process = %v, %+v", a.out, a.terr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiting call was not answered in process")
 	}
 	_ = cs.Close()
 	if err := ended(t, served); err != nil {

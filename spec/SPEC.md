@@ -1801,8 +1801,10 @@ M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal
   `TestTwoMCPStdioEndAsDaemonAndRelay`, `TestMCPLockRaceBacksOffAtMostTenSeconds`, `TestRelayRefusedIsNotADaemonGone`].
 - A relayed daemon that ends mid-session: a tool call in flight is answered `retry` (it may or may not have taken effect:
   read before writing again), other requests are re-sent, and the next message probes again and either relays to another
-  daemon or makes this `pcb mcp` the session daemon, without the agent initialising again (pcb replays its handshake)
-  [verified: `TestRelayAnswersRetryWhenItsDaemonEnds`, `TestRelayTakesOverAfterItsDaemonEnds`, `TestStdioMovesFromARelayToTheProcess`].
+  daemon or makes this `pcb mcp` the session daemon, without the agent initialising again (pcb replays its handshake).
+  A call that failed before any of it was written (sent as the daemon closed its connection) is not in flight: it goes
+  to the next backend [verified: `TestRelayAnswersRetryWhenItsDaemonEnds`, `TestRelayTakesOverAfterItsDaemonEnds`,
+  `TestStdioMovesFromARelayToTheProcess`, `TestCallUnsentAsTheDaemonEndsMovesToTheProcess`].
   The end of stdin ends the session: answers still due get up to 5 s, the session daemon drains and releases the state,
   exit 0 [verified: `TestMCPStdioBecomesTheDaemon`; `make rehearse` steps 19 and 22].
 - **Sealer guard** (ruling R20): on a state not created yet (no `layout.json`) under `[secrets] backend = auto` with no
