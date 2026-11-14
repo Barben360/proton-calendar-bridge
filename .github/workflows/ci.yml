@@ -329,6 +329,13 @@ jobs:
       - name: Race tests
         shell: msys2 {0}
         run: |
+          # The tests make their directories in the temp directory, and pcb
+          # refuses a directory whose access list lets CREATOR OWNER in. The
+          # msys2 shell's /tmp (D:\a\_temp\msys64\tmp) inherits such an entry
+          # from D:\a; the user profile's temp directory, where a user's own
+          # files live, does not.
+          TMP=$(cygpath -w "$LOCALAPPDATA/Temp")
+          export TMP TEMP=$TMP
           case "${{ matrix.shard }}" in
             service) pkgs=./internal/service ;;
             cli) pkgs=./internal/cli ;;

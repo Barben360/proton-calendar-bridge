@@ -61,3 +61,7 @@ func openPath(func(*url.URL) error) func(string) error {
 		return shellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL)
 	}
 }
+
+// setWindowClass is X11's WM_CLASS: Windows has no such thing, the window's
+// icon and name come from the executable's resources.
+func setWindowClass() {}
