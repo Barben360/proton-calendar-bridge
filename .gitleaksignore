@@ -1,8 +1,9 @@
 # gitleaks false positives in commits that cannot carry an inline
 # "gitleaks:allow" (already pushed history). One fingerprint per line, with
 # the reason above it; never quote the flagged text here, it would be
-# flagged again.
+# flagged again. Prefer file:rule:line (no commit): it also holds for the
+# squash of the branch onto main.
 
 # generic-api-key on a prose line of the Windows port design (a list of
 # package managers after the word Authenticode), no secret.
-66ac8e82ed738428b578daf314c34565c641077c:spec/designs/2026-11-14-windows-port-design.md:generic-api-key:27
+spec/designs/2026-11-14-windows-port-design.md:generic-api-key:27
