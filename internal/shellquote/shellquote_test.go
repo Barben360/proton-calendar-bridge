@@ -39,11 +39,15 @@ func TestPowerShell(t *testing.T) {
 }
 
 func TestQuoteIsTheOSQuoting(t *testing.T) {
-	want := shellquote.POSIX("a b")
+	const in = "it's" // quoted differently: POSIX 'it'\''s', PowerShell 'it''s'
+	want, other := shellquote.POSIX(in), shellquote.PowerShell(in)
 	if runtime.GOOS == "windows" {
-		want = shellquote.PowerShell("a b")
+		want, other = other, want
 	}
-	if got := shellquote.Quote("a b"); got != want {
-		t.Errorf("Quote(a b) = %q, want %q", got, want)
+	if want == other {
+		t.Fatalf("test input %q is quoted the same by both: it cannot tell the OSes apart", in)
+	}
+	if got := shellquote.Quote(in); got != want || got == other {
+		t.Errorf("Quote(%q) = %q, want the OS quoting %q (not %q)", in, got, want, other)
 	}
 }
