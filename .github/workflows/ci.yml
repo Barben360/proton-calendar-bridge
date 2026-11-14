@@ -15,22 +15,30 @@ env:
   GOFLAGS: -count=1
 jobs:
   secrets:
-    # gitleaks over the history (the pull request's commits on a PR, the
-    # pushed range on main). A test fixture that looks like a secret carries
-    # an inline "gitleaks:allow" with the reason.
+    # gitleaks over the whole history on every run: small, and immune to the
+    # push ranges gitleaks-action builds (on the first push of a repository
+    # it asked for the root commit's parent and scanned nothing). A test
+    # fixture that looks like a secret carries an inline "gitleaks:allow"
+    # with the reason.
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: read # gitleaks-action lists the PR's commits; without it, PR scans fail with 403
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb # gitleaks_8.30.1_linux_x64.tar.gz
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install gitleaks (pinned, checksum verified)
+        run: |
+          tgz="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tgz"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan the history
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
