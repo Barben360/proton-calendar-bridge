@@ -178,18 +178,24 @@ func TestAccountFields(t *testing.T) {
 	}
 }
 
-func TestCalendarBadgeFromGate(t *testing.T) {
+// A calendar is tagged read-only while its write gate is closed or
+// undecided, with the gate's reason as its info; a gate not known yet (no
+// client read the calendar, so its keys were not loaded) tags nothing, since
+// the first write loads them. The colour passes through.
+func TestCalendarReadOnlyFromGate(t *testing.T) {
 	a := ready("a", time.Minute, 300)
 	a.Health.Calendars = []service.CalendarHealth{
-		{Name: "Open", Gate: "open", GateReason: "stale reason", SyncedAt: ago(7 * time.Minute)},
+		{Name: "Open", Gate: "open", GateReason: "stale reason", Color: "#3F51B5", SyncedAt: ago(7 * time.Minute)},
 		{Name: "Closed", Gate: "closed", GateReason: "our member lacks the Write permission", Error: "boom"},
 		{Name: "Undecided", Gate: "undecided", GateReason: "the calendar keys did not unlock"},
+		{Name: "Unknown", Gate: "unknown", GateReason: "the keys were not loaded yet"},
 	}
 	cals := ui.Build(status(a), now).Accounts[0].Calendars
 	want := []ui.CalendarView{
-		{Name: "Open", ReadOnly: false, Badge: "", LastSync: "synced 7 min ago"},
-		{Name: "Closed", ReadOnly: true, Badge: "our member lacks the Write permission", Error: "boom"},
-		{Name: "Undecided", ReadOnly: true, Badge: "the calendar keys did not unlock"},
+		{Name: "Open", Color: "#3F51B5", LastSync: "synced 7 min ago"},
+		{Name: "Closed", ReadOnly: true, Info: "our member lacks the Write permission", Error: "boom"},
+		{Name: "Undecided", ReadOnly: true, Info: "the calendar keys did not unlock"},
+		{Name: "Unknown"},
 	}
 	if len(cals) != len(want) {
 		t.Fatalf("calendars = %+v", cals)

@@ -123,6 +123,7 @@ type Window struct {
 	// fyne.Do's function on the calling goroutine, which is not the thread
 	// the test is on).
 	dispatch func(func())
+	tips     *tipLayer // the info icons' hover tips
 }
 
 // NewWindow builds the window, hidden. newWizard starts a fresh add-account
@@ -139,6 +140,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	w.notice.Wrapping = fyne.TextWrapWord
 	w.notice.Importance = widget.LowImportance
 	w.notice.Hide()
+	w.tips = newTipLayer()
 	w.rowBox = vbox(2)
 	w.pane = newAccountPane(w)
 	w.wiz = &wizardPane{w: w}
@@ -158,7 +160,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	sidebar := fixedWidth(250, newPanel(pad(14, 12, 10, 10, container.NewBorder(header, footer, nil, nil, container.NewVScroll(w.rowBox))), colorCard, "", 0, 0, 0))
 	top := pad(16, 0, 28, 28, vbox(8, w.bannerBox, w.notice))
 	main := container.NewBorder(top, nil, nil, nil, w.right)
-	w.win.SetContent(container.NewBorder(nil, nil, container.NewBorder(nil, nil, nil, widget.NewSeparator(), sidebar), nil, main))
+	w.win.SetContent(container.NewStack(container.NewBorder(nil, nil, container.NewBorder(nil, nil, nil, widget.NewSeparator(), sidebar), nil, main), w.tips.box))
 	w.win.SetPadded(false) // the sidebar runs to the window's edges
 	w.win.Resize(fyne.NewSize(880, 620))
 	w.win.SetCloseIntercept(w.onClose)

@@ -49,12 +49,14 @@ type AccountView struct {
 	URL, Username, Fingerprint string
 }
 
-// CalendarView is one calendar of an account. Badge is the write gate's
-// reason while the gate is not open.
+// CalendarView is one calendar of an account. ReadOnly is set while its
+// write gate is closed or undecided, and Info is then the gate's reason. A
+// gate not known yet (its keys load on the first read or write) is not read
+// only. Color is Proton's ("#RRGGBB", "" when unknown).
 type CalendarView struct {
-	Name                   string
-	ReadOnly               bool
-	Badge, LastSync, Error string
+	Name, Color           string
+	ReadOnly              bool
+	Info, LastSync, Error string
 }
 
 // fallbackInterval is the cadence assumed for a pass whose loop did not say
@@ -153,9 +155,9 @@ func lastSync(h *service.Health) *time.Time {
 }
 
 func calendarView(c service.CalendarHealth, now time.Time) CalendarView {
-	cv := CalendarView{Name: c.Name, ReadOnly: c.Gate != "open", Error: c.Error}
+	cv := CalendarView{Name: c.Name, Color: c.Color, ReadOnly: c.Gate == "closed" || c.Gate == "undecided", Error: c.Error}
 	if cv.ReadOnly {
-		cv.Badge = c.GateReason
+		cv.Info = c.GateReason
 	}
 	if c.SyncedAt != nil {
 		cv.LastSync = "synced " + ago(now.Sub(*c.SyncedAt))

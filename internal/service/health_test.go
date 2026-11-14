@@ -181,6 +181,28 @@ func TestHealthReportsGatesWithReasons(t *testing.T) {
 	s.stop(t)
 }
 
+// A calendar's colour, as Proton serves it, reaches its health (the desktop
+// app draws it); a calendar with none has none.
+func TestHealthCarriesTheCalendarColour(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	u := e.f.Username
+	work := e.f.AddCalendar(u, protontest.Calendar{Name: "Work", Color: "#3F51B5"})
+	plain := e.f.AddCalendar(u, protontest.Calendar{Name: "Plain"})
+	e.signIn(t)
+	s := e.serve(t)
+	s.next(t, true)
+
+	h := e.health(t)
+	if c := calHealth(t, h, work); c.Color != "#3F51B5" {
+		t.Errorf("Work's colour = %q, want #3F51B5", c.Color)
+	}
+	if c := calHealth(t, h, plain); c.Color != "" {
+		t.Errorf("Plain's colour = %q, want none", c.Color)
+	}
+	s.stop(t)
+}
+
 // A calendar's sync state: its last success and lag from the fake clock, and
 // the class of a failure that is cleared by the next pass that works.
 func TestHealthCarriesTheErrorClass(t *testing.T) {

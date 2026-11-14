@@ -227,14 +227,15 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	} else {
 		p.fpRow.Hide()
 	}
+	p.w.tips.hide(nil) // its icon goes with the rows
 	cals := make([]fyne.CanvasObject, 0, len(av.Calendars))
 	for i, c := range av.Calendars {
 		var tags []fyne.CanvasObject
-		switch {
-		case c.Badge != "":
-			tags = append(tags, badge(c.Badge))
-		case c.ReadOnly:
+		if c.ReadOnly {
 			tags = append(tags, badge("read-only"))
+			if c.Info != "" {
+				tags = append(tags, vcenter(newInfoTip(p.w.tips, sentence(c.Info))))
+			}
 		}
 		if c.LastSync != "" {
 			tags = append(tags, newTextLine(c.LastSync, theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{}))
@@ -244,7 +245,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 		}
 		name := newTextLine(c.Name, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
 		name.Truncate = true
-		r := groupRow(nil, 0, name, tags...)
+		r := groupRow(nil, 0, container.NewBorder(nil, nil, pad(0, 0, 0, 8, calendarDot(c.Color)), nil, name), tags...)
 		if i > 0 {
 			r = divided(r)
 		}
