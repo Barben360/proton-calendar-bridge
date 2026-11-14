@@ -25,6 +25,27 @@ bin/pcb version
 
 Tests must bite: each fails when the behaviour it guards breaks. Write the failing test first.
 
+### Windows
+
+`make build GOOS=windows` cross-compiles `bin/pcb.exe` from Linux. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
+
+```sh
+make ui    # bin/pcb-ui.exe: a GUI binary (-H=windowsgui), with its icon and version
+```
+
+`make ui` runs `make winres` first, on Windows only: `cmd/pcb-ui/winres` renders `internal/ui/desktop/icons/app.svg` to a 256 px PNG, and the pinned `go-winres` turns it and the version (`v1.2.3…` becomes `1.2.3.0`) into `cmd/pcb-ui/rsrc_windows_amd64.syso`, which `go build` links. The `.syso` is generated, never committed.
+
+From Linux, `scripts/win/vmtest.sh` runs the tests on a Windows machine over SSH, on a copy of the working tree (tracked and untracked files). The machine's remote shell must be `cmd.exe` (OpenSSH's default), with Go and, for `pcb-ui`, the UCRT64 `gcc` on its `PATH`:
+
+```sh
+export PCB_WIN_SSH='-p PORT user@host'                       # the ssh arguments, never written in the repository
+scripts/win/vmtest.sh test ./internal/ctl/ -run Pipe -v       # go test with CGO_ENABLED=0, as pcb
+scripts/win/vmtest.sh test -ui ./cmd/pcb-ui/ ./internal/wingui/  # CGO_ENABLED=1, as pcb-ui (the first cgo build takes minutes)
+scripts/win/vmtest.sh run 'go build -o pcb.exe ./cmd/pcb && pcb.exe version'  # a raw cmd.exe line in the copy
+```
+
+Run the tests as a standard user, not elevated: elevation hides the permission problems a real user meets. `make vmtest-test` tests the script itself against a fake ssh.
+
 ### Smoke tests
 
 ```sh

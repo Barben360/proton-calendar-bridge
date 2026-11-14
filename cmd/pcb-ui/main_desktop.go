@@ -1,13 +1,15 @@
-//go:build linux && cgo
+//go:build (linux || windows) && cgo
 
 // Command pcb-ui is the desktop app of pcb: the bridge runs inside it, with a
 // window and a tray icon.
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -24,6 +26,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -40,12 +43,20 @@ const logMax = 10 * 1024 * 1024
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
-	opts, done, code := parseArgs(args, os.Stdout, os.Stderr)
+	// --version, --help and usage errors are written once parsed, after
+	// attachConsole: a Windows pcb-ui started from a terminal attaches to it
+	// only then, so a normal start is not tied to that terminal (its Ctrl-C
+	// and its closing would end pcb-ui).
+	var stdout, stderr bytes.Buffer
+	opts, done, code := parseArgs(args, &stdout, &stderr)
 	if done {
+		attachConsole()
+		_, _ = os.Stdout.Write(stdout.Bytes())
+		_, _ = os.Stderr.Write(stderr.Bytes())
 		return code
 	}
-	if err := checkDisplay(os.Getenv, openDisplay); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\nHint: %s\n", err, exitcode.HintOf(err))
+	if err := preflight(); err != nil {
+		showPreflightError(err)
 		return int(exitcode.From(err))
 	}
 	a := app.NewWithID(appID)
@@ -61,6 +72,11 @@ func run(args []string) int {
 	if err != nil {
 		return fatal(a, &exitcode.Error{Code: exitcode.Usage, Err: err, Hint: "use debug, info, warn or error in [log] level"})
 	}
+	// The state directory private to the user (an ACL on Windows) before the
+	// log creates it.
+	if err := acl.MkdirAll(dirs.State); err != nil {
+		return fatal(a, &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "check the permissions of the state directory"})
+	}
 	lf, err := logfile.Open(filepath.Join(dirs.State, "logs", "pcb-ui.log"), logMax)
 	if err != nil {
 		return fatal(a, &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "check the permissions of the state directory"})
@@ -73,7 +89,9 @@ func run(args []string) int {
 	var win *desktop.Window
 	show := func(account string) { fyne.Do(func() { win.Show(account) }) }
 	showLogin := func(username string) { fyne.Do(func() { win.ShowLogin(username) }) }
-	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin})
+	// ended is closed at logoff or shutdown: the bridge's drain is then 2 s.
+	ended := make(chan struct{})
+	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended})
 	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: a.OpenURL, exe: executable}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
 
@@ -99,6 +117,18 @@ func run(args []string) int {
 		ta = da
 	}
 	tray := desktop.Attach(ta, win, quit, opts.background)
+	// At logoff or shutdown Windows ends pcb-ui as soon as end returns: the
+	// bridge drains (2 s) within it. Linux sends SIGTERM instead.
+	stopWatch, err := watchSessionEnd(func() {
+		close(ended)
+		_ = bridge.Stop()
+		fyne.Do(a.Quit)
+	})
+	if err != nil {
+		log.Warn("pcb-ui will not drain at logoff or shutdown", "err", err)
+	} else {
+		defer stopWatch()
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -150,6 +180,11 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 		case <-b.Changes():
 		}
 	}
+}
+
+// printError writes err and its hint as the CLI does.
+func printError(w io.Writer, err error) {
+	fmt.Fprintf(w, "Error: %s\nHint: %s\n", err, exitcode.HintOf(err))
 }
 
 // fatal shows err (message and hint) in a window, waits for it to close and

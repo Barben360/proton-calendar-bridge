@@ -33,6 +33,7 @@ pcb doctor
 | The container restarts in a loop | A fault exit 10 (repair) or 20 (may pass); Docker restarts after both | Stop it, `docker compose run --rm --no-deps --entrypoint pcb pcb doctor`, start it. [Container](container.md#when-the-container-stops-or-restarts-in-a-loop) |
 | `pcb serve` exits 20 in the container | `/data` not writable by 65532, or `config`/`state` not 0700 | [Prepare /data](container.md#prepare-data) |
 | No tray icon on GNOME | The AppIndicator extension is missing or off | Install and enable AppIndicator and KStatusNotifierItem Support. [Desktop](desktop.md#no-tray-icon-on-gnome) |
+| `pcb-ui` on Windows exits 10, `pcb-ui needs OpenGL 2.0` | No OpenGL 2.0: a VM without 3D acceleration, a remote desktop session | Mesa's software `opengl32.dll` beside `pcb-ui.exe`. [Below](#pcb-ui-needs-opengl-20) |
 | `pcb-ui` shows a dialog and exits 20 | `pcb serve` (the service, the container) already serves this state | `pcb service stop` first, or use one of them. [One server per state](desktop.md#one-server-per-state-directory) |
 | `pcb is already serving (pid N, kind K)`, exit 20 | Another `pcb serve`, `pcb-ui` (`ui`) or agent session (`mcp`) holds the state | Stop it, or let commands go through it. [Thunderbird](thunderbird.md#what-pcb-serve-does) |
 | `pcb-ui` says `bridge stopped: <error>` | An error in `config.toml` after "Restart bridge" | Fix the file, press "Restart bridge". [Desktop](desktop.md#edit-the-configuration) |
@@ -43,3 +44,11 @@ pcb doctor
 | A command run as root refuses, `sudo -u pcb pcb ...` | The state belongs to the `pcb` user | Run it as `pcb`. [System service](service.md#run-it-as-a-system-service) |
 | pcb refuses to start, `account files of an older pcb are beside the per-account layout` | An older binary was run after the upgrade | Remove those files or move the state directory aside. [Upgrade](install.md#no-downgrade-after-the-multi-account-layout) |
 | `pcb login`, `sync` or `serve` exit 20 on Windows | No file lock or control socket off Unix | Run pcb on Linux. [Platforms](install.md#macos-and-windows) |
+
+## pcb-ui needs OpenGL 2.0
+
+**Symptom.** On Windows, `pcb-ui` does not open. Started from a terminal it prints `Error: pcb-ui needs OpenGL 2.0, which this display does not offer` with the driver's own message and exits 10; started from Explorer or at login it shows the same text in a message box.
+
+**Cause.** `pcb-ui` draws with OpenGL 2.0. Without a graphics driver that provides it, Windows offers only its own OpenGL 1.1: a virtual machine without 3D acceleration, some remote desktop sessions, a machine with only the basic display driver.
+
+**Fix.** Install or enable the graphics driver (in a VM, turn on 3D acceleration). Where that is not possible, Mesa's software renderer works around it: download a Mesa build for Windows (x64, for example the `mesa-dist-win` release archive) and copy its `opengl32.dll`, with the DLLs the archive puts beside it, into the folder of `pcb-ui.exe`. Windows loads a DLL beside the program before its own, so only `pcb-ui` uses it. pcb does not ship Mesa. `pcb` itself needs no OpenGL.

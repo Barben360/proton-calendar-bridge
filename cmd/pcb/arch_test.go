@@ -39,11 +39,12 @@ func TestPcbHasNoGUIDependency(t *testing.T) {
 
 // Both binaries carry the zone database (spec §5.6): a machine with no
 // zoneinfo (Windows) still loads every IANA zone. internal/ical imports
-// time/tzdata for it. pcb-ui's Windows build joins the list with its
-// desktop main (Task 12); today only its Linux build is checked.
+// time/tzdata for it; each binary's Windows and Linux builds are checked.
 func TestBinariesEmbedTheZoneDatabase(t *testing.T) {
 	for _, tc := range []struct{ goos, pkg string }{
 		{"windows", "."},
+		{"linux", "."},
+		{"windows", "../pcb-ui"},
 		{"linux", "../pcb-ui"},
 	} {
 		cmd := exec.Command("go", "list", "-deps", tc.pkg)

@@ -8,3 +8,6 @@ coverage.*
 # pcb-lab records (redacted live captures) stay local, never committed
 /spec/experiments/raw/E*/
 /spec/experiments/raw/L*/
+
+# pcb-ui.exe's icon and version resource, written by make winres
+/cmd/pcb-ui/rsrc_windows_*.syso

@@ -1,4 +1,4 @@
-//go:build linux && cgo
+//go:build (linux || windows) && cgo
 
 package main
 
@@ -47,5 +47,3 @@ func (s *settings) SetLevel(l slog.Level) { s.level.Set(l) }
 
 func (s *settings) OpenLogs() error   { return s.open(fileURL(s.logsDir)) }
 func (s *settings) OpenConfig() error { return s.open(fileURL(s.configPath)) }
-
-func fileURL(path string) *url.URL { return &url.URL{Scheme: "file", Path: path} }

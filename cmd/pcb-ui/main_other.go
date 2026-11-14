@@ -1,7 +1,7 @@
-//go:build !linux || !cgo
+//go:build (!linux && !windows) || !cgo
 
-// Command pcb-ui is the desktop app of pcb. Only the Linux build with cgo
-// exists for now.
+// Command pcb-ui is the desktop app of pcb. Only the Linux and Windows
+// builds with cgo exist for now.
 package main
 
 import (
