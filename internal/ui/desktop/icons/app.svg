@@ -1,23 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-  <rect x="2.5" y="2.5" width="59" height="59" rx="14" fill="#FFFFFF" stroke="#D5D8DE"/>
-  <g fill="#D5D8DE">
-    <rect x="9.5" y="9.5" width="9" height="9" rx="2.5"/>
-    <rect x="21.5" y="9.5" width="9" height="9" rx="2.5"/>
-    <rect x="33.5" y="9.5" width="9" height="9" rx="2.5"/>
-    <rect x="45.5" y="9.5" width="9" height="9" rx="2.5"/>
-    <rect x="9.5" y="21.5" width="9" height="9" rx="2.5"/>
-    <rect x="45.5" y="21.5" width="9" height="9" rx="2.5"/>
-    <rect x="21.5" y="33.5" width="9" height="9" rx="2.5"/>
-    <rect x="33.5" y="33.5" width="9" height="9" rx="2.5"/>
-    <rect x="9.5" y="45.5" width="9" height="9" rx="2.5"/>
-    <rect x="21.5" y="45.5" width="9" height="9" rx="2.5"/>
-    <rect x="33.5" y="45.5" width="9" height="9" rx="2.5"/>
-    <rect x="45.5" y="45.5" width="9" height="9" rx="2.5"/>
-  </g>
-  <g fill="#0B6E63">
-    <rect x="21.5" y="21.5" width="9" height="9" rx="2.5"/>
-    <rect x="33.5" y="21.5" width="9" height="9" rx="2.5"/>
-    <rect x="9.5" y="33.5" width="9" height="9" rx="2.5"/>
-    <rect x="45.5" y="33.5" width="9" height="9" rx="2.5"/>
-  </g>
+  <path d="M17.5 12 V7.5 A4 4 0 0 1 25.5 7.5 V12 Z M38.5 12 V7.5 A4 4 0 0 1 46.5 7.5 V12 Z" fill="#FFFFFF"/>
+  <rect x="7" y="12" width="50" height="45" rx="10" fill="#FFFFFF"/>
+  <path d="M7 25 V22 A10 10 0 0 1 17 12 H47 A10 10 0 0 1 57 22 V25 Z" fill="#0B6E63"/>
+  <rect x="7" y="12" width="50" height="45" rx="10" fill="none" stroke="#1B1D22" stroke-width="3"/>
+  <rect x="19" y="5" width="5" height="13" rx="2.5" fill="#1B1D22"/>
+  <rect x="40" y="5" width="5" height="13" rx="2.5" fill="#1B1D22"/>
+  <path d="M17 36 Q32 56 47 36" fill="none" stroke="#0B6E63" stroke-width="3.5" stroke-linecap="round"/>
 </svg>

@@ -15,11 +15,15 @@ env:
   GOFLAGS: -count=1
 jobs:
   secrets:
-    # gitleaks over the whole history on every run: small, and immune to the
-    # push ranges gitleaks-action builds (on the first push of a repository
-    # it asked for the root commit's parent and scanned nothing). A test
-    # fixture that looks like a secret carries an inline "gitleaks:allow"
-    # with the reason.
+    # gitleaks over the whole history of the commit under test on every run:
+    # small, and immune to the push ranges gitleaks-action builds (on the
+    # first push of a repository it asked for the root commit's parent and
+    # scanned nothing). --log-opts=HEAD keeps it to that history: by default
+    # gitleaks scans --all, every branch the full checkout fetched, so a
+    # finding on an unmerged branch failed main and every other pull request.
+    # A test fixture that looks like a secret carries an inline
+    # "gitleaks:allow" with the reason; a false positive already committed
+    # goes in .gitleaksignore.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -37,7 +41,7 @@ jobs:
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP" gitleaks
       - name: Scan the history
-        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .'
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 --log-opts=HEAD .'
 
   check:
     runs-on: ubuntu-latest
@@ -145,7 +149,7 @@ jobs:
       - name: Install the GL and X development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb x11-utils
       - run: make ui
       - name: pcb-ui starts far enough to print its version
         run: xvfb-run -a bin/pcb-ui --version

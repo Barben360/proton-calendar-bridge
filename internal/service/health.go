@@ -110,10 +110,12 @@ type PassHealth struct {
 // "other" for a failure the cache holds from an earlier one). Gate is the
 // write gate, open, closed, undecided or unknown (keys not loaded yet), and
 // GateReason says why unless it is open (M4-R39, M4-R40). KeysError is why
-// the keys did not unlock, when they did not.
+// the keys did not unlock, when they did not. Color is Proton's ("#RRGGBB",
+// "" when it has none).
 type CalendarHealth struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
+	Color      string     `json:"color,omitempty"`
 	Events     int        `json:"events"`
 	SyncedAt   *time.Time `json:"synced_at,omitempty"`
 	LagSeconds *int       `json:"lag_seconds,omitempty"`
@@ -391,7 +393,7 @@ func (l *Local) Health(ctx context.Context) (Health, error) {
 		return Health{}, l.fail(cacheError(err))
 	}
 	for _, c := range cals {
-		ch := CalendarHealth{ID: c.ID, Name: c.Name, Events: c.Events, Error: c.Error}
+		ch := CalendarHealth{ID: c.ID, Name: c.Name, Color: c.Color, Events: c.Events, Error: c.Error}
 		if c.Error != "" {
 			if ch.ErrorClass = classes[c.ID]; ch.ErrorClass == "" {
 				ch.ErrorClass = classOther

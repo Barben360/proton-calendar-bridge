@@ -12,6 +12,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/software"
+	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
@@ -43,8 +44,9 @@ func screenshotView() ui.View {
 				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite, LastSync: &synced,
 				URL: "http://127.0.0.1:1080/dav/1a2b3c4d/", Username: "alice@proton.me",
 				Calendars: []ui.CalendarView{
-					{Name: "Personal"},
-					{Name: "Holidays in France", ReadOnly: true, Badge: "read-only: subscribed calendar"},
+					{Name: "Personal", Color: "#3F51B5"},
+					{Name: "Work", Color: "#DB3251"},
+					{Name: "Holidays in France", Color: "#5ABEB4", ReadOnly: true, Info: "not a normal calendar (subscribed or holidays)"},
 				},
 			},
 			{ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing, SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly},
@@ -66,7 +68,17 @@ func TestScreenshots(t *testing.T) {
 		name  string
 		setup func(f *fixture)
 	}{
-		{"account", func(f *fixture) { f.w.selectAccount("1a2b3c4d") }},
+		{"account", func(f *fixture) {
+			// Taller than the default window, so the calendars show, with
+			// the pointer on the read-only calendar's info icon.
+			f.w.win.Resize(fyne.NewSize(880, 720))
+			f.w.selectAccount("1a2b3c4d")
+			tips := f.infoTips()
+			if len(tips) != 1 {
+				t.Fatalf("%d info icons in the account picture, want 1", len(tips))
+			}
+			test.MoveMouse(f.w.win.Canvas(), fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0]).Add(fyne.NewPos(4, 4)))
+		}},
 		{"add-account", func(f *fixture) { f.w.openWizard("carol@proton.me") }},
 	}
 	if dir == "" {

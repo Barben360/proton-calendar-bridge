@@ -169,8 +169,8 @@ func socketStatus(t *testing.T, r *rig) ctl.Status {
 
 // With no daemon, pcb mcp becomes one for the session: the control socket
 // reports kind mcp and no listener, its tools answer over stdio under the
-// read-only profile, and the end of stdin ends it with exit 0, the socket
-// removed.
+// full profile (the default, the author's call of 2026-11-14), and the end
+// of stdin ends it with exit 0, the socket removed.
 func TestMCPStdioBecomesTheDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
@@ -181,8 +181,8 @@ func TestMCPStdioBecomesTheDaemon(t *testing.T) {
 		t.Errorf("status accounts = %v, want %s", got, r.f.Username)
 	}
 	names := toolNames(t, cs)
-	if !slices.Contains(names, "events_list") || slices.Contains(names, "event_create") {
-		t.Errorf("tools = %v, want the read-only profile's", names)
+	if !slices.Contains(names, "event_create") || !slices.Contains(names, "event_delete") || !slices.Contains(names, "logout") {
+		t.Errorf("tools = %v, want the full profile's (the default)", names)
 	}
 	st := socketStatus(t, r)
 	if st.Daemon == nil || st.Daemon.Kind != "mcp" || st.Listener != nil {
@@ -251,20 +251,21 @@ func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 }
 
 // With a daemon running (pcb serve), pcb mcp relays to it: same accounts,
-// the daemon counts a relay session, and serve.lock stays the daemon's.
+// the profile asked for (here the read-only one, never the default), the
+// daemon counts a relay session, and serve.lock stays the daemon's.
 func TestMCPStdioRelaysToARunningDaemon(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	s.listening()
-	m := startMCP(t, r, nil, "--profile", "full")
+	m := startMCP(t, r, nil, "--profile", "read-only")
 	cs := m.connect("2026-07-28")
 	if got := mcpStatus(t, cs); !slices.Equal(got, []string{r.f.Username}) {
 		t.Errorf("status accounts = %v, want %s", got, r.f.Username)
 	}
-	if names := toolNames(t, cs); !slices.Contains(names, "event_delete") {
-		t.Errorf("tools = %v, want the full profile's", names)
+	if names := toolNames(t, cs); !slices.Contains(names, "events_list") || slices.Contains(names, "event_create") || slices.Contains(names, "logout") {
+		t.Errorf("tools = %v, want the read-only profile's", names)
 	}
 	st := socketStatus(t, r)
 	if st.Daemon == nil || st.Daemon.Kind != "serve" || st.MCP == nil || st.MCP.Sessions["relay"] != 1 || st.MCP.Sessions["stdio"] != 0 {

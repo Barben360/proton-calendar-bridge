@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"errors"
+	"image/color"
 	"log/slog"
 	"net/url"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -148,7 +150,7 @@ func twoAccounts() ui.View {
 	return ui.View{Tray: ui.TrayAttention, Accounts: []ui.AccountView{
 		{ID: "a1", Address: "alice@example.org", Short: "synced 1 min ago", Dot: ui.TrayOK, SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadWrite,
 			URL: "http://127.0.0.1:8080/", Username: "alice@example.org",
-			Calendars: []ui.CalendarView{{Name: "Personal"}, {Name: "Shared", ReadOnly: true, Badge: "read-only: ambiguous"}},
+			Calendars: []ui.CalendarView{{Name: "Personal", Color: "#3F51B5"}, {Name: "Shared", ReadOnly: true, Info: "an ambiguous gate"}},
 			Alerts:    []ctl.Alert{{Code: "sync-stalled", Severity: "error", Message: "sync is stalled", Fix: "restart the bridge"}}},
 		{ID: "b2", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false, CalDAV: false, MCP: false, MCPMode: service.MCPOff},
 	}}
@@ -265,6 +267,17 @@ func (f *fixture) line(text string) *textLine {
 	return found
 }
 
+// infoTips are the visible info icons.
+func (f *fixture) infoTips() []*infoTip {
+	var out []*infoTip
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if t, ok := o.(*infoTip); ok {
+			out = append(out, t)
+		}
+	})
+	return out
+}
+
 // tapAdd taps the sidebar's + (add an account).
 func (f *fixture) tapAdd() {
 	f.t.Helper()
@@ -340,7 +353,7 @@ func TestAccountListRendersView(t *testing.T) {
 		t.Error("ok and attention dots share a colour")
 	}
 	f.w.Show("")
-	for _, s := range []string{"alice@example.org", "synced 1 min ago", "Personal", "Shared", "read-only: ambiguous", "sync is stalled", "restart the bridge", "http://127.0.0.1:8080/"} {
+	for _, s := range []string{"alice@example.org", "synced 1 min ago", "Personal", "Shared", "read-only", "sync is stalled", "restart the bridge", "http://127.0.0.1:8080/"} {
 		if !f.has(s) {
 			t.Errorf("selected account pane lacks %q; visible: %v", s, f.texts())
 		}
@@ -403,8 +416,77 @@ func TestAccountPaneOrderAndBadge(t *testing.T) {
 			t.Errorf("%q is not above %q: %v", order[i-1], order[i], f.texts())
 		}
 	}
-	if l := f.line("read-only: ambiguous"); l.ColorName != theme.ColorNameWarning {
+	if l := f.line("read-only"); l.ColorName != theme.ColorNameWarning {
 		t.Errorf("badge colour = %v, want warning", l.ColorName)
+	}
+}
+
+// A read-only calendar shows a short "read-only" badge; its reason waits
+// behind an info icon, shown while the pointer is on the icon (or after a
+// tap) and gone once it leaves. The pointer moves through the canvas as the
+// driver routes it, so a tip that took the pointer from its icon (one drawn
+// in an overlay) would vanish at the first move.
+func TestReadOnlyReasonShowsOnHover(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	f.line("read-only")
+	if f.has("An ambiguous gate") {
+		t.Fatalf("the reason shows before any hover: %v", f.texts())
+	}
+	f.w.win.Resize(fyne.NewSize(880, 1000)) // the calendars below the fold of 620 px
+	tips := f.infoTips()
+	if len(tips) != 1 {
+		t.Fatalf("%d info icons, want 1 (the read-only calendar's)", len(tips))
+	}
+	c := f.w.win.Canvas()
+	on := fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0]).Add(fyne.NewPos(2, 2))
+	test.MoveMouse(c, on)
+	if !f.has("An ambiguous gate") {
+		t.Fatalf("hovering the info icon shows no reason: %v", f.texts())
+	}
+	test.MoveMouse(c, on.Add(fyne.NewPos(1, 1)))
+	if !f.has("An ambiguous gate") {
+		t.Error("the reason goes while the pointer stays on the icon")
+	}
+	test.MoveMouse(c, fyne.NewPos(1, 1))
+	if f.has("An ambiguous gate") {
+		t.Error("the reason stays after the pointer left the icon")
+	}
+	test.Tap(tips[0])
+	if !f.has("An ambiguous gate") {
+		t.Error("a tap on the info icon shows no reason")
+	}
+	f.w.Update(twoAccounts())
+	if f.has("An ambiguous gate") {
+		t.Error("the reason outlives the row that showed it")
+	}
+}
+
+// A calendar's colour is a dot before its name. One without a colour, or
+// with one pcb cannot read, keeps the dot's room, so the names line up.
+func TestCalendarColourDot(t *testing.T) {
+	f := newFixture(t)
+	v := twoAccounts()
+	v.Accounts[0].Calendars = append(v.Accounts[0].Calendars, ui.CalendarView{Name: "Odd", Color: "nope"})
+	f.w.Update(v)
+	f.w.Show("a1")
+	want := color.NRGBA{R: 0x3F, G: 0x51, B: 0xB5, A: 0xFF}
+	n := 0
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if c, ok := o.(*canvas.Circle); ok && c.FillColor == want {
+			n++
+		}
+	})
+	if n != 1 {
+		t.Errorf("%d dots of #3F51B5, want 1 (Personal's)", n)
+	}
+	abs := fyne.CurrentApp().Driver().AbsolutePositionForObject
+	x := abs(f.line("Personal")).X
+	for _, name := range []string{"Shared", "Odd"} {
+		if got := abs(f.line(name)).X; got != x {
+			t.Errorf("%s starts at x=%v, Personal at x=%v", name, got, x)
+		}
 	}
 }
 
@@ -511,6 +593,52 @@ func TestMCPSelectorCallsSetMCP(t *testing.T) {
 	}
 	if got := f.act.got(); len(got) != 3 {
 		t.Errorf("showing accounts called %v, want no call beyond the three choices", got[3:])
+	}
+}
+
+// Under the MCP selector, the command that adds pcb to Claude Code, with
+// its Copy, and what the agents of the shown mode may do: both settings
+// apply (issue 13), so Read-write says the agent's profile can still keep
+// it to reads. Off has nothing to add an agent to.
+func TestMCPAgentHint(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	if !f.visible(f.w.pane.agentRow) || !f.visible(f.w.pane.agentCopy) {
+		t.Fatal("no agent command under a Read-write account's MCP selector")
+	}
+	if !f.has("claude mcp add --scope user pcb -- pcb mcp") || !f.has("--profile read-only") || f.has("every change is refused") {
+		t.Errorf("Read-write hint: %v", f.texts())
+	}
+	test.Tap(f.w.pane.agentCopy)
+	if got := f.app.Clipboard().Content(); got != "claude mcp add --scope user pcb -- pcb mcp" {
+		t.Errorf("agent Copy: clipboard = %q", got)
+	}
+	v := twoAccounts()
+	v.Accounts[0].MCPMode = service.MCPReadOnly
+	f.w.Update(v)
+	if !f.visible(f.w.pane.agentRow) || !f.has("every change is refused") || f.has("--profile read-only") {
+		t.Errorf("Read-only hint: %v", f.texts())
+	}
+	f.w.Show("b2")
+	if f.visible(f.w.pane.agentRow) {
+		t.Error("agent command shown for an account with MCP off")
+	}
+	if len(f.act.got()) != 0 {
+		t.Errorf("the hint or its Copy called the bridge: %v", f.act.got())
+	}
+	// A choice that went through changes the hint at once, before the
+	// next update.
+	f.w.Show("a1")
+	f.w.pane.mcp.SetSelected("Read-write")
+	f.wait()
+	if !f.has("--profile read-only") {
+		t.Errorf("hint after choosing Read-write: %v", f.texts())
+	}
+	f.w.pane.mcp.SetSelected("Off")
+	f.wait()
+	if f.visible(f.w.pane.agentRow) {
+		t.Error("agent command still shown after choosing Off")
 	}
 }
 
@@ -841,8 +969,8 @@ func TestConnectionCopiesURLAndUsername(t *testing.T) {
 	v.Accounts[1].CalDAV, v.Accounts[1].URL, v.Accounts[1].Username = true, "http://127.0.0.1:8080/dav/b2/", "bob@example.org"
 	f.w.Update(v)
 	f.w.Show("a1")
-	if got := f.copies(); len(got) != 3 {
-		t.Fatalf("Copy buttons in the connection block: %d, want 3 (URL, username, password)", len(got))
+	if got := f.copies(); len(got) != 4 {
+		t.Fatalf("Copy buttons: %d, want 4 (the agent command, then the connection's URL, username, password)", len(got))
 	}
 	test.Tap(f.w.pane.urlCopy)
 	if got := f.app.Clipboard().Content(); got != "http://127.0.0.1:8080/" {

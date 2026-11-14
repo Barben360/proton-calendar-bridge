@@ -36,10 +36,10 @@ That helps, but your controls are:
 The agent starts `pcb mcp`, which speaks MCP on stdin and stdout.
 
 ```sh
-pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]
+pcb mcp [--profile full|read-only] [--allow CAPS] [--account A]
 ```
 
-- **When pcb already runs** (`pcb serve`, the service, `pcb-ui`), it relays the session to it over the control socket.
+- **When pcb already runs** (`pcb serve`, the service, `pcb-ui`), it relays the session to it over the control socket. There is no port to set: with `pcb-ui`, the agent still starts `pcb mcp`, so the `pcb` binary must be installed too.
 - **Otherwise** it serves your accounts itself for as long as the agent's session lasts. Meanwhile `pcb serve` and `pcb-ui` refuse to start, saying an agent session holds the state: end it first.
 
 - **With the pcb user service installed** and running or restarting, `pcb mcp` never takes its place: it waits up to 30 s for the service and relays to it, else exits 20 asking for `pcb service start`. A service you stopped changes nothing.
@@ -48,16 +48,18 @@ pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]
 ### Set up Claude Code
 
 ```sh
-claude mcp add pcb -- pcb mcp                    # read-only (the default): read, plus starting a login
-claude mcp add pcb -- pcb mcp --profile full     # also create, edit, delete, log out
+claude mcp add --scope user pcb -- pcb mcp                         # full (the default): read, create, edit, delete, log in and out
+claude mcp add --scope user pcb -- pcb mcp --profile read-only     # read, plus starting a login
 ```
+
+`--scope user` makes `pcb` available in every Claude Code session. Without it, Claude Code keeps the server for the directory you ran the command in only (its `local` scope), and a session started elsewhere does not list it. `claude mcp list` shows what a session sees; restart a running session after adding the server.
 
 To give the server an environment, `-e KEY=value` goes after its name: `-e` takes every following word.
 
 Or in a project's `.mcp.json`:
 
 ```json
-{"mcpServers": {"pcb": {"command": "pcb", "args": ["mcp", "--profile", "full"]}}}
+{"mcpServers": {"pcb": {"command": "pcb", "args": ["mcp"]}}}
 ```
 
 Give the absolute path of `pcb` when the agent's `PATH` lacks it.
@@ -72,16 +74,34 @@ Give the absolute path of `pcb` when the agent's `PATH` lacks it.
 | `delete` (needs `write`) | + `event_delete` |
 | `login` (stdio only) | `login` |
 | `manage` (stdio only) | `logout` |
-| `--profile read-only` (default) | `read` + `login` |
-| `--profile full` | all six |
+| `--profile full` (default) | all six |
+| `--profile read-only` | `read` + `login` |
 
 - `--allow write,delete` replaces the profile.
+- The default lets an agent delete events and sign an account out. pcb asks you first when the agent's client can ask, not otherwise ([deletes](#deletes-and-sign-outs-ask-you)); for an agent you would not let do that unasked, use `--allow write,login` or `--profile read-only`.
 - `--account ADDRESS` (repeatable) limits the session to those accounts.
 - Over stdio a profile is a guard rail, not a lock: any program running as you can run `pcb` itself.
-- Each account has its own MCP setting, above every profile and token (`pcb account mcp`, or the MCP selector in `pcb-ui`):
-  - `off` hides the account from every agent at once. Its sync keeps running while CalDAV is on.
-  - `read-only` lets agents read it but refuses every change, even from `--profile full` or a token with `write`: `event_create`, `event_update`, `event_delete` and `logout` answer `refused` (reason `pcb:account-read-only`), and `calendars_list`, `event_get` and `status` show it as `read_only`.
-  - `read-write` (the default) leaves it to the profile or token.
+### Two settings, the stricter wins
+
+Two settings decide what an agent may do, and both always apply:
+
+| Setting | Decides | Set with |
+|---|---|---|
+| The agent's grant | what **this agent** may do, on every account | `--profile` or `--allow` where you add the agent, or the token's `--allow` |
+| The account's MCP setting | what **any agent** may do with **this account** | `pcb account mcp off\|read-only\|read-write`, or the MCP selector in `pcb-ui` |
+
+An agent gets what both allow:
+
+| Account's MCP setting | Agent with `--profile full` (the default), or a token with `write` | Agent with `--profile read-only` |
+|---|---|---|
+| Off | does not see the account | does not see the account |
+| Read-only | reads; every change is refused | reads |
+| Read-write (the default) | reads and edits | reads; it has no tools to edit |
+
+With both defaults an agent reads and edits. To keep agents to reads, set the account to Read-only (every agent) or add the agent with `--profile read-only` (that agent).
+
+- Off hides the account from every agent at once. Its sync keeps running while CalDAV is on.
+- Read-only refuses every change, from any profile or token: `event_create`, `event_update`, `event_delete` and `logout` answer `refused` (reason `pcb:account-read-only`), and `calendars_list`, `event_get` and `status` show the account as `read_only`.
 
 ## From another machine (remote, with a token)
 

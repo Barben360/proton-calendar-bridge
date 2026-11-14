@@ -1,6 +1,6 @@
 # E09 — Decrypt cost per 1 000 events
 
-Offline half **measured** (2026-11-11, synthetic rows from the fake Proton); live half **pending** (test-account rows, cold start). Feeds the C2 design question of SPEC §7.2: is decrypting on demand cheap enough, or is a sealed decrypted cache needed? Earlier source figures: `raw/m2-feed-research.md` (E09), caloxide's claimed ~1.4 ms per event without signature checks.
+Offline half **measured** (2026-11-11, synthetic rows from the fake Proton); live half **measured** (2026-11-14, the test account's rows, cold start without a login: below). Feeds the C2 design question of SPEC §7.2: is decrypting on demand cheap enough, or is a sealed decrypted cache needed? Earlier source figures: `raw/m2-feed-research.md` (E09), caloxide's claimed ~1.4 ms per event without signature checks.
 
 ## Offline measurement
 
@@ -32,10 +32,20 @@ So about **0.2–0.4 s of CPU per 1 000 events, on one goroutine**, signatures c
 
 `service.Local.Serve` renders rows on demand through `cards.Open` and the `internal/ical` merge, into an in-memory LRU of rendered objects (fixed at 2 000 entries, `lruCapacity`; not configurable, counted by objects, shared by all calendars; ruling in the M3 plan, docs corrected by the initial-version audit); nothing decrypted reaches the disk [verified: `TestUndecryptableEventDoesNotFailTheReport` serves a report through the real service over the fake Proton; the LRU size and the no-disk rule are [claim]: no test of their own in this task]. No new timing was taken: `BenchmarkOpen` above is the only measurement, and no benchmark covers the merge, the render or a whole cold start. A cold-start figure (login to the first full render of every calendar) needs the live half.
 
-## Live half (pending)
+## Live half (2026-11-14)
 
-With the test account (`spec/HUMAN-CHECKS.md`, after the CAPTCHA step): time `cards.Open` over the account's real cached rows, and the cold start (login, key unlock, calendar bootstrap, first full render of every calendar). Record the address key algorithm and the parts mix per row.
+The test account's state, upgraded from M5 (`M6-live.md`), build v0.1.0-4-ge8adf96, the author's workstation (the machine of the offline half), run root and guard as `M6-live.md`. **No login was made** (the session of 2026-11-12 was alive), so the cold start here is the rest of it: the cache moved aside (`pcb.db` out of the account dir, kept), then a full sync, then the first full render. Times UTC.
+
+| Phase | What | Result |
+|---|---|---|
+| Full sync from an empty cache (`pcb sync --json`, 19:00:00Z) | calendar list, keys, every row of 3 calendars: 194 + 209 + 0 rows, mode `initial` | **71.5 s wall, 0.34 s user CPU, 0.14 s system**, 37 MB max RSS |
+| First full render (`pcb serve` just started, LRU empty): `calendar-multiget` of every object of each calendar, `calendar-data` | 209 objects (Holidays in France) + 190 objects (My calendar, 194 rows), 349 KB of iCalendar | **0.15 s + 0.36 s = 0.51 s** for 399 objects, request to last byte through loopback HTTP |
+| The same multigets again (rendered objects in the LRU) | | 0.04 s and 1.06 s (the second overlapped a sync pass; noisy) |
+
+- The sync stores ciphertext only (M2-R1): its CPU is 0.34 s for 403 rows, so the 71 s are network and Proton's answer times, not decryption. Proton's pages are 100 rows and the client's limiter allows 4 requests a second (burst 8), far from binding at this size; the per-request latency was not traced.
+- The render is where decryption happens (`cards.Open`, the merge, the iCalendar render): **about 1.3 ms per object end to end** including HTTP and XML, an upper bound for the decrypt share. That is the same order as the offline 0.2 to 0.4 ms per row for `cards.Open` alone; real rows are lighter than the synthetic ones (holidays carry no attendees or personal part).
+- Not measured: the login's own time (no login was made) and the address key algorithm (not recorded by the probes).
 
 ## Reading so far
 
-At 0.2–0.4 ms per event, a 1 000-event calendar renders in well under a second of CPU, far below the network cost of the initial listing. On-demand decryption with an in-memory LRU of rendered objects (M3 plan) is enough; no decrypted cache on disk is needed, which matches §7.2 "nothing decrypted is ever written". The live half confirms or revises this.
+At 0.2–0.4 ms per event, a 1 000-event calendar renders in well under a second of CPU, far below the network cost of the initial listing. On-demand decryption with an in-memory LRU of rendered objects (M3 plan) is enough; no decrypted cache on disk is needed, which matches §7.2 "nothing decrypted is ever written". **The live half confirms it** [verified: live 2026-11-14]: the first render of 399 real objects took 0.51 s while the sync before it took 71 s of network.

@@ -54,12 +54,19 @@ func TestParseArgs(t *testing.T) {
 	})
 }
 
+// childHook, set by a platform's test file, runs the child of a test that
+// needs the main thread (Linux: classChild, of TestWindowClassIsTheAppID).
+var childHook func() int
+
 // TestMain runs pcb-ui's run, with the arguments in PCB_UI_TEST_ARGS, in
 // the child of TestUnusableDisplayIsAPcbMessage and
 // TestVersionGoesToTheInheritedHandle (on the main thread, which GLFW needs).
 func TestMain(m *testing.M) {
 	if os.Getenv("PCB_UI_TEST_RUN") == "1" {
 		os.Exit(run(strings.Fields(os.Getenv("PCB_UI_TEST_ARGS"))))
+	}
+	if childHook != nil && os.Getenv("PCB_UI_TEST_CLASS") == "1" {
+		os.Exit(childHook())
 	}
 	os.Exit(m.Run())
 }

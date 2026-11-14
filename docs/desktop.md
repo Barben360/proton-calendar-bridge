@@ -36,7 +36,7 @@ After `make install-ui` it is also in your applications menu.
 | Part | What it does |
 |---|---|
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
-| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account), its calendars, and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
+| Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account, with the Claude Code command to copy under it), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
 | Add-account wizard | Password, 2FA code, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you. |
 | Settings | "Start at login", "Open config.toml", "Restart bridge", the log level. |
@@ -48,6 +48,23 @@ Closing the window hides it; Quit in the tray menu stops the bridge. Without a t
 Open the add-account wizard from the window and type the address, the password, then the 2FA code, and solve the CAPTCHA when Proton asks for one. An AI agent that starts a login opens the same wizard with the address filled in ([agents](agents.md#log-in-from-an-agent)).
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
+
+## Connect an AI agent
+
+`pcb-ui` has no port for agents to set. The agent starts `pcb mcp`, the command-line binary, which hands the session to the running `pcb-ui`. So `pcb` must be installed next to `pcb-ui`: the release installer puts both, while from a clone `make install-ui` alone does not (run `make install install-ui`).
+
+For Claude Code:
+
+```sh
+claude mcp add --scope user pcb -- pcb mcp                         # read, create, edit, delete (the default)
+claude mcp add --scope user pcb -- pcb mcp --profile read-only     # read only
+```
+
+`--scope user` makes it available in every Claude Code session, not only in the directory you ran the command in ([scopes](agents.md#set-up-claude-code)). Give the absolute path of `pcb` (`~/.local/bin/pcb`) when the agent's `PATH` lacks it.
+
+The MCP selector in the window is not a server switch: it says what any agent may do with that account. The agent's profile says what that agent may do. Both apply, and the stricter wins: on Read-write, an agent added with the first command edits and one added with `--profile read-only` only reads; on Read-only, every agent only reads ([the two settings](agents.md#two-settings-the-stricter-wins)). Under the selector, the window shows the first command with a Copy button, and what agents may do with the setting chosen.
+
+An agent on another machine uses the remote `/mcp` with a token: turn it on in `config.toml` (Settings, "Open config.toml", then "Restart bridge") and create the token with `pcb mcp token add` ([remote](agents.md#from-another-machine-remote-with-a-token)).
 
 ## No tray icon on GNOME
 

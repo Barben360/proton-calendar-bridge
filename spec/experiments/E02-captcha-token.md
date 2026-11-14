@@ -21,11 +21,18 @@ Single-process interactive fallback: whatever E02 finds, M1 keeps the flow where
 
 ## Results
 
-| # | Challenge (UTC) | Token length | Solved | Retry (new process) | Token age at retry | Outcome |
-|---|---|---|---|---|---|---|
-| 1 | 2026-11-10 23:47:39 | 24 | pending (author away) | pending | pending (at least hours) | pending |
+Rows 2 to 6 were read on 2026-11-14 from the records the live runs left (the run root's `hv-log.jsonl` files, the login ledgers and the saved `pcb login --json` outputs); no new login was made for E02. Times UTC. "Challenge" is the `hv-log.jsonl` line where there is one, else the ledger time of the login that met the CAPTCHA (the challenge comes within seconds of it). "Accepted" means the retry logged in with no new human-verification answer (no second `hv-log.jsonl` line, `state: ready` or a saved session).
 
-Row 1 was recorded by hand: this HV happened before `hv-log.jsonl` existed (first `pcb-lab login` on the author's workstation, Proton code 9001; `hv.json` holds the challenge). The author's delay before solving it is the first E02 measurement: if Proton accepts the hours-old token in a new process, a solved token outlives its process and a long delay.
+| # | Challenge (UTC) | Token length | Solved | Retry | Token age at retry | Outcome |
+|---|---|---|---|---|---|---|
+| 1 | 2026-11-10 23:47:39 | 24 | never | never | — | dropped: superseded by HUMAN-CHECKS step 1's fresh challenge |
+| 2 | 2026-11-12 22:33:34 (step 2a, `pcb-lab login`) | 24 | by the author, before the retry | 22:34:41, new process (`pcb-lab login --captcha-token`) | 1 min 07 s | accepted |
+| 3 | 2026-11-12 22:49:27 (step 3, `pcb-lab login`) | 24 | by the author | 22:53:48, new process | 4 min 21 s | accepted |
+| 4 | 2026-11-12 23:15:29 (M1.2, `pcb login`) | 24 | by the author | 23:21:56, new process (`pcb login resume --captcha-token`) | about 6 min 27 s | accepted (`state: ready`) |
+| 5 | 2026-11-12 23:45:11 (M1.7, the unattended relogin of `pcb calendar list`) | 24 | by the author | 23:46:14, new process (`pcb login resume --captcha-token`) | about 1 min 03 s | accepted (`state: ready`) |
+| 6 | 2026-11-13 22:54:00 (step 9, `pcb-ui`'s wizard) and 2026-11-13 23:41:30 (step 10, the loopback page) | — | by the author | the same process (the wizard's `I solved it`; the page's continue) | about 2 min 38 s; about 2 min 53 s | accepted |
+
+Not a CAPTCHA case: HUMAN-CHECKS 2b, 2c, 2d and the seed's second `proton-cal` login met none or are proton-cal's own flow (not pcb's).
 
 ## Pending live run (HUMAN-CHECKS steps 1 and 2)
 
@@ -48,7 +55,9 @@ pass-cli run --env-file ~/.config/pcb-live/lab.env -- pcb-lab login --captcha-to
 
 ## Conclusion
 
-Open. If no further HV occurs after the first solved one, E02 stays open with "no CAPTCHA seen in N logins" (N = the number of logins in the live-run log kept in the pending section of `E03-client-identity.md`, cross-checked with the lines of `hv-log.jsonl`); M1 then keeps the single-process interactive fallback only.
+**Answered for short delays [verified: live 2026-11-12/13, rows 2 to 6]: a solved token is valid in a new process**, from about 1 minute up to about 6.5 minutes after its challenge (four cases, every one accepted, no second challenge); the same holds in one process (row 6). Longer ages (hours) were not measured: no run left a solved token unused that long, and provoking one would cost logins on the test account for no design change. `pcb login resume --captcha-token` from another process is therefore sound within minutes of the challenge. The paragraph below was the plan before the runs.
+
+Open (as planned before the runs). If no further HV occurs after the first solved one, E02 stays open with "no CAPTCHA seen in N logins" (N = the number of logins in the live-run log kept in the pending section of `E03-client-identity.md`, cross-checked with the lines of `hv-log.jsonl`); M1 then keeps the single-process interactive fallback only.
 
 ## Feeds
 

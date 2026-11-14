@@ -101,6 +101,7 @@ func run(args []string) int {
 	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended})
 	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: openPath(a.OpenURL), exe: executable}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
+	setWindowClass()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -216,6 +217,7 @@ func errorWindow(a fyne.App, err error, done func()) fyne.Window {
 		text += "\n\n" + h
 	}
 	w := a.NewWindow("pcb-ui cannot start")
+	setWindowClass()
 	w.SetMaster()
 	title := widget.NewLabelWithStyle("pcb-ui cannot start", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	ok := widget.NewButton("OK", done)

@@ -618,3 +618,23 @@ func TestLoginPageStateFollowsItsLogin(t *testing.T) {
 		}
 	})
 }
+
+// The note under the unattended box says "If ticked:" once (the warning
+// from loginflow already starts with it) and ends its sentence with one
+// period before the 2FA sentence.
+func TestLoginPageNoteSaysIfTickedOnce(t *testing.T) {
+	l := newLab(t)
+	p := start(t, l.options(nil))
+	_, body := p.get(false)
+	want := html.EscapeString(loginflow.UnattendedWarningFor(service.SealerKeyFile)) +
+		". With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code."
+	if got := strings.Count(body, "If ticked:"); got != 1 {
+		t.Errorf("\"If ticked:\" appears %d times, want 1:\n%s", got, body)
+	}
+	if !strings.Contains(body, want) {
+		t.Errorf("note sentence %q missing:\n%s", want, body)
+	}
+	if strings.Contains(body, "..") {
+		t.Errorf("double period in the page:\n%s", body)
+	}
+}

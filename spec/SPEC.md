@@ -305,16 +305,19 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   two-password mode and FIDO2 refused with a clear message for now.
 - Human verification (CAPTCHA): the challenge token can be solved on any
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
-  login retried with it [verified: interactive login 2026-11-10]. Whether the
-  solved token survives across processes and for how long [assumed → E02];
+  login retried with it [verified: interactive login 2026-11-10]. A solved token
+  survives across processes for at least minutes [verified: live 2026-11-12/13, E02 rows 2 to 5: accepted from a new
+  process 1 to 6.5 minutes after its challenge; hours not measured];
   the design relies on it for `pcb login resume --captcha-token`. After "Press Enter once solved" an interactive login
   prints "Checking the CAPTCHA with Proton…" while Proton checks the token (seconds, observation O1; never with
-  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the marker stays `[assumed → E02]` until the M1 live session (`HUMAN-CHECKS.md`, "M1 live session") is written up: it ran on 2026-11-13, its results are not written up yet.
+  `--non-interactive`) [verified: `TestCaptchaSaysItIsCheckedAfterEnter`]. M1 builds this flow and proves it offline against a fake; the M1 live session's two resumes (`pcb login resume --captcha-token` from a new process, 2026-11-12) are E02 rows 4 and 5.
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies
   (whoever unseals the store owns the account).
-- Session lifetime and refresh-token rotation rules [assumed → E01]: decide
+- Session lifetime and refresh-token rotation rules [partly verified: live 2026-11-12/14, E01: the access token lives
+  24 h (`ExpiresIn` 86400), every refresh rotates both tokens, the long probe's session alive at 42 h; its 14-day
+  window ends 2026-11-26; the session's whole lifetime stays assumed → E01]: decide
   how often the daemon refreshes and when it must relogin. M1 refreshes on demand, once across processes; the Proton answers it classifies as "session ended" or "credentials refused" are all `[assumed]` until the live session lists them (`HUMAN-CHECKS.md`, "signals to confirm").
 - Refresh request: `POST /auth/v4/refresh` with `UID`, `RefreshToken`,
   `ResponseType: token`, `GrantType: refresh_token`, `RedirectURI`, a random
@@ -990,7 +993,7 @@ so no sealed session was exercised there; the live step 7 did: a sealed session 
   `TestIdleServeSlowsToFiveMinutes`, `TestAuthenticatedRequestWakesAnIdleLoop`, `TestRefusedPasswordIsNotActivity`,
   `TestWakeCutsOnlyASuccessSleep`, `TestWakeDuringBackOffDoesNotShortenIt`, `TestPartialPassKeepsTheCadence`,
   `TestWatchKeepsGoingAfterPartial`, `TestSetIntervalReplacesTheActiveCadence`]. Live: the idle cadence (300 s after 35 minutes without a request) and the wake (an authenticated request brings a pass within about a second, cadence back to 30 s) [verified: live 2026-11-13, spec/experiments/M5-live.md], driven by curl. That Thunderbird at its
-  default settings keeps the active cadence was **not** verified live (7.4.4 skipped; E08 §3.7 stays the expectation) [assumed → step 7.4.4; live run done 2026-11-14; result not recorded here].
+  default settings keeps the active cadence [verified: live 2026-11-14, `spec/experiments/M5-live.md` 7.4.4: an hour with Thunderbird open, never idle, 30 s cadence].
   The standby idea is caloxide's (README, Credits).
 - Waiting for a login (M5, `pcb serve --wait-for-login`, the default of the units and the image; M5-Rpre3, R8, R9,
   R10, P8, P9, P22): CTL and the CalDAV listener bind at once, and while there is no usable session every
@@ -1288,8 +1291,8 @@ writes (PUT, DELETE) since M4.
   the username shown is the account's address (any username is accepted). Responses are in the namespace the request
   came on (hrefs of another namespace in a multiget are 404). Why the prefix and the realm: one Thunderbird profile holding
   two accounts on the same host would otherwise see one origin, one realm and the same paths, and its HTTP auth cache
-  could send account A's password on B's URLs [assumed → `HUMAN-CHECKS.md` step 8 (live run done 2026-11-14; result not recorded here): that Thunderbird keeps the two
-  passwords apart; nothing here depends on it, a wrong password is a 401]. One failure limiter serves every account,
+  could send account A's password on B's URLs [verified: live 2026-11-14, `spec/experiments/M6-live.md` 8.3.5: Thunderbird keeps the two
+  passwords apart, one saved entry and one prompt per realm, by origin and realm; nothing here depends on it, a wrong password is a 401]. One failure limiter serves every account,
   charged once per request and only for a password no account holds; a client of an account whose CalDAV adapter is off is
   401 with no charge and no activity (every Thunderbird shares 127.0.0.1, a client left configured would otherwise
   lock every account out, R28); while any account's `clients.json` or `state.json` cannot be read, a password no other
@@ -1348,8 +1351,8 @@ writes (PUT, DELETE) since M4.
   start), SANs = hostnames + `localhost` + bind IP (every interface IP for
   0.0.0.0/[::]), replaced when a hostname or specific bind IP is no longer covered or
   under 30 days remain; its SHA-256 fingerprint is printed by `pcb serve` and
-  `pcb doctor` for the exception dialog (M3-R29, R31, R32) [claim: Thunderbird offers
-  the exception over the network, E08 §2.3, live run done 2026-11-14; result not recorded here; the certificate rules
+  `pcb doctor` for the exception dialog (M3-R29, R31, R32) [verified: live 2026-11-14, E08 §2.3: Thunderbird offers
+  the exception over the network and shows the fingerprint `pcb serve` prints; the certificate rules
   are tested in `internal/tlsutil` and `internal/cli` [claim: test names not listed here]].
 - Plain HTTP inside a container behind a reverse proxy: not built (`OPEN.md`, later); the image serves the
   self-signed TLS of any non-loopback bind on 1080.
@@ -1406,8 +1409,8 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
 - **Grants.** Capabilities `freebusy` < `read` < `write`, plus `delete` (needs `write`: refused otherwise),
   `login` and `manage` (stdio only, refused on tokens); `read` brings `freebusy`, `write` brings `read`
   [verified: `TestParseCapsAppliesImplications`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`].
-  stdio profiles: `read-only` (`read` + `login`, the default) and `full` (all six); `--allow` replaces the profile
-  [verified: `TestProfiles`]. A grant names accounts (address, case-insensitive, or local ID; none: every account,
+  stdio profiles: `full` (all six, the default since 2026-11-14) and `read-only` (`read` + `login`); `--allow` replaces
+  the profile [verified: `TestProfiles`, `TestMCPStdioBecomesTheDaemon`, `TestMCPStdioRelaysToARunningDaemon`]. A grant names accounts (address, case-insensitive, or local ID; none: every account,
   later ones included) and, for a token, calendar IDs (none: all). An account outside the grant, pending, with
   MCP off (`pcb account mcp off`, the person's kill switch for every agent) or signed out (`logged-out`) is
   invisible: a call naming it or one of its `event_id`s answers as for something that does not exist (`no account
@@ -1599,7 +1602,7 @@ pcb client rotate NAME|ID                    # M5, decision 0013: a new password
 pcb account list                            # M6: local ID, address, phase, CalDAV on/off (M8: and MCP off/read-only/read-write), last sync; pending adds included; the daemon's view when one answers
 pcb account caldav on|off                   # M6: the account's CalDAV switch (§4.1)
 pcb account mcp off|read-only|read-write    # M8: the account's MCP switch (§4.1); read-only since 2026-11-14, on = read-write
-pcb mcp [--profile read-only|full] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
+pcb mcp [--profile full|read-only] [--allow CAPS] [--account A]...   # M8: MCP on stdin/stdout for the agent that runs it (§12; full the default since 2026-11-14): relayed to a running daemon, else serving the session itself (kind mcp); not with --json
 pcb mcp token add NAME --allow CAPS [--account A]... [--calendar ID]... [--expires D] [--plan]   # M8: a remote agent's bearer token, printed once (§12)
 pcb mcp token list                          # M8: name, grants, created, last used, expiry (expired ones marked)
 pcb mcp token remove NAME [--yes]           # M8: the token stops working at once
@@ -1783,7 +1786,7 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   `Hint: run pcb-ui from the desktop session (its terminal, or the applications menu); on a headless host run pcb serve instead`, exit 10 (the user must act: no retry of this start can succeed, unlike R15's keyring out of reach over SSH, exit 20, which can come back by itself, §7.3; exit 2 before the live run of 2026-11-13, F8, where an SSH start with `DISPLAY` set and no X authority printed Fyne's raw
   `failed to initialise GLFW` and panicked), and touches no state (the sealer is not chosen by a start that cannot show anything); `--version` and `--help` exit 0 before any toolkit starts
   [verified: `TestParseArgs`, `TestCheckDisplay`, `TestUnusableDisplayIsAPcbMessage` (the real `run` in a child, `DISPLAY` on no server); the same runs by hand, R11]. It runs the daemon in process (`ui.Bridge`, kind `ui`, wait for login, the same listener, control socket and `serve.lock` as `pcb serve`), shows
-  a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 880 x 620 window in the Paper theme (light or dark with the desktop; a fixed accounts sidebar, each account with its initial, address and state; per account the alerts first, then grouped boxes: the CalDAV switch and the MCP selector (Off, Read-only, Read-write since 2026-11-14, `TestMCPSelectorCallsSetMCP`), the CalDAV connection (the server URL and the username each with Copy, since the live run of 2026-11-13, F6, `TestConnectionCopiesURLAndUsername`; the password masked behind Show and Copy), New password, and the calendars with their badges; Sign out or Sign in,
+  a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 880 x 620 window in the Paper theme (light or dark with the desktop; a fixed accounts sidebar, each account with its initial, address and state; per account the alerts first, then grouped boxes: the CalDAV switch and the MCP selector (Off, Read-only, Read-write since 2026-11-14, `TestMCPSelectorCallsSetMCP`), the CalDAV connection (the server URL and the username each with Copy, since the live run of 2026-11-13, F6, `TestConnectionCopiesURLAndUsername`; the password masked behind Show and Copy), New password, and the calendars, each with a dot of its Proton colour (room kept when it has none, since 2026-11-14, `TestCalendarColourDot`) and, while its write gate is closed or undecided, a `read-only` badge whose reason shows on hover of an info icon beside it, drawn in a layer of the window's content rather than an overlay so the tip never takes the pointer from its icon (`TestReadOnlyReasonShowsOnHover`; a gate not known yet, keys not loaded, shows no badge, `TestCalendarReadOnlyFromGate`); Sign out or Sign in,
   Remove; the "+" beside Accounts, or Add account when there is none, opens the wizard: address and password, an unattended-relogin opt-in (unticked) with one line saying what ticking it means for the state's sealer (below), the 2FA code, the CAPTCHA with "Open verification", then the CalDAV connection to copy;
   Settings: start at login, log level, open the logs folder or `config.toml`, Restart bridge, the doctor report) [verified: `TestThemeContrast`, `TestAccountPaneOrderAndBadge`, `TestEmptyPaneOffersAdd`]. The logs folder opens as a `file://` URL with spaces and specials escaped on Linux, and by its plain path through `ShellExecute` on Windows (a `file://` URL lost a non-ASCII profile name there) [verified: `TestSettingsOpenFiles`, `TestOpenPathIsAnEscapedFileURL`, `TestOpenPathHandsShellExecuteThePath`]. Closing the window hides it; Quit in the tray menu drains (5 s) and stops everything, after which `pcb status` says offline.
   `--background` starts in the tray only; when no tray host answers (GNOME without the AppIndicator extension) the window opens anyway and says once `your desktop shows no tray icons; on GNOME install the AppIndicator extension`,
@@ -2122,7 +2125,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   write counted at the fake, the audit line and no password in any output) and a session `pcb mcp` serves itself (step 22:
   kind `mcp`, no listener, `pcb serve` refused naming it) [verified: `make rehearse`, PASS on 2026-11-13]. A real agent
   client is `spec/HUMAN-CHECKS.md` step 10: Claude Code 2.1.325 against the test account `[verified: live 2026-11-14, spec/experiments/M8-live.md]`, with TLS on a
-  non-loopback bind (10.5.5, skipped on 2026-11-13/14) still `[assumed → step 10]` (the author reports every step run on 2026-11-14; result of 10.5.5 not recorded here).
+  non-loopback bind and `NODE_EXTRA_CA_CERTS` alone `[verified: live 2026-11-14, spec/experiments/M8-live.md 10.5.5, against pcb-fake]`.
 
 ## 17. Experiments (assumptions to settle before the code that needs them)
 
@@ -2133,12 +2136,12 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E03 | Accepted `x-pm-appversion` values and resulting scopes | C1 transport | try candidates, record scopes and calendar access |
 | E04 | Calendar modelevents semantics (cursor, payload, gaps); push stream status | C4 sync | test account: edit events, read the feed (`pcb-lab probe feed`; source-based write-up `E04-calendar-feed.md`, live run pending) |
 | E05 | Core event loop for calendar list / membership changes | C4 sync | same (`E05-core-events.md`; not used in M2, M2-R2) |
-| E06 | Rate limits and 429 behaviour | C1, C4 | controlled bursts on the test account |
+| E06 | Rate limits and 429 behaviour | C1, C4 | dropped 2026-11-14 (`OPEN.md`): no controlled bursts on the test account; no 429 met in any live run |
 | E07 | What changes in a row on edit (modify time, sequence, parts) | ETags | edit fields one at a time (`E07-row-changes.md`, source-based, live run pending) |
 | E08 | Thunderbird's CalDAV requests (discovery, sync, writes, errors) | A1 | read Thunderbird's source (done, `E08-thunderbird-caldav.md`); live capture against a reference server deferred to the human check |
 | E09 | Decrypt cost per 1 000 events; cold-start time | C2 design (moved from M2 to M3, M2-R1) | offline: 0.2 to 0.4 ms per event, signatures checked [verified: `BenchmarkOpen`], `E09-decrypt-cost.md`; live half (test-account rows, cold start) pending |
 | E10 | Which keys sign each part; does the member passphrase signature verify with our address key (R17) | C1 keys, M4 write gate | `E10-signatures.md`: `pcb calendar list`, the parts pcb writes, the render counters, on the test account (HUMAN-CHECKS §6); a shared calendar needs a second account |
-| E11 | Does Thunderbird need VTIMEZONE? | C0 | answered from source inside E08 (§6.3, "Answers to SPEC questions"; no E11 file): **no** [source: E08]; the bridge emits none; live run done 2026-11-14; result not recorded here |
+| E11 | Does Thunderbird need VTIMEZONE? | C0 | answered from source inside E08 (§6.3, "Answers to SPEC questions"; no E11 file): **no** [source: E08]; the bridge emits none [verified: live 2026-11-14, E08 §6.3: the test account's TZID events land at the right instant in Thunderbird] |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity (M4) | `E12-recurrence-forms.md`: write each RRULE form and series operation through pcb, read back, compare in the web app and Thunderbird (HUMAN-CHECKS §6) |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
 | E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
@@ -2152,7 +2155,7 @@ Status at the close of M0 (2026-11-11):
 - E03: gate passed on the fork's evidence (R13); scope list and other candidates pending the live run.
 - E15: done (user-scope systemd-creds, Secret Service presence, key file verified; TPM2 and desktop system scope untested).
 - E08, E11: answered from Thunderbird's source; live Thunderbird session pending.
-- E01, E02: probes built and tested offline, no live measurement yet (the test account's CAPTCHA is unsolved); their markers in §5.2 stay `[assumed]`.
+- E01, E02: probes built and tested offline, no live measurement yet (the test account's CAPTCHA is unsolved); their markers in §5.2 stay `[assumed]`. (Since 2026-11-14: E02 answered for minutes, E01 interim; §5.2.)
 - Live runs, in order: `spec/HUMAN-CHECKS.md`.
 
 Status at the close of M2 (2026-11-11):
@@ -2162,7 +2165,7 @@ Status at the close of M2 (2026-11-11):
 
 Status at the close of M3 (2026-11-11):
 - E08: implemented and contract-tested ("What the bridge does (M3)" in `E08-thunderbird-caldav.md`); live Thunderbird session after M4 (`spec/HUMAN-CHECKS.md` step 6).
-- E09: offline measured, live half run (live run done 2026-11-14; result not recorded here). E11: answered from source in E08, live run done (2026-11-14; result not recorded here). E17: done.
+- E09: offline measured, live half measured 2026-11-14 (cold sync 71.5 s of network for 403 rows, first full render 0.51 s for 399 objects). E11: answered from source in E08, confirmed live 2026-11-14 (E08 §6.3). E17: done.
 
 Status at the close of M4 (2026-11-12):
 - E10, E12, E13, E14: source-based write-ups, each with what the code assumes and the exact live steps; the code gatekeeps so that a wrong assumption fails closed (read only, 403 or 503), never writes wrong data silently. The live run is `spec/HUMAN-CHECKS.md` step 6 (the M4 live session, with the Thunderbird session of M3).
@@ -2189,7 +2192,7 @@ raw results (redacted), conclusion, and the decision it feeds.
 | M4 CalDAV writes (built, live session 2026-11-13, write-up pending) | C1 codec write path, A1 writes, fidelity table (E12, E13), write gate (E10, E14) | Thunderbird two-way edits, incl. single occurrences: contract-tested against a fake Proton; the live check is `spec/HUMAN-CHECKS.md` step 6 |
 | M5 Daemon and ops (built, live session 2026-11-13) | C6, `pcb install/uninstall/service/doctor`, container image | fresh Debian host and a container both set up from the terminal only: smoke-tested in CI (a Debian container with systemd as PID 1, the image); the live run, `spec/HUMAN-CHECKS.md` step 7, ran on 2026-11-13 (`spec/experiments/M5-live.md`) |
 
-| M6 Several accounts per process (built 2026-11-12, live session reported run by the author 2026-11-14) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run, `spec/HUMAN-CHECKS.md` step 8 on the one test account, was reported done by the author on 2026-11-14 (its results are not recorded here) |
+| M6 Several accounts per process (built 2026-11-12, live session run 2026-11-14, `spec/experiments/M6-live.md`) | `service.Hub`, layout v2 and the M5 migration, per-account CalDAV URLs, selector and `pcb account`, control socket v2, `internal/daemon`, `output` schema 2 | two accounts served side by side on the fake Proton, an M5 install upgraded in place keeps its session, cache and CalDAV passwords: contract-tested against the fake only; the live run, `spec/HUMAN-CHECKS.md` step 8 on the one test account: a real M5 state upgraded with no login, Thunderbird on both URLs, passwords kept apart by realm [verified: live 2026-11-14, `spec/experiments/M6-live.md`] |
 | M7 `pcb-ui` desktop app (built 2026-11-13, live session 2026-11-13) | a separate cgo binary running `internal/daemon` in process: tray, account window, add-account wizard, notifications, autostart; the Secret Service sealer (§7.3); `pcb-ui` log file; `make ui` and `make install-ui` | the UI logic and the keyring sealer are tested against the fake Proton, a fake Secret Service and Fyne's headless driver; the GUI itself is `spec/HUMAN-CHECKS.md` step 9, on a throwaway desktop VM (a GNOME session) fenced like step 7 with its own login ledger, the test account only (decision 0015): it ran on 2026-11-13 (`spec/experiments/M7-live.md`), its ten findings fixed |
 | M8 MCP adapter (built 2026-11-13, live session 2026-11-14) | E16, E19; the structured event layer (`ical.Expand`, `DecodeEvent`, `ApplyEdit`, `service.Agenda`); the per-account MCP switch; `internal/mcp` (tokens, grants, the eleven tools, untrusted marking, audit); remote `/mcp`; `/mcp` on the control socket; `pcb mcp` (relay or session daemon); `login` and `logout` (`pcb-ui` wizard or loopback page) | every tool tested through the SDK's client against the fake Proton, a secrets scan over a whole session, and `make rehearse` driving `pcb mcp` against `pcb-fake`; Claude Code over stdio and remote, the loopback login and one create/update/delete checked at Proton are `spec/HUMAN-CHECKS.md` step 10, the test account only (decision 0016): it ran on 2026-11-14 (`spec/experiments/M8-live.md`, the writes checked over CalDAV through a second session of the test account, not in the web app), its findings fixed |
 | Windows port (built 2026-11-14, live check pending) | decision 0018: paths, private DACLs, `LockFileEx` locks, the control pipe, the DPAPI sealer, share-delete reads and POSIX renames, the CLDR zone table, `pcb-ui.exe` (OpenGL check, console, session end, Run-key autostart), `install`/`service` refused, CI and the release zip | both binaries built and tested on a Windows runner; `pcb_windows_amd64.zip` in a release; the live check, `spec/HUMAN-CHECKS.md` step 12, flips "runs, untested" |
@@ -2231,7 +2234,7 @@ M5 carry-overs from M1 to M4, as closed:
 - R16 (`pcb login resume --totp`): done, as a boolean (M5-P11).
 - Open and parked, not carried: see "Later" in `OPEN.md`.
 
-M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMAN-CHECKS.md` step 8 were reported run by the author on 2026-11-14, test account only; results not recorded here): `store` layout v2 and the crash-safe M5 migration (`internal/store/layout.go`), the fake Proton's per-user failure injection, `Local` on an account directory with a shared guard and limiter, `service.Hub` (accounts, login rules, pending adds, sign-out, removal, the CalDAV switch, one serve loop per account, the exit rule, the router), the CalDAV router with per-account URLs, control socket v2, `internal/daemon` (the wiring out of `internal/cli/serve.go`), the selector, `pcb account` and schema 2 in the CLI, the doctor's layout and per-account checks, and the two-accounts and upgrade contract tests (`internal/daemon`). Author's choice, recorded: no second Proton test account, so **multi-account is proven on the fake only** (two or more users); the live run uses one account. Deferred: the live session (step 8) and `pcb-ui` (M7). Rulings recorded (`.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`; the implementation plan, not published; design `spec/designs/2026-11-12-multi-account-and-ui-design.md`):
+M6 delivered (2026-11-12, branch m6-multi-account; the live checks of `spec/HUMAN-CHECKS.md` step 8 ran on 2026-11-14, test account only: `spec/experiments/M6-live.md`): `store` layout v2 and the crash-safe M5 migration (`internal/store/layout.go`), the fake Proton's per-user failure injection, `Local` on an account directory with a shared guard and limiter, `service.Hub` (accounts, login rules, pending adds, sign-out, removal, the CalDAV switch, one serve loop per account, the exit rule, the router), the CalDAV router with per-account URLs, control socket v2, `internal/daemon` (the wiring out of `internal/cli/serve.go`), the selector, `pcb account` and schema 2 in the CLI, the doctor's layout and per-account checks, and the two-accounts and upgrade contract tests (`internal/daemon`). Author's choice, recorded: no second Proton test account, so **multi-account is proven on the fake only** (two or more users); the live run uses one account. Deferred: the live session (step 8) and `pcb-ui` (M7). Rulings recorded (`.superpowers/sdd/2026-11-12-m6-multi-account/progress.md`; the implementation plan, not published; design `spec/designs/2026-11-12-multi-account-and-ui-design.md`):
 
 | Ruling | Decision |
 |---|---|
