@@ -4,5 +4,6 @@ Name=pcb
 Comment=Proton calendar bridge
 Exec=pcb-ui
 Icon=pcb-ui
+StartupWMClass=io.github.barben360.pcb-ui
 Terminal=false
 Categories=Network;Office;Calendar;

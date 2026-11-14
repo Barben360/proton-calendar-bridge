@@ -65,7 +65,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 |---|---|
 | Built | any number of Proton accounts in one process, one URL per account; the per-account state layout (`accounts/<id>/`); `--json` schema version 2 |
 | Tested | against the fake Proton only, with two or more accounts: there is no second Proton test account |
-| Live | the migration of an M5 state, one account, Thunderbird on its per-account URL, two accounts' passwords in one Thunderbird profile: run on the test account, reported by the author on 2026-11-14; the results are not written up yet |
+| Live | 2026-11-14, on the test account: a real M5 state upgraded in place with no new login, its CalDAV password and session kept; Thunderbird with calendars on the old URL and on the per-account URL in one profile keeps one saved password per URL and asks for each after a password change. [M6-live.md](../spec/experiments/M6-live.md) |
 | Note | no downgrade after M6 ([install](install.md#no-downgrade-after-the-multi-account-layout)) |
 | Design | [SPEC](../spec/SPEC.md), [decision 0014](../spec/decisions/0014-several-accounts-per-process.md) |
 
@@ -75,7 +75,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 |---|---|
 | Built | `pcb-ui` ([desktop](desktop.md)), and a sealer that keeps the sealing key in the desktop keyring, Secret Service ([security](security.md#the-desktop-keyring-secret-service)) |
 | Tested | against the fake Proton, a fake Secret Service and Fyne's headless test driver |
-| Live | step 9, 2026-11-13, in a throwaway Debian 13 VM with GNOME 48 and the test account: the keyring sealer, the lock and its recovery without a login, Thunderbird by copy and paste, Quit, the second instance, the conflict dialog and autostart worked. [M7-live.md](../spec/experiments/M7-live.md) |
+| Live | step 9, 2026-11-13, in a throwaway Debian 13 VM with GNOME 48 and the test account: the keyring sealer, the lock and its recovery without a login, Thunderbird by copy and paste, Quit, the second instance, the conflict dialog and autostart worked. On 2026-11-14, in the same VM against the fake Proton: a notification click with the window hidden (banner and message tray), the window without the tray extension, and `pcb uninstall --delete-data` removing the real keyring item. [M7-live.md](../spec/experiments/M7-live.md) |
 | Fixed | its ten findings: a CAPTCHA'd add deleted by a click on pcb-ui's own notification, no login lines in the log, a silent fallback to the key file, `pcb uninstall --delete-data` unable to clean a desktop-only install, and smaller wording and display issues |
 | Design | [decision 0015](../spec/decisions/0015-pcb-ui.md) |
 
@@ -85,13 +85,11 @@ What is built, how each part was tested, and which checks against a real Proton 
 |---|---|
 | Built | `pcb mcp` over stdio, remote `/mcp` with a bearer token, grants per agent, and a login the agent starts but you finish (in `pcb-ui` or on a one-time page on 127.0.0.1) ([agents](agents.md)) |
 | Tested | against the fake Proton through the MCP SDK's own client, with a scan for secrets over a whole session; `make rehearse` drives `pcb mcp` against `pcb-fake` |
-| Live | 2026-11-14, with a real agent client (Claude Code 2.1.325) against the test account: stdio with a login on the loopback page, a create, update and delete, a session relayed to `pcb-ui`, remote `/mcp` with a token. TLS not checked. [M8-live.md](../spec/experiments/M8-live.md) |
+| Live | 2026-11-14, with a real agent client (Claude Code 2.1.325) against the test account: stdio with a login on the loopback page, a create, update and delete, a session relayed to `pcb-ui`, remote `/mcp` with a token; remote `/mcp` over TLS trusting pcb's certificate through `NODE_EXTRA_CA_CERTS` alone (against the fake Proton). [M8-live.md](../spec/experiments/M8-live.md) |
 | Fixed | its three defects, and a fourth the fixes found |
 | Design | [decision 0016](../spec/decisions/0016-mcp-adapter.md), [SPEC §12](../spec/SPEC.md) |
 
 ## Still to check live
 
-- **Write-up of the multi-account run** (the migration of an M5 state, Thunderbird on its per-account URL, two accounts in one Thunderbird profile): run, reported by the author on 2026-11-14, results still to be recorded.
-- **Desktop app:** the uninstall's removal of the real keyring item, a notification click with the window hidden, the tray without the AppIndicator extension (the author reports on 2026-11-14 that every live check has been run; the results of these three are not recorded here).
-- **Agents:** remote `/mcp` over TLS with an agent trusting pcb's certificate (skipped on 2026-11-14).
+- **Session lifetime:** a 14-day probe of one Proton session, running until 2026-11-26 (so far: the access token lasts 24 hours and both tokens change on every refresh).
 - **Write-ups** of the 2026-11-13 sessions other than step 7 (M1, M2, step 6).

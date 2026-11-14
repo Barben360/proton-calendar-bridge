@@ -1,6 +1,6 @@
 # M5-live — The daemon, the service and the container against the test account
 
-Status: **HUMAN-CHECKS step 7 run on 2026-11-13** (7.1 to 7.7 and 7.9; 7.8 was done on 2026-11-12). Three defects found and fixed (Fixes 7, 8 and 9 below). Not exercised live: Thunderbird (7.1.7, 7.2.5, 7.7.2, 7.4.4), the 2FA-held login path (7.1.5). Feeds SPEC §7.3, §8.1, §13 and E15.
+Status: **HUMAN-CHECKS step 7 run on 2026-11-13** (7.1 to 7.7 and 7.9; 7.8 was done on 2026-11-12). Three defects found and fixed (Fixes 7, 8 and 9 below). Not exercised live: Thunderbird (7.1.7, 7.2.5, 7.7.2; 7.4.4 was run on 2026-11-14, section 7.4), the 2FA-held login path (7.1.5). Feeds SPEC §7.3, §8.1, §13 and E15.
 
 ## Setup
 
@@ -55,7 +55,7 @@ Status: **HUMAN-CHECKS step 7 run on 2026-11-13** (7.1 to 7.7 and 7.9; 7.8 was d
 
 - Last curl at 17:21. Idle at 17:56:33: `idle` true, `interval_seconds` 300. Passes at 17:56:33 and 18:01:34 (301 s apart).
 - Wake: one authenticated curl at 18:04:21.689; the pass started at 18:04:22.720, `idle` false, `interval_seconds` 30.
-- **7.4.4 skipped** (author's decision; hybrid mode, the daemon sat on the VM's loopback, Thunderbird was not run). Whether Thunderbird at default settings keeps the daemon active (E08 section 3.7: its 30-minute refresh is under the 35 minutes) stays the expectation, not a live result.
+- **7.4.4 skipped** in this run (author's decision; hybrid mode, the daemon sat on the VM's loopback, Thunderbird was not run). **Run by the agent on 2026-11-14: PASS** [verified: live 2026-11-14]: the `pcb serve` of `M6-live.md` (build v0.1.0-4-ge8adf96, the test account, on the workstation's loopback) with Thunderbird 153.7.0esr at default settings (no refresh preference set), four CalDAV calendars on it, left open from 19:14:36Z (the last request the agent caused) with nothing else touching CalDAV. `pcb status --json` every 2 minutes from 19:15:47Z to 20:15:51Z: 31 samples, every one `idle: false`, `interval_seconds: 30`, a pass every 30 s. So Thunderbird's own refresh (30 minutes, E08 §3.7) keeps the daemon active, as expected.
 
 ## 7.5 `status` and `doctor` as the author reads them, one alert: PASS after Fix 9
 
@@ -90,5 +90,5 @@ Done on 2026-11-12 (see HUMAN-CHECKS 7.8); not part of this session.
 ## What this changes
 
 - SPEC §7.3 (sealed session in a service and a container), §13 (real systemd, linger across a reboot, a real login) and the E15 compose-secret note: verified live.
-- SPEC §8.1 (idle and wake): verified by curl; Thunderbird's own behaviour at default settings stays assumed (7.4.4 skipped).
+- SPEC §8.1 (idle and wake): verified by curl; Thunderbird at default settings keeps the daemon active (7.4.4, run on 2026-11-14).
 - Fixes 7, 8, 9 as above. O1 and the two 7.6 nits were fixed later by the polish round: O1 by e12dffc (the "Checking the CAPTCHA with Proton…" line after Enter, and a debug record of each API retry wait, so the cause of the wait can be read next time), the nits by d9c0c66 and 86421b1 (7.6 above). Not re-run live.

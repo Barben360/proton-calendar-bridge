@@ -112,10 +112,11 @@ type hubAccount struct {
 	gate    sync.RWMutex
 	removed bool // the account is gone: calls through its API fail; written under gate
 
-	lmu      sync.Mutex                  // guards removing, long and loop; taken before Hub.mu when both are held
+	lmu      sync.Mutex                  // guards removing, long, loop and ended; taken before Hub.mu when both are held
 	removing bool                        // retire has begun: a long call starts already ended, no loop starts
 	long     map[*int]context.CancelFunc // the long calls in flight (Serve, WatchSync), ended by retire
 	loop     *accountLoop                // the Hub's serve loop of the account, nil when none runs
+	ended    <-chan struct{}             // the end (done) of the account's last loop started, nil before the first
 }
 
 // enter admits a call through a's API, or refuses it once a is removed.

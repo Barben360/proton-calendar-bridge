@@ -51,11 +51,15 @@ type serveRig struct {
 	mu     sync.Mutex
 	passes map[string][]service.WatchPass
 	states map[string][]service.ServeState
+	// atStop is the account's AccountInfo.Stopped as each report of
+	// ServeStopped found it, read in the callback: what a client that
+	// looks on the report sees.
+	atStop map[string][]*service.StopInfo
 	poke   chan struct{} // a record was added (capacity 1)
 }
 
 func newServeRig(h *service.Hub) *serveRig {
-	return &serveRig{h: h, passes: map[string][]service.WatchPass{}, states: map[string][]service.ServeState{}, poke: make(chan struct{}, 1)}
+	return &serveRig{h: h, passes: map[string][]service.WatchPass{}, states: map[string][]service.ServeState{}, atStop: map[string][]*service.StopInfo{}, poke: make(chan struct{}, 1)}
 }
 
 func (r *serveRig) note(f func()) {
@@ -73,7 +77,16 @@ func (r *serveRig) options(waitForLogin bool) service.HubServeOptions {
 	return service.HubServeOptions{
 		ServeOptions: service.ServeOptions{WaitForLogin: waitForLogin, LoginPoll: time.Hour},
 		OnState: func(id string, s service.ServeState) {
-			r.note(func() { r.states[id] = append(r.states[id], s) })
+			var stop *service.StopInfo
+			if s == service.ServeStopped {
+				stop = r.stopInfo(id)
+			}
+			r.note(func() {
+				r.states[id] = append(r.states[id], s)
+				if s == service.ServeStopped {
+					r.atStop[id] = append(r.atStop[id], stop)
+				}
+			})
 		},
 		OnPass: func(id string, p service.WatchPass) {
 			r.note(func() { r.passes[id] = append(r.passes[id], p) })
@@ -155,9 +168,28 @@ func (r *serveRig) passCount(id string) int {
 	return r.okPasses(id)
 }
 
+// stopInfo is id's AccountInfo.Stopped now, nil when id is not listed.
+func (r *serveRig) stopInfo(id string) *service.StopInfo {
+	for _, a := range r.h.Accounts() {
+		if a.ID == id {
+			return a.Stopped
+		}
+	}
+	return nil
+}
+
+// waitStopped waits until id's last report is ServeStopped and checks the
+// park was readable when that report came (issue #7): a client refreshing
+// on it must see why the account stopped.
 func (r *serveRig) waitStopped(t *testing.T, id string) service.AccountInfo {
 	t.Helper()
 	r.waitFor(t, id+" stopped", func() bool { return r.last(id) == service.ServeStopped })
+	r.mu.Lock()
+	at := r.atStop[id]
+	r.mu.Unlock()
+	if len(at) == 0 || at[len(at)-1] == nil {
+		t.Fatalf("%s reported stopped, but its AccountInfo.Stopped was nil at the report", id)
+	}
 	info := accountInfo(t, r.h, id)
 	if info.Stopped == nil {
 		t.Fatalf("%s reported stopped, but its AccountInfo.Stopped is nil", id)
@@ -1001,7 +1033,10 @@ func setAddress(t *testing.T, e *hubEnv, id, address string) {
 }
 
 // A Restart that lands while a loop ends on a park, once the park is
-// published, starts a new loop: the account serves again, not parked.
+// recorded but before ServeStopped is reported, starts a new loop: the
+// account serves again, not parked, and the new loop's reports follow the
+// old loop's ServeStopped (a client never sees serving, then a stale
+// stopped).
 func TestRestartWhileALoopParksServesAgain(t *testing.T) {
 	t.Parallel()
 	e := newServeEnv(t)
@@ -1029,13 +1064,12 @@ func TestRestartWhileALoopParksServesAgain(t *testing.T) {
 	case <-time.After(waitLimit):
 		t.Fatal("a's loop never parked")
 	}
-	r.mu.Lock()
-	last := r.last(a)
-	r.mu.Unlock()
-	if last != service.ServeStopped {
-		// Reported later, it could follow the new loop's serving.
-		t.Errorf("a's last state at its park = %q, want stopped reported before the park", last)
+	if info := accountInfo(t, h, a); info.Stopped == nil {
+		t.Error("a.Stopped is nil at its park, want the park recorded before ServeStopped is reported")
 	}
+	r.mu.Lock()
+	before := len(r.states[a])
+	r.mu.Unlock()
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -1043,15 +1077,30 @@ func TestRestartWhileALoopParksServesAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	close(release)
 	if got.Stopped != nil {
 		t.Errorf("Restart(a) = %+v, want not stopped", got)
 	}
+	// Room for a new loop that did not wait for the old one's end to
+	// report serving ahead of the old loop's stopped.
+	time.Sleep(200 * time.Millisecond)
+	r.mu.Lock()
+	early := append([]service.ServeState(nil), r.states[a][before:]...)
+	r.mu.Unlock()
+	if len(early) != 0 {
+		t.Errorf("a reported %v before its old loop reported stopped, want nothing yet", early)
+	}
+	close(release)
 	r.waitPassed(t, a, 0)
 	if info := accountInfo(t, h, a); info.Stopped != nil {
 		t.Errorf("a.Stopped = %+v after the Restart, want nil", info.Stopped)
 	}
 	r.waitFor(t, "a serving after the Restart", func() bool { return r.last(a) == service.ServeServing })
+	r.mu.Lock()
+	after := append([]service.ServeState(nil), r.states[a][before:]...)
+	r.mu.Unlock()
+	if after[0] != service.ServeStopped {
+		t.Errorf("a's reports after its park = %v, want the old loop's stopped first", after)
+	}
 }
 
 // Ruling R23: another pcb holding an account's sync.lock (an offline sync

@@ -7,9 +7,41 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/driver/software"
+	"fyne.io/fyne/v2/test"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
+
+// Fyne draws SVG with a narrower renderer than a browser's: an icon it cannot
+// draw comes out as an empty square in the tray, the dock and the window. (A
+// single bad element is skipped, the rest still drawn: this guards the whole.)
+func TestIconsDrawInFyne(t *testing.T) {
+	test.NewTempApp(t)
+	for _, n := range []string{"app", "ok", "syncing", "attention"} {
+		img := canvas.NewImageFromResource(icon(n))
+		img.FillMode = canvas.ImageFillContain
+		c := software.NewTransparentCanvas()
+		c.SetPadded(false)
+		c.SetContent(img)
+		c.Resize(fyne.NewSquareSize(48))
+		shot := c.Capture()
+		b := shot.Bounds()
+		drawn := 0
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				if _, _, _, a := shot.At(x, y).RGBA(); a > 0x8000 {
+					drawn++
+				}
+			}
+		}
+		// the page alone covers well over half of the square
+		if total := b.Dx() * b.Dy(); drawn*2 < total {
+			t.Fatalf("%s: Fyne drew %d of %d pixels, want at least half", n, drawn, total)
+		}
+	}
+}
 
 type fakeTrayApp struct {
 	menu         *fyne.Menu

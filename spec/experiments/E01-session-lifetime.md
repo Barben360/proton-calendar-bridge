@@ -23,7 +23,7 @@ Tested offline against the shared fake (`internal/lab/probe/session_test.go`, `c
 
 ## Results
 
-The planned measurements below are still pending. One finding came first.
+One finding came first (below); then the long probe's interim figures (2026-11-14). The long probe runs until 2026-11-26.
 
 ### Live finding (2026-11-12): a refresh needs the access token
 
@@ -48,6 +48,19 @@ go-proton-api's exported `Manager.NewClientWithRefresh` sends no access token (`
 - pcb (`auth.Refresh`) used `NewClientWithRefresh`: every session's second refresh, about 48 h after login, was refused and read as "session ended" (needs-login every two days). It now sends the access token (SPEC §5.2).
 - pcb-lab refreshed the saved session on every command (`session.Resume`) and in `probe refresh` / `probe alive` without the access token. `Resume` now uses the saved tokens, checked by one `GET /core/v4/users`, without refreshing; every refresh it makes carries the access token, and `probe refresh`'s retry with the previous refresh token carries the previous pair's access token.
 - The shared fake (`protontest`) enforces the rule (400, 10013), so a regression fails the tests and `make rehearse`.
+
+### Long probe, interim (2026-11-14)
+
+The dedicated session of HUMAN-CHECKS step 3 (login 2026-11-12 22:53:48Z, after a CAPTCHA: E02 row 3), sampled every 6 hours by the `pcb-lab-e01` user timer (`pcb-lab probe alive`: one authenticated call, a refresh only when the access token has expired). Its `e01.jsonl` (no secrets in it) as of 2026-11-14 17:00Z [verified: live 2026-11-12 to 2026-11-14]:
+
+| Samples | Result |
+|---|---|
+| 9 (2026-11-12 22:53Z to 2026-11-14 17:00Z), 6 hours apart | every one `ok`, code 1000 |
+| Refreshes | 2, at 2026-11-13 05:00Z and 2026-11-14 05:00Z: the first sample after the access token's 24 h ran out |
+| `ExpiresIn` on each refresh | 86400 (86399) s: **the access token lives 24 h** |
+| Rotation | `rotated: true` on both: each refresh returns a new refresh token and a new access token |
+
+So far: the session is alive at 42 h with a refresh once a day; the refresh token rotates on every refresh. The old-token rule is the 2026-11-12 finding above (a rotated refresh token needs its pair's access token). Still to come: the end of the 14-day window (2026-11-26), with the first `ok:false` line or "survived 14 days of 6-hourly sampling"; then the timer is removed and `e01.jsonl` goes in `raw/E01/alive.jsonl`.
 
 ## Pending live run (HUMAN-CHECKS steps 2 and 3)
 

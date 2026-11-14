@@ -160,6 +160,7 @@ test_default_install() {
   exists "$d" "$p/share/icons/hicolor/scalable/apps/pcb-ui.svg"
   line "$d" "Exec=$p/bin/pcb-ui"
   line "$d" "Icon=pcb-ui"
+  line "$d" "StartupWMClass=io.github.barben360.pcb-ui"
   mode "$d" -rw-r--r--
   same "$p/share/icons/hicolor/scalable/apps/pcb-ui.svg" "$root/internal/ui/desktop/icons/app.svg"
   has "$c/out" "pcb version v0.2.0"

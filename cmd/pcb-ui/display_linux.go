@@ -59,3 +59,16 @@ func openDisplay() error {
 	glfw.Terminate()
 	return nil
 }
+
+// setWindowClass makes appID the X11 class (WM_CLASS) of every window GLFW
+// opens from now on; on Wayland the app ID is already the app_id. The
+// desktop entry's StartupWMClass names it, which is how the shell ties a
+// window to the entry and shows its icon. Without it GLFW takes the title
+// ("pcb"), and Fyne runs on XWayland under GNOME, so GNOME showed no logo.
+// It must run on the main thread, after Fyne initialised GLFW (its first
+// NewWindow does) and before the window is shown: Fyne opens the native
+// window at the first Show, and glfw.Init resets the hints.
+func setWindowClass() {
+	glfw.WindowHintString(glfw.X11InstanceName, appID)
+	glfw.WindowHintString(glfw.X11ClassName, appID)
+}

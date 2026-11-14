@@ -188,8 +188,8 @@ func (h *Hub) LocalOf(id string) *Local {
 }
 
 // OnPark makes f run each time a serve loop parked its account (after
-// a.loop is cleared, before the loop's end is signalled). Set it before
-// Serve.
+// a.loop is cleared, before the loop reports ServeStopped and its end is
+// signalled). Set it before Serve.
 func (h *Hub) OnPark(f func(id string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
