@@ -17,7 +17,7 @@ import (
 // pcb mcp over stdio (design §5.3): one MCP session on stdin and stdout,
 // served by one backend after another. The backend is this process's own
 // server (ServeStdio, when pcb mcp is the session daemon) or a daemon's
-// /mcp on the control socket (Relay). Messages are copied one by one; the
+// /mcp on the control socket (RelayDial). Messages are copied one by one; the
 // agent's handshake is kept and replayed to a new backend, so a daemon that
 // ends hands the session over without the agent noticing more than the
 // call in flight, which returns retry.

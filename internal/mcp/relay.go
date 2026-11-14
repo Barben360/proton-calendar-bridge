@@ -5,19 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ErrDaemonGone is Relay's end when the daemon went away: the agent's
+// ErrDaemonGone is RelayDial's end when the daemon went away: the agent's
 // next message is queued, for the next backend (another daemon, or this
 // process become the session daemon).
 var ErrDaemonGone = errors.New("the pcb daemon went away")
 
-// ErrRelayRefused is Relay's end when the daemon answered without serving
+// ErrRelayRefused is RelayDial's end when the daemon answered without serving
 // the session (a refused request, before any answer): the agent's
 // messages stay queued, and a new attempt should wait first.
 var ErrRelayRefused = errors.New("the pcb daemon did not serve the relay")
@@ -26,34 +25,27 @@ var ErrRelayRefused = errors.New("the pcb daemon did not serve the relay")
 // request after initialize.
 const protocolVersionHeader = "Mcp-Protocol-Version"
 
-// Relay bridges stdio to the daemon's /mcp on the control socket, message
-// by message. See (*Stdio).Relay.
-func Relay(ctx context.Context, socket string, g Grant, in io.Reader, out io.Writer) error {
-	return NewStdio(in, out).Relay(ctx, socket, g)
-}
-
-// Relay serves st through the daemon's /mcp on the control socket at
-// socket, sending g as the grant (RelayAuth) on every request, until
+// RelayDial serves st through the daemon's /mcp over the connections dial
+// opens (pcb mcp passes ctl.DialConn: the control socket, or its named pipe
+// on Windows), sending g as the grant (RelayAuth) on every request, until
 // stdin ends (nil, after up to 5 s for the answers still due), ctx ends
 // (its error) or the daemon goes away: then the tool calls in flight are
-// answered retry and, once the agent sent its next message, Relay returns
-// ErrDaemonGone (stdin ending meanwhile: nil). A daemon that answers
-// without serving the session (a refused request before any answer) ends
-// it with ErrRelayRefused, the agent's messages kept.
+// answered retry and, once the agent sent its next message, RelayDial
+// returns ErrDaemonGone (stdin ending meanwhile: nil). A dial failure
+// counts as the daemon gone, as a Unix socket that cannot be dialled does.
+// A daemon that answers without serving the session (a refused request
+// before any answer) ends it with ErrRelayRefused, the agent's messages
+// kept.
+//
+// A call counts as delivered once its request was written, so dial's
+// connections must refuse a write once the daemon closed its end, as a
+// Unix socket and a named pipe do (an AF_UNIX socket on Windows accepts
+// it): a call sent after the daemon ended then goes to the next backend
+// instead of being answered retry.
 //
 // The SDK's connection sends Mcp-Protocol-Version only for a session it
-// initialised itself (E19): Relay adds the version the agent's initialize
-// settled to every request that lacks one.
-func (st *Stdio) Relay(ctx context.Context, socket string, g Grant) error {
-	return st.RelayDial(ctx, func(ctx context.Context) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", socket)
-	}, g)
-}
-
-// RelayDial is Relay over the connections dial opens (ctl.DialConn: the
-// control socket, or its named pipe on Windows). A dial failure counts as
-// the daemon gone, as a Unix socket that cannot be dialled does.
+// initialised itself (E19): RelayDial adds the version the agent's
+// initialize settled to every request that lacks one.
 func (st *Stdio) RelayDial(ctx context.Context, dial func(context.Context) (net.Conn, error), g Grant) error {
 	grant, err := json.Marshal(g)
 	if err != nil {
