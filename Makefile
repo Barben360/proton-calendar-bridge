@@ -23,7 +23,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test shellcheck pcb-fake rehearse screenshots
+.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test shellcheck actionlint pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -112,6 +112,11 @@ shellcheck:
 	if [ -n "$$files" ]; then \
 		docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(SHELLCHECK_IMAGE) -x $$files; \
 	fi
+
+# The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
+ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+actionlint:
+	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(ACTIONLINT_IMAGE) -color
 
 # The release scripts (scripts/release): the tag rules and the archives;
 # each prints PASS last.
