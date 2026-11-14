@@ -30,3 +30,6 @@ func SetLocalZone(f func() *time.Location) (restore func()) {
 	localZone = f
 	return func() { localZone = old }
 }
+
+// WindowsZone is the process's zone from a Windows zone key reader.
+func WindowsZone(key func() (string, bool)) *time.Location { return windowsZone(key) }

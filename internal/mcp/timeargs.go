@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/winzone"
 )
 
 // Time arguments (design §5.7, Review Focus 1): an RFC 3339 time with an
@@ -67,12 +68,13 @@ var localZone = func() *time.Location { return localZoneFrom(runtime.GOOS, os.Lo
 // TZ's name (a zone file's path by its zoneinfo/ part, or the link it is),
 // else, TZ unset, the /etc/localtime link, else /etc/timezone (Debian's
 // copy of the name when /etc/localtime is no link). TZ set but empty or
-// unknown is time.Local (Go's UTC then); so is no name found, and Windows,
-// where Go reads no TZ. zoneLabel names an unnamed time.Local by its
+// unknown is time.Local (Go's UTC then); so is no name found. On Windows,
+// where Go reads no TZ, the zone is the IANA zone CLDR maps the Windows zone
+// key to (windowsZone). zoneLabel names an unnamed time.Local by its
 // offset.
 func localZoneFrom(goos string, env func(string) (string, bool), readlink func(string) (string, error), readFile func(string) ([]byte, error)) *time.Location {
 	if goos == "windows" {
-		return time.Local
+		return windowsZone(winzone.Key)
 	}
 	tz, set := env("TZ")
 	tz = strings.TrimPrefix(tz, ":")
@@ -100,6 +102,25 @@ func localZoneFrom(goos string, env func(string) (string, bool), readlink func(s
 				return loc
 			}
 		}
+	}
+	return time.Local
+}
+
+// windowsZone is the IANA zone of the Windows zone key, time.Local itself
+// when there is no key, CLDR does not map it (pcb doctor reports that) or
+// the zone cannot be loaded: wall clocks are then still read in the local
+// zone, labelled by its offset.
+func windowsZone(key func() (string, bool)) *time.Location {
+	k, ok := key()
+	if !ok {
+		return time.Local
+	}
+	name, ok := winzone.IANA(k)
+	if !ok {
+		return time.Local
+	}
+	if loc := namedZone(name); loc != nil {
+		return loc
 	}
 	return time.Local
 }
