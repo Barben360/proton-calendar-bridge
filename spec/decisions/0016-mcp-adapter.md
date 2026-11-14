@@ -2,7 +2,7 @@
 
 - **Date**: 2026-11-13
 - **Decided by**: author (an MCP server in `pcb`, stdio and remote; read-only or more by configuration; login inside MCP; multi-account; header-capable clients with one bearer token per agent, no OAuth; stdio relays to a running daemon or serves the session itself; never a login through remote MCP; a per-account MCP switch), the rest the agent's calls (design `spec/designs/2026-11-13-mcp-design.md`, and the implementation plan, not published)
-- **Status**: accepted, built in M8 on 2026-11-13 (branch `m8-mcp`; live session pending, `spec/HUMAN-CHECKS.md` step 10; what was built: SPEC §12, the differences from the design: SPEC §18); amends 0007 (MCP was not planned), 0014 (one adapter switch per account becomes two) and SPEC §12's note "agents never on the control socket"
+- **Status**: accepted, built in M8 on 2026-11-13 (branch `m8-mcp`; live session run 2026-11-13/14, `spec/HUMAN-CHECKS.md` step 10, `spec/experiments/M8-live.md`; what was built: SPEC §12, the differences from the design: SPEC §18); amends 0007 (MCP was not planned), 0014 (one adapter switch per account becomes two) and SPEC §12's note "agents never on the control socket"
 
 `pcb` gains A4, an MCP adapter over `service` like CalDAV, built on the official Go SDK (`github.com/modelcontextprotocol/go-sdk`, pure Go, `pcb` stays `CGO_ENABLED=0`).
 
