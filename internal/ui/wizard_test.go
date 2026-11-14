@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -403,13 +404,17 @@ func TestWizardCopiesThePassword(t *testing.T) {
 }
 
 // The wizard's line under the unattended box is the shared conditional
-// sentence for the bridge's state (here a key file: no bus), never doctor's
-// "unattended relogin is on" (live 2026-11-13, F5).
+// sentence for the bridge's state (here a key file: no bus; DPAPI on
+// Windows), never doctor's "unattended relogin is on" (live 2026-11-13, F5).
 func TestWizardUnattendedWarningFitsTheState(t *testing.T) {
 	l := newLab(t)
 	b := l.start(t)
 	w := ui.NewWizard(b)
-	if got, want := w.UnattendedWarning(), loginflow.UnattendedWarningFor(service.SealerKeyFile); got != want {
+	sealer := service.SealerKeyFile
+	if runtime.GOOS == "windows" {
+		sealer = service.SealerDPAPI
+	}
+	if got, want := w.UnattendedWarning(), loginflow.UnattendedWarningFor(sealer); got != want {
 		t.Errorf("UnattendedWarning = %q, want %q", got, want)
 	}
 	if got := w.UnattendedWarning(); strings.HasPrefix(got, "unattended relogin is on") || got == doctor.UnattendedKeyringWarning("secrets.sealed") {

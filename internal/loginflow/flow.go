@@ -56,6 +56,8 @@ func UnattendedWarningFor(sealer string) string {
 		return "If ticked: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account"
 	case service.SealerKeyFile:
 		return "If ticked: whoever can read the key file and secrets.sealed owns the Proton account"
+	case service.SealerDPAPI:
+		return "If ticked: whoever can sign in as this Windows user and read secrets.sealed owns the Proton account"
 	}
 	return "If ticked: whoever can read secrets.sealed and the key that seals it (the desktop keyring or the key file) owns the Proton account"
 }

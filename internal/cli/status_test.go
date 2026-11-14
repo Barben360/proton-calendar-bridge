@@ -19,6 +19,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 type statusStub struct{ stubAPI }
@@ -389,9 +390,6 @@ func TestStatusDaemonHintFitsTheHost(t *testing.T) {
 // Only "no daemon" falls back offline: any other dial failure exits 20,
 // in status and in doctor (a daemon ✗).
 func TestOnlyNoDaemonFallsBackOffline(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := stubRig(t, &stubAPI{statusPhase: "ready"})
 	r.dial = func(context.Context, string) (*ctl.Client, error) {
@@ -539,6 +537,9 @@ func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	key := config.Defaults(r.dirs).Secrets.KeyFile
+	if runtime.GOOS == "windows" { // auto seals with DPAPI: its key is in the state directory
+		key = filepath.Join(r.dirs.State, seal.DPAPIKeyName)
+	}
 	check := func(when string, absent bool) {
 		t.Helper()
 		want := "key_file: " + key + "\n"

@@ -586,6 +586,29 @@ func TestSealerGuardRefusesWithoutAKeyring(t *testing.T) {
 	}
 }
 
+// On Windows auto always gives DPAPI, whatever the session: the guard lets
+// pcb mcp create a new state with no keyring at all, and that state records
+// dpapi.
+func TestSealerGuardPassesOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only: elsewhere auto depends on the session (TestSealerGuardRefusesWithoutAKeyring)")
+	}
+	t.Parallel()
+	r := newRig(t, nil)
+	if err := cli.SealerGuard(t.Context(), func(k string) string { return r.env[k] }, seal.DBusKeyring("")); err != nil {
+		t.Fatalf("guard on a new Windows state = %v, want nil", err)
+	}
+	m := startMCP(t, r, seal.DBusKeyring(""))
+	cs := m.connect("2025-11-25")
+	if got := mcpStatus(t, cs); len(got) != 0 {
+		t.Errorf("status accounts on a new state = %v", got)
+	}
+	layout, err := os.ReadFile(filepath.Join(r.dirs.State, "layout.json"))
+	if err != nil || !strings.Contains(string(layout), `"dpapi"`) {
+		t.Errorf("layout.json = %q (%v), want the dpapi sealer", layout, err)
+	}
+}
+
 // An explicit [secrets] backend is honoured as by every command, a state
 // that has its layout is never probed, and a keyring that answers lets
 // auto choose it: the guard passes. pcb mcp then serves a new keyfile
@@ -593,7 +616,11 @@ func TestSealerGuardRefusesWithoutAKeyring(t *testing.T) {
 func TestSealerGuardAllowsAnExplicitBackend(t *testing.T) {
 	t.Parallel()
 	noBus := seal.DBusKeyring("")
-	for _, backend := range []string{"keyfile", "secret-service"} {
+	backends := []string{"keyfile", "secret-service"}
+	if runtime.GOOS == "windows" {
+		backends = backends[:1] // secret-service is a config fault there (config's TestCheckBackend)
+	}
+	for _, backend := range backends {
 		r := newRig(t, nil)
 		writeConfig(t, r, "[secrets]\nbackend = \""+backend+"\"\n")
 		if err := cli.SealerGuard(t.Context(), func(k string) string { return r.env[k] }, noBus); err != nil {

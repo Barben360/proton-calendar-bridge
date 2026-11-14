@@ -110,6 +110,9 @@ func doctorResults(t *testing.T, r *rig) map[string]doctorResult {
 // keyringRig is a rig logged in on a state the desktop keyring seals.
 func keyringRig(t *testing.T) *rig {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the desktop keyring (secret-service) is Linux's sealer: [secrets] backend secret-service is a config fault on Windows (config's TestCheckBackend)")
+	}
 	r := newRig(t, &protontest.Options{})
 	r.keyring = &memKeyring{}
 	toml := "[proton]\nbase_url = \"" + r.f.URL + "\"\n[secrets]\nbackend = \"secret-service\"\n"
@@ -121,9 +124,6 @@ func keyringRig(t *testing.T) *rig {
 }
 
 func TestDoctorChecksSecretsWithTheKeyring(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := keyringRig(t)
 	res := doctorResults(t, r)
@@ -151,9 +151,6 @@ func TestDoctorChecksSecretsWithTheKeyring(t *testing.T) {
 }
 
 func TestDoctorWarnsLockedKeyring(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := keyringRig(t)
 	r.keyring.setLocked(true)
@@ -171,7 +168,7 @@ func TestDoctorWarnsLockedKeyring(t *testing.T) {
 
 func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+		t.Skip("auto never falls back to the key file on Windows (DPAPI: service's TestNewStateOnWindowsSealsWithDPAPI); doctor's DPAPI line is Task 11's, and doctor exits 10 on the platform warning until Task 16")
 	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})

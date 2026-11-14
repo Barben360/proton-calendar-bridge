@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -189,7 +190,7 @@ func (a *hubAccount) retire(before func() error) (gone bool, err error) {
 // root's layout.lock and sync.lock, both taken without waiting: an M5 pcb
 // holding sync.lock is Blocked (ruling R2: with the layout in place neither
 // is touched). A new state (no layout.json, no account, no legacy file, no
-// interrupted migration) instead gets its sealer chosen (chooseSealer)
+// interrupted migration) instead gets its sealer chosen (chooseSealerOn)
 // and recorded in layout.json under the same locks; an existing layout is
 // never probed, and o.Sealer, when set, wins. It removes the pending adds
 // older than pendingExpiry and the abandoned adds older than abandonedAge,
@@ -223,7 +224,7 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	}
 	var choose func() (string, string, error)
 	if base.Sealer == nil {
-		choose = func() (string, string, error) { return chooseSealer(base.Config.Secrets.Backend, kr) }
+		choose = func() (string, string, error) { return chooseSealerOn(runtime.GOOS, base.Config.Secrets.Backend, kr) }
 	}
 	chosen := func(name, reason string) {
 		log := base.Logger
@@ -339,14 +340,19 @@ func newState(info store.LayoutInfo) bool {
 // answer before it counts as absent.
 const ProbeTimeout = 2 * time.Second
 
-// chooseSealer is the sealer a new state records, by [secrets] backend:
-// keyfile, secret-service (refused, exit 10, when the keyring cannot be
-// used) or auto (secret-service when the keyring answers within
+// chooseSealerOn is the sealer a new state records on goos (a
+// runtime.GOOS), by [secrets] backend. On Windows: keyfile, else dpapi (the
+// config refuses secret-service there), the keyring never probed.
+// Elsewhere: keyfile, secret-service (refused, exit 10, when the keyring
+// cannot be used) or auto (secret-service when the keyring answers within
 // ProbeTimeout and is unlocked, else keyfile). reason is why auto fell back
 // to the key file ("" otherwise).
-func chooseSealer(backend string, kr Keyring) (name, reason string, err error) {
+func chooseSealerOn(goos, backend string, kr Keyring) (name, reason string, err error) {
 	if backend == "keyfile" {
 		return SealerKeyFile, "", nil
+	}
+	if goos == "windows" {
+		return SealerDPAPI, "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
 	defer cancel()
@@ -389,18 +395,21 @@ func logSealerChoice(log *slog.Logger, root, backend, name, reason string, at ti
 }
 
 // NewSealer is the sealer layout.json names for the state root: the key
-// file's, or the desktop keyring's with its one key for the whole root
-// (its absolute path names the keyring item). pcb doctor builds the
-// sealer through it too.
+// file's, DPAPI's with its one key in the root (seal.DPAPIKeyName), or the
+// desktop keyring's with its one key for the whole root (its absolute path
+// names the keyring item). pcb doctor builds the sealer through it too.
 func NewSealer(root, name, keyFile string, kr Keyring) (seal.Sealer, error) {
-	if name != SealerSecretService {
-		return &seal.KeyFile{Path: keyFile}, nil
+	switch name {
+	case SealerDPAPI:
+		return &seal.DPAPI{Path: filepath.Join(root, seal.DPAPIKeyName)}, nil
+	case SealerSecretService:
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
+		}
+		return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
-	}
-	return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
+	return &seal.KeyFile{Path: keyFile}, nil
 }
 
 // DeleteSealingKey deletes the desktop keyring item ("pcb sealing key") of
@@ -814,9 +823,9 @@ func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) 
 	return res, err
 }
 
-// Sealer is the name of what seals the state's secrets: SealerKeyFile or
-// SealerSecretService (the login wizard words its unattended-relogin line
-// by it).
+// Sealer is the name of what seals the state's secrets: SealerKeyFile,
+// SealerSecretService or SealerDPAPI (the login wizard words its
+// unattended-relogin line by it).
 func (h *Hub) Sealer() string { return h.o.Sealer.Name() }
 
 // log is the Hub's logger (Options.Logger), or one that drops everything.

@@ -16,6 +16,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // isolate points the XDG dirs at a temp tree and returns the config dir.
@@ -101,7 +102,7 @@ func TestDoctorExitCode(t *testing.T) {
 
 func TestDoctorTextOK(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+		t.Skip("needs the doctor's platform check to say ok on windows/amd64 (Task 16): it warns \"runs, unsupported\" until then")
 	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
@@ -156,7 +157,7 @@ func TestDoctorTextShowsFix(t *testing.T) {
 
 func TestDoctorReportsUnresolvableDirs(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
+		t.Skip("Windows resolves the directories from %APPDATA% and %LOCALAPPDATA%, never HOME or XDG_*: blanking those leaves them resolvable")
 	}
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
@@ -288,9 +289,6 @@ func TestDoctorNeedsLoginOfADaemonWithNoAccountIsAWarning(t *testing.T) {
 // ux-I2: a daemon that does not answer its control socket cleanly is the
 // one error that may pass by itself: exit 20 when it is the only one.
 func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := stubRig(t, &stubAPI{})
 	r.dial = func(context.Context, string) (*ctl.Client, error) {
@@ -303,13 +301,12 @@ func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
 	if want := "Error: pcb doctor found 1 error\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; r.errb.String() != want {
 		t.Errorf("stderr = %q, want %q", r.errb.String(), want)
 	}
-	// With a mode to fix as well, a person must act: 10.
+	// With a mode (on Windows an access list) to fix as well, a person must
+	// act: 10.
 	if err := os.MkdirAll(r.dirs.Config, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(r.dirs.Config, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	acltest.OpenToOthers(t, r.dirs.Config)
 	r.want(exitcode.MustAct, "doctor")
 }
 
@@ -318,15 +315,23 @@ func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
 // named by its account. (Signed out first: the new key would fail the
 // sealed session's check too.)
 func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := clientRig(t)
 	r.want(exitcode.OK, "client", "add", "phone")
 	r.want(exitcode.OK, "logout")
-	key := filepath.Join(r.dirs.Config, "secrets.key")
-	if err := os.WriteFile(key, []byte(strings.Repeat("k", 32)), 0o600); err != nil {
+	key, newKey := filepath.Join(r.dirs.Config, "secrets.key"), []byte(strings.Repeat("k", 32))
+	if runtime.GOOS == "windows" { // auto sealed with DPAPI: a new DPAPI key in the state directory
+		key = filepath.Join(r.dirs.State, seal.DPAPIKeyName)
+		other := filepath.Join(t.TempDir(), seal.DPAPIKeyName)
+		if _, err := (&seal.DPAPI{Path: other}).Seal(nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if newKey, err = os.ReadFile(other); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(key, newKey, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r.want(exitcode.OK, "doctor")
@@ -362,9 +367,6 @@ func TestDoctorRefusedControlSocketIsExit10(t *testing.T) {
 // warning naming it (the next command finishes it), not "no account"; an
 // unreadable layout is an error with its own fix.
 func TestDoctorNamesTheLayoutsState(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
 	staged := filepath.Join(state, "accounts", "aaaaaaaa.migrating")

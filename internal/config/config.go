@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -112,7 +113,7 @@ type Proton struct {
 // Secrets locates the key that seals the stored secrets.
 type Secrets struct {
 	KeyFile string `toml:"key_file"` // absolute path
-	Backend string `toml:"backend"`  // auto (default), keyfile or secret-service: what seals the secrets of a new state
+	Backend string `toml:"backend"`  // auto (default), keyfile or secret-service (not on Windows): what seals the secrets of a new state
 }
 
 // Path returns where config.toml lives.
@@ -191,6 +192,26 @@ func keyAt(data []byte, line int) string {
 	return strings.TrimSpace(key)
 }
 
+// checkBackend refuses a [secrets] backend the pcb of goos (a runtime.GOOS)
+// does not have: secret-service, the Linux desktop keyring, is none of
+// Windows' (DPAPI is, through auto).
+func checkBackend(goos, backend string) error {
+	if goos == "windows" {
+		switch backend {
+		case "auto", "keyfile":
+			return nil
+		case "secret-service":
+			return errors.New("[secrets] backend secret-service needs a Linux desktop keyring: on Windows use auto (DPAPI, the default) or keyfile")
+		}
+		return errors.New("[secrets] backend must be auto or keyfile")
+	}
+	switch backend {
+	case "auto", "keyfile", "secret-service":
+		return nil
+	}
+	return errors.New("[secrets] backend must be auto, keyfile or secret-service")
+}
+
 func (c Config) validate() error {
 	if err := validAppVersion(c.Proton.AppVersion); err != nil {
 		return fmt.Errorf("proton.app_version %w", err)
@@ -201,10 +222,8 @@ func (c Config) validate() error {
 	if !filepath.IsAbs(c.Secrets.KeyFile) {
 		return errors.New("secrets.key_file must be an absolute path")
 	}
-	switch c.Secrets.Backend {
-	case "auto", "keyfile", "secret-service":
-	default:
-		return errors.New("[secrets] backend must be auto, keyfile or secret-service")
+	if err := checkBackend(runtime.GOOS, c.Secrets.Backend); err != nil {
+		return err
 	}
 	if _, err := ParseLevel(c.Log.Level); err != nil {
 		return fmt.Errorf("log.level %w", err)

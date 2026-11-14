@@ -54,7 +54,8 @@ Without it, a login stores tokens only, and you log in again when Proton ends th
 pcb seals your Proton session (and, with `--unattended-relogin`, your credentials) in `secrets.sealed`, and the CalDAV passwords in `clients.json`, with one key. That key is either:
 
 - a **key file**, by default in the config directory, beside the data; set `[secrets] key_file` to keep it on another mount ([container](container.md#the-key-file));
-- or an item in the **desktop keyring** ([below](#the-desktop-keyring-secret-service)).
+- or an item in the **desktop keyring** ([below](#the-desktop-keyring-secret-service));
+- or, on Windows, a key **protected by DPAPI** for your Windows account ([below](#on-windows-dpapi)).
 
 The key file must be exactly 32 bytes, and readable by pcb's user only: pcb refuses a key file others can read (mode 0444 included).
 
@@ -106,6 +107,26 @@ A login checks the keyring first and, when it is locked or not available, refuse
 
 - `pcb uninstall --delete-data` removes the item (a `remove keyring` step after the state directory). When the keyring is locked or not available it deletes the data anyway, and its output says how to delete the item by hand in Seahorse.
 - `pcb account remove` keeps it, since the key belongs to the state.
+
+## On Windows: DPAPI
+
+On Windows a new state keeps its sealing key in `secrets.key.dpapi` in the state directory (`%LOCALAPPDATA%\pcb`), encrypted by Windows for your account (DPAPI): only your Windows account, signed in, can decrypt it, and a copy of the file opens nowhere else.
+
+`[secrets] backend` chooses, once, when the state is created:
+
+| Value | Effect |
+|---|---|
+| `auto` (default) | DPAPI |
+| `keyfile` | the key file, a plain 32-byte key whose access list lets only you in (portable, so back it up like a password) |
+| `secret-service` | refused, exit 10: the desktop keyring exists on Linux only |
+
+- As with the key file, any program running as you can use the key: DPAPI protects it against other accounts and against a copy of the disk, not against your own processes.
+- A reset Windows password (by an administrator, not changed by you) or a new Windows profile loses the key: `pcb` then says the stored secrets cannot be opened; run `pcb logout`, then `pcb login`.
+- `pcb uninstall --delete-data` deletes the key with the state directory.
+
+### A state moved between systems
+
+A state created on Windows with DPAPI cannot be opened on Linux or macOS, and a state sealed by a Linux desktop keyring cannot be opened on Windows: pcb exits 10 and names the system the state was created on. Use it there, or move the state directory aside and run `pcb login` to start a new one. A key-file state moves with its key file.
 
 ## CalDAV passwords
 

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -443,9 +442,6 @@ func TestSchemaVersionIs2(t *testing.T) {
 // Design §4.6: doctor runs the process checks once and the account checks
 // per account, each named by its account's address.
 func TestDoctorNamesTheAccount(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to stop warning on windows/amd64 (Task 16) and the dpapi sealer instead of the key-file warning (Task 7): doctor exits 10 on any warning")
-	}
 	t.Parallel()
 	r := twoAccounts(t)
 	r.want(exitcode.OK, "doctor", "--json")

@@ -561,10 +561,14 @@ func layoutError(err error, root string, legacy []string) error {
 	var (
 		ee *exitcode.Error
 		pe *fs.PathError
+		fe *store.ForeignSealerError
 	)
 	switch {
 	case errors.As(err, &ee):
 		return err
+	case errors.As(err, &fe):
+		return mustAct("the state in "+root+" was created on "+fe.OS+" (sealer "+fe.Sealer+"): this pcb cannot open it here",
+			"use it with pcb on "+fe.OS+", or move "+root+" aside and run pcb login to start a new state")
 	case errors.Is(err, store.ErrLegacyBesideLayout):
 		msg := "account files of an older pcb are beside the per-account layout"
 		if len(legacy) > 0 {

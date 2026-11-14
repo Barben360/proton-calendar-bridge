@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -316,13 +317,14 @@ func raced(err error) error {
 // bus, none on it, or a locked keyring: auto would fall back to the key
 // file), it refuses (must-act). An agent host that scrubs the session bus
 // cannot fix a desktop's state to the key file by accident. An explicit
-// backend, and a state whose sealer is recorded, pass.
+// backend, and a state whose sealer is recorded, pass; so does every state
+// on Windows, where auto has one outcome (DPAPI) whatever the session.
 //
 // The session daemon checks it before it opens the accounts (opening a
 // new state records its sealer), and passes it to the MCP server for its
 // login tool.
 func sealerGuard(ctx context.Context, dirs paths.Dirs, cfg config.Config, kr service.Keyring) error {
-	if cfg.Secrets.Backend != "auto" {
+	if cfg.Secrets.Backend != "auto" || runtime.GOOS == "windows" {
 		return nil
 	}
 	layout, err := doctor.Accounts(dirs.State)

@@ -229,3 +229,8 @@ func (h *Hub) AlsoOnOpen(f func(l *Local)) {
 		f(l)
 	}
 }
+
+// ChooseSealerOn exposes chooseSealerOn.
+func ChooseSealerOn(goos, backend string, kr Keyring) (name, reason string, err error) {
+	return chooseSealerOn(goos, backend, kr)
+}

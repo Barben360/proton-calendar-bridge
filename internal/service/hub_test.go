@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // The fake's users of the Hub tests, and the password of b (a's is the
@@ -1354,5 +1356,108 @@ func TestAbandonLoginKeepsTheStoredSession(t *testing.T) {
 	}
 	if info := find(h.Accounts(), ra.Account); info == nil || info.Phase != string(service.StateReady) {
 		t.Errorf("after a second AbandonLogin: %+v, want ready", info)
+	}
+}
+
+// On Windows a new state is sealed with DPAPI unless [secrets] backend is
+// keyfile, without asking the desktop keyring; elsewhere the choice is
+// unchanged.
+func TestChooseSealerOnWindows(t *testing.T) {
+	kr := &fakeKeyring{}
+	for _, tc := range []struct{ goos, backend, want string }{
+		{"windows", "auto", service.SealerDPAPI},
+		{"windows", "keyfile", service.SealerKeyFile},
+		{"linux", "keyfile", service.SealerKeyFile},
+		{"linux", "auto", service.SealerSecretService}, // an unlocked keyring answers
+	} {
+		name, reason, err := service.ChooseSealerOn(tc.goos, tc.backend, kr)
+		if name != tc.want || reason != "" || err != nil {
+			t.Errorf("chooseSealerOn(%q, %q) = %q, %q, %v; want %q", tc.goos, tc.backend, name, reason, err, tc.want)
+		}
+	}
+	if asked, _, _ := kr.counts(); asked != 1 {
+		t.Errorf("the keyring was asked %d times, want once (linux auto only)", asked)
+	}
+	if _, _, err := service.ChooseSealerOn("windows", "auto", nil); err != nil {
+		t.Errorf("windows auto with no keyring: %v", err)
+	}
+}
+
+// A state whose layout.json names another system's sealer (a dpapi state
+// copied off Windows, a secret-service one onto it) is a MustAct naming that
+// system, with the way out.
+func TestForeignStateNamesItsOS(t *testing.T) {
+	t.Parallel()
+	foreign, sys := service.SealerDPAPI, "Windows"
+	if runtime.GOOS == "windows" {
+		foreign, sys = service.SealerSecretService, "Linux"
+	}
+	e := newHubEnv(t)
+	if err := os.MkdirAll(filepath.Join(e.dirs.State, "accounts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "layout.json"), []byte(`{"version":2,"sealer":"`+foreign+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.OpenHub(e.options())
+	if got := exitcode.From(err); got != exitcode.MustAct {
+		t.Fatalf("OpenHub = %v (exit %d), want exit %d", err, got, exitcode.MustAct)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "created on "+sys) || !strings.Contains(msg, "sealer "+foreign) || !strings.Contains(msg, e.dirs.State) {
+		t.Errorf("message %q does not name %s, the sealer and the state", msg, sys)
+	}
+	if h := exitcode.HintOf(err); !strings.Contains(h, "pcb on "+sys) || !strings.Contains(h, "move "+e.dirs.State) || !strings.Contains(h, "pcb login") {
+		t.Errorf("hint = %q", h)
+	}
+}
+
+func TestNewSealerDPAPIKeyLivesInTheState(t *testing.T) {
+	root := t.TempDir()
+	cfgKey := filepath.Join(t.TempDir(), "secrets.key")
+	s, err := service.NewSealer(root, service.SealerDPAPI, cfgKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := s.(*seal.DPAPI)
+	if !ok || d.Path != filepath.Join(root, "secrets.key.dpapi") || s.Name() != service.SealerDPAPI {
+		t.Fatalf("NewSealer(dpapi) = %#v, want a DPAPI sealer on %s", s, filepath.Join(root, "secrets.key.dpapi"))
+	}
+	if s, _ := service.NewSealer(root, service.SealerKeyFile, cfgKey, nil); s.(*seal.KeyFile).Path != cfgKey {
+		t.Errorf("NewSealer(keyfile) = %#v", s)
+	}
+}
+
+// On Windows a new state records dpapi and its first login writes the
+// DPAPI key in the state directory, never the configured key file; Status
+// names that key.
+func TestNewStateOnWindowsSealsWithDPAPI(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("DPAPI is Windows only: TestChooseSealerOnWindows covers the choice here")
+	}
+	t.Parallel()
+	e := newHubEnv(t)
+	e.keyring = &fakeKeyring{}
+	h := e.open(t)
+	if got := layoutSealer(t, e); got != service.SealerDPAPI {
+		t.Fatalf("layout sealer = %q, want dpapi", got)
+	}
+	if h.Sealer() != service.SealerDPAPI {
+		t.Errorf("Hub.Sealer = %q", h.Sealer())
+	}
+	e.skip(t, h)
+	id := e.mustLogin(t, h, userA).Account
+	key := filepath.Join(e.dirs.State, seal.DPAPIKeyName)
+	if err := (&seal.DPAPI{Path: key}).Check(); err != nil {
+		t.Fatalf("DPAPI key after the login: %v", err)
+	}
+	if _, err := os.Stat(e.cfg.Secrets.KeyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the configured key file %s was written (%v)", e.cfg.Secrets.KeyFile, err)
+	}
+	st := accountStatus(t, h, id)
+	if st.Secrets != "sealed" || st.Sealer != service.SealerDPAPI || st.KeyFile != key || st.KeyFileAbsent {
+		t.Errorf("status = secrets %q sealer %q key %q absent %v; want sealed, dpapi, %s", st.Secrets, st.Sealer, st.KeyFile, st.KeyFileAbsent, key)
+	}
+	if asked, _, _ := e.keyring.(*fakeKeyring).counts(); asked != 0 {
+		t.Errorf("the keyring was asked %d times, want 0", asked)
 	}
 }

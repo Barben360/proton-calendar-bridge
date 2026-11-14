@@ -6,6 +6,7 @@ import (
 	"go/build"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -268,6 +269,7 @@ func TestUnattendedWarningFollowsTheSealer(t *testing.T) {
 	}{
 		{service.SealerSecretService, "If ticked: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account", "key file"},
 		{service.SealerKeyFile, "If ticked: whoever can read the key file and secrets.sealed owns the Proton account", "keyring"},
+		{service.SealerDPAPI, "If ticked: whoever can sign in as this Windows user and read secrets.sealed owns the Proton account", "key file"},
 		{"", "If ticked: whoever can read secrets.sealed and the key that seals it (the desktop keyring or the key file) owns the Proton account", "is on"},
 	} {
 		got := loginflow.UnattendedWarningFor(tc.sealer)
@@ -275,9 +277,14 @@ func TestUnattendedWarningFollowsTheSealer(t *testing.T) {
 			t.Errorf("sealer %q: %q, want %q", tc.sealer, got, tc.want)
 		}
 	}
-	// A flow asks its Hub: this lab's state has no keyring, so the key file.
+	// A flow asks its Hub: this lab's state has no keyring, so the key file
+	// (DPAPI on Windows).
+	native := service.SealerKeyFile
+	if runtime.GOOS == "windows" {
+		native = service.SealerDPAPI
+	}
 	l := newLab(t)
-	if got, want := l.flow().UnattendedWarning(), loginflow.UnattendedWarningFor(service.SealerKeyFile); got != want {
-		t.Errorf("flow on a key-file state: %q, want %q", got, want)
+	if got, want := l.flow().UnattendedWarning(), loginflow.UnattendedWarningFor(native); got != want {
+		t.Errorf("flow on a %s state: %q, want %q", native, got, want)
 	}
 }

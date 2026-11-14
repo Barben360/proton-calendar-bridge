@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -496,9 +497,13 @@ func TestLoginPageNeverTicksUnattended(t *testing.T) {
 		if got := strings.Contains(body, "The agent suggests unattended relogin"); got != suggested {
 			t.Errorf("suggested %t: the page shows the agent's suggestion: %t\n%s", suggested, got, body)
 		}
-		// The lab's state seals with a key file (no bus): the line says so,
-		// and says what ticking means (live 2026-11-13, F5).
-		if !strings.Contains(body, html.EscapeString(loginflow.UnattendedWarningFor(service.SealerKeyFile))) || strings.Contains(body, "unattended relogin is on") {
+		// The lab's state seals with a key file (no bus; DPAPI on Windows):
+		// the line says so, and says what ticking means (live 2026-11-13, F5).
+		sealer := service.SealerKeyFile
+		if runtime.GOOS == "windows" {
+			sealer = service.SealerDPAPI
+		}
+		if !strings.Contains(body, html.EscapeString(loginflow.UnattendedWarningFor(sealer))) || strings.Contains(body, "unattended relogin is on") {
 			t.Errorf("suggested %t: no key-file warning next to the box, or doctor's \"is on\":\n%s", suggested, body)
 		}
 		p.post("credentials", "password", l.f.Password)

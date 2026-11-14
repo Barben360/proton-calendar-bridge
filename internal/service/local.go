@@ -230,20 +230,24 @@ func (l *Local) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// keyFile is the path named in store errors.
 // The sealers' names (seal.Sealer.Name, layout.json's "sealer").
 const (
 	SealerKeyFile       = "keyfile"
 	SealerSecretService = "secret-service"
+	SealerDPAPI         = "dpapi"
 )
 
 // keyringRef stands for the desktop keyring where the error mappers take a
 // key file's path: the key of a secret-service state is no file.
 const keyringRef = "<the desktop keyring>"
 
-// keyFile is the key file's path, or keyringRef for a secret-service state;
-// it is only a name for the messages (Status.KeyFile reads the config).
+// keyFile is the key file's path (a dpapi state's in the state directory),
+// or keyringRef for a secret-service state; it is only a name for the
+// messages.
 func (l *Local) keyFile() string {
+	if d, ok := l.o.Sealer.(*seal.DPAPI); ok {
+		return d.Path
+	}
 	if l.o.Sealer.Name() == SealerSecretService {
 		return keyringRef
 	}
@@ -454,8 +458,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Unattended: st.Unattended,
 		Address:    st.Address,
 	}
-	if s.Sealer == SealerKeyFile {
-		s.KeyFile = l.o.Config.Secrets.KeyFile
+	if s.Sealer == SealerKeyFile || s.Sealer == SealerDPAPI {
+		s.KeyFile = l.keyFile()
 		// The keyring's sealer has no file to be absent.
 		if _, err := os.Stat(s.KeyFile); errors.Is(err, os.ErrNotExist) {
 			s.KeyFileAbsent = true

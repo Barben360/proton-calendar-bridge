@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -819,10 +820,17 @@ func TestCommandsPrintTheServiceWarningsOnStderr(t *testing.T) {
 
 // createState runs a first command, which creates the state: with no
 // session bus it warns once on stderr that auto chose the key file, and
-// says why (live 2026-11-13, F1).
+// says why (live 2026-11-13, F1). On Windows auto has one outcome, DPAPI:
+// nothing to warn about.
 func createState(t *testing.T, r *rig) {
 	t.Helper()
 	r.want(exitcode.OK, "status")
+	if runtime.GOOS == "windows" {
+		if strings.Contains(r.errb.String(), "sealer chosen") {
+			t.Fatalf("the first command's stderr %q warns about the sealer: DPAPI is no fallback", r.errb.String())
+		}
+		return
+	}
 	if want := "Warning: sealer chosen (sealer: keyfile, backend: auto, reason: no Secret Service answered on the session bus)"; !strings.Contains(r.errb.String(), want) {
 		t.Fatalf("the first command's stderr %q lacks %q", r.errb.String(), want)
 	}

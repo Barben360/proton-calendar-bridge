@@ -2,10 +2,12 @@ package config_test
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -290,7 +292,11 @@ func TestBackendDefaultsToAuto(t *testing.T) {
 	if err != nil || cfg.Secrets.Backend != "auto" {
 		t.Fatalf("backend = %q, %v", cfg.Secrets.Backend, err)
 	}
-	for _, ok := range []string{"auto", "keyfile", "secret-service"} {
+	oks := []string{"auto", "keyfile", "secret-service"}
+	if runtime.GOOS == "windows" {
+		oks = oks[:2] // secret-service: TestCheckBackend
+	}
+	for _, ok := range oks {
 		cfg, err := config.Load(write(t, "[secrets]\nbackend = \""+ok+"\"\n"), dirs)
 		if err != nil || cfg.Secrets.Backend != ok {
 			t.Errorf("backend %q: got %q, %v", ok, cfg.Secrets.Backend, err)
@@ -299,10 +305,42 @@ func TestBackendDefaultsToAuto(t *testing.T) {
 }
 
 func TestBadBackendIsRefused(t *testing.T) {
-	const want = "[secrets] backend must be auto, keyfile or secret-service"
+	want := "[secrets] backend must be auto, keyfile or secret-service"
+	if runtime.GOOS == "windows" {
+		want = "[secrets] backend must be auto or keyfile"
+	}
 	for _, bad := range []string{"tpm", "", "Auto", "secret_service"} {
 		if msg := refused(t, "[secrets]\nbackend = \""+bad+"\"\n"); msg != want {
 			t.Errorf("backend %q: message = %q", bad, msg)
+		}
+	}
+	if runtime.GOOS == "windows" { // a config fault like any other: exit 10, hint "fix <path>"
+		const ss = "[secrets] backend secret-service needs a Linux desktop keyring: on Windows use auto (DPAPI, the default) or keyfile"
+		if msg := refused(t, "[secrets]\nbackend = \"secret-service\"\n"); msg != ss {
+			t.Errorf("backend secret-service on Windows: message = %q", msg)
+		}
+	}
+}
+
+// Each system's pcb has its backends: secret-service, the Linux desktop
+// keyring, is refused on Windows, where auto chooses DPAPI.
+func TestCheckBackend(t *testing.T) {
+	for _, tc := range []struct{ goos, backend, want string }{
+		{"windows", "secret-service", "[secrets] backend secret-service needs a Linux desktop keyring: on Windows use auto (DPAPI, the default) or keyfile"},
+		{"windows", "auto", ""},
+		{"windows", "keyfile", ""},
+		{"windows", "x", "[secrets] backend must be auto or keyfile"},
+		{"windows", "dpapi", "[secrets] backend must be auto or keyfile"},
+		{"linux", "secret-service", ""},
+		{"linux", "auto", ""},
+		{"linux", "keyfile", ""},
+		{"linux", "x", "[secrets] backend must be auto, keyfile or secret-service"},
+		{"linux", "dpapi", "[secrets] backend must be auto, keyfile or secret-service"},
+		{"darwin", "secret-service", ""},
+	} {
+		err := config.CheckBackend(tc.goos, tc.backend)
+		if got := fmt.Sprint(err); (tc.want == "" && err != nil) || (tc.want != "" && got != tc.want) {
+			t.Errorf("checkBackend(%q, %q) = %v, want %q", tc.goos, tc.backend, err, tc.want)
 		}
 	}
 }

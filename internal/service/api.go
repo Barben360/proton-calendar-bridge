@@ -309,7 +309,8 @@ type Status struct {
 	// KeyFileAbsent: no file at KeyFile (before the first login, or once
 	// deleted); another stat failure is not absence.
 	KeyFileAbsent bool `json:"key_file_absent"`
-	// Sealer is what seals the secrets: "keyfile" or "secret-service".
+	// Sealer is what seals the secrets: "keyfile", "secret-service" or
+	// "dpapi" (KeyFile is then the DPAPI key, in the state directory).
 	Sealer      string     `json:"sealer"`
 	Unattended  bool       `json:"unattended"`
 	CaptchaURL  string     `json:"captcha_url,omitempty"`
