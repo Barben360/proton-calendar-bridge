@@ -3,9 +3,12 @@
 package atomicfile_test
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,4 +114,72 @@ func TestRenameRetriesADirectory(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(d2, "x")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// junk keeps the reader's garbage reachable until the next one replaces it,
+// so the heap around a rename's buffer holds non-zero bytes.
+var junk []byte
+
+// Replacing a file again and again, while a pcb reader loops on it, always
+// leaves exactly the file Write was given, with its new content: the rename
+// never fails, never lands on another name, never loses the file. Target
+// paths of 64 consecutive lengths cover every allocation size the rename's
+// buffer can take, and the reader fills the heap with non-zero bytes (a
+// buffer read past its end then meets garbage, not a lucky zero).
+func TestWriteStressWithASharedReader(t *testing.T) {
+	root := t.TempDir()
+	const lengths, cycles = 64, 8 // 512 replacements
+	for n := range lengths {
+		dir := filepath.Join(root, fmt.Sprint(n))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, strings.Repeat("f", n+1))
+		if err := atomicfile.Write(p, []byte("v0")); err != nil {
+			t.Fatalf("first Write of a %d-character path: %v", len(p), err)
+		}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if b, err := atomicfile.ReadFile(p); err == nil {
+					junk = bytes.Repeat(b, 64+len(p))
+				}
+			}
+		}()
+		for i := 1; i <= cycles; i++ {
+			want := fmt.Sprintf("v%d", i)
+			if err := atomicfile.Write(p, []byte(want)); err != nil {
+				close(stop)
+				<-done
+				t.Fatalf("Write %d of a %d-character path: %v", i, len(p), err)
+			}
+			b, err := atomicfile.ReadFile(p)
+			if err != nil || string(b) != want {
+				close(stop)
+				<-done
+				t.Fatalf("after Write %d of a %d-character path: ReadFile = %q, %v; want %q (directory: %v)", i, len(p), b, err, want, names(dir))
+			}
+		}
+		close(stop)
+		<-done
+		if got := names(dir); len(got) != 1 || got[0] != filepath.Base(p) {
+			t.Fatalf("directory of a %d-character path holds %q, want only %q", len(p), got, filepath.Base(p))
+		}
+	}
+}
+
+func names(dir string) []string {
+	entries, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out
 }

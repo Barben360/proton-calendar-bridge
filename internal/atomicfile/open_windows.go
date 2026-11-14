@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -29,8 +30,10 @@ func Open(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-// Rename is os.Rename, retried every 50 ms for at most RenameRetry while a
-// reader or a scanner holds the file (sharing violation, access denied).
+// Rename moves from to to, replacing to (see rename: POSIX semantics for a
+// file, os.Rename for a directory), retried every 50 ms for at most
+// RenameRetry while a foreign reader or a scanner holds a file (sharing
+// violation, access denied).
 func Rename(from, to string) error {
 	deadline := time.Now().Add(RenameRetry)
 	for {
@@ -60,37 +63,45 @@ func rename(from, to string) error {
 	return nil
 }
 
+// posixRename renames from (a file, or the link itself if it is one) to to,
+// replacing to even while another handle holds it with FILE_SHARE_DELETE.
 func posixRename(from, to string) error {
 	abs, err := windows.FullPath(to)
 	if err != nil {
 		return err
 	}
+	// The name keeps its NUL: SetFileInformationByHandle converts it to an NT
+	// path as a NUL-terminated string and ignores FileNameLength, so without
+	// one it reads past the name into the next heap object, and the rename
+	// fails (invalid name, path not found) or lands on that longer name.
 	name, err := windows.UTF16FromString(abs)
 	if err != nil {
 		return err
 	}
-	name = name[:len(name)-1] // without the NUL: the length is explicit
 	src, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return err
 	}
 	h, err := windows.CreateFile(src, windows.DELETE|windows.SYNCHRONIZE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return err
 	}
 	defer windows.CloseHandle(h) //nolint:errcheck // nothing to do about it
-	buf := make([]byte, int(unsafe.Offsetof(renameInfo{}.FileName))+len(name)*2)
+	size := int(unsafe.Offsetof(renameInfo{}.FileName)) + len(name)*2
+	buf := make([]uint64, (size+7)/8) // zeroed, aligned for the handle field
 	info := (*renameInfo)(unsafe.Pointer(&buf[0]))
 	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
-	info.FileNameLength = uint32(len(name) * 2)
+	info.FileNameLength = uint32((len(name) - 1) * 2) // bytes, without the NUL
 	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
-	return windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buf[0], uint32(len(buf)))
+	err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, (*byte)(unsafe.Pointer(&buf[0])), uint32(size))
+	runtime.KeepAlive(buf)
+	return err
 }
 
 // renameInfo is FILE_RENAME_INFO (the buffer is longer than the struct: the
-// name follows FileName's first element).
+// name and its NUL follow FileName's first element).
 type renameInfo struct {
 	Flags          uint32
 	RootDirectory  windows.Handle

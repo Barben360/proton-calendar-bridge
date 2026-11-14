@@ -181,3 +181,34 @@ func TestOpenMissingIsNotExist(t *testing.T) {
 		t.Fatalf("Open missing = %v, want fs.ErrNotExist", err)
 	}
 }
+
+// Rename moves a symbolic link itself: the link lands at the new name, still
+// pointing at its target, which stays where it was.
+func TestRenameMovesALinkNotItsTarget(t *testing.T) {
+	dir := t.TempDir()
+	target, link, moved := filepath.Join(dir, "target"), filepath.Join(dir, "link"), filepath.Join(dir, "moved")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("this user may not create symbolic links (no developer mode or privilege): %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := atomicfile.Rename(link, moved); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(moved); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("Lstat(moved) = %v, %v; want the link", fi, err)
+	}
+	if got, err := os.Readlink(moved); err != nil || got != target {
+		t.Errorf("moved points at %q, %v; want %q", got, err, target)
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "x" {
+		t.Errorf("target = %q, %v; want it untouched", b, err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the old link name is still there: %v", err)
+	}
+}
