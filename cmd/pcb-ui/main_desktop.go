@@ -40,6 +40,18 @@ const appID = "io.github.barben360.pcb-ui"
 // logMax is the size at which pcb-ui.log rotates to pcb-ui.log.1.
 const logMax = 10 * 1024 * 1024
 
+// openLog opens <state>/logs/pcb-ui.log. The state and logs directories
+// are made first, private to the user as every directory pcb makes (an
+// access list owned by the user on Windows, even elevated): logfile, which
+// imports only the standard library, would make them with os.MkdirAll.
+func openLog(state string) (*logfile.File, error) {
+	logs := filepath.Join(state, "logs")
+	if err := acl.MkdirAll(logs); err != nil {
+		return nil, err
+	}
+	return logfile.Open(filepath.Join(logs, "pcb-ui.log"), logMax)
+}
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
@@ -72,12 +84,7 @@ func run(args []string) int {
 	if err != nil {
 		return fatal(a, &exitcode.Error{Code: exitcode.Usage, Err: err, Hint: "use debug, info, warn or error in [log] level"})
 	}
-	// The state directory private to the user (an ACL on Windows) before the
-	// log creates it.
-	if err := acl.MkdirAll(dirs.State); err != nil {
-		return fatal(a, &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "check the permissions of the state directory"})
-	}
-	lf, err := logfile.Open(filepath.Join(dirs.State, "logs", "pcb-ui.log"), logMax)
+	lf, err := openLog(dirs.State)
 	if err != nil {
 		return fatal(a, &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: "check the permissions of the state directory"})
 	}

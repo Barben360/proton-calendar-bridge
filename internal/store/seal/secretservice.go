@@ -5,10 +5,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 )
 
@@ -98,7 +98,7 @@ func (s *SecretService) key(create bool) ([]byte, error) {
 // sealed under a key that no longer exists. Under the lock the loser finds
 // the winner's key. Off Unix the lock is a no-op, as elsewhere.
 func (s *SecretService) create(ctx context.Context, attrs map[string]string) ([]byte, error) {
-	if err := os.MkdirAll(s.StateDir, 0o700); err != nil {
+	if err := acl.MkdirAll(s.StateDir); err != nil {
 		return nil, err
 	}
 	lctx, cancel := context.WithTimeout(ctx, createLockWait)

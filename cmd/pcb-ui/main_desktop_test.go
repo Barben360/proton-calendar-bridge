@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 )
@@ -177,4 +178,26 @@ func TestCheckGL(t *testing.T) {
 	if err := checkGL(func() error { return nil }); err != nil {
 		t.Errorf("a usable OpenGL: %v", err)
 	}
+}
+
+// The log's directories are private as every directory pcb makes: mode
+// 0700 on Unix; on Windows a protected access list owned by the user, not
+// the state directory's inherited one (an elevated pcb-ui would otherwise
+// leave <state>\logs owned by Administrators).
+func TestOpenLogMakesPrivateDirectories(t *testing.T) {
+	t.Parallel()
+	state := filepath.Join(t.TempDir(), "state")
+	lf, err := openLog(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lf.Close() }()
+	if _, err := lf.Write([]byte("line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "logs", "pcb-ui.log")); err != nil {
+		t.Fatalf("the log is not at <state>/logs/pcb-ui.log: %v", err)
+	}
+	acltest.WantPrivate(t, state, 0o700)
+	acltest.WantPrivate(t, filepath.Join(state, "logs"), 0o700)
 }
