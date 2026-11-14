@@ -12,8 +12,8 @@ import (
 //go:embed icons/*.svg
 var iconFS embed.FS
 
-// icon loads one of our own icons (a grid of days, four of them lit as an
-// arch).
+// icon loads one of our own icons (a calendar page with two rings, whose
+// curve smiles across it).
 func icon(name string) fyne.Resource {
 	b, err := iconFS.ReadFile("icons/" + name + ".svg")
 	if err != nil {
