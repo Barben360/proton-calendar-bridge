@@ -5,7 +5,7 @@
 # commit time), owner 0:0, modes 0755 (binaries) and 0644 (the rest).
 # The tarballs need GNU tar: Linux runners, or macOS with gnu-tar's gnubin
 # first on PATH. The zip is written by mkzip.py (python3 zipfile, level 9, no
-# extra fields): the same bytes on any host with the same zlib, and no
+# extra fields): byte-identical for the same zlib build (zlib-ng differs), and no
 # dependency on an Info-ZIP zip, which a workstation may lack.
 # Usage: scripts/release/package.sh OS ARCH BINDIR OUTDIR
 #   OS linux|darwin|windows, ARCH amd64|arm64 (windows: amd64 only); linux

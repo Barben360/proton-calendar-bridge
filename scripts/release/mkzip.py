@@ -6,8 +6,10 @@ bytes of the names. Fixed per entry: modification time = EPOCH (UTC, DOS
 resolution, so rounded down to an even second; EPOCH >= 315532800), Deflate
 level 9, created-by Unix, no extra fields, no comment, external attributes
 0755 for files whose mode has the owner-execute bit and 0644 otherwise.
-Python's zipfile and the same zlib behave the same on a workstation and on
-the runners; nothing here reads the clock, the umask or the file times.
+Byte-identical for the same zlib build (as the gzip'd tarballs are):
+zlib and zlib-ng (some distributions' default) compress differently, so a
+workstation may not match the runners. Nothing here reads the clock, the
+umask or the file times.
 Run it as python3 -I (package.sh does).
 """
 import os
@@ -26,12 +28,17 @@ def main(argv):
     when = time.gmtime(epoch)[:6]
     if when[0] < 1980:
         sys.exit("mkzip.py: EPOCH before 1980 cannot be stored in a zip")
+    entries = []
+    for name in names:  # all checks before the archive is created
+        if "/" in name or name in ("", ".", ".."):
+            sys.exit("mkzip.py: not a flat file name: %r" % name)
+        path = os.path.join(src, name)
+        try:
+            entries.append((name, path, os.stat(path).st_mode & 0o100))
+        except OSError as e:
+            sys.exit("mkzip.py: %s" % e)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for name in names:
-            if "/" in name or name in ("", ".", ".."):
-                sys.exit("mkzip.py: not a flat file name: %r" % name)
-            path = os.path.join(src, name)
-            exe = os.stat(path).st_mode & 0o100
+        for name, path, exe in entries:
             info = zipfile.ZipInfo(name, date_time=when)
             info.create_system = 3
             info.compress_type = zipfile.ZIP_DEFLATED

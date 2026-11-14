@@ -75,6 +75,9 @@ cp -r "$wb" "$tmp/wb2"; rm "$tmp/wb2/pcb-ui.exe"
 msg=$("$pkg" windows amd64 "$tmp/wb2" "$tmp/out5" 2>&1); rc=$?
 check "windows without pcb-ui.exe refused" "$rc $(grep -c pcb-ui.exe <<<"$msg")" "2 1"
 check "no archive without pcb-ui.exe" "$(find "$tmp/out5" -type f 2>/dev/null | wc -l)" 0
+mkdir -p "$tmp/out7"
+msg=$(python3 -I "$here/mkzip.py" "$tmp/out7/x.zip" 315619200 "$wb" pcb.exe gone.exe 2>&1); rc=$?
+check "mkzip with a missing input refused, no zip left" "$rc $(grep -c gone.exe <<<"$msg") $(find "$tmp/out7" -type f | wc -l)" "1 1 0"
 msg=$("$pkg" windows amd64 "$bin" "$tmp/out5" 2>&1); rc=$?
 check "windows needs the .exe names" "$rc $(grep -c 'pcb.exe' <<<"$msg")" "2 1"
 

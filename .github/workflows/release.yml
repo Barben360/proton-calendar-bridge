@@ -602,7 +602,7 @@ jobs:
           }
           for try in 1 2 3 4 5; do
             if state; then echo "$GITHUB_REF_NAME is published as decided"; exit 0; fi
-            [ "$try" -eq 6 ] || sleep 10
+            [ "$try" -eq 5 ] || sleep 10
           done
           echo "::error::$GITHUB_REF_NAME IS PUBLISHED; only this check failed (see above): check the Release on GitHub and fix it there, do not re-run"
           exit 1
