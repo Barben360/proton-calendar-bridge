@@ -67,6 +67,9 @@ func (sv *hubServe) poke() {
 type accountLoop struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// after is the end of the account's previous loop, nil for its first:
+	// the loop starts once that one has made its last reports.
+	after <-chan struct{}
 }
 
 // stop ends the loop, if any, and waits for its end.
@@ -379,8 +382,8 @@ func (h *Hub) startLoop(sv *hubServe, a *hubAccount) {
 		return
 	}
 	ctx, cancel := context.WithCancel(sv.ctx)
-	run := &accountLoop{cancel: cancel, done: make(chan struct{})}
-	a.loop = run
+	run := &accountLoop{cancel: cancel, done: make(chan struct{}), after: a.ended}
+	a.loop, a.ended = run, run.done
 	a.lmu.Unlock()
 	h.mu.Lock()
 	a.state, a.waitErr = "", nil
@@ -402,13 +405,19 @@ const keyringRetry = 30 * time.Second
 // a stop its context did not cause parks a. A sync.lock held elsewhere is
 // tried again every syncLockRetry, logged once per distinct cause.
 //
-// The loop's end reports ServeStopped first, then parks a and clears
-// a.loop in one critical section (lmu, then mu): a Restart or a login
-// after it finds a parked account with no loop and starts one; one
-// before it finds the loop still there and leaves it, and the park
-// follows.
+// The loop's end records ServeStopped, parks a and clears a.loop in one
+// critical section (lmu, then mu), then reports ServeStopped: a client
+// that looks on the report finds the park (AccountInfo.Stopped, issue
+// #7). A Restart or a login after that section finds a parked account
+// with no loop and starts one; one before it finds the loop still there
+// and leaves it, and the park follows. A loop started after the section
+// waits for this one's end (run.after) before it serves, so its reports
+// follow this one's ServeStopped.
 func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *accountLoop) {
 	defer sv.wg.Done()
+	if run.after != nil {
+		<-run.after
+	}
 	o := sv.o
 	opts := ServeOptions{
 		Interval:     o.Interval,
@@ -447,9 +456,9 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 	cancelled := ctx.Err() != nil
 	run.cancel()
 	park := !cancelled && err != nil
-	h.loopState(sv, a, ServeStopped)
 	a.lmu.Lock()
 	h.mu.Lock()
+	a.state = ServeStopped
 	if park {
 		a.stopped = &StopInfo{Code: int(exitcode.From(err)), Message: err.Error(), Hint: exitcode.HintOf(err), At: h.o.Now()}
 		a.stopErr = err
@@ -462,10 +471,11 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 	hook := h.onPark
 	h.mu.Unlock()
 	a.lmu.Unlock()
+	if park && hook != nil {
+		hook(a.id)
+	}
+	h.report(sv, a, ServeStopped)
 	if park {
-		if hook != nil {
-			hook(a.id)
-		}
 		sv.log.Error("account stopped", "account", a.id, "reason", err.Error(), "hint", exitcode.HintOf(err))
 		sv.parked.Store(true)
 		sv.poke()
@@ -473,12 +483,17 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 	close(run.done)
 }
 
-// loopState records the state a's loop entered, reports it and lets the
-// exit rule look again.
+// loopState records the state a's loop entered and reports it.
 func (h *Hub) loopState(sv *hubServe, a *hubAccount, s ServeState) {
 	h.mu.Lock()
 	a.state = s
 	h.mu.Unlock()
+	h.report(sv, a, s)
+}
+
+// report gives s, which a's loop entered and the Hub recorded, to OnState
+// and lets the exit rule look again.
+func (h *Hub) report(sv *hubServe, a *hubAccount, s ServeState) {
 	if sv.o.OnState != nil {
 		sv.o.OnState(a.id, s)
 	}
