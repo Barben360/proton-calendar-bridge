@@ -1820,7 +1820,7 @@ runs `.github/workflows/release.yml`, which refuses a tag off main, a tag whose 
 builds the archives `pcb_<os>_<arch>.tar.gz` (Linux and macOS, amd64 and arm64; `pcb-ui` on Linux only), pushes the image and
 publishes the Release with `checksums.txt` and `install.sh`. The files and the image carry GitHub artifact attestations
 (`gh attestation verify`), which replace the minisign [call] this section made earlier. `install.sh` downloads an archive, checks its
-SHA-256 (and the attestation when `gh` is logged in), and places the files under `~/.local`; it does not run `pcb install`.
+SHA-256 (and the attestation when `gh` 2.49 or later is logged in), and places the files under `~/.local`; it does not run `pcb install`.
 Install from source (`make install` in a clone, then `pcb install`) still works.
 
 Container: `ghcr.io/barben360/proton-calendar-bridge`, a public package (amd64 and arm64), pushed on a release (`X.Y.Z`, `X.Y`,

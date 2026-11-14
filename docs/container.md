@@ -33,15 +33,19 @@ Images are pushed when a release is published, never from main.
 
 A patch release of an older line (`1.2.4` after `1.3.0`) does not take `latest`. Pin `X.Y.Z` for a server you do not want to change under you.
 
-GHCR may list an image's attestation as an extra `sha256-<hex>` version of the package. It belongs to the release: do not delete it.
+GHCR lists more versions than tags: each release also has an untagged version per architecture (the images its `X.Y.Z` points to) and may have its attestation as a `sha256-<hex>` version. They belong to the release: do not delete them, or its tags break for good.
 
 ### Check an image
 
-Each image carries a GitHub attestation: proof that this repository's release workflow built it.
+Each image carries a GitHub attestation: proof that this repository's image workflow (`image-build.yml`, which a release runs) built it from a given commit. For a release, `--source-ref` also checks that it was built for that version's tag:
 
 ```sh
-gh attestation verify oci://ghcr.io/barben360/proton-calendar-bridge:latest --repo Barben360/proton-calendar-bridge
+gh attestation verify oci://ghcr.io/barben360/proton-calendar-bridge:X.Y.Z --repo Barben360/proton-calendar-bridge \
+  --signer-workflow Barben360/proton-calendar-bridge/.github/workflows/image-build.yml \
+  --source-ref refs/tags/vX.Y.Z
 ```
+
+A `sha-<12 hex>` development image is built from a branch: leave out `--source-ref`.
 
 ## Prepare `/data`
 

@@ -71,6 +71,19 @@ git tag -d vX.Y.Z                   # and the local one
 
 Release notes come from the pull request titles; edit them on GitHub afterwards when needed.
 
+A refused tag that you keep still counts: a later run compares every `v*` tag to decide `latest` and `X.Y`, so a kept `v2.0.0` stops `v1.5.0` from taking them. Delete it.
+
+### When a release run fails
+
+The run's jobs, in order: checks, the builds, the archives, macOS, `image`, `release`. What a failure leaves depends on where it happened:
+
+| Failed | Published | What to do |
+|---|---|---|
+| before the `image` job | nothing | delete the tag, fix the cause, tag again |
+| in the `image` job or after it | the image, maybe its tags | fix what is outside the commit (a runner, the network, GitHub), then "Re-run failed jobs" on that run. "Re-run all jobs" and a re-pushed tag are refused: the image is already pushed. A cause in the code cannot be fixed this way: the version is burned, release the next one |
+| the image's attestation | the version tags, on an image without its attestation, and no Release | "Re-run failed jobs": it builds the same commit again and moves those tags onto the attested image |
+| the last step, "The Release is published as decided" | everything: the Release is out | do not re-run; check the Release on GitHub and fix it there |
+
 ### A development image
 
 An image of any commit, branch or tag, tagged `sha-<12 hex>` of the commit it resolves to:
@@ -88,13 +101,14 @@ make actionlint      # lint the workflow files
 make shellcheck      # shellcheck the shell scripts
 ```
 
-`install.sh` has test hooks, for these tests only:
+`install.sh` and its test have hooks, for these tests only:
 
 | Variable | Effect |
 |---|---|
 | `PCB_INSTALL_BASE_URL` | replaces `https://github.com/Barben360/proton-calendar-bridge/releases`; a `file://` URL works through curl |
 | `PCB_INSTALL_OS` | the system name, instead of `uname -s` |
 | `PCB_INSTALL_ARCH` | the architecture, instead of `uname -m` |
+| `PCB_TEST_SH` | the shell `install_test.sh` runs `install.sh` with, instead of `sh`: `PCB_TEST_SH=dash make install-test` |
 
 ## Live sessions
 

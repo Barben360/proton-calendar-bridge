@@ -37,7 +37,7 @@ curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/d
 | `--version vX.Y.Z` | that release instead of the latest stable (the `v` is optional) | latest stable |
 | `--no-desktop` | no desktop entry and no icon | both installed |
 | `--no-ui` | `pcb` only, no `pcb-ui` and no desktop entry (servers) | both binaries |
-| `--verify` | require the attestation check: fail when `gh` is missing or not logged in | check when `gh` is logged in, else skip with a line |
+| `--verify` | require the attestation check: fail when `gh` is missing, older than 2.49 or not logged in | check when `gh` (2.49 or later) is logged in, else skip with a line |
 | `-h`, `--help` | usage | |
 
 A prefix containing `%`, `"`, `$`, `\` or a backtick is refused. Exit codes: `0` done, `1` failed, `2` bad invocation.
@@ -51,7 +51,7 @@ It installs:
 | the desktop entry | `PREFIX/share/applications/pcb-ui.desktop`, with `Exec=` set to the absolute path |
 | the icon | `PREFIX/share/icons/hicolor/scalable/apps/pcb-ui.svg` |
 
-What it checks: the archive's SHA-256 against the release's `checksums.txt`, and then its attestation. A failed check stops the install and leaves the previous files as they were. If `PREFIX/bin` is not on your `PATH`, or `pcb-ui` lacks a system library, it says so and names the fix.
+What it checks: the archive's SHA-256 against the release's `checksums.txt`, and its attestation when `gh` 2.49 or later is installed and logged in (always with `--verify`). A failed check stops the install and leaves the previous files as they were. If `PREFIX/bin` is not on your `PATH`, or `pcb-ui` lacks a system library, it says so and names the fix.
 
 It does not set up the service: next, run `pcb-ui`, or `pcb install` for a service, then `pcb login`.
 
@@ -61,10 +61,11 @@ The release's `pcb-ui` is built on Ubuntu 22.04 (glibc 2.35). It runs on Ubuntu 
 
 ### Check a download yourself
 
-Every archive, `checksums.txt` and `install.sh` carry a GitHub attestation: proof that this repository's release workflow built the file from a given commit. With the [GitHub CLI](https://cli.github.com/), logged in:
+Every archive, `checksums.txt` and `install.sh` carry a GitHub attestation: proof that this repository's release workflow (`release.yml`) built the file from a given commit. With the [GitHub CLI](https://cli.github.com/) 2.49 or later, logged in:
 
 ```sh
-gh attestation verify pcb_linux_amd64.tar.gz --repo Barben360/proton-calendar-bridge
+gh attestation verify pcb_linux_amd64.tar.gz --repo Barben360/proton-calendar-bridge \
+  --signer-workflow Barben360/proton-calendar-bridge/.github/workflows/release.yml
 ```
 
 The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).

@@ -1,7 +1,7 @@
 # Release process — design
 
 - **Date**: 2026-11-14
-- **Status**: approved 2026-11-14; implementation in progress on branch `release-process`
+- **Status**: approved 2026-11-14; built on branch `release-process` (rollout pending)
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 ("updates/signed releases (while private)" leaves "not planned"), SPEC §13 "Until the repository is public" and "Later, when public" (the minisign [call] is replaced by GitHub attestations, and `install.sh` does not run `pcb install`), via a new decision 0017; `docs/install.md`, `docs/container.md`, `docs/development.md`, the README; the "private" wording left in SPEC §3, §13 and the `Makefile`'s `JOBS` comment (the repository is public now).
 
@@ -71,10 +71,14 @@ Trigger: push of a tag matching `v*`.
    - a tag whose commit is not an ancestor of `origin/main`;
    - a tag whose Release already exists;
    - a commit where the `ci` workflow did not succeed on the push to main (looked up through the API; `image` no longer runs on main, and the release smoke-tests its own image). A commit whose run is still going is refused; the author deletes the tag and pushes it again once main is green, possible only while nothing was published.
+
+   *Built:* checks also refuse a version whose `X.Y.Z` image is already pushed, so a run that got past the image is never started again from the top; it is resumed with "Re-run failed jobs", which skips checks (the `release` job checks the owner again for that reason). A version whose run cannot be resumed is burned: the next tag is released (`docs/development.md`, "When a release run fails").
 2. **Builds** (matrix):
    - `pcb` for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64: `CGO_ENABLED=0`, stamped by `make build` with `VERSION=<tag>`.
    - `pcb-ui` for linux/amd64 on `ubuntu-22.04` and linux/arm64 on `ubuntu-22.04-arm`, directly on the runner with the CI's headers: glibc 2.35, so it runs on Ubuntu 22.04+, Debian 12+, Fedora 36+ and Arch; RHEL 9 (2.34) and Debian 11 are not covered [call, review: Debian 12's 2.36 would have excluded Ubuntu 22.04]. When GitHub retires the 22.04 images, the build moves to a container of the oldest supported Ubuntu.
    - Each binary is checked: `pcb version --json` and `xvfb-run pcb-ui --version` print the tag on Linux; the darwin binaries are checked by the macOS job of §5.5, which runs them from the release's own archives before the Release is published (`go version -m` cannot: `-trimpath` drops `-ldflags` from the build info) [review].
+
+   *Built:* the linux/amd64 `pcb` is checked through `install.sh`, which installs the packaged archive as a user gets it; the cross-compiled linux/arm64 `pcb` is run on an arm64 runner (job `pcb-arm64`).
 3. **Archives** [call]: `pcb_<os>_<arch>.tar.gz`, flat, with no version in the name, so `releases/latest/download/<name>` resolves with no API call (the version is in the Release and in `pcb version`); each holds:
    - Linux: `pcb`, `pcb-ui`, `pcb-ui.desktop` (from `packaging/`), `pcb-ui.svg` (from `internal/ui/desktop/icons/app.svg`), `LICENSE`, `README.md`;
    - macOS: `pcb`, `LICENSE`, `README.md`.
@@ -84,6 +88,8 @@ Trigger: push of a tag matching `v*`.
 6. **Release**: a draft with `gh release create --draft --generate-notes --verify-tag`, marked pre-release when the tag has a `-` suffix; the job re-downloads the draft's files and checks them against `checksums.txt`, then publishes it (backsight's pattern) [call]. Notes come from the squash-merged pull request titles; the author edits them on GitHub afterwards when needed [author]. The Release's "latest" flag follows the image's rule (§5.2): `--latest=false` unless the tag is the highest stable version, so `releases/latest`, and with it `install.sh`, never goes back to an older line [call, review: GitHub otherwise marks the newest-created release latest].
 
 Order matters: the image is pushed and its tags moved only after every build succeeded; the Release is published last, so `releases/latest` (what `install.sh` uses) changes only when everything is out [call].
+
+*Built:* every release run is in one global `release` concurrency group that never cancels a running run: a cancelled run could stop while the image is being tagged, and two tags in flight could leave `latest` on the older line. GitHub keeps one pending run per group and cancels the older pending one when a newer run queues; that one is re-run by hand.
 
 ### 5.2 Images (`.github/workflows/image.yml`)
 
@@ -127,9 +133,12 @@ Steps:
 2. Download the archive and `checksums.txt` into a temporary directory (`mktemp -d`, removed on exit) with `curl` or `wget`; from `releases/download/<tag>/`, or `releases/latest/download/` without `--version` (no API call, no rate limit).
 3. Check the archive's SHA-256 (`sha256sum`, else `shasum -a 256`); refuse on mismatch or a missing line.
 4. Attestation: `gh attestation verify <archive> --repo Barben360/proton-calendar-bridge` per §5.3's `--verify` rule.
+   *Built:* the call also passes `--signer-workflow Barben360/proton-calendar-bridge/.github/workflows/release.yml`; a `gh` older than 2.49 (no `gh attestation`) is skipped like a missing one, naming its version, and fails `--verify`.
 5. Install, never with sudo; an unwritable prefix fails with a hint (`--prefix`, or run as a user who can write it). Each file is copied to a temporary name beside its target, then renamed over it, so a running `pcb-ui` keeps its old file and no half-written binary exists; all files are staged first and renamed together, so a failure leaves the previous version whole [call].
    - `pcb` → `PREFIX/bin/pcb` (0755); `pcb-ui` → `PREFIX/bin/pcb-ui` (0755);
    - desktop entry → `PREFIX/share/applications/pcb-ui.desktop` with `Exec=` set to the absolute path, quoted per the Desktop Entry spec when the path has a space (fixes OPEN.md's unquoted `Exec=`); icon → `PREFIX/share/icons/hicolor/scalable/apps/pcb-ui.svg`; `update-desktop-database` when present.
+
+   *Built:* every file is staged beside its target first, then the files are renamed one after another (no rename covers several files): a failed download, checksum or copy leaves the previous version whole; only a failure between two renames, after every file was staged, could leave a mix.
 6. After install:
    - warn when `PREFIX/bin` is not on `PATH`, with the line to add;
    - Linux with `pcb-ui`: warn and name the packages (`docs/install.md` table) when `ldd pcb-ui` reports a missing library;
@@ -155,6 +164,8 @@ A repository ruleset on `refs/tags/v*`: creation, update and deletion restricted
   - `ci.yml`, on every pull request and push to main: `install_test.sh` with darwin archives built in the job, then `pcb version --json` and `pcb doctor --json` on the installed binary;
   - `release.yml`, before the Release is published: `install.sh` against the draft's real darwin archive, then `pcb version --json` must print the tag. A failure blocks the release.
   It proves the script and that the binary starts, not that sync works; the author's tester covers that.
+
+  *Built:* the release's macOS job runs on `macos-latest` (arm64) and `macos-26-intel` (amd64), against the packaged files (`dist`) before the draft exists; the `release` job then checks that the draft's files are those same bytes (`checksums.txt`, downloaded back). In both places the `pcb doctor --json` check is a prefix match: the platform result's message starts with `darwin/<arch>` and its status is `ok` or `warn`.
 - Release workflow: a dry run on a pre-release tag (`v0.1.0-rc.1`) before the first stable release: archives, checksums, attestations (`gh attestation verify`), the image's `0.1.0-rc.1` tag pulled anonymously, `latest` untouched.
 - The refusals of §5.1: each is a small shell function in a script (`scripts/release/check.sh`) with a test of its own (wrong tag form, commit off main, existing release), so they are not tested only by pushing tags [call].
 
@@ -170,12 +181,18 @@ A repository ruleset on `refs/tags/v*`: creation, update and deletion restricted
 
 1. Create the tag ruleset (§5.4) if the implementation did not.
 2. Push the first pre-release tag (`v0.1.0-rc.1`, §5.5): it adds the first release version to the package.
-3. Delete the `:main` and `sha-…` versions published from main [author: agreed to the agent's suggestion] (they would stay frozen and visible once public; cannot be undone). Deleting them only after step 2 keeps the package alive: removing every version may delete the package, and a recreated package is private again [call, review].
+3. Delete the `:main` and `sha-…` versions published from main [author: agreed to the agent's suggestion] (they would stay frozen and visible once public; cannot be undone). Deleting them only after step 2 keeps the package alive: removing every version may delete the package, and a recreated package is private again [call, review]. Delete only the versions tagged `main` or `sha-…`, and the untagged versions created before the `v0.1.0-rc.1` run started (by their date in the package's version list): those are the old `:main` leftovers. The untagged versions that run created (the per-architecture images `0.1.0-rc.1` points to, and its `sha256-…` attestation) look the same but belong to the release: deleting one breaks `0.1.0-rc.1` for good [review]. Afterwards, both must still pass:
+
+   ```sh
+   docker buildx imagetools inspect ghcr.io/barben360/proton-calendar-bridge:0.1.0-rc.1
+   gh attestation verify oci://ghcr.io/barben360/proton-calendar-bridge:0.1.0-rc.1 --repo Barben360/proton-calendar-bridge
+   ```
 4. Make the package public: https://github.com/users/Barben360/packages/container/package/proton-calendar-bridge (Package settings → Danger Zone → Change visibility), then check the rc image pulls with no login.
+5. Once `v0.1.0-rc.1` checks out (§5.5's dry run, and the image pulls with no login), push the first stable tag, `v0.1.0`: it gives the README's install line a `releases/latest` and the image its `latest` and `0.1`, which the documentation describes [call, review].
 
 ## 6. Left to the builder
 
 - Reusable workflow versus composite action for the image build; job names and layout.
-- Exact action versions (pinned by SHA), the Debian 12 image digest for `pcb-ui`.
+- Exact action versions (pinned by SHA).
 - Messages of `install.sh` and of the release checks, within the rules above.
 - Whether the release workflow calls `image.yml` or shares the build steps otherwise, as long as the release has one image build.

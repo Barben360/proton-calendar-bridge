@@ -2,7 +2,7 @@
 
 - **Date**: 2026-11-14
 - **Decided by**: author (a protected semver tag publishes the release; the image pushed only on release, plus a manual build of any commit; the package public; a `curl | sh` installer for Linux and macOS; GitHub attestations rather than minisign; no Windows MSI until `pcb` and `pcb-ui` are ported), the rest the agent's calls (design `spec/designs/2026-11-14-release-process-design.md`)
-- **Status**: accepted, in progress on branch `release-process` (the first pre-release tag is the author's step, design §5.7); amends SPEC §3 (updates and signed releases leave "not planned") and SPEC §13 ("Until the repository is public" and "Later, when public"); replaces the minisign [call] of §13
+- **Status**: accepted; built on branch `release-process`, rollout pending (the tags and the package settings are the author's steps, design §5.7); amends SPEC §3 (updates and signed releases leave "not planned") and SPEC §13 ("Until the repository is public" and "Later, when public"); replaces the minisign [call] of §13
 
 Releases are made by a tag, not by a push to main.
 
