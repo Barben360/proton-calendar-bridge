@@ -108,7 +108,7 @@ type fileState struct {
 	mtime  time.Time
 	size   int64
 	ctime  int64       // change time in ns, 0 where unknown
-	info   os.FileInfo // for os.SameFile
+	info   os.FileInfo // for os.SameFile, its identity read at stat time (statFile)
 }
 
 func (a fileState) same(b fileState) bool {
@@ -155,7 +155,7 @@ func NewStore(dir string, now func() time.Time) *Store {
 func (s *Store) path() string { return filepath.Join(s.dir, fileName) }
 
 func stateOf(path string) (fileState, error) {
-	fi, err := os.Stat(path)
+	fi, err := statFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fileState{}, nil
 	}
