@@ -75,7 +75,7 @@ Trigger: push of a tag matching `v*`.
    - `pcb` for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64: `CGO_ENABLED=0`, stamped by `make build` with `VERSION=<tag>`.
    - `pcb-ui` for linux/amd64 on `ubuntu-22.04` and linux/arm64 on `ubuntu-22.04-arm`, directly on the runner with the CI's headers: glibc 2.35, so it runs on Ubuntu 22.04+, Debian 12+, Fedora 36+ and Arch; RHEL 9 (2.34) and Debian 11 are not covered [call, review: Debian 12's 2.36 would have excluded Ubuntu 22.04]. When GitHub retires the 22.04 images, the build moves to a container of the oldest supported Ubuntu.
    - Each binary is checked: `pcb version --json` and `xvfb-run pcb-ui --version` print the tag on Linux; the darwin binaries are checked by the macOS job of §5.5, which runs them from the release's own archives before the Release is published (`go version -m` cannot: `-trimpath` drops `-ldflags` from the build info) [review].
-3. **Archives** [call]: `pcb_<X.Y.Z>_<os>_<arch>.tar.gz`, flat, with:
+3. **Archives** [call]: `pcb_<os>_<arch>.tar.gz`, flat, with no version in the name, so `releases/latest/download/<name>` resolves with no API call (the version is in the Release and in `pcb version`); each holds:
    - Linux: `pcb`, `pcb-ui`, `pcb-ui.desktop` (from `packaging/`), `pcb-ui.svg` (from `internal/ui/desktop/icons/app.svg`), `LICENSE`, `README.md`;
    - macOS: `pcb`, `LICENSE`, `README.md`.
    `checksums.txt` (SHA-256, `sha256sum` format) covers every archive and `install.sh`.
