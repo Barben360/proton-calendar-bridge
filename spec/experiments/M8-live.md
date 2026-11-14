@@ -1,6 +1,6 @@
 # M8-live — Agents over MCP (Claude Code) against the test account
 
-Status: **HUMAN-CHECKS step 10 run on 2026-11-13/14 UTC** (10.1 to 10.7; the optional TLS check 10.5.5 was skipped), in the **workstation variant** (below). Every check passed; three defects found, all fixed, a fourth found while fixing the first, and one observation settled (table at the end, each fix named by its commit subject: the merge into main keeps the subjects, not the branch's hashes). Feeds SPEC §1, §12, §13, §15, §16, README "Agents (MCP)" and `spec/OPEN.md` "Parked by M8".
+Status: **HUMAN-CHECKS step 10 run on 2026-11-13/14 UTC** (10.1 to 10.7; the optional TLS check 10.5.5 was skipped, then run by the agent on 2026-11-14, below), in the **workstation variant** (below). Every check passed; three defects found, all fixed, a fourth found while fixing the first, and one observation settled (table at the end, each fix named by its commit subject: the merge into main keeps the subjects, not the branch's hashes). Feeds SPEC §1, §12, §13, §15, §16, README "Agents (MCP)" and `spec/OPEN.md` "Parked by M8".
 
 ## Setup
 
@@ -54,15 +54,22 @@ Checked at Proton through the independent CalDAV session (23:46 to 23:52Z):
 - 10.4.3: `events_list` for 2026-11-15: a monthly series of the dataset at 10:00 to 10:30, as expected. `pcb-ui.log`'s `mcp call` lines: `status`, `login`, `events_list`, each `entry=relay grant=stdio:full`, the account as its local ID, `outcome=ok`; no title, URL or address.
 - 10.4.4: `/exit`: `relay 0`, `pcb-ui` kept serving; stopped with SIGTERM.
 
-## 10.5 Remote `/mcp` with a token: PASS (O3; 10.5.5 skipped)
+## 10.5 Remote `/mcp` with a token: PASS (O3; 10.5.5 run separately, below)
 
 23:58 to 00:01Z.
 - 10.5.1: `[mcp] remote = true`, `pcb serve --wait-for-login` (run as a user unit) on 127.0.0.1:1090, its log `mcp: remote on`.
 - 10.5.2: the token `m8-live --allow read` created in the client's own shell (`pcbm_` prefix checked, never printed); `.mcp.json` with `pcb-remote`, `type: http` and `headers` from `${PCB_MCP_TOKEN}`: the expansion works.
 - 10.5.3: Claude Code asked to approve the project server; `/mcp`: connected, authenticated, six tools, all read-only (List calendars, Get an event, List events, Search events, Free/busy, Status). `status` and the events (the same series on 2026-11-15) answered; `pcb status`: `remote 1`. `pcb mcp token list` showed LAST USED 23:58:34, the session's first call, while calls ran until 23:59:14 (**O3**: a use is recorded at most once a minute, and the 40 s sat within it; settled below).
 - 10.5.4: wrong token 401, a foreign `Origin` 403, no header 401.
-- 10.5.5 (TLS, optional): **skipped**: it would bind a LAN address on the workstation. `NODE_EXTRA_CA_CERTS` stays `[assumed]`.
+- 10.5.5 (TLS, optional): skipped in this run (it would bind a LAN address on the workstation); **run by the agent on 2026-11-14: PASS** (next section).
 - 10.5.6: the token removed at 00:00:39Z; the next call: Claude Code showed `MCP server "pcb-remote" rejected the Authorization header in its config (update it, then run /mcp to reconnect)` and marked it disconnected. Then the token unset, `.mcp.json` back to the stdio server, `[mcp]` removed, `pcb serve` stopped.
+
+## 10.5.5 Remote `/mcp` over TLS (agent, 2026-11-14): PASS
+
+- Where: the bridge in the step 9 desktop VM, against `pcb-fake` (no Proton: the check is about TLS and the client), build v0.1.0-4-ge8adf96, its own run root; `[caldav] listen = "<the VM's LAN IP>:8443"`, `[mcp] remote = true`. `pcb serve` printed the certificate's SHA-256 fingerprint; the certificate (`<state>/tls/cert.pem`, SANs `localhost` and the LAN IP) was copied to the workstation. A read token `m8-live` (`pcbm_` prefix checked, kept in a 0600 file, never printed); `.mcp.json` as in 10.5.2 with `https://<the VM's LAN IP>:8443/mcp` and `${PCB_MCP_TOKEN}`.
+- The client: Claude Code 2.1.325 on the workstation, headless (`claude -p` with that file as `--mcp-config`, `--strict-mcp-config`, only `mcp__pcb-remote__*` allowed), 19:21Z.
+- Without `NODE_EXTRA_CA_CERTS`: the server never connected (Claude Code reported it unavailable): the self-signed certificate is refused, as it should be.
+- With `NODE_EXTRA_CA_CERTS=<the copied cert.pem>` and nothing else: connected over TLS, `status` answered (phase `ready`, the fake's account). On the VM, `pcb status`: `mcp: remote on; live sessions: remote 1`; `pcb mcp token list`: `m8-live` LAST USED 19:21:40Z. **Nothing else was needed.** The token was removed afterwards (`No MCP token yet`).
 
 ## 10.6 An agent session blocks the others: PASS
 
@@ -85,4 +92,4 @@ From 00:01Z: a stdio session (kind `mcp`); `pcb serve` exit 20, `pcb is already 
 
 ## What the next live run checks
 
-10.5.5 (TLS with `NODE_EXTRA_CA_CERTS`); in the VM variant, a session daemon that seals with the keyring; the fixed results: `status` naming the IANA zone, an update result's `event_zone`, the `login` answer after `I'm done, continue` (`state: ready`), and the listener's error line in `pcb-ui.log` on a port in use.
+In the VM variant, a session daemon that seals with the keyring; the fixed results: `status` naming the IANA zone, an update result's `event_zone`, the `login` answer after `I'm done, continue` (`state: ready`), and the listener's error line in `pcb-ui.log` on a port in use.
