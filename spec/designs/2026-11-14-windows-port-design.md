@@ -1,7 +1,7 @@
 # Windows port — design
 
 - **Date**: 2026-11-14
-- **Status**: approved by the author on 2026-11-14
+- **Status**: approved by the author on 2026-11-14; built (decision 0018), live check pending. Where the build differs from this design, the text says so in a "Built:" line.
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 (Windows leaves "only builds"; "a GUI on Windows" leaves "not planned"), SPEC §13 "Platforms", decision 0015 ("Windows is next"), via a new decision 0018; `docs/install.md`, `docs/desktop.md`, `docs/status.md`, the README.
 
@@ -38,7 +38,7 @@ Anti-goals (failure even if it works):
 ## 3. Constraints
 
 - `pcb` stays `CGO_ENABLED=0` on every OS (`cmd/pcb/arch_test.go`); only `pcb-ui` uses cgo.
-- New code is behind build tags (`windows` / `!windows`) beside the existing `unix` / `!unix` pairs; the Linux and macOS builds compile no Windows code.
+- New code is behind build tags (`windows` / `!windows`) beside the existing `unix` / `!unix` pairs; the Linux and macOS builds compile no Windows code. Built: "Windows code" means code that calls Windows APIs; the logic around it (pipe name, DPAPI error classes, doctor's Windows checks, the Run value's format, the foreign-sealer rule) stays untagged, so Linux tests it too.
 - New dependencies are credited in the README's Credits section (CONTRIBUTING): `github.com/Microsoft/go-winio` (MIT) for named pipes; `golang.org/x/sys/windows` (already indirect, BSD) for locks, DPAPI, ACLs, the registry and the time zone.
 - Existing state on Linux is untouched; there is no Windows state to migrate.
 - The author's Windows 11 VM is available to the agent (SSH, an administrator and a standard user, auto sign-in of the standard user) [author]; CI's Windows runner runs the suites, the VM runs the live checklist (§6).
@@ -72,7 +72,7 @@ Resolved with `os.UserConfigDir` / `os.UserCacheDir`'s Windows sources (`APPDATA
 - Every directory pcb creates under the config and state roots gets a **protected DACL**: full control for the current user's SID and for `SYSTEM`, nothing else, no inheritance from the parent, and its **owner set explicitly to the user's SID** (an elevated process would otherwise make `BUILTIN\Administrators` the owner) [call, review]. Files created inside inherit it.
 - Where Unix code checks `perm & 0077` or the owner UID (`store`, `tlsutil`, `doctor`, `seal/keyfile.go`), the Windows variant checks the DACL instead: an allow ACE for any SID other than the user, `SYSTEM` or `Administrators` is refused with the same error kinds and exit codes (the Windows message names the ACL and the fix, `pcb doctor`) [call].
 - `os.Chmod` calls stay (harmless on Windows); the `runtime.GOOS == "windows"` skips in `keyfile.go`, `selfsigned.go`, `doctor/caldav.go`, `doctor/cache.go` are replaced by the DACL checks.
-- Owner checks (`DirOwner`, `fileOwner`, `CheckStateOwner`) accept the process token's user SID, and `BUILTIN\Administrators` only when the token is an elevated member of it (files an elevated run made before the owner was set explicitly, and CI's elevated runner); anything else is refused as today. Elevated runs are not refused: `pcb doctor` warns that pcb runs elevated [call, review].
+- Owner checks (`DirOwner`, `fileOwner`, `CheckStateOwner`; built: directories only, a file's owner is not checked, only its access list) accept the process token's user SID, and `BUILTIN\Administrators` only when the token is an elevated member of it (files an elevated run made before the owner was set explicitly, and CI's elevated runner); anything else is refused as today. Elevated runs are not refused: `pcb doctor` warns that pcb runs elevated [call, review].
 
 ### 5.3 Locks (`internal/filelock`)
 
@@ -82,15 +82,16 @@ Resolved with `os.UserConfigDir` / `os.UserCacheDir`'s Windows sources (`APPDATA
 
 - `listen_windows.go` / `dial_windows.go`: a named pipe `\\.\pipe\pcb-<hash>` where `<hash>` is the first 16 hex of SHA-256 of the **canonical** state directory (the final path from `GetFinalPathNameByHandle`, so case, 8.3 short names and junctions give one pipe; lower-cased), so two states (overrides) get two pipes and the name leaks no path [call, review].
 - Security descriptor (SDDL): owner and full access for the current user's SID only, `D:P(A;;GA;;;<user SID>)`; remote clients refused (`PIPE_REJECT_REMOTE_CLIENTS`, go-winio's default).
-- Peer check: the server reads the client's SID (`GetNamedPipeClientProcessId` → process token) and refuses another SID, as `SO_PEERCRED` does on Linux; the client checks the server process's SID the same way before sending anything [call].
-- A pipe name already served by another user's process (squatting): the client's server-SID check refuses it, exit 10, as a foreign-owned socket does today.
+- Peer check: the server reads the client's SID (`GetNamedPipeClientProcessId` → process token) and refuses another SID, as `SO_PEERCRED` does on Linux; the client checks the server process's SID the same way before sending anything [call]. Built: the client checks the pipe's **owner SID** (`GetSecurityInfo`), not the server process's: a squatter could serve from a handle whose creating process had exited, and the reused PID could be one of the user's; no user can make another user's SID a pipe's owner without SeRestorePrivilege.
+- A pipe name already served by another user's process (squatting): the client's server-SID check refuses it, exit 10, as a foreign-owned socket does today. Built: exit 20 (Blocked, as every control-channel refusal), `the control pipe <name> is owned by another user (<SID>): pcb refuses to talk to it`; `Listen` on a name already served fails with exit 20 too.
 - Everything above `Listen`/`Dial` (the HTTP protocol, `/v2/...`, single-instance `ui.Probe`, `pcb login` going through `pcb-ui`) is unchanged.
 
 ### 5.5 Secrets (`internal/store/seal`)
 
 - A new sealer kind **`dpapi`**, recorded in `layout.json` (`"sealer": "dpapi"`) like `keyfile` and `secret-service` [call]. Its key: 32 random bytes, stored at `<state>\secrets.key.dpapi` as the output of `CryptProtectData` (user scope, `CRYPTPROTECT_UI_FORBIDDEN`, an entropy string naming pcb), written with the existing atomic-file code.
 - On Windows `[secrets] backend = auto` chooses `dpapi`; `keyfile` stays available (a plain key file, DACL-protected) for those who want a portable key; `secret-service` is a configuration fault on Windows, exit 10 like every config fault (SPEC §7.3, ruling R2) [call, review].
-- An unknown sealer on another OS (a `dpapi` state copied to Linux) is `ErrUnknownSealer`, exit 10, hint "this state was created on Windows" [call].
+- An unknown sealer on another OS (a `dpapi` state copied to Linux) is `ErrUnknownSealer`, exit 10, hint "this state was created on Windows" [call]. Built: `the state in <root> was created on <OS> (sealer <s>): this pcb cannot open it here`, hint `use it with pcb on <OS>, or move <root> aside and run pcb login to start a new state`; a `secret-service` state on Windows gets the same, naming Linux.
+- Built (not in this design): an unprotect failure that is not an integrity failure (a logon without the password, such as SSH with a key; another user's key; a profile without its master key) is exit 20, `secrets: key-unavailable` with `secrets_cause` and the alert `key-unavailable`, phase kept, never a logout hint; integrity failures, a machine-scope blob and a wrong size are corrupt. A protect failure at the first login is exit 10.
 - `uninstall --delete-data` deletes the DPAPI key with the state.
 
 ### 5.6 Time zone
@@ -110,7 +111,7 @@ Resolved with `os.UserConfigDir` / `os.UserCacheDir`'s Windows sources (`APPDATA
 
 - Signals: in a console, Ctrl-C (`os.Interrupt`) and the console close, logoff and shutdown events (which Go's `os/signal` delivers as `syscall.SIGTERM`) drain like SIGTERM on Linux; the existing `signal.Notify(SIGINT, SIGTERM)` calls already cover them [call]. `pcb-ui` has no console: at logoff or shutdown it must drain too, through the window session-end message (`WM_QUERYENDSESSION`/`WM_ENDSESSION`) reaching Fyne's lifecycle or a small hidden message window of its own; the builder picks the mechanism that works, and the live checklist (§6) proves it with a real logoff.
 - Hints and `Fix` lines quote for PowerShell on Windows (`'…'` with `''` doubling), POSIX on Unix: `internal/shellquote` gets a per-OS `Quote` with its own safe-character set on Windows (`@ { } , ; ( ) $ \` ` and the like are special in PowerShell and always quoted) [call, review].
-- `pcb doctor` on Windows: `platform` reports `windows/amd64: runs, untested` (warn) until the live check of §6 passes, then `ok` in the same project [call, review]; the DACL and owner checks of §5.2; an "elevated" warning; no systemd, desktop-entry or Secret Service checks; when the autostart value exists, a check that it names an existing `pcb-ui.exe`, warning when that is not the one beside `pcb.exe` (no new control-channel field) [call, review].
+- `pcb doctor` on Windows: `platform` reports `windows/amd64: runs, untested` (warn) until the live check of §6 passes, then `ok` in the same project [call, review]; the DACL and owner checks of §5.2; an "elevated" warning; no systemd, desktop-entry or Secret Service checks (built: the `service` line says `pcb-ui`'s Start at login runs pcb there; also a `dpapi key` check, and a `time zone` check that warns on an unmapped key and is OK when `[mcp] timezone` is set); when the autostart value exists, a check that it names an existing `pcb-ui.exe`, warning when that is not the one beside `pcb.exe` (no new control-channel field) [call, review].
 
 ### 5.8 The desktop app (`cmd/pcb-ui`, `internal/ui/desktop`)
 
@@ -120,14 +121,14 @@ Resolved with `os.UserConfigDir` / `os.UserCacheDir`'s Windows sources (`APPDATA
   - Tray: Fyne's system tray (always present on Windows); `TrayHost` true.
   - Notifications: `fyne.SendNotification` (Windows toast); a click is not reported by Fyne, so the notification text says where to look (as on non-Linux today). Toasts from a zip install may not show on every Windows build without a Start-menu shortcut carrying the app ID; they are best effort until the MSI creates that shortcut, the tray icon's attention state carries the same news, and the live check records what is seen [call, review].
   - Autostart: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `pcb-ui`, data `"<absolute exe>" --background`; switching it off deletes the value; the MSI later sets the same value so both agree [call].
-  - Open config / logs: `fyne.App.OpenURL(file://…)` (ShellExecute), already used.
+  - Open config / logs: `fyne.App.OpenURL(file://…)` (ShellExecute), already used. Built: `ShellExecute` with the plain path; a `file://` URL percent-encodes a non-ASCII profile name, which Windows decoded wrongly (`Zoë` became `ZoÃ«`).
 - Single instance: unchanged (`ui.Probe` over the pipe).
 
 ### 5.9 Build, CI and release
 
 - `Makefile`: `make build` and `make ui` honour `GOOS=windows` and append `.exe`; no new Windows-only make targets beyond what CI needs [call].
-- CI (`ci.yml`): a `windows` job on `windows-latest` (pinned actions, `persist-credentials: false`), mingw-w64 from a pinned `msys2/setup-msys2` (or the runner's preinstalled one, builder's choice, pinned either way): `go vet ./...`, `go test -race` of the packages touched here (filelock, ctl, paths, store, seal, tlsutil, doctor, shellquote, ui, cmd/pcb, cmd/pcb-ui), `make build ui`, then `pcb.exe version --json`, `pcb.exe doctor --json` and `pcb-ui.exe --version`. The `GOOS=windows go vet` step in `check` stays.
-- Release (`release.yml`): `pcb` for windows/amd64 cross-compiled with the others; `pcb-ui` for windows/amd64 built on a `windows-latest` job; a Windows smoke job runs both from the archive; `scripts/release/package.sh` accepts `windows` and writes `pcb_windows_amd64.zip` (`pcb.exe`, `pcb-ui.exe`, `LICENSE`, `README.md`), byte-reproducible like the tarballs; `checksums.txt` and the attestations cover it; the asset count checks grow accordingly. `install.sh` refuses Windows with a pointer to the zip [call].
+- CI (`ci.yml`): a `windows` job on `windows-latest` (pinned actions, `persist-credentials: false`), mingw-w64 from a pinned `msys2/setup-msys2` (or the runner's preinstalled one, builder's choice, pinned either way): `go vet ./...`, `go test -race` of the packages touched here (filelock, ctl, paths, store, seal, tlsutil, doctor, shellquote, ui, cmd/pcb, cmd/pcb-ui), `make build ui`, then `pcb.exe version --json`, `pcb.exe doctor --json` and `pcb-ui.exe --version`. The `GOOS=windows go vet` step in `check` stays. Built: two jobs, `windows` (vet, `make build ui`, the three commands) and `windows-test` (`go test -race`, sharded `service`, `cli` and the rest), with `msys2/setup-msys2` pinned by SHA (UCRT64).
+- Release (`release.yml`): `pcb` for windows/amd64 cross-compiled with the others; `pcb-ui` for windows/amd64 built on a `windows-latest` job; a Windows smoke job runs both from the archive; `scripts/release/package.sh` accepts `windows` and writes `pcb_windows_amd64.zip` (`pcb.exe`, `pcb-ui.exe`, `LICENSE`, `README.md`), byte-reproducible like the tarballs (built: `scripts/release/mkzip.py`, identical for the same zlib build); `checksums.txt` and the attestations cover it; the asset count checks grow accordingly. `install.sh` refuses Windows with a pointer to the zip [call].
 
 ### 5.10 Files replaced while another process reads them
 
@@ -135,6 +136,8 @@ Windows refuses to rename over a file another process holds open unless that pro
 - every read of a file that `atomicfile` replaces goes through one helper that opens with `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE` (build-tagged; `os.Open` elsewhere);
 - `atomicfile`'s rename retries on a sharing violation or access denied for at most 2 s (a reader outside pcb, such as an antivirus scan, can still hold the file), then fails as today;
 - the layout migration's directory renames get the same bounded retry.
+
+Built: `os.Rename` (`MoveFileEx`) refuses to replace a file another handle holds open even with `FILE_SHARE_DELETE`, so a file is replaced by a POSIX rename: `SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS|FILE_RENAME_FLAG_POSIX_SEMANTICS`, the source opened with `FILE_FLAG_OPEN_REPARSE_POINT`. The target name is NUL-terminated: Windows ignores `FileNameLength` and reads up to the first NUL (the cause of the first build's flaky renames). A directory at the target is refused at once with `EEXIST`, as Go's Unix `rename` does, instead of an access denied retried for 2 s; directories themselves still go through `os.Rename`.
 
 ### 5.11 Logoff and shutdown
 
@@ -145,7 +148,7 @@ Windows ends a console process about 5 s after the close, logoff or shutdown eve
 - Unit tests on the Windows runner for each Windows file: two processes contending a lock (a helper process), the pipe refusing another SID (a test that impersonates is not available; instead: the server refuses a client whose SID differs, with the SID lookup injected) and accepting the same user, the DACL created and the check refusing an added `Everyone` ACE, the DPAPI round trip and a tampered blob refused, the CLDR mapping for a fixed list of keys, the Run-key write/delete, the PowerShell quoting table.
 - The existing suites (`internal/service`, `internal/cli`, `internal/ui`) run on Windows in CI; tests that are Unix-specific by nature stay tagged; any test skipped on Windows says why.
 - Linux and macOS: the existing suites unchanged, proving no behaviour change.
-- A live checklist, `spec/HUMAN-CHECKS.md` step 11, run by the agent on the author's Windows 11 VM as its standard user (test account only; elevation hides the permission problems a real user meets) [author: the agent may use the VM and install anything on it]: install from the zip, add the test account in `pcb-ui`, Thunderbird on Windows, `pcb status` through the pipe, tray, notification, "Start at login" across a real logoff/logon, a second Windows user cannot read the state nor reach the pipe, `uninstall --delete-data`.
+- A live checklist, `spec/HUMAN-CHECKS.md` step 12 (built: step 11 is the first release's), run by the agent on the author's Windows 11 VM as its standard user (test account only; elevation hides the permission problems a real user meets) [author: the agent may use the VM and install anything on it]: install from the zip, add the test account in `pcb-ui`, Thunderbird on Windows, `pcb status` through the pipe, tray, notification, "Start at login" across a real logoff/logon, a second Windows user cannot read the state nor reach the pipe, `uninstall --delete-data`.
 
 ## 7. Documentation
 
