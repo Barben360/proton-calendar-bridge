@@ -35,7 +35,7 @@ if [[ $os == linux ]]; then
   install -m 0644 "$root/internal/ui/desktop/icons/app.svg" "$stage/pcb-ui.svg"
 fi
 
-epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct)}
+epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null)} || die "no SOURCE_DATE_EPOCH and no git history"
 archive=$outdir/pcb_${os}_${arch}.tar.gz
 # gzip -n: no name or time in the header.
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \

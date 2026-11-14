@@ -3,6 +3,7 @@
 # exits 1 if any expectation failed.
 # Usage: scripts/release/package_test.sh        (make release-test)
 set -uo pipefail
+export TZ=UTC # tar -tv prints local time
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 pkg=$here/package.sh
