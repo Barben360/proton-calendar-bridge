@@ -111,7 +111,6 @@ func (g slowMissKeyring) Get(ctx context.Context, attrs map[string]string) ([]by
 	return v, err
 }
 
-// Two processes sealing for the first time at once must agree on one key.
 // The first Seal makes a missing state directory private, as every
 // directory pcb makes: mode 0700, or on Windows a protected access list
 // owned by the user.
@@ -123,6 +122,7 @@ func TestSecretServiceMakesItsStateDirPrivate(t *testing.T) {
 	acltest.WantPrivate(t, dir, 0o700)
 }
 
+// Two processes sealing for the first time at once must agree on one key.
 func TestSecretServiceFirstSealsAgreeOnOneKey(t *testing.T) {
 	g := slowMissKeyring{newMem()}
 	dir := t.TempDir()

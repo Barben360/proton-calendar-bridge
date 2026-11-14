@@ -54,6 +54,7 @@ pcb doctor
 | Windows: `pcb doctor` warns `elevated` | pcb runs as administrator | Run it from a normal (not elevated) terminal: what an elevated pcb creates is owned by Administrators |
 | Windows: exit 20, `the control pipe … is owned by another user` | Another Windows account's process holds the name of pcb's control pipe | Run pcb as the account that runs `pcb-ui`; if that is you, find the process that created the pipe, or set `PCB_STATE_DIR` to another directory. [Security](security.md#on-windows-files-and-the-pipe) |
 | Windows: exit 20, `the control pipe is already served` when `pcb-ui` or `pcb serve` starts | Another `pcb-ui` or `pcb serve` of this state, or another account's process, holds the pipe's name | Stop the other one; if none runs, set `PCB_STATE_DIR` to another directory |
+| Windows: exit 20, `the control pipe's name is still held, and nothing answers on it` when `pcb-ui` or `pcb serve` starts | The previous `pcb-ui` or `pcb serve` of this state is still ending (a restart), or a process holds the pipe's name without serving it | Wait a moment and start again; if it persists, another process holds the name: set `PCB_STATE_DIR` to another directory |
 | Windows: `pcb doctor` warns `the Windows time zone … has no IANA name in pcb's table`, or `the Windows time zone cannot be read` | pcb has no IANA name for this Windows time zone, so agents get times with UTC offsets | Set `[mcp] timezone` in `config.toml` to your zone, such as `Europe/Paris` |
 
 ## pcb-ui needs OpenGL 2.0
