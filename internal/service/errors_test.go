@@ -158,3 +158,23 @@ func TestCalendarErrorShowsTheUnverifiedNote(t *testing.T) {
 		t.Errorf("calendarError = %q, want %q", got, note.Error())
 	}
 }
+
+// keyCause names what refused the key file: its mode on Unix, the SID its
+// access list lets in on Windows; either is a key fault (exit 10).
+func TestKeyCauseNamesTheModeOrTheAccessList(t *testing.T) {
+	for _, tc := range []struct {
+		err  *seal.KeyModeError
+		want string
+	}{
+		{&seal.KeyModeError{Path: "k", Mode: 0o644}, "mode 0644 lets other users read it, and pcb refuses it"},
+		{&seal.KeyModeError{Path: "k", Grantee: "S-1-1-0"}, "its access list lets S-1-1-0 in, and pcb refuses it"},
+	} {
+		err := fmt.Errorf("open: %w", tc.err)
+		if got := keyCause(err); got != tc.want {
+			t.Errorf("keyCause(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+		if !keyFault(err) {
+			t.Errorf("keyFault(%v) = false, want a key fault", tc.err)
+		}
+	}
+}

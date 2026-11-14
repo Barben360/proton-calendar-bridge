@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -69,9 +70,7 @@ func TestAddedPasswordChecksAndIsNeverStored(t *testing.T) {
 	if bytes.Contains(data, []byte(pw)) || bytes.Contains(data, raw) {
 		t.Error("clients.json contains the password")
 	}
-	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
-		t.Errorf("clients.json mode = %v, want 0600", st.Mode().Perm())
-	}
+	acltest.WantPrivate(t, path, 0o600)
 	// A new store on the same directory (a new process) accepts it.
 	if _, ok := access.NewStore(dir, newClock().now).Check(pw); !ok {
 		t.Error("a fresh store refused the stored client")

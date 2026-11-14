@@ -28,7 +28,8 @@ func (c PlatformCheck) Run(context.Context) Result {
 	return r
 }
 
-// DirModeCheck verifies that a directory grants no more than Want.
+// DirModeCheck verifies that a directory grants no more than Want (on
+// Windows: that its access list and owner keep other users out).
 type DirModeCheck struct {
 	Label string
 	Path  string
@@ -51,13 +52,29 @@ func (c DirModeCheck) Run(context.Context) Result {
 	case !info.IsDir():
 		r.Status, r.Message = StatusError, c.Path+" is not a directory"
 	default:
-		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
-			r.Status = StatusError
-			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
-			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
+		r = judgeAccess(r, c.Path, true, info.Mode().Perm(), c.Want)
+	}
+	return r
+}
+
+// judgeAccess rates an existing path as pcb uses it: by its access list and,
+// for a directory, its owner on Windows (aclProblem), else by its mode
+// against want.
+func judgeAccess(r Result, path string, dir bool, mode, want fs.FileMode) Result {
+	if msg, fix, checked := aclProblem(path, dir); checked {
+		if msg != "" {
+			r.Status, r.Message, r.Fix = StatusError, msg, fix
 		} else {
-			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
+			r.Status, r.Message = StatusOK, path+" private"
 		}
+		return r
+	}
+	if extra := mode &^ want; extra != 0 {
+		r.Status = StatusError
+		r.Message = path + " has mode " + modeString(mode) + ", want " + modeString(want)
+		r.Fix = "chmod " + modeString(want) + " " + shellquote.Quote(path)
+	} else {
+		r.Status, r.Message = StatusOK, path+" "+modeString(mode)
 	}
 	return r
 }
@@ -105,7 +122,8 @@ func (c ConfigCheck) Run(context.Context) Result {
 	return r
 }
 
-// FileModeCheck verifies that a regular file grants no more than Want.
+// FileModeCheck verifies that a regular file grants no more than Want (on
+// Windows: that its access list keeps other users out).
 type FileModeCheck struct {
 	Label string
 	Path  string
@@ -128,13 +146,7 @@ func (c FileModeCheck) Run(context.Context) Result {
 	case !info.Mode().IsRegular():
 		r.Status, r.Message = StatusError, c.Path+" is not a regular file"
 	default:
-		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
-			r.Status = StatusError
-			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
-			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
-		} else {
-			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
-		}
+		r = judgeAccess(r, c.Path, false, info.Mode().Perm(), c.Want)
 	}
 	return r
 }

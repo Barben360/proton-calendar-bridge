@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -29,14 +31,26 @@ func isolate(t *testing.T) string {
 	return filepath.Join(root, "cfg", "pcb")
 }
 
+// openDir makes dir, open to other users (mode 0750; on Windows an access
+// list letting Everyone in), and returns the fix pcb doctor gives for it.
+func openDir(t *testing.T, dir string) (fix string) {
+	t.Helper()
+	if err := acl.MkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		acltest.OpenToOthers(t, dir)
+		return acl.Fix(dir, acltest.Everyone)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return "chmod 700 " + dir
+}
+
 func TestDoctorExitCode(t *testing.T) {
 	cfg := isolate(t)
-	if err := os.MkdirAll(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	fix := openDir(t, cfg)
 	code, out, errs := run("doctor", "--json")
 	if code != exitcode.MustAct || errs != "" { // ux-I2: a mode to fix is the person's
 		t.Fatalf("code=%d stderr=%q", code, errs)
@@ -80,7 +94,7 @@ func TestDoctorExitCode(t *testing.T) {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
-	if !strings.Contains(env.Data.Results[1].Fix, "chmod 700 "+cfg) {
+	if !strings.Contains(env.Data.Results[1].Fix, fix) {
 		t.Fatalf("fix = %q", env.Data.Results[1].Fix)
 	}
 }
@@ -133,14 +147,9 @@ func TestDoctorTextOK(t *testing.T) {
 
 func TestDoctorTextShowsFix(t *testing.T) {
 	cfg := isolate(t)
-	if err := os.MkdirAll(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	fix := openDir(t, cfg)
 	code, out, _ := run("doctor")
-	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: chmod 700 "+cfg) {
+	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: "+fix) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }

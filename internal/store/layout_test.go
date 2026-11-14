@@ -7,12 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -145,12 +146,8 @@ func checkMigrated(t *testing.T, root string, before map[string]string, id strin
 	}
 	delete(got, "layout.json")
 	sameTree(t, got, want)
-	if runtime.GOOS != "windows" {
-		for _, dir := range []string{store.AccountsDir(root), store.AccountDir(root, id)} {
-			if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
-				t.Errorf("%s: %v, %v; want mode 0700", dir, info, err)
-			}
-		}
+	for _, dir := range []string{store.AccountsDir(root), store.AccountDir(root, id)} {
+		acltest.WantPrivate(t, dir, 0o700)
 	}
 }
 
@@ -182,11 +179,7 @@ func TestFreshStateHasNoLayout(t *testing.T) {
 	if v := layoutVersion(t, root); v != 2 {
 		t.Errorf("layout.json version %d", v)
 	}
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(store.AccountsDir(root)); err != nil || info.Mode().Perm() != 0o700 {
-			t.Errorf("accounts/: %v, %v; want mode 0700", info, err)
-		}
-	}
+	acltest.WantPrivate(t, store.AccountsDir(root), 0o700)
 	if info, err := store.ReadLayout(root); err != nil || info.Version != 2 || len(info.Accounts) != 0 {
 		t.Fatalf("ReadLayout after = %+v, %v", info, err)
 	}
@@ -294,7 +287,7 @@ func TestMigrationResumesAfterEachStep(t *testing.T) {
 	root := t.TempDir()
 	writeM5State(t, root)
 	before := tree(t, root)
-	if err := os.MkdirAll(filepath.Join(store.AccountsDir(root), id+".migrating"), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Join(store.AccountsDir(root), id+".migrating")); err != nil { // as Migrate makes it
 		t.Fatal(err)
 	}
 	if got, migrated, err := store.Migrate(root, noNewID(t)); err != nil || !migrated || got != id {
@@ -608,14 +601,8 @@ func TestCreateLayoutWritesTheLayoutAndAccounts(t *testing.T) {
 	}
 	sameTree(t, tree(t, root), map[string]string{
 		"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"secret-service\"}\n"})
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(store.AccountsDir(root)); err != nil || info.Mode().Perm() != 0o700 {
-			t.Errorf("accounts/: %v, %v; want mode 0700", info, err)
-		}
-		if info, err := os.Stat(filepath.Join(root, "layout.json")); err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("layout.json: %v, %v; want mode 0600", info, err)
-		}
-	}
+	acltest.WantPrivate(t, store.AccountsDir(root), 0o700)
+	acltest.WantPrivate(t, filepath.Join(root, "layout.json"), 0o600)
 	var synced []string
 	defer store.OnSyncDir(func(dir string) { synced = append(synced, dir) })()
 	root2 := t.TempDir()
@@ -714,13 +701,7 @@ func TestSealerChoiceRoundTrip(t *testing.T) {
 	if !ok || got != want {
 		t.Fatalf("read %+v, %v; want %+v", got, ok, want)
 	}
-	fi, err := os.Stat(filepath.Join(dir, "sealer-choice.json"))
-	if err != nil {
-		t.Fatalf("sealer-choice.json: %v", err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("sealer-choice.json: mode %v, want 0600", fi.Mode().Perm())
-	}
+	acltest.WantPrivate(t, filepath.Join(dir, "sealer-choice.json"), 0o600)
 	if err := os.WriteFile(filepath.Join(dir, "sealer-choice.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}

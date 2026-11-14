@@ -119,7 +119,7 @@ func TestMigrationRunsItsStepsOnce(t *testing.T) {
 // restored or copied file keeps whatever mode it came with.
 func TestOpenRepairsTheFileModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
+		t.Skip("Unix modes: Windows has none to repair; the cache files take their private directory's access list, which pcb doctor checks (TestCacheAndCertificateChecksUseTheACL)")
 	}
 	c, path := openNew(t)
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("a", 1)}, time.Unix(100, 0)); err != nil {

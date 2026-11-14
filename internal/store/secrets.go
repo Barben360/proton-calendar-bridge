@@ -312,10 +312,20 @@ func stateWriteCause(err error) string {
 		return ErrNewerState.Error()
 	case errors.Is(err, ErrGenerationOutOfRange):
 		return "state.json holds a secrets generation out of range"
+	case errors.As(err, &pe) && isDir(pe.Path):
+		// Windows refuses to open a directory as a file with "Access is
+		// denied", which would send a person after permissions.
+		return "state.json or its lock cannot be used: is a directory"
 	case errors.As(err, &pe):
 		return "state.json or its lock cannot be used: " + pe.Err.Error()
 	}
 	return "state.json cannot be read or written"
+}
+
+// isDir reports whether path is a directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Wipe removes the sealed file under the store lock (a logout, or a store

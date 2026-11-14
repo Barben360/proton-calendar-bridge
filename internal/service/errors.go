@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -341,32 +340,11 @@ func unsupportedStore(e *store.UnsupportedError) *exitcode.Error {
 	return mustAct(e.Explain(), "upgrade pcb")
 }
 
-// CheckStateOwner refuses euid 0 on a state directory another user owns (a
-// system install's pcb user): every file root writes there would become
-// root's, and that user could no longer read it (state Minor). userName
-// names a UID (nil or failing: "#UID", which sudo takes too). A directory
-// that does not exist yet, or a system without owners, passes.
-func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, error)) error {
-	if euid != 0 {
-		return nil
-	}
-	uid, ok := store.DirOwner(stateDir)
-	if !ok || uid == 0 {
-		return nil
-	}
-	name, sudoName := "#"+strconv.Itoa(uid), "'#"+strconv.Itoa(uid)+"'"
-	if userName != nil {
-		if n, err := userName(uid); err == nil && n != "" {
-			name, sudoName = n, n
-		}
-	}
-	return mustAct("the state directory belongs to "+name+": run pcb as that user", "sudo -u "+sudoName+" pcb …")
-}
-
 // keyCause is why the key file, the sealed store or the login lock could
 // not be used, safe to show (it never holds a secret): the OS error with its
 // operation and path (permission denied, read-only file system) or the key
-// file's mode refusal; "" when there is none to give (M5-R15 C2).
+// file's mode (Windows: access list) refusal; "" when there is none to give
+// (M5-R15 C2).
 func keyCause(err error) string {
 	var (
 		me *seal.KeyModeError
@@ -375,6 +353,8 @@ func keyCause(err error) string {
 		le *os.LinkError
 	)
 	switch {
+	case errors.As(err, &me) && me.Grantee != "":
+		return "its access list lets " + me.Grantee + " in, and pcb refuses it"
 	case errors.As(err, &me):
 		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
 	case errors.As(err, &se):

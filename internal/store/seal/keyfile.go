@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
@@ -67,7 +66,8 @@ func (k *KeyFile) key(create bool) ([]byte, error) {
 	return key, err
 }
 
-// read loads the key, failing closed on loose permissions or a wrong size.
+// read loads the key, failing closed on loose permissions (a mode or an
+// access list letting others in) or a wrong size.
 func (k *KeyFile) read() ([]byte, error) {
 	f, err := os.Open(k.Path)
 	if err != nil {
@@ -78,8 +78,8 @@ func (k *KeyFile) read() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, &KeyModeError{Path: k.Path, Mode: info.Mode().Perm()}
+	if err := checkKeyAccess(k.Path, info); err != nil {
+		return nil, err
 	}
 	key := make([]byte, keySize+1)
 	n, err := f.Read(key)

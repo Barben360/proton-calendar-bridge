@@ -313,7 +313,7 @@ func TestSelfSignedCertFieldsForNSS(t *testing.T) {
 
 func TestSelfSignedRepairsModesOnReuse(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
+		t.Skip("Unix modes: Windows repairs nothing and refuses an open access list (TestSecureRefusesAnOpenKey)")
 	}
 	dir := filepath.Join(t.TempDir(), "tls")
 	o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&now), InterfaceAddrs: noInterfaces(t)}
@@ -350,7 +350,7 @@ func TestSelfSignedRepairsModesOnReuse(t *testing.T) {
 
 func TestSelfSignedRefusesFilesOfAnotherUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no Unix owners")
+		t.Skip("Unix UIDs: the Windows twins are TestSecureRefusesADirectoryOfAnotherOwner and TestSecureAcceptsAnAdministratorsOwnedPrivateFile (a file's owner is not checked there)")
 	}
 	for _, foreign := range []string{"directory", "key"} {
 		t.Run(foreign, func(t *testing.T) {

@@ -6,16 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
@@ -698,44 +699,61 @@ func TestShowClientWhoseSealedCopyIsNotItsPasswordSaysSo(t *testing.T) {
 
 // M5-R15 C2: a key file this user cannot read (a container secret left
 // host-owned) fails with its cause, never a bare "could not be sealed";
-// a key other users can read (mode 0444, a compose default) says so too.
+// a key other users can read (mode 0444, a compose default; on Windows an
+// access list letting Everyone in) says so too.
 func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode 0000 file")
-	}
 	e := newClientsEnv(t)
 	if _, err := e.svc.AddClient(t.Context(), "Phone"); err != nil {
 		t.Fatal(err)
 	}
 	key := config.Defaults(e.dirs).Secrets.KeyFile
-	for _, c := range []struct {
-		mode fs.FileMode
-		want string
-	}{{0o000, "permission denied"}, {0o444, "mode 0444"}} {
-		if err := os.Chmod(key, c.mode); err != nil {
+	raw, err := os.ReadFile(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rewrite puts the key back as pcb made it, before the next fault.
+	rewrite := func(b []byte) {
+		t.Helper()
+		if err := os.Remove(key); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(key, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	denied, open := "permission denied", "mode 0444"
+	openKey := func() {
+		if err := os.Chmod(key, 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		denied, open = "Access is denied", "its access list lets S-1-1-0 in"
+		openKey = func() { acltest.OpenToOthers(t, key) }
+	}
+	for _, c := range []struct {
+		name  string
+		fault func()
+		want  string
+	}{{"unreadable", func() { acltest.Unreadable(t, key) }, denied}, {"open to others", openKey, open}} {
+		rewrite(raw)
+		c.fault()
 		_, err := e.svc.AddClient(t.Context(), "Laptop")
 		wantCode(t, err, exitcode.MustAct) // ux-I3: a key fault is the person's to repair
 		if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), key) {
-			t.Errorf("mode %04o: error %q, want the key file and %q", c.mode, err, c.want)
+			t.Errorf("%s: error %q, want the key file and %q", c.name, err, c.want)
 		}
 		// show, too: the key is not lost, so rotate is no way out.
 		_, err = e.svc.ShowClient(t.Context(), "Phone")
 		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(exitcode.HintOf(err), "rotate") {
-			t.Errorf("mode %04o: show error %v, hint %q; want %q and no rotate", c.mode, err, exitcode.HintOf(err), c.want)
+			t.Errorf("%s: show error %v, hint %q; want %q and no rotate", c.name, err, exitcode.HintOf(err), c.want)
 		}
 	}
 	// ux-M: a key of the wrong size names its size, as the mode and the
 	// permission do.
-	if err := os.Chmod(key, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(key, []byte("short"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := e.svc.AddClient(t.Context(), "Laptop")
+	rewrite([]byte("short"))
+	_, err = e.svc.AddClient(t.Context(), "Laptop")
 	wantCode(t, err, exitcode.MustAct)
 	const want = "the client's password could not be sealed with the key file "
 	if got := err.Error(); got != want+key+" (it holds 5 bytes, not a 32-byte key), so nothing was stored" {

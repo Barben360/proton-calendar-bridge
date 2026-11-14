@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
@@ -191,14 +190,23 @@ func (c CertificateCheck) Run(ctx context.Context) Result {
 		}
 		return c.served(c.judge(r, leaf, now(), nil, "certificate of caldav.tls_cert", "replace it"), leaf)
 	}
-	if runtime.GOOS != "windows" {
-		for path, want := range map[string]fs.FileMode{c.TLSDir: 0o700, tlsutil.KeyPath(c.TLSDir): 0o600} {
-			if info, err := os.Stat(path); err == nil && info.Mode().Perm()&^want != 0 {
-				r.Status = StatusError
-				r.Message = path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(want) + " (pcb serve narrows it at its next start)"
-				r.Fix = "chmod " + modeString(want) + " " + shellquote.Quote(path)
+	for path, want := range map[string]fs.FileMode{c.TLSDir: 0o700, tlsutil.KeyPath(c.TLSDir): 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if msg, fix, checked := aclProblem(path, info.IsDir()); checked {
+			if msg != "" {
+				r.Status, r.Message, r.Fix = StatusError, msg+" (pcb serve refuses it)", fix
 				return r
 			}
+			continue
+		}
+		if info.Mode().Perm()&^want != 0 {
+			r.Status = StatusError
+			r.Message = path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(want) + " (pcb serve narrows it at its next start)"
+			r.Fix = "chmod " + modeString(want) + " " + shellquote.Quote(path)
+			return r
 		}
 	}
 	leaf, err := tlsutil.Inspect(c.TLSDir)

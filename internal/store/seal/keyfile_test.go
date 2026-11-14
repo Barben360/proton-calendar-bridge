@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
@@ -59,16 +60,8 @@ func TestKeyFileCreatesKeyOnce(t *testing.T) {
 	if again, _ := os.ReadFile(path); !bytes.Equal(first, again) || len(first) != 32 {
 		t.Fatalf("key changed or wrong size (%d)", len(first))
 	}
-	if runtime.GOOS != "windows" {
-		info, _ := os.Stat(path)
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("key mode %o", info.Mode().Perm())
-		}
-		dir, _ := os.Stat(filepath.Dir(path))
-		if dir.Mode().Perm() != 0o700 {
-			t.Fatalf("key dir mode %o", dir.Mode().Perm())
-		}
-	}
+	acltest.WantPrivate(t, path, 0o600)
+	acltest.WantPrivate(t, filepath.Dir(path), 0o700)
 }
 
 func TestOpenWithoutKeyIsErrNoKey(t *testing.T) {
@@ -84,7 +77,7 @@ func TestOpenWithoutKeyIsErrNoKey(t *testing.T) {
 
 func TestKeyFileRefusesLooseMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
+		t.Skip("Unix modes: the access-list twin is TestKeyFileWithAnEveryoneACEIsRefused")
 	}
 	path := keyPath(t)
 	k := &seal.KeyFile{Path: path}
@@ -190,9 +183,7 @@ func TestKeyCreationFallsBackWithoutHardLinks(t *testing.T) {
 		if err != nil || string(got) != "x" {
 			t.Fatalf("%v: %q, %v", cause, got, err)
 		}
-		if info, _ := os.Stat(path); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-			t.Fatalf("%v: mode %o", cause, info.Mode().Perm())
-		}
+		acltest.WantPrivate(t, path, 0o600)
 		if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".key-*")); len(left) != 0 {
 			t.Fatalf("temporary key left: %v", left)
 		}

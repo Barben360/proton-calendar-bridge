@@ -98,7 +98,7 @@ func TestLogoutOfAStoreItCannotReadAsksOnATerminal(t *testing.T) {
 // and service, which run as root, are not concerned.
 func TestRootRefusesAnotherUsersState(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Unix ownership: os.Geteuid is -1 on Windows, whose state owner check is the ACL's (Tasks 4 and 5)")
+		t.Skip("root, UIDs and sudo are Unix's: on Windows the owner is checked whoever runs pcb (TestAnotherOwnersStateIsRefused)")
 	}
 	t.Parallel()
 	if os.Geteuid() == 0 {

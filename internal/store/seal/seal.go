@@ -35,18 +35,24 @@ var (
 	// ErrNoService means no Secret Service answers on the session bus (or
 	// there is no session bus): the desktop keyring cannot be used.
 	ErrNoService = errors.New("no Secret Service answers on the session bus")
-	// ErrKeyMode means the key file's mode lets other users in: it is
-	// refused, readable or not (fails closed). The error is a *KeyModeError.
+	// ErrKeyMode means the key file's mode (on Windows, its access list) lets
+	// other users in: it is refused, readable or not (fails closed). The
+	// error is a *KeyModeError.
 	ErrKeyMode = errors.New("the key file is accessible by others")
 )
 
-// KeyModeError is a key file refused for its mode.
+// KeyModeError is a key file refused for its mode, or on Windows for its
+// access list.
 type KeyModeError struct {
-	Path string
-	Mode fs.FileMode
+	Path    string
+	Mode    fs.FileMode // the refused mode (Unix)
+	Grantee string      // the SID the access list lets in (Windows), "" on Unix
 }
 
 func (e *KeyModeError) Error() string {
+	if e.Grantee != "" {
+		return "key file " + e.Path + ": its access list lets " + e.Grantee + " in: pcb refuses it. Fix: run pcb doctor"
+	}
 	return fmt.Sprintf("key file %s is accessible by others (mode %04o). Fix: chmod 600 %s", e.Path, e.Mode, e.Path)
 }
 

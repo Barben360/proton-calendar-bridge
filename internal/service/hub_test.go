@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
@@ -345,16 +345,10 @@ func TestOpenHubRefusesDamagedLayout(t *testing.T) {
 // too: no restart fixes it.
 func TestOpenHubRefusesUnreadableLayout(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
-		t.Skip("file modes do not stop root, nor apply on Windows")
-	}
 	e := newHubEnv(t)
 	_ = e.open(t).Close()
 	path := filepath.Join(e.dirs.State, "layout.json")
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	acltest.Unreadable(t, path)
 	_, err := service.OpenHub(e.options())
 	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "cannot use the state layout") || !strings.Contains(ee.Error(), path) {
 		t.Errorf("error = %q, want the unreadable layout.json named", ee.Error())

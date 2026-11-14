@@ -3,7 +3,11 @@
 package store
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
+	"os/user"
+	"strconv"
 	"syscall"
 )
 
@@ -21,5 +25,14 @@ func DirOwner(dir string) (uid int, ok bool) {
 	return int(st.Uid), true
 }
 
-// fileOwner is the UID owning path.
-func fileOwner(path string) (uid int, ok bool) { return DirOwner(path) }
+// describeOwner is Unreadable's "owner NAME, mode 0000" for path.
+func describeOwner(path string, info fs.FileInfo) string {
+	owner := "unknown"
+	if uid, ok := DirOwner(path); ok {
+		owner = "#" + strconv.Itoa(uid)
+		if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.Username != "" {
+			owner = u.Username
+		}
+	}
+	return fmt.Sprintf("owner %s, mode %04o", owner, info.Mode().Perm())
+}

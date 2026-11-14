@@ -228,7 +228,7 @@ func TestLoginWrongPasswordDoesNotLeakIt(t *testing.T) {
 func TestSessionFileMode0600(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("POSIX modes")
+		t.Skip("Unix modes: pcb-lab is a developer tool whose directory is os.MkdirAll's, with no Windows access list of its own")
 	}
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
@@ -694,6 +694,9 @@ func TestHVFileRemovedByPlainSuccessfulLogin(t *testing.T) {
 
 func TestExistingStateDirTightenedTo0700(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes: pcb-lab (a developer tool) has no Windows access list to tighten")
+	}
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	if err := os.MkdirAll(o.StateDir, 0o755); err != nil {
@@ -717,9 +720,6 @@ func TestExistingStateDirTightenedTo0700(t *testing.T) {
 // any token, old or rotated.
 func TestResumedClientReportsFailedTokenWrite(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory modes")
-	}
 	f := labtest.NewFront(t, &labtest.Front{})
 	o := opts(t, f)
 	var stderr bytes.Buffer
@@ -745,10 +745,15 @@ func TestResumedClientReportsFailedTokenWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if err := os.Chmod(o.StateDir, 0o500); err != nil {
+	// A directory where session.json was: the save fails on every OS and
+	// for root, which a read-only directory does not stop.
+	sessionPath := filepath.Join(o.StateDir, "session.json")
+	if err := os.Remove(sessionPath); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(o.StateDir, 0o700) //nolint:errcheck // t.TempDir cleanup
+	if err := os.Mkdir(sessionPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	f.Backend.ExpireAccessTokens()
 	if _, err := r.Client.GetUser(t.Context()); err != nil {
 		t.Fatalf("GetUser after expiry: %v", err)
@@ -851,7 +856,7 @@ func TestHVEventsAreLogged(t *testing.T) {
 	if lines[1].At != "2026-11-11T10:01:01Z" || lines[1].TokenLen != len(second) || !lines[1].SentCaptcha {
 		t.Errorf("second line = %+v", lines[1])
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) { // pcb-lab makes no Windows access list
 		t.Errorf("hv-log.jsonl mode = %v (%v), want 0600", fi.Mode().Perm(), err)
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 )
 
 func sha32(s string) string {
@@ -87,18 +89,8 @@ func TestOpenCreates0600WAL(t *testing.T) {
 	if err := c.db.QueryRowContext(bg, `PRAGMA busy_timeout`).Scan(&busy); err != nil || busy != 5000 {
 		t.Errorf("busy_timeout = %d, %v", busy, err)
 	}
-	if runtime.GOOS == "windows" {
-		return
-	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		fi, err := os.Stat(p)
-		if err != nil {
-			t.Errorf("%s: %v", p, err)
-			continue
-		}
-		if fi.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %o, want 600", p, fi.Mode().Perm())
-		}
+		acltest.WantPrivate(t, p, 0o600)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -153,7 +154,7 @@ func TestCertificateCheckSelfSigned(t *testing.T) {
 	})
 	t.Run("a readable key is an error", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			t.Skip("no Unix modes")
+			t.Skip("Unix modes: the access-list twin is TestCacheAndCertificateChecksUseTheACL")
 		}
 		dir := t.TempDir()
 		selfSigned(t, dir, "pcb.lan")
@@ -264,9 +265,10 @@ func TestSealedClientsCheckWarnsPerClientTheKeyNoLongerOpens(t *testing.T) {
 		t.Errorf("lost key beside secrets.sealed: %+v, want none", got)
 	}
 	// Readable by others: the key file check reports it.
-	if err := os.WriteFile(key, bytes.Repeat([]byte{7}, 32), 0o644); err != nil {
+	if err := os.WriteFile(key, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	acltest.OpenToOthers(t, key)
 	if got := check.RunAll(ctx); len(got) != 0 {
 		t.Errorf("loose key: %+v, want none", got)
 	}
