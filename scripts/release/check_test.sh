@@ -112,7 +112,20 @@ test_image_tag_list() {
   [ -z "$(image_tag_list $'1.2.3\nbad tag\n' 2>/dev/null)" ] || fail "partial list printed"
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_on_main; do
+test_owner() {
+  "$check" owner alice alice alice || fail "the owner twice refused"
+  "$check" owner alice alice || fail "the owner once refused"
+  want_status "triggering actor not the owner" 1 "$check" owner alice alice bob
+  want_status "actor not the owner" 1 "$check" owner alice bob alice
+  want_status "empty actor" 1 "$check" owner alice alice ""
+  want_status "case differs" 1 "$check" owner alice Alice
+  local err; err=$("$check" owner alice alice bob 2>&1 || true)
+  [ "$err" = "check: bob is not the owner alice" ] || fail "message: $err"
+  want_status "no actor" 2 "$check" owner alice
+  want_status "empty owner" 2 "$check" owner "" ""
+}
+
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_owner test_on_main; do
   "$case_name"
   echo "ok   $case_name"
 done

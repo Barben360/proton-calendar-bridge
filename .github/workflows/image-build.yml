@@ -27,6 +27,11 @@ on:
         description: The tags to put on the manifest list, newline-separated, without the repository.
         type: string
         required: true
+      owner-only:
+        description: Refuse unless the run's actor and triggering actor are the repository owner.
+        type: boolean
+        required: false
+        default: false
     outputs:
       digest:
         description: The manifest list's digest.
@@ -72,6 +77,12 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      # release.yml: "Re-run failed jobs" on a failed image job skips its
+      # checks job, and with it the owner check; this one runs again.
+      - name: Refuse an image started by anyone but the owner
+        if: inputs.owner-only
+        run: |
+          scripts/release/check.sh owner "$GITHUB_REPOSITORY_OWNER" "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR" || { echo "::error::only the owner $GITHUB_REPOSITORY_OWNER publishes this image (actor $GITHUB_ACTOR, triggered by $GITHUB_TRIGGERING_ACTOR)"; exit 1; }
       # The tags are put on the list by publish; a bad one fails here,
       # before anything is built or pushed.
       - name: Check the tags
@@ -140,6 +151,11 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      # "Re-run failed jobs" on a failed publish runs this job alone.
+      - name: Refuse an image started by anyone but the owner
+        if: inputs.owner-only
+        run: |
+          scripts/release/check.sh owner "$GITHUB_REPOSITORY_OWNER" "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR" || { echo "::error::only the owner $GITHUB_REPOSITORY_OWNER publishes this image (actor $GITHUB_ACTOR, triggered by $GITHUB_TRIGGERING_ACTOR)"; exit 1; }
       - name: Log in to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -9,6 +9,7 @@
 #   check.sh image-tags TAG LATEST MINOR_LATEST image tags, one per line (flags: yes|no)
 #   check.sh image-tag-list                     tags on stdin, one per line; prints the non-blank ones, refuses
 #                                               a bad one or none (image-build.yml's tags input)
+#   check.sh owner OWNER ACTOR...               0 when every ACTOR is OWNER
 #   check.sh on-main SHA [BASE]                 0 when SHA is an ancestor of BASE (default origin/main)
 set -eu
 
@@ -88,11 +89,19 @@ case $cmd in
     ((${#tags[@]} > 0)) || die "no tag given"
     printf '%s\n' "${tags[@]}"
     ;;
+  owner)
+    [[ $# -ge 2 && -n $1 ]] || die "usage: owner OWNER ACTOR..."
+    owner=$1
+    shift
+    for a in "$@"; do
+      [[ $a == "$owner" ]] || { echo "check: $a is not the owner $owner" >&2; exit 1; }
+    done
+    ;;
   on-main)
     [[ $# -ge 1 && $# -le 2 ]] || die "usage: on-main SHA [BASE]"
     git merge-base --is-ancestor "$1" "${2:-origin/main}"
     ;;
   *)
-    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|on-main ..."
+    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|owner|on-main ..."
     ;;
 esac
