@@ -1,17 +1,28 @@
 name: image
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch or tag to build (empty for the branch the run is dispatched on)
+        type: string
+        required: false
+        default: ""
 permissions:
   contents: read
-# Pushes to main serialize (never cancelled: a half-finished push could leave
-# :main and :sha- out of step); a newer pull request run cancels the older.
+# A newer pull request run cancels the older. Dispatches are never
+# cancelled while running: a cancelled run could stop between pushing the
+# digests and tagging them. The group is the branch the dispatch runs on,
+# so dispatches of different refs from one branch share it; it holds one
+# running and one pending run, and a newer dispatch makes GitHub cancel the
+# older pending one (dispatch it again). Release images come from
+# release.yml; main pushes none.
 concurrency:
-  group: image-${{ github.event_name == 'push' && 'main' || github.ref }}
+  group: image-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # A pull request: build the image and smoke-test it; nothing is pushed.
+  # A pull request: build the image and smoke-test it, its version labels
+  # too; nothing is pushed.
   smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -21,36 +32,49 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and smoke-test the image
-        run: make container-smoke
-  # main: build, smoke-test that very image, then push it to the private
-  # GHCR package.
-  push:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PCB_SMOKE_VERSION: pr-smoke
+        run: make container-smoke VERSION="$PCB_SMOKE_VERSION"
+  # By hand: the resolved commit, built for both architectures, as
+  # sha-<12 hex>.
+  resolve:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve the ref to a full commit SHA
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ -z "$REF" ]; then
+            sha=$GITHUB_SHA
+          else
+            if [[ ! $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ || $REF == *..* ]]; then
+              echo "::error::not a commit, branch or tag: $REF"
+              exit 1
+            fi
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$REF" --jq .sha) || { echo "::error::no commit for $REF"; exit 1; }
+          fi
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a full commit SHA: $sha"; exit 1; }
+          echo "Building $sha as sha-${sha::12}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${sha::12}" >> "$GITHUB_OUTPUT"
+  image:
+    needs: resolve
     permissions:
       contents: read
       packages: write
-    env:
-      REPO: ghcr.io/barben360/proton-calendar-bridge
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build the image
-        run: make image IMAGE="$REPO:main"
-      - name: Smoke-test it
-        run: PCB_SMOKE_IMAGE="$REPO:main" scripts/container-smoke.sh
-      - name: Log in to GHCR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-      - name: Push main and sha-<12 hex>
-        run: |
-          sha_tag="$REPO:sha-${GITHUB_SHA::12}"
-          docker tag "$REPO:main" "$sha_tag"
-          docker push "$REPO:main"
-          docker push "$sha_tag"
-      - name: Log out
-        if: always()
-        run: docker logout ghcr.io
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.tag }}
+      tags: ${{ needs.resolve.outputs.tag }}

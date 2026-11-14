@@ -5,7 +5,6 @@
 </h1>
 
 [![CI](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml?query=branch%3Amain)
-[![Image](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/image.yml/badge.svg?branch=main)](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/image.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/github/license/Barben360/proton-calendar-bridge)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/Barben360/proton-calendar-bridge)](go.mod)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-blue)](docs/install.md#requirements)
@@ -63,7 +62,13 @@ One process serves every account: the desktop app, the `pcb serve` daemon (syste
 | The same, in Docker | the container image | [container](docs/container.md) |
 | Only an AI agent on this machine, no daemon | `pcb mcp`, started by the agent | [agents](docs/agents.md) |
 
-There are no release binaries yet: you build pcb from a clone with Go (version in [go.mod](go.mod)). Requirements and build dependencies: [docs/install.md](docs/install.md).
+Install a release (Linux and macOS, amd64 and arm64; no sudo):
+
+```sh
+curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/download/install.sh | sh
+```
+
+It puts `pcb` and `pcb-ui` in `~/.local/bin`, plus the desktop entry on Linux. Flags, checks and macOS: [docs/install.md](docs/install.md). Or build from a clone with Go (version in [go.mod](go.mod)); the "On a desktop" and "Headless" steps below do.
 
 ### On a desktop
 
@@ -111,7 +116,7 @@ Every command takes `--json` and prints one envelope, `{schema_version, command,
 
 | Page | What is in it |
 |---|---|
-| [install](docs/install.md) | Requirements, building, platforms, upgrading. |
+| [install](docs/install.md) | Installing a release, building, platforms, upgrading. |
 | [desktop](docs/desktop.md) | `pcb-ui`: the tray, the window, adding accounts, start at login, removing it. |
 | [service](docs/service.md) | `pcb serve` as a systemd user or system service. |
 | [container](docs/container.md) | The image, compose, the key file, a container that restarts in a loop. |

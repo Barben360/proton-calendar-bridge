@@ -19,9 +19,14 @@ RUN install -d -m 0700 -o 65532 -g 65532 /out/data /out/data/config /out/data/st
 
 # gcr.io/distroless/static-debian13:nonroot
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+# The stamp of pcb (make image passes both), as labels.
+ARG VERSION
+ARG COMMIT
 LABEL org.opencontainers.image.source="https://github.com/Barben360/proton-calendar-bridge" \
       org.opencontainers.image.description="pcb, the Proton Calendar CalDAV bridge" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$COMMIT
 COPY --from=build /out/pcb /usr/local/bin/pcb
 COPY --from=build --chown=65532:65532 /out/data /data
 ENV PCB_CONFIG_DIR=/data/config \

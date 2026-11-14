@@ -1,0 +1,164 @@
+name: image-build
+# The one image build (§5.2 of the release process design), called by
+# image.yml (by hand: sha-<12 hex>) and release.yml (a release tag). Each
+# architecture builds on its native runner and is pushed untagged, by
+# digest; the tags go on one manifest list over both digests, then a build
+# provenance attestation is pushed beside it.
+#
+# The digests on the list are the ones smoke-tested, and no temporary tag is
+# ever pushed: each build job pushes its image by digest only (BuildKit's
+# push-by-digest, no tag), pulls that very digest back and smoke-tests it,
+# and hands the digest on only when the smoke test passed. The list is made
+# from those digests (imagetools create), and the publish job checks that
+# the list holds exactly them. A failed smoke test leaves an untagged
+# version in the package, never a tag.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to build, a full SHA.
+        type: string
+        required: true
+      version:
+        description: Stamped into pcb and into the org.opencontainers.image.version label.
+        type: string
+        required: true
+      tags:
+        description: The tags to put on the manifest list, newline-separated, without the repository.
+        type: string
+        required: true
+    outputs:
+      digest:
+        description: The manifest list's digest.
+        value: ${{ jobs.publish.outputs.digest }}
+permissions:
+  contents: read
+env:
+  REPO: ghcr.io/barben360/proton-calendar-bridge
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    # One output per architecture: matrix legs setting the same name would
+    # overwrite each other.
+    outputs:
+      digest-amd64: ${{ steps.handoff.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.handoff.outputs.digest-arm64 }}
+    env:
+      # A BuildKit of our own (docker-container driver), pinned: the
+      # runner's docker driver pushes by digest only with the containerd
+      # image store, which a runner image need not use.
+      BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+      BUILDX_BUILDER: pcb
+    steps:
+      - name: Check the inputs
+        env:
+          REF: ${{ inputs.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ $REF =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ref is not a full commit SHA: $REF"; exit 1; }
+          [[ $VERSION =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || { echo "::error::not a version: $VERSION"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Set up the builder
+        run: docker buildx create --name "$BUILDX_BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --bootstrap
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build and push by digest, untagged
+        id: build
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          meta="$RUNNER_TEMP/build-metadata.json"
+          # No BuildKit attestations: the image is a single manifest, and
+          # its provenance is the publish job's attestation.
+          make image IMAGE="$REPO" VERSION="$VERSION" \
+            IMAGE_FLAGS="--provenance=false --sbom=false --output type=image,push-by-digest=true,name-canonical=true,push=true --metadata-file $meta"
+          digest=$(jq -r '."containerimage.digest" // ""' "$meta")
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no image digest in the build metadata"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Pull that digest and smoke-test it
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          image="$REPO@$DIGEST"
+          docker pull "$image"
+          got=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")
+          [ "$got" = "linux/$ARCH" ] || { echo "::error::$image is $got, want linux/$ARCH"; exit 1; }
+          PCB_SMOKE_IMAGE="$image" PCB_SMOKE_VERSION="$VERSION" scripts/container-smoke.sh
+      - name: Hand the smoke-tested digest on
+        id: handoff
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: echo "digest-$ARCH=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.list.outputs.digest }}
+    steps:
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Tag one manifest list over both digests
+        id: list
+        env:
+          TAGS: ${{ inputs.tags }}
+          AMD64: ${{ needs.build.outputs.digest-amd64 }}
+          ARM64: ${{ needs.build.outputs.digest-arm64 }}
+        run: |
+          for d in "$AMD64" "$ARM64"; do
+            [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::an architecture's digest is missing: '$d'"; exit 1; }
+          done
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "::error::not an image tag: '$tag'"; exit 1; }
+            args+=(-t "$REPO:$tag")
+          done <<<"$TAGS"
+          [ "${#args[@]}" -gt 0 ] || { echo "::error::no tag given"; exit 1; }
+          meta="$RUNNER_TEMP/list-metadata.json"
+          docker buildx imagetools create --metadata-file "$meta" "${args[@]}" "$REPO@$AMD64" "$REPO@$ARM64"
+          digest=$(jq -r '."containerimage.descriptor".digest // ""' "$meta")
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no manifest list digest in the metadata"; exit 1; }
+          got=$(docker buildx imagetools inspect --raw "$REPO@$digest" | jq -r '[.manifests[].digest] | sort | join(" ")')
+          want=$(printf '%s\n' "$AMD64" "$ARM64" | sort | paste -sd ' ')
+          [ "$got" = "$want" ] || { echo "::error::the list holds $got, want the smoke-tested $want"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REPO }}
+          subject-digest: ${{ steps.list.outputs.digest }}
+          push-to-registry: true
+          # Storage records exist for organisation-owned repositories only.
+          create-storage-record: false
+      - name: Log out
+        if: always()
+        run: docker logout ghcr.io

@@ -17,13 +17,13 @@ PREFIX  ?= $(HOME)/.local
 # GOMAXPROCS sets go's -p (packages at once), -parallel (tests at once per
 # package) and the threads of each test binary and child. JOBS is 4, or the
 # machine's CPUs when fewer: more than the CPUs starves the same way (CI's
-# private-repo runners have 2). At 4 locally the suite takes about 250 s
+# runners have 2). At 4 locally the suite takes about 250 s
 # against 200 s uncapped, for half the CPU time (contention under -race
 # doubles the work).
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test shellcheck pcb-fake rehearse screenshots
+.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test shellcheck actionlint pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -76,11 +76,13 @@ lint:
 	go vet ./...
 	golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
 
-# The container image (M5-Rpre7), stamped like make build.
+# The container image (M5-Rpre7), stamped like make build. IMAGE_FLAGS adds
+# docker build flags (.github/workflows/image-build.yml pushes by digest).
 IMAGE ?= pcb:local
+IMAGE_FLAGS ?=
 
 image:
-	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(IMAGE_FLAGS) .
 
 # Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
 container-smoke:
@@ -106,6 +108,26 @@ SHELLCHECK_IMAGE ?= koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de
 shellcheck:
 	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m/scripts/live $(SHELLCHECK_IMAGE) \
 		-x -P SCRIPTDIR common.sh guard.sh run.sh preflight.sh guard_test.sh rehearse.sh
+	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(SHELLCHECK_IMAGE) -x \
+		scripts/install.sh scripts/install_test.sh \
+		scripts/release/check.sh scripts/release/check_test.sh scripts/release/macos-smoke.sh \
+		scripts/release/package.sh scripts/release/package_test.sh
+
+# The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
+ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+actionlint:
+	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(ACTIONLINT_IMAGE) -color
+
+# The release scripts (scripts/release): the tag rules and the archives;
+# each prints PASS last.
+release-test:
+	bash scripts/release/check_test.sh
+	bash scripts/release/package_test.sh
+
+# install.sh against a fake release of stub binaries (POSIX sh, as the
+# curl | sh users run it); prints PASS last.
+install-test:
+	sh scripts/install_test.sh
 
 # The live session rehearsed offline against pcb-fake (plan R2): builds pcb
 # and pcb-fake into a temporary run root and prints PASS last.

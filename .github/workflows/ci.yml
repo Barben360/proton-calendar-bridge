@@ -73,6 +73,8 @@ jobs:
         run: |
           make live-preflight-test
           make shellcheck
+      - name: Release and install scripts, workflow lint
+        run: make release-test install-test actionlint
       - name: Vet for Windows
         run: GOOS=windows go vet ./...
       - name: Build is stamped
@@ -196,3 +198,47 @@ jobs:
       - name: Download modules
         run: go mod download
       - run: make rehearse
+  # The installer on a Mac: the darwin archive built and packaged as the
+  # release does, installed by install.sh from a file:// release, then run.
+  # No actions/cache: the build is short, and the runner's cache paths differ.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install GNU tar
+        # package.sh needs GNU tar (--sort, --mtime): macOS has bsdtar. gtar's
+        # gnubin directory (tar without the g) goes first on PATH from here on.
+        run: |
+          brew install gnu-tar
+          echo "$(brew --prefix gnu-tar)/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Build and package darwin
+        run: |
+          case $(uname -m) in
+            x86_64) arch=amd64 ;;
+            *) arch=arm64 ;;
+          esac
+          make build VERSION=v0.0.0-ci
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) scripts/release/package.sh darwin "$arch" bin dist
+          cp scripts/install.sh dist/install.sh
+          (cd dist && shasum -a 256 "pcb_darwin_${arch}.tar.gz" install.sh > checksums.txt)
+      - name: Install smoke
+        run: scripts/release/macos-smoke.sh dist v0.0.0-ci
+      - name: The smoke fails on a wrong version
+        # The archive's pcb reports v0.0.0-ci: asking for another tag must fail.
+        run: |
+          if out=$(scripts/release/macos-smoke.sh dist v0.0.0-wrong 2>&1); then
+            echo "$out"
+            echo "the smoke passed on a wrong version" >&2
+            exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -qF "pcb version reports 'v0.0.0-ci', want 'v0.0.0-wrong'"
+      - name: install.sh tests on the macOS shell
+        run: sh scripts/install_test.sh

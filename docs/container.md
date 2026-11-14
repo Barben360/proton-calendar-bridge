@@ -17,7 +17,35 @@ The image runs pcb serve as the entrypoint, so you never need `pcb install` or s
 
 It comes up healthy with no login and waits for one. CalDAV answers 401 until a login creates the first client.
 
-Tags: `ghcr.io/barben360/proton-calendar-bridge:main` and `:sha-<12 hex>` (a private package), or `pcb:local` from `make image`.
+The image is `ghcr.io/barben360/proton-calendar-bridge`, a public package for amd64 and arm64: `docker pull` needs no login. Or `pcb:local` from `make image`.
+
+## Tags
+
+Images are pushed when a release is published, never from main.
+
+| Tag | Moves to | Pushed for |
+|---|---|---|
+| `X.Y.Z` | never: a released tag is not rebuilt | every release |
+| `X.Y` | the newest patch of that line | a stable release |
+| `latest` | the newest stable release by version, not by date | a stable release |
+| `X.Y.Z-rc.N` | never | a pre-release, which gets this tag only |
+| `sha-<12 hex>` | never | a development build of one commit, started by hand |
+
+A patch release of an older line (`1.2.4` after `1.3.0`) does not take `latest`. Pin `X.Y.Z` for a server you do not want to change under you.
+
+GHCR lists more versions than tags: each release also has an untagged version per architecture (the images its `X.Y.Z` points to) and may have its attestation as a `sha256-<hex>` version. They belong to the release: do not delete them, or its tags break for good.
+
+### Check an image
+
+Each image carries a GitHub attestation: proof that this repository's image workflow (`image-build.yml`, which a release runs) built it from a given commit. For a release, `--source-ref` also checks that it was built for that version's tag:
+
+```sh
+gh attestation verify oci://ghcr.io/barben360/proton-calendar-bridge:X.Y.Z --repo Barben360/proton-calendar-bridge \
+  --signer-workflow Barben360/proton-calendar-bridge/.github/workflows/image-build.yml \
+  --source-ref refs/tags/vX.Y.Z
+```
+
+A `sha-<12 hex>` development image is built from a branch: leave out `--source-ref`.
 
 ## Prepare `/data`
 
@@ -37,7 +65,7 @@ mkdir -p data/config data/state && sudo chown -R 65532:65532 data && chmod 700 d
 ```yaml
 services:
   pcb:
-    image: pcb:local                  # make image
+    image: ghcr.io/barben360/proton-calendar-bridge:latest   # pin X.Y.Z on a server; or pcb:local from make image
     container_name: pcb
     restart: unless-stopped
     ports:

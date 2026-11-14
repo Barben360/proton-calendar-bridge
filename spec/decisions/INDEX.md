@@ -18,3 +18,4 @@
 | [0014](0014-several-accounts-per-process.md) | Several Proton accounts per process; per-account CalDAV URLs (accepted) |
 | [0015](0015-pcb-ui.md) | pcb-ui: a separate cgo binary running the daemon in process; the keyring sealer (accepted) |
 | [0016](0016-mcp-adapter.md) | An MCP adapter for agents, over stdio and remote; amends 0007 (accepted, built in M8, live session pending) |
+| [0017](0017-release-process.md) | Tag-driven releases, attestations instead of minisign, a public image pushed on release; amends SPEC §3 and §13 (accepted, built, rollout pending) |

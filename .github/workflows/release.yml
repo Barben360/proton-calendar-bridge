@@ -1,0 +1,509 @@
+name: release
+# A vX.Y.Z or vX.Y.Z-PRERELEASE tag publishes a release
+# (spec/designs/2026-11-14-release-process-design.md §5.1).
+#
+# Order: checks → builds (pcb, pcb-ui) → archives → macOS smoke → image →
+# Release. Each step runs only when everything before it passed, so the
+# outward steps come last and in the order a user meets them: nothing is
+# pushed while a check or a build can still fail, the image (and its tags,
+# latest included) moves only once every binary was built and the darwin
+# archives ran on macOS, and the Release is published last, so
+# releases/latest, which install.sh follows, changes only when every file
+# and the image are out.
+#
+# No cache: no actions/cache, and setup-go with cache: false. A tag run may
+# restore the default branch's caches, which main-branch CI jobs fill while
+# running third-party code; go mod verify re-checks the module cache, but
+# compiled objects in GOCACHE are trusted on a hit, so a poisoned cache
+# would land in an attested binary. The release builds from scratch:
+# modules from the proxy, checked against go.sum.
+#
+# A published version never moves (design §2): checks refuse a tag whose
+# Release is published or whose X.Y.Z image is already pushed. A failed run
+# publishes nothing beyond the step that failed; fix the cause and use
+# "Re-run failed jobs" on that run, never "Re-run all jobs" nor a re-pushed
+# tag: both start with checks, which refuse a version whose image is out.
+# "Re-run failed jobs" re-runs the failed job and the jobs after it, not
+# checks (it passed), so it resumes past the image check. That is how the
+# one partial state is retried: image-build.yml tags the manifest list,
+# then attests it, so a failed attestation leaves the version tags on an
+# unattested list and no Release; re-running the failed image job builds
+# the same commit again and re-points those tags before anything else is
+# published. A version whose image was pushed and whose run is not resumed
+# this way is burned: release the next tag.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+# One release at a time, never cancelled: a cancelled run could stop in
+# the middle of tagging the image (imagetools create), and two tags in
+# flight could finish out of order and leave latest on the older line. The
+# trade-off: a group holds one running and one pending run, and when a
+# newer run queues GitHub cancels the older pending one, which must then be
+# re-run by hand.
+concurrency:
+  group: release
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  # The release files besides checksums.txt, which covers exactly these.
+  ASSETS: install.sh pcb_darwin_amd64.tar.gz pcb_darwin_arm64.tar.gz pcb_linux_amd64.tar.gz pcb_linux_arm64.tar.gz
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    env:
+      REPO: ghcr.io/barben360/proton-calendar-bridge
+    outputs:
+      kind: ${{ steps.tag.outputs.kind }}
+      latest: ${{ steps.latest.outputs.latest }}
+      minor_latest: ${{ steps.latest.outputs.minor_latest }}
+      image_tags: ${{ steps.latest.outputs.image_tags }}
+    steps:
+      # Only the owner releases, with no manual approval: the tag ruleset
+      # lets only the admin create v* tags (repository settings), and this
+      # refuses anyone else. "Re-run failed jobs" skips this job once it
+      # passed, so the release job checks the owner again.
+      - name: Refuse releases started by anyone but the owner
+        run: |
+          for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
+            [ "$a" = "$GITHUB_REPOSITORY_OWNER" ] || { echo "::error::$a is not $GITHUB_REPOSITORY_OWNER: only the owner releases"; exit 1; }
+          done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse a tag that is not vMAJOR.MINOR.PATCH[-PRERELEASE]
+        id: tag
+        run: |
+          [[ $GITHUB_REF == refs/tags/* ]] || { echo "::error::$GITHUB_REF is not a tag"; exit 1; }
+          kind=$(scripts/release/check.sh tag-kind "$GITHUB_REF_NAME") || { echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE"; exit 1; }
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_REF_NAME is a $kind release"
+      - name: Refuse a tag that is not on main
+        run: |
+          git fetch -q --force --tags origin main
+          scripts/release/check.sh on-main "$GITHUB_SHA" origin/main || { echo "::error::tag $GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
+      # A draft is left by a run that failed at its last job: the release
+      # job replaces it. A published Release is never replaced.
+      - name: Refuse a tag whose Release is already published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\" and (.draft | not)) | .html_url")
+          [ -z "$published" ] || { echo "::error::$GITHUB_REF_NAME is already published ($published): release a new tag"; exit 1; }
+      # An image pushed by an earlier run of this version (its Release may
+      # be only a draft, or missing) is never rebuilt: see the top comment.
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Refuse a version whose image is already pushed
+        run: |
+          ref="$REPO:${GITHUB_REF_NAME#v}"
+          rc=0
+          out=$(docker buildx imagetools inspect "$ref" 2>&1) || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::image ${GITHUB_REF_NAME#v} is already pushed: use Re-run failed jobs on the run that pushed it, or release a new tag"
+            exit 1
+          fi
+          if grep -qE 'not found|MANIFEST_UNKNOWN' <<<"$out"; then
+            echo "$ref is not pushed yet"
+          else
+            echo "$out"
+            echo "::error::cannot tell whether $ref is pushed (imagetools inspect failed, see above)"
+            exit 1
+          fi
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+      - name: Refuse a commit whose ci run on main did not succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+            --jq '[.workflow_runs[] | select(.head_branch == "main")] | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"')
+          [ -n "$run" ] || { echo "::error::no ci run on a push to main for $GITHUB_SHA: tag a commit that main's ci ran on"; exit 1; }
+          read -r status conclusion url <<<"$run"
+          [ "$status" = completed ] || { echo "::error::ci on main for $GITHUB_SHA is still $status ($url): once it is green, delete the tag and push it again"; exit 1; }
+          [ "$conclusion" = success ] || { echo "::error::ci on main for $GITHUB_SHA concluded $conclusion ($url)"; exit 1; }
+          echo "ci passed on main: $url"
+      # latest and X.Y follow the newest stable version, not the newest
+      # date (§5.2): a patch of an older line takes neither, and a
+      # pre-release takes neither (is-latest and is-latest-minor answer no).
+      - name: Decide latest, X.Y and the image tags
+        id: latest
+        run: |
+          others=$(git tag -l 'v*' | { grep -vxF "$GITHUB_REF_NAME" || true; })
+          flag() {
+            local rc=0
+            printf '%s\n' "$others" | scripts/release/check.sh "$1" "$GITHUB_REF_NAME" || rc=$?
+            case $rc in
+              0) echo yes ;;
+              1) echo no ;;
+              *) echo "::error::check.sh $1 failed ($rc)" >&2; return 1 ;;
+            esac
+          }
+          latest=$(flag is-latest)
+          minor_latest=$(flag is-latest-minor)
+          tags=$(scripts/release/check.sh image-tags "$GITHUB_REF_NAME" "$latest" "$minor_latest")
+          {
+            echo "latest=$latest"
+            echo "minor_latest=$minor_latest"
+            echo "image_tags<<IMAGE_TAGS_EOF"
+            printf '%s\n' "$tags"
+            echo "IMAGE_TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "latest=$latest minor_latest=$minor_latest; image tags:"
+          echo "$tags"
+
+  # pcb is static (CGO_ENABLED=0, -trimpath: make build), so one runner
+  # cross-compiles the four targets.
+  pcb:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build pcb for the four targets
+        run: |
+          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            GOOS=${t%-*} GOARCH=${t#*-} make build VERSION="$GITHUB_REF_NAME" OUT="bin/$t/pcb"
+          done
+      # One artifact per target; overwrite: a re-run of this job replaces
+      # its own artifacts (each name belongs to one job).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-linux-amd64
+          path: bin/linux-amd64/pcb
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-linux-arm64
+          path: bin/linux-arm64/pcb
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-darwin-amd64
+          path: bin/darwin-amd64/pcb
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-darwin-arm64
+          path: bin/darwin-arm64/pcb
+          if-no-files-found: error
+          overwrite: true
+
+  # The linux/arm64 pcb is cross-compiled on amd64: the very file is run on
+  # an arm64 runner (the amd64 one is run by package, through install.sh).
+  pcb-arm64:
+    needs: pcb
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pcb-linux-arm64
+          path: ${{ runner.temp }}/pcb
+      - name: pcb (linux/arm64) prints the tag
+        run: |
+          chmod 0755 "$RUNNER_TEMP/pcb/pcb"
+          got=$("$RUNNER_TEMP/pcb/pcb" version --json | jq -r .data.version)
+          [ "$got" = "$GITHUB_REF_NAME" ] || { echo "::error::pcb version --json prints $got, want $GITHUB_REF_NAME"; exit 1; }
+          echo "pcb (linux/arm64) prints $got"
+
+  # pcb-ui needs cgo and the GL/X headers: built natively per architecture,
+  # on Ubuntu 22.04 (glibc 2.35) so it runs on most distributions (§5.1).
+  ui:
+    needs: checks
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install the GL and X development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev xvfb
+      - run: make ui VERSION="$GITHUB_REF_NAME"
+      - name: pcb-ui prints the tag
+        run: |
+          got=$(xvfb-run -a bin/pcb-ui --version)
+          echo "$got"
+          [[ $got == "pcb-ui $GITHUB_REF_NAME "* ]] || { echo "::error::pcb-ui --version does not print $GITHUB_REF_NAME"; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-ui-linux-${{ matrix.arch }}
+          path: bin/pcb-ui
+          if-no-files-found: error
+          overwrite: true
+
+  package:
+    needs: [pcb, pcb-arm64, ui]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pcb-*
+          path: ${{ runner.temp }}/artifacts
+      # Artifacts drop the file modes; each binary is checked to be the
+      # target's before it goes into that target's archive.
+      - name: Check the binaries and package the four archives
+        run: |
+          [ ! -e dist ] || { echo "::error::dist exists before packaging"; exit 1; }
+          declare -A want=(
+            [linux-amd64]='^ELF 64-bit LSB .*x86-64'
+            [linux-arm64]='^ELF 64-bit LSB .*ARM aarch64'
+            [darwin-amd64]='^Mach-O 64-bit x86_64 executable'
+            [darwin-arm64]='^Mach-O 64-bit arm64 executable'
+          )
+          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            os=${t%-*} arch=${t#*-}
+            stage=$RUNNER_TEMP/stage/$t
+            mkdir -p "$stage"
+            install -m 0755 "$RUNNER_TEMP/artifacts/pcb-$t/pcb" "$stage/pcb"
+            bins=(pcb)
+            if [ "$os" = linux ]; then
+              install -m 0755 "$RUNNER_TEMP/artifacts/pcb-ui-$t/pcb-ui" "$stage/pcb-ui"
+              bins+=(pcb-ui)
+              file -b "$stage/pcb" | grep -q 'statically linked' || { echo "::error::pcb for $t is not static"; exit 1; }
+            fi
+            for b in "${bins[@]}"; do
+              kind=$(file -b "$stage/$b")
+              [[ $kind =~ ${want[$t]} ]] || { echo "::error::$b for $t is: $kind"; exit 1; }
+            done
+            scripts/release/package.sh "$os" "$arch" "$stage" dist
+          done
+      - name: Add install.sh and write checksums.txt
+        run: |
+          read -ra assets <<<"$ASSETS"
+          # sha256sum with no names would hash stdin.
+          [ "${#assets[@]}" -eq 5 ] || { echo "::error::ASSETS does not name 5 files"; exit 1; }
+          cp scripts/install.sh dist/install.sh
+          (cd dist && sha256sum "${assets[@]}" > checksums.txt)
+          [ "$(wc -l < dist/checksums.txt)" -eq 5 ] || { echo "::error::checksums.txt does not have 5 lines"; exit 1; }
+          diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd dist && printf '%s\n' * | sort) || { echo "::error::dist does not hold exactly the release files"; exit 1; }
+          cat dist/checksums.txt
+      # The linux/amd64 archive as a user gets it: dist laid out as
+      # download/<tag>/, install.sh installs from it (checksum included),
+      # and the installed pcb prints the tag. With no token, gh is logged
+      # out: the files are attested only later, in the release job.
+      - name: Install the linux/amd64 archive with install.sh and run pcb
+        run: |
+          rel=$RUNNER_TEMP/rel prefix=$RUNNER_TEMP/prefix
+          mkdir -p "$rel/download/$GITHUB_REF_NAME" "$RUNNER_TEMP/home"
+          cp dist/* "$rel/download/$GITHUB_REF_NAME/"
+          env -u GH_TOKEN -u GITHUB_TOKEN HOME="$RUNNER_TEMP/home" PCB_INSTALL_BASE_URL="file://$rel" \
+            sh dist/install.sh --version "$GITHUB_REF_NAME" --prefix "$prefix" --no-desktop
+          for b in pcb pcb-ui; do
+            cmp "$RUNNER_TEMP/stage/linux-amd64/$b" "$prefix/bin/$b" || { echo "::error::install.sh did not install the packaged $b"; exit 1; }
+          done
+          got=$(HOME="$RUNNER_TEMP/home" "$prefix/bin/pcb" version --json | jq -r .data.version)
+          [ "$got" = "$GITHUB_REF_NAME" ] || { echo "::error::the installed pcb version --json prints $got, want $GITHUB_REF_NAME"; exit 1; }
+          echo "install.sh installed $GITHUB_REF_NAME; pcb prints $got"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+
+  # The darwin archives are run before anything is published (§5.5):
+  # install.sh installs the release's own archive, and its pcb must print
+  # the tag. Intel runner label checked against GitHub's runner list
+  # (actions/runner-images README, 2026-11-14): macos-26-intel.
+  macos:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            machine: arm64
+          - runner: macos-26-intel
+            machine: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: The runner is the expected architecture
+        env:
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          got=$(uname -m)
+          [ "$got" = "$MACHINE" ] || { echo "::error::runner is $got, want $MACHINE"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      # macos-smoke.sh takes the release files flat and lays them out
+      # under download/<tag>/ itself, as install.sh fetches them.
+      - name: Install the darwin archive with install.sh and run pcb
+        run: bash scripts/release/macos-smoke.sh dist "$GITHUB_REF_NAME"
+
+  # Version tags, X.Y and latest as checks decided (check.sh image-tags).
+  # A failure after the list was tagged (its attestation) leaves the tags
+  # on an unattested list and publishes no Release: re-run failed jobs.
+  image:
+    needs: [checks, macos]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      ref: ${{ github.sha }}
+      version: ${{ github.ref_name }}
+      tags: ${{ needs.checks.outputs.image_tags }}
+
+  release:
+    needs: [checks, package, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      KIND: ${{ needs.checks.outputs.kind }}
+      LATEST: ${{ needs.checks.outputs.latest }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # "Re-run failed jobs" does not run checks again: whoever re-runs
+      # must be the owner too.
+      - name: Refuse releases started by anyone but the owner
+        run: |
+          for a in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
+            [ "$a" = "$GITHUB_REPOSITORY_OWNER" ] || { echo "::error::$a is not $GITHUB_REPOSITORY_OWNER: only the owner releases"; exit 1; }
+          done
+      - name: Refuse a pre-release marked latest
+        run: |
+          case $KIND/$LATEST in
+            stable/yes | stable/no | prerelease/no) ;;
+            *) echo "::error::kind '$KIND' with latest '$LATEST': a pre-release never takes latest"; exit 1 ;;
+          esac
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: The files are the packaged ones
+        run: |
+          read -ra assets <<<"$ASSETS"
+          diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd dist && printf '%s\n' * | sort) || { echo "::error::dist does not hold exactly the release files"; exit 1; }
+          [ "$(wc -l < dist/checksums.txt)" -eq 5 ] || { echo "::error::checksums.txt does not have 5 lines"; exit 1; }
+          (cd dist && sha256sum --strict -c checksums.txt)
+      # The checks ran minutes ago: the tag must still name the commit that
+      # was built, and no Release of it may have been published since. A
+      # draft of this tag is a failed run's: it is deleted and made again.
+      - name: Refuse a moved tag or a published Release; drop stale drafts
+        run: |
+          [[ $GITHUB_REF_NAME =~ ^v[0-9A-Za-z.-]+$ ]] || { echo "::error::not a release tag: $GITHUB_REF_NAME"; exit 1; }
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" --jq .sha)
+          [ "$sha" = "$GITHUB_SHA" ] || { echo "::error::tag $GITHUB_REF_NAME now names $sha, this run built $GITHUB_SHA"; exit 1; }
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | \"\(.id) \(.draft)\"")
+          while read -r id draft; do
+            [ -n "$id" ] || continue
+            [ "$draft" = true ] || { echo "::error::$GITHUB_REF_NAME is published already (by another run, or by this one before a later step failed): nothing to redo, check the Release"; exit 1; }
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            echo "deleted the stale draft $id"
+          done <<<"$releases"
+      # Every release file, checksums.txt included (§5.1 step 5).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Create the draft
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes)
+          if [ "$KIND" = prerelease ]; then args+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*
+      # Nobody sees the Release before its files, downloaded back from
+      # GitHub, match checksums.txt.
+      - name: The draft's files are the attested ones
+        run: |
+          [ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true ] || { echo "::error::$GITHUB_REF_NAME is not a draft"; exit 1; }
+          draft=$(mktemp -d "$RUNNER_TEMP/draft.XXXXXX")
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$draft"
+          read -ra assets <<<"$ASSETS"
+          diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd "$draft" && printf '%s\n' * | sort) || { echo "::error::the draft does not hold exactly the release files"; exit 1; }
+          cmp dist/checksums.txt "$draft/checksums.txt" || { echo "::error::the draft's checksums.txt is not the attested one"; exit 1; }
+          n=$(wc -l < "$draft/checksums.txt")
+          [ "$n" -eq 5 ] || { echo "::error::the draft's checksums.txt has $n lines, want 5"; exit 1; }
+          (cd "$draft" && sha256sum --strict -c checksums.txt)
+          echo "the draft's 5 files match checksums.txt"
+      - name: Publish the draft
+        run: |
+          if [ "$LATEST" = yes ]; then latest=true; else latest=false; fi
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
+      # The Release is out by now: a failure here is the check's alone,
+      # to look at on GitHub, not to re-run. A few tries cover the API
+      # catching up with the edit.
+      - name: The Release is published as decided
+        run: |
+          want="false $([ "$KIND" = prerelease ] && echo true || echo false)"
+          state() {
+            local got
+            got=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"') || return 1
+            [ "$got" = "$want" ] || { echo "isDraft isPrerelease is '$got', want '$want'"; return 1; }
+            if [ "$LATEST" = yes ]; then
+              got=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name) || return 1
+              [ "$got" = "$GITHUB_REF_NAME" ] || { echo "releases/latest is $got, want $GITHUB_REF_NAME"; return 1; }
+            fi
+          }
+          for try in 1 2 3 4 5; do
+            if state; then echo "$GITHUB_REF_NAME is published as decided"; exit 0; fi
+            [ "$try" -eq 5 ] || sleep 10
+          done
+          echo "::error::$GITHUB_REF_NAME IS PUBLISHED; only this check failed (see above): check the Release on GitHub and fix it there, do not re-run"
+          exit 1
