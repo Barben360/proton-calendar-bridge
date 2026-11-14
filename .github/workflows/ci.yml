@@ -145,7 +145,7 @@ jobs:
       - name: Install the GL and X development headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev dbus dbus-x11 xvfb x11-utils
       - run: make ui
       - name: pcb-ui starts far enough to print its version
         run: xvfb-run -a bin/pcb-ui --version
