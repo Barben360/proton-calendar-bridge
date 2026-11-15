@@ -96,7 +96,7 @@ func TestDoctorExitCode(t *testing.T) {
 			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
 		}
 		// No systemd on Windows: pcb-ui's Start at login is the service.
-		if got := env.Data.Results[len(env.Data.Results)-2]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+		if got := env.Data.Results[len(env.Data.Results)-3]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
 			t.Errorf("service = %+v", got)
 		}
 	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon,update"; got != want {
