@@ -105,7 +105,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 | Built | `pcb_windows_amd64.msi`, in each release from the next one: a per-user install with no administrator prompt, `pcb-ui` (required) and `pcb` on your `PATH` (optional), a Start-menu shortcut that names `pcb-ui` to Windows, "Start at login" ticked by default, an uninstall that keeps your accounts ([install](install.md#the-installer)) |
 | Tested | `scripts/win/msi-smoke.ps1` on a Windows 11 virtual machine as a standard user: a silent install, the files, the shortcut and its app ID, "Start at login", the `PATH` entry seen by a new process, repairs that leave "Start at login" off, `pcb` removed and added back, upgrades, the uninstall keeping the data; CI runs the same script on every pull request, and a release on its own installer before publishing |
 | Live | not yet: the double-click install and its screens, SmartScreen, a notification showing `pcb-ui`'s name, "Start at login" across a restart, an upgrade and the uninstall |
-| Design | [the Windows installer](../spec/decisions/0019-windows-msi.md) |
+| Design | [the Windows installer](../spec/decisions/0020-windows-msi.md) |
 
 ## Still to check live
 

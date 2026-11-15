@@ -1,4 +1,4 @@
-# 0019 — Windows installer: a per-user WiX MSI
+# 0020 — Windows installer: a per-user WiX MSI
 
 - **Date**: 2026-11-15
 - **Decided by**: author (an MSI before the next release; `pcb-ui` required, `pcb` optional on the user's `PATH`; a Start-menu shortcut; "Start at login" in the installer; unsigned, SmartScreen warns as for the zip; WiX 7.0.1 with its OSMF EULA accepted), the rest the agent's calls, approved by the author (design `spec/designs/2026-11-15-windows-msi-design.md` §4)

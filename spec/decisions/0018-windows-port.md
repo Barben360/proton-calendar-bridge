@@ -2,7 +2,7 @@
 
 - **Date**: 2026-11-14
 - **Decided by**: author (the run model: `pcb-ui` only, started at login, no Windows service; the control channel: a named pipe restricted to the user; the secrets: DPAPI in the user's scope; `pcb-ui` built natively on Windows with mingw-w64, not cross-compiled; the agent may use the author's Windows 11 VM), the rest the agent's calls (design `spec/designs/2026-11-14-windows-port-design.md` §5)
-- **Status**: accepted, built, live check passed (step 12; `spec/experiments/W1-windows-live.md`, 2026-11-15); amends SPEC §3 (Windows leaves "only builds", a GUI on Windows leaves "not planned"), SPEC §13 ("Platforms") and decision 0015 ("Windows is next"); "Next" 1 (the MSI) is decision 0019 (2026-11-15)
+- **Status**: accepted, built, live check passed (step 12; `spec/experiments/W1-windows-live.md`, 2026-11-15); amends SPEC §3 (Windows leaves "only builds", a GUI on Windows leaves "not planned"), SPEC §13 ("Platforms") and decision 0015 ("Windows is next"); "Next" 1 (the MSI) is decision 0020 (2026-11-15)
 
 Both binaries run on Windows 10 (1809 or later) and 11, amd64. `pcb-ui.exe` is the bridge, started at login; `pcb.exe` talks to it or works on the files itself. They were labelled "runs, untested" (in the docs and in `pcb doctor`'s `platform` line) until the live check passed on the VM (2026-11-15); they are supported since.
 
@@ -21,7 +21,7 @@ Why:
 
 Consequences and limits:
 - Supported since the live check: CI builds both binaries on Windows and runs the suites there. The live check (`spec/HUMAN-CHECKS.md` step 12, on the author's VM as a standard user) flipped the label: a real end of session (a restart) and the next logon, toasts from a zip install, CalDAV, a second Windows user locked out of the state and the pipe, `uninstall --delete-data`. Not checked live: Thunderbird for Windows' own window (skipped by the author; CalDAV passed with `curl`), an elevated and a normal `pcb` of the same user against one `pcb-ui`, and Windows 10.
-- Toasts from a zip install are best effort: without a Start-menu shortcut carrying the app's ID some Windows builds show none (the MSI of decision 0019 creates that shortcut). The tray's attention state carries the same news. A click on a toast is not reported.
+- Toasts from a zip install are best effort: without a Start-menu shortcut carrying the app's ID some Windows builds show none (the MSI of decision 0020 creates that shortcut). The tray's attention state carries the same news. A click on a toast is not reported.
 - A machine without OpenGL 2.0 (a VM without 3D acceleration, some remote desktops) cannot run `pcb-ui`; Mesa's software `opengl32.dll` beside `pcb-ui.exe` works around it and is not shipped.
 - Stale `.key-*` temporary files at the state root (a crash while a key is created) are now removed when the Hub opens, on every system: that clean-up also runs on Linux.
 - SmartScreen warns about an unknown publisher until the binaries are signed.
@@ -29,6 +29,6 @@ Consequences and limits:
 - Cost if wrong: the Windows files are build-tagged and the shared logic is tested on Linux, so the run model (a service later) or the secrets (Credential Manager) can change behind `internal/ctl`'s `Listen`/`Dial` and the sealer interface; a state sealed with `dpapi` would need a re-seal command that does not exist.
 
 Next (separate projects):
-1. An MSI (WiX): `pcb-ui` required, `pcb` optional (adding `pcb.exe` to the user's `PATH`), the same Run value, a Start-menu shortcut carrying the app ID (toasts), per-user (no administrator rights; to settle then). Built: decision 0019, per-user.
+1. An MSI (WiX): `pcb-ui` required, `pcb` optional (adding `pcb.exe` to the user's `PATH`), the same Run value, a Start-menu shortcut carrying the app ID (toasts), per-user (no administrator rights; to settle then). Built: decision 0020, per-user.
 2. Authenticode signing (SignPath Foundation or Azure Trusted Signing; not self-signed).
 3. Windows on arm64.

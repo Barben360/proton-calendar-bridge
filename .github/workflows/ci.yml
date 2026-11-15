@@ -252,7 +252,7 @@ jobs:
         run: sh scripts/install_test.sh
   # Both binaries on Windows (the Windows port): pcb and pcb-ui are built and
   # run, packed into the MSI, which the smoke script installs, repairs,
-  # upgrades and uninstalls (decision 0019), and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
+  # upgrades and uninstalls (decision 0020), and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
   # release's ui-windows job) gives cgo its gcc and the steps their make; with
   # path-type: inherit the runner's go stays on PATH, and so does its jq (from the
   # runner image, not an msys2 package: a change of image shows up there). The runner's user
@@ -305,7 +305,7 @@ jobs:
           cat v.txt
           grep -q '^pcb-ui ' v.txt
           powershell -NoProfile -Command '(Get-Item bin/pcb-ui.exe).VersionInfo.ProductName' | tr -d '\r' | grep -qx 'pcb-ui'
-      # WiX 7.0.1 exactly (decision 0019), a .NET tool from nuget.org: the
+      # WiX 7.0.1 exactly (decision 0020), a .NET tool from nuget.org: the
       # runner image's .NET SDK installs it. The release's msi job runs the
       # same script.
       - name: Install WiX 7.0.1 and its UI and Util extensions

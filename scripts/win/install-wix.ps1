@@ -4,7 +4,7 @@ Installs WiX Toolset 7.0.1 and its UI and Util extensions for the current user.
 
 .DESCRIPTION
 The tools CI's windows job and the release's msi job build the MSI with
-(decision 0019): `dotnet tool install --global wix --version 7.0.1`, then
+(decision 0020): `dotnet tool install --global wix --version 7.0.1`, then
 the two extensions at 7.0.1. Every wix command passes -acceptEula wix7:
 the author accepted WiX 7's Open Source Maintenance Fee EULA (2026-11-15).
 Needs a .NET SDK 8 or later on PATH. On a runner (GITHUB_PATH set), the

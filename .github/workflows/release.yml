@@ -324,7 +324,7 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # The MSI (decision 0019) packs the release's own pcb.exe and pcb-ui.exe,
+  # The MSI (decision 0020) packs the release's own pcb.exe and pcb-ui.exe,
   # the files the zip gets: WiX 7.0.1 exactly, every wix command with
   # -acceptEula wix7 (the author accepted WiX 7's OSMF EULA), ProductVersion
   # the tag's X.Y.Z, then the ICE checks. A second build of the same files

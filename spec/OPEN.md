@@ -226,9 +226,9 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 
 ## Parked by the Windows port
 
-Next projects (decisions 0018 and 0019; the MSI itself is built, decision 0019): Authenticode signing (SignPath Foundation or Azure Trusted Signing) of the binaries and the MSI, until which SmartScreen warns about an unknown publisher; winget, Chocolatey or Scoop packages; Windows on arm64. Toasts from a zip install stay best effort (no Start-menu shortcut carrying the app's ID; the MSI has one).
+Next projects (decisions 0018 and 0020; the MSI itself is built, decision 0020): Authenticode signing (SignPath Foundation or Azure Trusted Signing) of the binaries and the MSI, until which SmartScreen warns about an unknown publisher; winget, Chocolatey or Scoop packages; Windows on arm64. Toasts from a zip install stay best effort (no Start-menu shortcut carrying the app's ID; the MSI has one).
 
-Limits of the MSI (decision 0019), parked:
+Limits of the MSI (decision 0020), parked:
 - A silent upgrade closes `pcb-ui` (Restart Manager) and nothing starts it again until the next sign-in or a start from the Start menu: registering `pcb-ui` with `RegisterApplicationRestart` would let Restart Manager restart it.
 - The Run value's write has no rollback action: an install that fails after it leaves the value.
 - The `PATH` entry is matched as text: a hand-made entry with a trailing `\` or a `%VARIABLE%` is doubled, and the uninstall removes a hand-made entry identical to the installer's.
