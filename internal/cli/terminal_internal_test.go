@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -104,22 +105,23 @@ func TestOSTerminalEndOfInputEndsThePromptLine(t *testing.T) {
 	}
 }
 
+// The refusal comes before any read, so descriptor 0 is safe here. Its hint
+// shows a redirection the platform has: 3<file is a POSIX shell's, and
+// Windows takes only 0, 1 or 2.
 func TestPasswordFDRefusesATerminal(t *testing.T) {
-	rd, wr, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = wr.Close() // end of input, so a read can never hang
-	t.Cleanup(func() { _ = rd.Close() })
 	old := isTerminalFD
 	isTerminalFD = func(int) bool { return true }
 	t.Cleanup(func() { isTerminalFD = old })
-	_, err = readPasswordFD(int(rd.Fd()))
+	_, err := readPasswordFD(0)
 	if code := exitcodeOf(err); code != 2 {
 		t.Fatalf("err = %v (exit %d), want a usage error", err, code)
 	}
-	if hintOf(err) == "" {
-		t.Error("no hint")
+	want, not := "--password-fd 3 3<", "--password-fd 0 <"
+	if runtime.GOOS == "windows" {
+		want, not = not, want
+	}
+	if h := hintOf(err); !strings.Contains(h, want) || strings.Contains(h, not) {
+		t.Errorf("hint %q, want %q and not %q", h, want, not)
 	}
 }
 
