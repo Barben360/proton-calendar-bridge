@@ -191,6 +191,20 @@ function Why-PropertyUnset([string] $name) {
     return ''
 }
 
+function Hash([string] $path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+
+# Why-MsiExes: pcb-ui.exe and pcb.exe in the install dir are the MSI's
+# (the bytes the default install put there, $msiHash).
+function Why-MsiExes {
+    foreach ($n in @('pcb-ui.exe', 'pcb.exe')) {
+        $f = Join-Path $InstallDir $n
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return "no $f" }
+        $h = Hash $f
+        if ($h -ne $msiHash[$n]) { return "$f is not the MSI's: SHA-256 $h, want $($msiHash[$n])" }
+    }
+    return ''
+}
+
 function Why-Files([string[]] $want) {
     if (-not (Test-Path -LiteralPath $InstallDir -PathType Container)) { return "no $InstallDir" }
     $got = @(Get-ChildItem -LiteralPath $InstallDir -Force | ForEach-Object { $_.Name } | Sort-Object)
@@ -325,6 +339,7 @@ function Why-Markers {
 # --- the run -------------------------------------------------------------
 
 $saved = $null
+$script:zipPlaced = $false
 $madeDirs = @()
 $upgradeCode = $null
 $exit = 1
@@ -382,6 +397,18 @@ try {
     Check 'user PATH: the install dir once, the other entries intact' { Why-PathEntry 1 $others }
     Check 'a new terminal finds pcb.exe, pcb version runs' { Why-PcbOnPath }
     Check 'pcb-ui.exe --version' { Why-UiVersion }
+    $msiHash = @{ 'pcb-ui.exe' = (Hash $UiExe); 'pcb.exe' = (Hash $CliExe) }
+    $msiUiVersion = (Get-Item -LiteralPath $UiExe).VersionInfo.FileVersion
+    # A zip of another build of the same version: the MSI's own binaries
+    # with a byte appended (pcb-ui.exe keeps its file version).
+    $zipBuild = Join-Path $Work 'zip'
+    New-Item -ItemType Directory -Path $zipBuild | Out-Null
+    foreach ($n in @('pcb-ui.exe', 'pcb.exe')) {
+        $f = Join-Path $zipBuild $n
+        Copy-Item -LiteralPath (Join-Path $InstallDir $n) -Destination $f
+        $s = [IO.File]::Open($f, [IO.FileMode]::Append)
+        try { $s.WriteByte(0) } finally { $s.Close() }
+    }
 
     # 2. Repairs do not turn Start at login back on (Review Focus 1), nor off.
     Set-Run $null
@@ -453,6 +480,30 @@ try {
     Check 'uninstall: the Run value, now this install''s, gone' { Why-Run $null }
     Check 'uninstall: program dir, shortcut and own registry key gone' { Why-Uninstalled }
 
+    # A zip unzipped into the install folder itself, of another build of
+    # the same version (an rc zip, then the final MSI): Windows Installer
+    # keeps a file of an equal version, so the MSI deletes both .exe
+    # first; the uninstall also removes the zip's LICENSE and README.md.
+    New-Item -ItemType Directory -Path $InstallDir | Out-Null
+    $script:zipPlaced = $true
+    Copy-Item -Path (Join-Path $zipBuild '*') -Destination $InstallDir
+    foreach ($n in @('LICENSE', 'README.md')) { Set-Content -LiteralPath (Join-Path $InstallDir $n) -Value "the zip's $n" }
+    Check 'a zip in the install folder: its pcb-ui.exe has the MSI''s file version, other bytes' {
+        $zipUi = Join-Path $InstallDir 'pcb-ui.exe'
+        $got = (Get-Item -LiteralPath $zipUi).VersionInfo.FileVersion
+        if (-not $got -or $got -ne $msiUiVersion) { return "its file version is [$got], want the MSI's [$msiUiVersion]" }
+        foreach ($n in @('pcb-ui.exe', 'pcb.exe')) {
+            if ((Hash (Join-Path $InstallDir $n)) -eq $msiHash[$n]) { return "the zip's $n has the MSI's bytes" }
+        }
+        ''
+    }
+    Msiexec 'install (defaults) over a zip in the install folder' @('/i', "`"$Msi`"")
+    Check 'over a zip: pcb-ui.exe and pcb.exe are the MSI''s' { Why-MsiExes }
+    Msiexec 'repair /fa over a zip' @('/fa', "`"$Msi`"")
+    Check 'repair /fa: pcb-ui.exe and pcb.exe are the MSI''s' { Why-MsiExes }
+    Msiexec 'uninstall' @('/x', "`"$Msi`"")
+    Check 'uninstall over a zip: the zip''s LICENSE and README.md gone too' { Why-Uninstalled }
+
     # 6. Major upgrades keep Start at login as pcb-ui left it.
     if ($UpgradeMsi) {
         Msiexec 'install (defaults)' @('/i', "`"$Msi`"")
@@ -470,6 +521,7 @@ try {
         Msiexec 'upgrade (Start at login turned on in pcb-ui)' @('/i', "`"$Msi`"")
         Check 'upgrade: the Run value kept' { Why-Run $RunData }
         Check 'upgrade: the shortcut' { Why-Shortcut }
+        Check 'upgrade: pcb-ui.exe and pcb.exe are the MSI''s' { Why-MsiExes }
         Msiexec 'uninstall' @('/x', "`"$Msi`"")
         Check 'uninstall after upgrades: all gone, data kept' {
             $w = Why-Uninstalled; if ($w) { return $w }
@@ -491,6 +543,11 @@ try {
         foreach ($p in (Get-RelatedProducts $upgradeCode)) {
             Start-Process -FilePath msiexec.exe -ArgumentList @('/x', $p, '/qn', '/norestart') -Wait | Out-Null
         }
+    }
+    # What the zip check put in the install dir and an uninstall left.
+    if ($script:zipPlaced -and (Test-Path -LiteralPath $InstallDir)) {
+        foreach ($n in @('pcb-ui.exe', 'pcb.exe', 'LICENSE', 'README.md')) { Remove-Item -LiteralPath (Join-Path $InstallDir $n) -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $InstallDir -ErrorAction SilentlyContinue
     }
     if ($saved) {
         Set-Value 'Environment' 'Path' $saved.Path

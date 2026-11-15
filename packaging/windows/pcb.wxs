@@ -48,6 +48,14 @@
     <Feature Id="App" Title="pcb-ui" Description="The desktop app: the bridge, its tray icon and its window, and a Start-menu shortcut." Level="1" AllowAbsent="no">
       <Component Id="PcbUi" Directory="INSTALLFOLDER" Guid="68A631BF-DE5A-4174-A227-03AC9F764310">
         <File Id="PcbUiExe" Name="pcb-ui.exe" Source="$(var.PcbUiExe)" KeyPath="no" />
+        <!-- A zip unzipped here: Windows Installer keeps a file of an equal
+             version (an rc zip's pcb-ui.exe under the final MSI, both
+             X.Y.Z.0), so the zip's copy is deleted before the MSI's is
+             copied (RemoveFiles runs before InstallFiles). The zip's other
+             files go at the uninstall, with the folder. -->
+        <RemoveFile Id="RemoveZipPcbUi" Name="pcb-ui.exe" On="install" />
+        <RemoveFile Id="RemoveZipLicense" Name="LICENSE" On="uninstall" />
+        <RemoveFile Id="RemoveZipReadme" Name="README.md" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\proton-calendar-bridge\installer" Name="App" Type="integer" Value="1" KeyPath="yes" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
@@ -62,6 +70,9 @@
     <Feature Id="Cli" Title="pcb (command line)" Description="pcb.exe, on your PATH: new terminals find it." Level="1">
       <Component Id="Pcb" Directory="INSTALLFOLDER" Guid="1EE5F733-C52F-401C-80C5-0FFFC9D31CAC">
         <File Id="PcbExe" Name="pcb.exe" Source="$(var.PcbExe)" KeyPath="no" />
+        <!-- The same for a zip's pcb.exe: unversioned, it is kept when
+             written after it was created (taken for the user's edit). -->
+        <RemoveFile Id="RemoveZipPcb" Name="pcb.exe" On="install" />
         <!-- Windows Installer adds no entry that PATH already holds (the
              same text, any case) and removes it at uninstall: without the
              trailing backslash of [INSTALLFOLDER], as a hand-made entry
