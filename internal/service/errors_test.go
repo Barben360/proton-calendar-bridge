@@ -110,6 +110,16 @@ func TestAcquireErrorIsBlocked(t *testing.T) {
 	if got := acquireError(errors.New("hunter2"), "/state"); strings.Contains(got.Error(), "hunter2") {
 		t.Errorf("acquireError leaked an unknown error's text: %q", got)
 	}
+	// File locks exist on Linux, macOS and Windows: a system without them
+	// names all three, never "a Unix system" alone.
+	if got := acquireError(filelock.ErrUnsupported, "/state"); got.Error() != "login locking needs Linux, macOS or Windows" ||
+		exitcode.HintOf(got) != "run pcb on Linux, macOS or Windows" {
+		t.Errorf("acquireError(ErrUnsupported) = %q, hint %q", got, exitcode.HintOf(got))
+	}
+	if got := unsupportedLock("sync"); got.Error() != "sync locking needs Linux, macOS or Windows" || exitcode.HintOf(got) != "run pcb on Linux, macOS or Windows" ||
+		exitcode.From(got) != exitcode.Blocked {
+		t.Errorf("unsupportedLock(sync) = %q, hint %q, exit %d", got, exitcode.HintOf(got), exitcode.From(got))
+	}
 	guard := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("busy"), Hint: "wait for it to finish"}
 	if got := acquireError(guard, "/state"); got != guard { //nolint:errorlint // identity is the point
 		t.Errorf("a guard refusal was rewrapped: %v", got)

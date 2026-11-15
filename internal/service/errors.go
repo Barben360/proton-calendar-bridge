@@ -516,13 +516,19 @@ func acquireError(err error, stateDir string) error {
 	case errors.As(err, &ee):
 		return err
 	case errors.Is(err, filelock.ErrUnsupported):
-		return final("login locking needs a Unix system", "run pcb on Linux or macOS")
+		return unsupportedLock("login")
 	}
 	msg := "cannot take the login lock"
 	if cause := keyCause(err); cause != "" {
 		msg += ": " + cause
 	}
 	return blocked(msg, "make sure "+stateDir+" is writable by this user")
+}
+
+// unsupportedLock is the final failure of a lock (what: "login", "sync") on
+// a system without file locks (filelock.ErrUnsupported).
+func unsupportedLock(what string) *exitcode.Error {
+	return final(what+" locking needs Linux, macOS or Windows", "run pcb on Linux, macOS or Windows")
 }
 
 // keysError is the secret-free reason a calendar's keys did not unlock:
