@@ -103,14 +103,30 @@ func TestLoginDeadlineIsBlocked(t *testing.T) {
 	auth.CallTimeout = time.Second
 	t.Cleanup(func() { auth.CallTimeout = old })
 	e := newEnv(t, protontest.Options{})
-	// Answered after 3 s: without the deadline the login succeeds.
-	e.f.StallNext(http.MethodPost, "/auth/v4/info", 3*time.Second)
-	_, err := e.svc.Login(t.Context(), e.req())
+	// Never answered until the test ends: without the call deadline the login
+	// would never return.
+	h := e.f.HoldNext(http.MethodPost, "/auth/v4/info")
+	t.Cleanup(h.Release)
+	err := within(t, func() error { _, err := e.svc.Login(t.Context(), e.req()); return err })
 	if err == nil {
-		t.Fatal("a stalled login succeeded: no deadline")
+		t.Fatal("a stalled login succeeded")
 	}
 	ee := wantExit(t, err, exitcode.Blocked)
 	if ee.Err.Error() != "the operation was cancelled or timed out" || ee.Hint != "run the command again" {
 		t.Fatalf("message %q, hint %q; want the timeout", ee.Err, ee.Hint)
+	}
+}
+
+// within runs f and fails, instead of hanging, if it has not returned in 30 s.
+func within(t *testing.T, f func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
+		t.Fatal("the call has no deadline: it is still waiting for the held request")
+		return nil
 	}
 }

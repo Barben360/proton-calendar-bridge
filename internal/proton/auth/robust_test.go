@@ -7,19 +7,26 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 )
 
-// stallBound is how long the fake holds a stalled request at most: past it
-// the request is answered, so a call with no deadline of its own succeeds
-// (below the test API client's own 5 s timeout).
-const stallBound = 3 * time.Second
+// hold pins the next request to method and path: the fake never answers it
+// until the client gives up (or the test ends), so no timer can answer it
+// before the call's deadline fires.
+func hold(t *testing.T, f *protontest.Fake, method, path string) {
+	t.Helper()
+	h := f.HoldNext(method, path)
+	t.Cleanup(h.Release)
+}
 
 // TestLoginCallsHaveADeadline: a Proton that accepts the connection and
 // never answers does not hold a login call past its own deadline, even when
-// the caller's context has none (ruling A1). Not parallel: it shortens the
+// the caller's context has none (ruling A1). Without the deadline the call
+// would never return. Not parallel: it shortens the
 // package's deadline.
 func TestLoginCallsHaveADeadline(t *testing.T) {
 	cases := []struct {
@@ -31,7 +38,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 			f := protontest.New(t, protontest.Options{})
 			m := manager(t, f)
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/info", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/info")
 				p, err := auth.Begin(context.Background(), m, f.Username, []byte(f.Password), "")
 				if p != nil {
 					p.Close()
@@ -43,21 +50,23 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 			f, tp := totpAccount(t)
 			p := begin(t, f, manager(t, f))
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/2fa", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/2fa")
 				return p.SubmitTOTP(context.Background(), tp.Code(t0))
 			}
 		}},
 		{"unlock auth info", http.MethodPost, "/auth/v4/info", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
+			s.C = patientClient(f, s.C.Tokens())
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/info", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/info")
 				return s.Unlock(context.Background())
 			}
 		}},
 		{"unlock proof", http.MethodPut, "/core/v4/users/unlock", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
+			s.C = patientClient(f, s.C.Tokens())
 			return func() error {
-				f.StallNext(http.MethodPut, "/core/v4/users/unlock", stallBound)
+				hold(t, f, http.MethodPut, "/core/v4/users/unlock")
 				return s.Unlock(context.Background())
 			}
 		}},
@@ -66,7 +75,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := tc.call(t) // the setup logs in with the normal deadline
 			setCallTimeout(t, time.Second)
-			err := run()
+			err := within(t, run)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("%s %s stalled: error = %v, want the call's deadline exceeded", tc.method, tc.path, err)
 			}
@@ -120,6 +129,19 @@ func TestBeginKeepsRetryAfter(t *testing.T) {
 	}
 }
 
+// patientClient is client(f, tok) without its 5 s HTTP timeout. The unlock
+// proof goes through an api.Client, whose HTTP timeout would otherwise end a
+// held request with the same DeadlineExceeded as auth.CallTimeout, and so
+// hide a missing CallTimeout. The login calls through the gpa.Manager have
+// no HTTP timeout at all.
+func patientClient(f *protontest.Fake, tok api.Tokens) *api.Client {
+	return api.New(tok, api.Options{
+		BaseURL: f.URL,
+		Limiter: rate.NewLimiter(rate.Inf, 1),
+		HTTP:    &http.Client{Timeout: time.Hour},
+	})
+}
+
 // setCallTimeout shortens auth.CallTimeout for t. t must not run in
 // parallel.
 func setCallTimeout(t *testing.T, d time.Duration) {
@@ -127,4 +149,18 @@ func setCallTimeout(t *testing.T, d time.Duration) {
 	old := auth.CallTimeout
 	auth.CallTimeout = d
 	t.Cleanup(func() { auth.CallTimeout = old })
+}
+
+// within runs f and fails, instead of hanging, if it has not returned in 30 s.
+func within(t *testing.T, f func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
+		t.Fatal("the call has no deadline: it is still waiting for the held request")
+		return nil
+	}
 }
