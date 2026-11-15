@@ -31,6 +31,10 @@ Rows 2 to 6 were read on 2026-11-14 from the records the live runs left (the run
 | 4 | 2026-11-12 23:15:29 (M1.2, `pcb login`) | 24 | by the author | 23:21:56, new process (`pcb login resume --captcha-token`) | about 6 min 27 s | accepted (`state: ready`) |
 | 5 | 2026-11-12 23:45:11 (M1.7, the unattended relogin of `pcb calendar list`) | 24 | by the author | 23:46:14, new process (`pcb login resume --captcha-token`) | about 1 min 03 s | accepted (`state: ready`) |
 | 6 | 2026-11-13 22:54:00 (step 9, `pcb-ui`'s wizard) and 2026-11-13 23:41:30 (step 10, the loopback page) | — | by the author | the same process (the wizard's `I solved it`; the page's continue) | about 2 min 38 s; about 2 min 53 s | accepted |
+| 7 | 2026-11-15 00:50:21 (Windows step 12, `pcb login` through `pcb-ui`) | 24 | not solved (left for hours, then replaced by row 8's challenge) | none | — | not tried |
+| 8 | 2026-11-15 10:00:48 (Windows step 12, a fresh login because row 7's was hours old) | 24 | by the author, about 10:01 | 10:01:36, new process (`pcb login resume --captcha-token`, the login run by the `pcb-ui` that held the challenge) | about 48 s | accepted (`state: ready` at 10:01:49) |
+
+Rows 7 and 8 are the Windows live check (`HUMAN-CHECKS.md` step 12, `W1-windows-live.md`).
 
 Not a CAPTCHA case: HUMAN-CHECKS 2b, 2c, 2d and the seed's second `proton-cal` login met none or are proton-cal's own flow (not pcb's).
 

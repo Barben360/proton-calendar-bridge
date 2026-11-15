@@ -1,6 +1,6 @@
 # W1-live — Both binaries on a Windows 11 VM, as a standard user
 
-Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped at the login (12.4): Proton answered with a CAPTCHA.** Every line that needs no account ran: 12.1, 12.2, 12.3, 12.7, 12.9, and 12.8, 12.10 and 12.11 without an account. The one login reached Proton through the running `pcb-ui` and got a CAPTCHA, the stop condition of this step; solving it means a second login, the author's call. 12.5, 12.6, 12.12 and the account parts of 12.7, 12.8, 12.10 and 12.11 wait for it (last section). Four findings, all fixed (table at the end); Windows stays "runs, untested" until the rest passes.
+Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line passed; two parts are for the author to confirm** (12.6 Thunderbird's own window, CalDAV having passed with `curl`; 12.12 the web app's session list). Four findings, all fixed and their lines run again (table at the end). Two sittings: up to the login on the night of 2026-11-14/15, the rest on the morning of 2026-11-15 after the author solved a CAPTCHA. Windows is "supported" from this run on (`pcb doctor`'s `platform` line ok).
 
 ## Setup
 
@@ -8,7 +8,7 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped at t
 - Contexts: **ssh** (key sign-in of `<user>`), **console** (an interactive scheduled task of `<user>` in its console session: task XML with `InteractiveToken` and no battery conditions, PowerShell run as `conhost.exe --headless powershell.exe …`), **admin** (the administrator over SSH). Screenshots (`Graphics.CopyFromScreen`) were copied to the workstation and stay there.
 - Build under test: branch `win-t16`, first `v0.1.0-53-g5cb9a93`, then, after the fixes, `v0.1.0-56-gfa1e8e2`. `pcb.exe` cross-compiled (`GOOS=windows make build`), `pcb-ui.exe` built on the VM (MSYS2 UCRT64, `make ui`), the zip made by `scripts/release/package.sh windows amd64` (zip SHA-256 `304250c0…162023`, then `99589264…071e3a`), copied to `Downloads`, its `Get-FileHash` equal to the workstation's, unzipped with `Expand-Archive` into `%LOCALAPPDATA%\Programs\pcb`.
 - Windows Update restarted the VM on its own at 23:35Z and 23:38Z, before the run (a servicing restart, then TrustedInstaller); the first sign-in after it showed the "almost done setting up your PC" screen, dismissed with "Remind me in 3 days".
-- **Logins: 1** (12.4, 00:50:21Z, outcome `needs-captcha`). An earlier attempt at 00:47:55Z stopped in pcb before any Proton call (F4) and is not a login. Last entry of any ledger before it: 2026-11-13T23:44:21Z.
+- **Logins: 3**, all for 12.4, all `pcb login` relayed to the running `pcb-ui` (`entry=cli` in `pcb-ui.log`): login 1 at 00:50:21Z, `needs-captcha`, left unsolved; login 2 at 10:00:47Z (a fresh challenge, the first being hours old), `needs-captcha`, solved by the author; login 3 at 10:01:36Z (`pcb login resume --captcha-token`), `ready` at 10:01:49Z (`last_login` 10:01:47Z). Logins 2 and 3 were run by the author from the workstation's terminal, with the same command and wrapper: the agent's runs of that command were refused by its tool's permission check. An attempt at 00:47:55Z stopped in pcb before any Proton call (F4) and is not a login. Last entry of any ledger before login 1: 2026-11-13T23:44:21Z. E02 rows 2 and 3.
 
 ## 12.1 The zip: PASS
 
@@ -29,21 +29,35 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped at t
 - `icacls`: `%LOCALAPPDATA%\pcb` and `…\logs`: `<user>:(OI)(CI)(F)` and `SYSTEM:(OI)(CI)(F)` only, protected (no inherited entry), owner `<user>`; `layout.json` and `pcb-ui.log` inherit those two only.
 - The toast: 23:51Z, a Windows toast titled `pcb`, under the header `io.github.barben360.pcb-ui` (the raw app ID: a zip install registers no display name), body `not logged in to Proton\nrun pcb login` with a **literal** `\n` (**F2**); `notification sent alert=needs-login` in `pcb-ui.log`. After the fix, 00:09Z: body `not logged in to Proton — run pcb login` (screenshot).
 
-## 12.4 The login through the running `pcb-ui`: STOPPED (CAPTCHA; F4)
+## 12.4 The login through the running `pcb-ui`: PASS after a CAPTCHA (F4)
 
 - Method: from the workstation, `pass-cli run --env-file ~/.config/pcb-live/pcb.env -- sh -c 'printf … | ssh <user>@<VM> powershell -File <scratch>\login.ps1'`; `login.ps1` read the username, the TOTP URI and the password from stdin, gave the first two to `pcb.exe` in its environment only and the password on its stdin, and replaced the address by `<test account>` in what it printed. A dry run first printed only the lengths (`uri=True`). Nothing was written on the VM; no secret appeared in any output kept.
 - 00:47:55Z, ssh, `pcb-ui` running in the console: `pcb.exe login --password-fd 0 --non-interactive --json` exit 2, `cannot read the password from descriptor 0`, before any Proton call (**F4**: on Windows a descriptor number is not a handle). Fixed, `pcb.exe` (`v0.1.0-59-gbb07ca2`) copied into the install folder over the zip's.
-- 00:50:21Z, the login: `pcb login` found `pcb-ui` on its pipe and the login ran there (`pcb-ui.log`: `login started entry=cli account=<id> add=true`, then `login ended entry=cli account=<id> outcome=needs-captcha`, no address). Exit 10, `needs-captcha`, with the verification link and `pcb login resume --captcha-token …` as the hint. `pcb status`: the account `pending`, phase `needs-captcha`, `secrets: none`, `key_file: …\secrets.key.dpapi (absent)`; no toast for the pending add (as designed). Stopped there: no second login.
+- 00:50:21Z, the login: `pcb login` found `pcb-ui` on its pipe and the login ran there (`pcb-ui.log`: `login started entry=cli account=<id> add=true`, then `login ended entry=cli account=<id> outcome=needs-captcha`, no address). Exit 10, `needs-captcha`, with the verification link and `pcb login resume --captcha-token …` as the hint. `pcb status`: the account `pending`, phase `needs-captcha`, `secrets: none`, `key_file: …\secrets.key.dpapi (absent)`; no toast for the pending add (as designed). Stopped there (the step's stop rule) until the author chose to solve one.
+- 10:00:47Z, login 2 (author's terminal): `needs-captcha`, a new challenge for the same pending add (`add=false`), solved by the author. 10:01:36Z, login 3, `login.ps1 resume <token>`: exit 0, `{"state":"ready","default_client_created":true,…}`; `pcb-ui.log`: `created the CalDAV client "default"`, `login ended … outcome=ready`, a first `sync pass … calendars=3 added=403` at 10:02:25Z. The wrapper printed the masked username as `&lt;test account&gt;` (the wrapper's escaping, not pcb).
+- After it (ssh): `%LOCALAPPDATA%\pcb\secrets.key.dpapi` exists (`<user>` and `SYSTEM` only, inherited), `layout.json` `{"version":2,"sealer":"dpapi"}`, the account's `secrets.sealed`, `state.json`, `clients.json` and `pcb.db` under `accounts\<id>`, no `secrets.key` anywhere, and no `@` in `pcb-ui.log` (no address).
 
-## 12.7 Tray and menu: PASS without an account (the account's line waits for 12.4)
+## 12.5 `pcb status` through the pipe: PASS
+
+- 10:02Z, ssh and console give the same view: `daemon: … kind ui`, the listener `http://localhost:1080`, the account `phase: ready`, `secrets: sealed`, `key_file: …\secrets.key.dpapi`, `unattended: false`, `serve: serving since …`, three calendars (one subscribed). `status --json`: `daemon.kind` `ui`, `login.phase` `ready`, `login.sealer` `dpapi`, `login.secrets` `sealed`, `last_login` 10:01:47Z. A key sign-in (ssh) reads it all through `pcb-ui`'s pipe.
+
+## 12.6 Thunderbird for Windows: CalDAV PASS with `curl`, Thunderbird author to confirm
+
+- 10:04Z, console, a task reading `pcb client show --json --reveal` in-process (nothing printed or kept; the `Authorization` header in a scratch file deleted at once): `PROPFIND` Depth 1 on the account's home set (`<url>calendars/me/`) 207 with 3 calendars; `REPORT` `sync-collection` (empty token) on each: 207 with 209, 190 and 0 events; a wrong password: 401. `client show --json` leaves the password out without `--reveal`, as documented.
+- Observation: after four wrong-password requests in a row (the first runs of the check sent an empty password), the next requests got 503 with `Retry-After` for a few seconds, then 401 or 207 again: pcb's throttling of failed attempts, as designed.
+- Thunderbird itself was not installed or driven: **author to confirm** (steps in the section below).
+
+## 12.7 Tray and menu: PASS
 
 - 23:54Z–00:11Z, console: right-click on the icon: `Open pcb`, `Quit` (no account line: none yet). A left click shows the same menu, not the window. The window's X hides it: `pcb.exe status` (ssh) still shows the daemon of kind `ui`. `Open pcb` shows it again.
+- 10:05Z, with the account: the menu is the account's line (`<test account> — synced just now`), `Open pcb`, `Quit`; the icon without its attention mark; the account's line opens the window on that account (its CalDAV block, three calendars, the subscribed one marked as not a normal calendar).
 - 00:08:53Z: `Quit`: `pcb-ui` exited 0 within a second (`listener stopped`, `control socket stopped`, `daemon stopped stop=0s`); `pcb.exe status`: `daemon: not running (offline view)`, exit 0; `pcb.sock` absent.
 
-## 12.8 Start at login across a real end of session: PASS without an account (the account part waits for 12.4)
+## 12.8 Start at login across a real end of session: PASS
 
 - 00:11Z, console: Settings, `Start at login` on. ssh: `reg query …\Run /v pcb-ui`: `"<install folder>\pcb-ui.exe" --background`; `pcb.exe doctor`: `✓ start at login: starts <install folder>\pcb-ui.exe`.
 - 00:12:06Z, admin: `shutdown /r /t 0`. `pcb-ui.log`: `listener stopped`, `control socket stopped`, `daemon stopped stop=0s` at 00:12:05Z (a clean stop at the end of session; with no account there was nothing to drain). Signed in again at the console at 00:12Z; `pcb-ui` started at 00:12:45Z: its command line `"<install folder>\pcb-ui.exe" --background`, parent `explorer`, session 1, no window (screenshot), the tray icon; `pcb.exe status` (ssh): the daemon of kind `ui`, listener up, the toast sent again (`notification sent alert=needs-login`).
+- With the account, 10:05:40Z, admin: `shutdown /r /t 0`. `pcb-ui.log`: a sync pass at 10:05:32Z, then `listener stopped`, `control socket stopped`, `daemon stopped stop=30ms` at 10:05:37Z, within the 2 s drain. Signed in again; `pcb-ui` back at 10:06:18Z (`--background`, parent `explorer`), a sync pass at 10:06:19Z; `pcb status --json`: `kind ui`, `ready`, `serving`, `last_login` still 10:01:47Z: no login.
 
 ## 12.9 Explorer and config.toml: PASS after F3
 
@@ -51,29 +65,33 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped at t
 - 23:56Z: `Open config.toml` with no `config.toml` (the usual case): a dialog `Something went wrong` / `The system cannot find the file specified.` (**F3**). With an empty file made by hand: Windows' `Select an app to open this .toml file` (Notepad, Windows Media Player Legacy, …): no `.toml` association on a fresh Windows; Notepad, Just once, opened it.
 - After the fix, 00:10Z, with no `%APPDATA%\pcb`: `Open config.toml` made `%APPDATA%\pcb` (protected: `<user>` and `SYSTEM` only) and an empty `config.toml` (inherited, the same two), then Windows asked for the app as above; Notepad opened it.
 
-## 12.10 A second Windows user is kept out: PASS without an account (to repeat with the secrets, after 12.4)
+## 12.10 A second Windows user is kept out: PASS
 
 - 00:03Z: a temporary local user, not in Administrators (checked from inside the check: `admin=False`). Two ways to run as it failed for reasons of Windows, not pcb: a scheduled task never started (standard users have no right to log on as a batch job: `SeBatchLogonRight` is Administrators, Backup Operators and Performance Log Users only), and `Start-Process -Credential` from the administrator's SSH session ended `0xC0000142` (no access to that session's window station). It ran from `<user>`'s console session as `runas` does (`Start-Process -Credential`), the password handed over in a file only `<user>` could read, deleted by the task as it read it.
 - As that user, with `pcb-ui` running and `PCB_STATE_DIR` set to `<user>`'s `%LOCALAPPDATA%\pcb`: `pcb.exe status` exit 20, `cannot reach the pcb daemon on …\pcb.sock: open <state>: Access is denied.`, hint `check that you run pcb as the user that runs pcb serve`; `pcb.exe doctor` exit 10 (`state dir: … Access is denied`, `accounts: open …layout.json: Access is denied`, `daemon: … Access is denied`). Listing the state directory and `logs`, reading `layout.json` and `pcb-ui.log`: `Access is denied`. Opening the pipe `\\.\pipe\pcb-<hash>` (the name from `pcb-ui.log`): `Access to the path is denied`.
 - Observation: for the files that did not exist yet (`state.json`, `secrets.sealed`, `secrets.key.dpapi`) that user got "Could not find file", so it can tell whether a name exists in the directory (Windows lets everyone traverse a directory to a named child), not read it.
-- Then the user, its profile and the folder were deleted (checked: none left).
+- 10:07Z, again with the account's files present (same method, a new temporary user): `pcb.exe status` exit 20 and `pcb.exe doctor` exit 10 as above; `Access is denied` for the state directory, `logs`, `accounts`, `accounts\<id>`, `layout.json`, `secrets.key.dpapi`, `secrets.sealed`, `state.json`, `clients.json`, `pcb.db`, `pcb-ui.log`; the pipe: `Access to the path is denied`.
+- Each time the user, its profile and the folder were deleted (checked: none left).
 
-## 12.11 `pcb doctor`: PASS without an account (the `dpapi key` line waits for 12.4)
+## 12.11 `pcb doctor`: PASS
 
 - 00:10Z, with `pcb-ui` running, console and ssh give the same lines, exit 0: `! platform: windows/amd64: runs, untested`, `✓ config dir … private`, `✓ state dir … private`, `✓ config file`, `✓ sealer: dpapi`, `– dpapi key: no key yet: the first login creates it`, `✓ caldav listener: 127.0.0.1:1080, plain HTTP (the running daemon; URL http://localhost:1080)`, `– tls certificate`, `! accounts: no account …`, `✓ elevated: not elevated`, `✓ time zone: Romance Standard Time → Europe/Paris`, `– start at login: Start at login is off` (`✓ … starts <install folder>\pcb-ui.exe` once on), `– service: no service on Windows: pcb-ui's Start at login runs it`, `✓ daemon: running … kind ui`, `! alert needs-login …`. Beyond `platform`, the warnings are the missing account's.
+- 10:07:36Z, with the account, console and ssh alike, exit 0, every line ok but `platform`: `✓ dpapi key: …secrets.key.dpapi: protected for this Windows user, 32 bytes`, `✓ <test account>: sealed secrets: …secrets.sealed private`, `✓ <test account>: secrets: secrets sealed with a key DPAPI protects for this Windows user`, `✓ <test account>: cache: …pcb.db private, schema 2, integrity ok`, `✓ <test account>: caldav clients: 1 client`, `✓ elevated: not elevated`, `✓ time zone`, `✓ start at login: starts <install folder>\pcb-ui.exe`, `– service: no service on Windows: pcb-ui's Start at login runs it`, `✓ daemon: … kind ui`.
 
-## Not run yet (they need the login)
+## 12.12 Uninstall: PASS (the web app's session list: author to confirm)
 
-| Line | What remains |
+- 10:07:56Z, console, `pcb-ui` serving: `pcb.exe uninstall --delete-data --yes` exit 20, `pcb is already serving (pid N, kind ui)`, hint `quit pcb-ui (its tray menu, Quit), then try again`; nothing deleted (both directories and the Run value still there).
+- 10:08:55Z: tray `Quit`: `daemon stopped stop=10ms`, `pcb.exe status` offline.
+- `pcb.exe uninstall --delete-data --plan`: `run logout <state> — revoke the Proton session, best effort`, `remove dir %APPDATA%\pcb`, `remove dir %LOCALAPPDATA%\pcb`, `remove autostart HKCU\Software\Microsoft\Windows\CurrentVersion\Run\pcb-ui — pcb-ui's autostart entry`, `Plan only: nothing was changed.`; 10:09:15Z `--yes`: the same four lines, exit 0. Then (ssh) both directories gone (with `secrets.key.dpapi`) and the Run value gone.
+- Observation: a `pcb status` run right after (offline) made a new `%LOCALAPPDATA%\pcb` (`layout.json` with the sealer chosen, `accounts`, two locks); Linux does the same (pre-existing: an offline `pcb status` on no state creates one). Removed by hand.
+- Whether the logout ended the Proton session: **author to confirm** (the web app's session list).
+
+## Author to confirm
+
+| Line | Steps for the author |
 |---|---|
-| 12.4 | the CAPTCHA solved by the author, then the second login (`pcb login resume --captcha-token T` with the password on stdin again, at least 60 s after 00:50:21Z); then `secrets.key.dpapi`, the `ready` lines of `pcb-ui.log` |
-| 12.5 | `pcb status` (ssh and console) with the account, `pcb client show` |
-| 12.6 | Thunderbird for Windows (or `curl.exe` PROPFIND/REPORT and Thunderbird left to the author) |
-| 12.7 | the account's line in the tray menu |
-| 12.8 | a second reboot with the account: `last_login` unchanged, the drain with an account to stop |
-| 12.10 | the same check with `secrets.sealed`, `secrets.key.dpapi` and `state.json` present |
-| 12.11 | `pcb doctor` with the account (the `dpapi key` line ok; over ssh, what a key sign-in reports for it) |
-| 12.12 | the refusal while `pcb-ui` serves, `uninstall --delete-data --plan` and `--yes`, the web app's session list (author) |
+| 12.6 Thunderbird for Windows | On a Windows machine with Thunderbird for Windows (on the VM: as the administrator, `winget install Mozilla.Thunderbird`): unzip a release, start `pcb-ui`, add the test account in its window, then in Thunderbird (a fresh profile) New Calendar, On the Network, CalDAV, the Server URL and the Username from the account's pane, the password with its Copy: the calendars appear with their events; one event edit reaches the web app. Then Quit and `pcb uninstall --delete-data --yes`. It costs one login. |
+| 12.12 session list | In the Proton web app of the test account, the session list (Settings, Security): no session left from pcb's login of 2026-11-15 10:01Z (the uninstall's logout at 10:09:15Z). |
 
 ## Findings and their fixes
 
