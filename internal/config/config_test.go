@@ -2,10 +2,12 @@ package config_test
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +17,17 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 )
 
-var dirs = paths.Dirs{Config: "/x/cfg/pcb", State: "/x/state/pcb"}
+// root is an absolute directory on every OS (the config demands absolute
+// paths, and "/x" is not one on Windows).
+var root = filepath.Join(os.TempDir(), "pcb-config-test")
+
+var dirs = paths.Dirs{Config: filepath.Join(root, "x", "cfg", "pcb"), State: filepath.Join(root, "x", "state", "pcb")}
+
+// abs is a path under root, absolute like the config wants.
+func abs(elem ...string) string { return filepath.Join(append([]string{root}, elem...)...) }
+
+// lit is p as a TOML literal string: backslashes stay as they are.
+func lit(p string) string { return "'" + p + "'" }
 
 func write(t *testing.T, body string) string {
 	t.Helper()
@@ -41,12 +53,12 @@ func refused(t *testing.T, body string) string {
 }
 
 func TestPathAndDefaults(t *testing.T) {
-	if got := config.Path(dirs); got != "/x/cfg/pcb/config.toml" {
+	if got := config.Path(dirs); got != filepath.Join(dirs.Config, "config.toml") {
 		t.Fatalf("path = %q", got)
 	}
 	d := config.Defaults(dirs)
 	if d.Proton.BaseURL != "https://mail-api.proton.me" || d.Proton.AppVersion != "Other" ||
-		d.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" || d.CalDAV.Listen != "127.0.0.1:1080" ||
+		d.Secrets.KeyFile != filepath.Join(dirs.Config, "secrets.key") || d.CalDAV.Listen != "127.0.0.1:1080" ||
 		d.CalDAV.Hostnames != nil || d.CalDAV.TLSCert != "" || d.CalDAV.TLSKey != "" {
 		t.Fatalf("defaults = %+v", d)
 	}
@@ -63,14 +75,14 @@ func TestLoadMissingFileGivesDefaults(t *testing.T) {
 }
 
 func TestLoadOverridesEachKey(t *testing.T) {
-	p := write(t, "[proton]\nbase_url = \"https://example.org\"\napp_version = \"web-calendar@1.2.3\"\n[secrets]\nkey_file = \"/k/my.key\"\n")
+	p := write(t, "[proton]\nbase_url = \"https://example.org\"\napp_version = \"web-calendar@1.2.3\"\n[secrets]\nkey_file = "+lit(abs("k", "my.key"))+"\n")
 	got, err := config.Load(p, dirs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := config.Config{
 		Proton:  config.Proton{BaseURL: "https://example.org", AppVersion: "web-calendar@1.2.3"},
-		Secrets: config.Secrets{KeyFile: "/k/my.key", Backend: "auto"},
+		Secrets: config.Secrets{KeyFile: abs("k", "my.key"), Backend: "auto"},
 		CalDAV:  config.CalDAV{Listen: "127.0.0.1:1080"},
 		Log:     config.Log{Level: "info"},
 	}
@@ -84,7 +96,7 @@ func TestLoadKeepsDefaultsForAbsentKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Proton.BaseURL != config.DefaultBaseURL || got.Secrets.KeyFile != "/x/cfg/pcb/secrets.key" || got.Proton.AppVersion != "x" {
+	if got.Proton.BaseURL != config.DefaultBaseURL || got.Secrets.KeyFile != filepath.Join(dirs.Config, "secrets.key") || got.Proton.AppVersion != "x" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -167,12 +179,12 @@ func TestLoadUnreadableFileIsAnError(t *testing.T) {
 
 func TestLoadCalDAVSection(t *testing.T) {
 	p := write(t, "[caldav]\nlisten = \"0.0.0.0:8443\"\nhostnames = [\"pcb.lan\", \"192.168.1.5\"]\n"+
-		"tls_cert = \"/c/cert.pem\"\ntls_key = \"/c/key.pem\"\n")
+		"tls_cert = "+lit(abs("c", "cert.pem"))+"\ntls_key = "+lit(abs("c", "key.pem"))+"\n")
 	got, err := config.Load(p, dirs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"pcb.lan", "192.168.1.5"}, TLSCert: "/c/cert.pem", TLSKey: "/c/key.pem"}
+	want := config.CalDAV{Listen: "0.0.0.0:8443", Hostnames: []string{"pcb.lan", "192.168.1.5"}, TLSCert: abs("c", "cert.pem"), TLSKey: abs("c", "key.pem")}
 	if !reflect.DeepEqual(got.CalDAV, want) {
 		t.Fatalf("caldav = %+v, want %+v", got.CalDAV, want)
 	}
@@ -188,24 +200,24 @@ func TestLoadCalDAVSection(t *testing.T) {
 
 func TestLoadCalDAVIsStrict(t *testing.T) {
 	for body, key := range map[string]string{
-		"[caldav]\nport = 1080\n":                            "caldav.port",
-		"[caldav]\nlisten = 1080\n":                          "listen",
-		"[caldav]\nlisten = \"1080\"\n":                      "caldav.listen",
-		"[caldav]\nlisten = \":1080\"\n":                     "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1\"\n":                 "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:65536\"\n":           "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:-1\"\n":              "caldav.listen",
-		"[caldav]\nlisten = \"127.0.0.1:http\"\n":            "caldav.listen",
-		"[caldav]\nlisten = \"bad host:1080\"\n":             "caldav.listen",
-		"[caldav]\nhostnames = []\n":                         "caldav.hostnames",
-		"[caldav]\nhostnames = [\"\"]\n":                     "caldav.hostnames",
-		"[caldav]\nhostnames = [\"a b\"]\n":                  "caldav.hostnames",
-		"[caldav]\nhostnames = [\"-a.lan\"]\n":               "caldav.hostnames",
-		"[caldav]\nhostnames = [\"https://a.lan\"]\n":        "caldav.hostnames",
-		"[caldav]\ntls_cert = \"/c/cert.pem\"\n":             "caldav.tls_key",
-		"[caldav]\ntls_key = \"/c/key.pem\"\n":               "caldav.tls_cert",
-		"[caldav]\ntls_cert = \"c.pem\"\ntls_key = \"/k\"\n": "caldav.tls_cert",
-		"[caldav]\ntls_cert = \"/c\"\ntls_key = \"k.pem\"\n": "caldav.tls_key",
+		"[caldav]\nport = 1080\n":                                         "caldav.port",
+		"[caldav]\nlisten = 1080\n":                                       "listen",
+		"[caldav]\nlisten = \"1080\"\n":                                   "caldav.listen",
+		"[caldav]\nlisten = \":1080\"\n":                                  "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1\"\n":                              "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:65536\"\n":                        "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:-1\"\n":                           "caldav.listen",
+		"[caldav]\nlisten = \"127.0.0.1:http\"\n":                         "caldav.listen",
+		"[caldav]\nlisten = \"bad host:1080\"\n":                          "caldav.listen",
+		"[caldav]\nhostnames = []\n":                                      "caldav.hostnames",
+		"[caldav]\nhostnames = [\"\"]\n":                                  "caldav.hostnames",
+		"[caldav]\nhostnames = [\"a b\"]\n":                               "caldav.hostnames",
+		"[caldav]\nhostnames = [\"-a.lan\"]\n":                            "caldav.hostnames",
+		"[caldav]\nhostnames = [\"https://a.lan\"]\n":                     "caldav.hostnames",
+		"[caldav]\ntls_cert = " + lit(abs("c", "cert.pem")) + "\n":        "caldav.tls_key",
+		"[caldav]\ntls_key = " + lit(abs("c", "key.pem")) + "\n":          "caldav.tls_cert",
+		"[caldav]\ntls_cert = 'c.pem'\ntls_key = " + lit(abs("k")) + "\n": "caldav.tls_cert",
+		"[caldav]\ntls_cert = " + lit(abs("c")) + "\ntls_key = 'k.pem'\n": "caldav.tls_key",
 	} {
 		if msg := refused(t, body); !strings.Contains(msg, key) {
 			t.Errorf("%q: error %q does not name %s", body, msg, key)
@@ -272,15 +284,31 @@ func TestUnknownLogLevelIsRefused(t *testing.T) {
 	refused(t, "[log]\nlevel = \"\"\n")
 }
 
+// An empty config.toml, what pcb-ui's "Open config.toml" makes when there
+// is none, loads as the defaults.
+func TestLoadEmptyFileGivesDefaults(t *testing.T) {
+	got, err := config.Load(write(t, ""), dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := config.Defaults(dirs); !reflect.DeepEqual(got, want) {
+		t.Errorf("an empty file loads as %+v, want the defaults %+v", got, want)
+	}
+}
+
 func TestBackendDefaultsToAuto(t *testing.T) {
 	if got := config.Defaults(dirs).Secrets.Backend; got != "auto" {
 		t.Fatalf("default backend = %q", got)
 	}
-	cfg, err := config.Load(write(t, "[secrets]\nkey_file = \"/k\"\n"), dirs)
+	cfg, err := config.Load(write(t, "[secrets]\nkey_file = "+lit(abs("k"))+"\n"), dirs)
 	if err != nil || cfg.Secrets.Backend != "auto" {
 		t.Fatalf("backend = %q, %v", cfg.Secrets.Backend, err)
 	}
-	for _, ok := range []string{"auto", "keyfile", "secret-service"} {
+	oks := []string{"auto", "keyfile", "secret-service"}
+	if runtime.GOOS == "windows" {
+		oks = oks[:2] // secret-service: TestCheckBackend
+	}
+	for _, ok := range oks {
 		cfg, err := config.Load(write(t, "[secrets]\nbackend = \""+ok+"\"\n"), dirs)
 		if err != nil || cfg.Secrets.Backend != ok {
 			t.Errorf("backend %q: got %q, %v", ok, cfg.Secrets.Backend, err)
@@ -289,10 +317,42 @@ func TestBackendDefaultsToAuto(t *testing.T) {
 }
 
 func TestBadBackendIsRefused(t *testing.T) {
-	const want = "[secrets] backend must be auto, keyfile or secret-service"
+	want := "[secrets] backend must be auto, keyfile or secret-service"
+	if runtime.GOOS == "windows" {
+		want = "[secrets] backend must be auto or keyfile"
+	}
 	for _, bad := range []string{"tpm", "", "Auto", "secret_service"} {
 		if msg := refused(t, "[secrets]\nbackend = \""+bad+"\"\n"); msg != want {
 			t.Errorf("backend %q: message = %q", bad, msg)
+		}
+	}
+	if runtime.GOOS == "windows" { // a config fault like any other: exit 10, hint "fix <path>"
+		const ss = "[secrets] backend secret-service needs a Linux desktop keyring: on Windows use auto (DPAPI, the default) or keyfile"
+		if msg := refused(t, "[secrets]\nbackend = \"secret-service\"\n"); msg != ss {
+			t.Errorf("backend secret-service on Windows: message = %q", msg)
+		}
+	}
+}
+
+// Each system's pcb has its backends: secret-service, the Linux desktop
+// keyring, is refused on Windows, where auto chooses DPAPI.
+func TestCheckBackend(t *testing.T) {
+	for _, tc := range []struct{ goos, backend, want string }{
+		{"windows", "secret-service", "[secrets] backend secret-service needs a Linux desktop keyring: on Windows use auto (DPAPI, the default) or keyfile"},
+		{"windows", "auto", ""},
+		{"windows", "keyfile", ""},
+		{"windows", "x", "[secrets] backend must be auto or keyfile"},
+		{"windows", "dpapi", "[secrets] backend must be auto or keyfile"},
+		{"linux", "secret-service", ""},
+		{"linux", "auto", ""},
+		{"linux", "keyfile", ""},
+		{"linux", "x", "[secrets] backend must be auto, keyfile or secret-service"},
+		{"linux", "dpapi", "[secrets] backend must be auto, keyfile or secret-service"},
+		{"darwin", "secret-service", ""},
+	} {
+		err := config.CheckBackend(tc.goos, tc.backend)
+		if got := fmt.Sprint(err); (tc.want == "" && err != nil) || (tc.want != "" && got != tc.want) {
+			t.Errorf("checkBackend(%q, %q) = %v, want %q", tc.goos, tc.backend, err, tc.want)
 		}
 	}
 }

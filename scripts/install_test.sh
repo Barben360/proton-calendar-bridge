@@ -227,6 +227,13 @@ test_arch_names() {
   run --prefix "$p/bsd"
   want_rc 2
   has "$c/err" FreeBSD
+  for os in MINGW64_NT-10.0-19045 MSYS_NT-10.0-19045 CYGWIN_NT-10.0-19045 Windows_NT; do
+    arch=x86_64
+    run --prefix "$p/win"
+    want_rc 2
+    has "$c/err" pcb_windows_amd64.zip
+    absent "$p/win"
+  done
   end_case
 }
 

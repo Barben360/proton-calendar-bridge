@@ -7,23 +7,32 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // A daemon as the relay sees it: the control socket's /mcp (HTTPHandler
-// behind RelayAuth) on a unix socket, recording the requests it gets.
+// behind RelayAuth), recording the requests it gets. It listens, and the
+// relay dials, as pcb serve and pcb mcp do (ctl.Listen, ctl.DialConn): a
+// unix socket, a named pipe on Windows. Not a unix socket on Windows: there
+// a write to an AF_UNIX connection whose daemon end is closed succeeds, so
+// a call sent on the idle connection of a daemon just killed would count as
+// delivered (answered retry) instead of going to the next backend; a closed
+// pipe, like a closed unix socket elsewhere, refuses the write.
 
 type seenRequest struct {
 	method  string // the JSON-RPC method, "response" for an answer to the server
@@ -37,7 +46,9 @@ type fakeDaemon struct {
 	seen []seenRequest
 }
 
-// socketPath is a socket path short enough for sun_path.
+// socketPath is a control socket path short enough for sun_path, in a
+// directory of its own (0700, as ctl.Listen requires; on Windows the
+// directory names the pipe).
 func socketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "pcbr")
@@ -50,7 +61,7 @@ func socketPath(t *testing.T) string {
 
 func startDaemon(t *testing.T, srv *mcp.Server, socket string) *fakeDaemon {
 	t.Helper()
-	ln, err := net.Listen("unix", socket)
+	ln, err := ctl.Listen(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +96,12 @@ func (d *fakeDaemon) requests() []seenRequest {
 
 // kill ends the daemon at once: its socket closes, its streams break.
 func (d *fakeDaemon) kill() { _ = d.srv.Close() }
+
+// relay runs st's relay to the daemon at socket with the full grant, over
+// the connections pcb mcp opens.
+func relay(t *testing.T, st *mcp.Stdio, socket string) error {
+	return st.RelayDial(t.Context(), func(ctx context.Context) (net.Conn, error) { return ctl.DialConn(ctx, socket) }, fullGrant)
+}
 
 // agentPipes are pcb mcp's stdin and stdout, and the agent's ends of them.
 type agentPipes struct {
@@ -146,7 +163,7 @@ var fullGrant = func() mcp.Grant {
 // and, once a version is negotiated, the Mcp-Protocol-Version header the
 // spec requires on every later request (the SDK's connection does not
 // send it for a session it did not initialise itself, E19). The end of
-// stdin ends Relay with nil.
+// stdin ends RelayDial with nil.
 func TestRelayServesBothProtocolVersions(t *testing.T) {
 	t.Parallel()
 	for _, version := range []string{"2026-07-28", "2025-11-25"} {
@@ -157,7 +174,7 @@ func TestRelayServesBothProtocolVersions(t *testing.T) {
 			d := startDaemon(t, r.srv, socket)
 			p := newPipes()
 			done := make(chan error, 1)
-			go func() { done <- mcp.Relay(t.Context(), socket, fullGrant, p.stdin, p.stdout) }()
+			go func() { done <- relay(t, mcp.NewStdio(p.stdin, p.stdout), socket) }()
 			cs := connectAgent(t, p, version, "")
 			negotiated := cs.InitializeResult().ProtocolVersion
 			if negotiated != "2025-11-25" {
@@ -178,7 +195,7 @@ func TestRelayServesBothProtocolVersions(t *testing.T) {
 			}
 			_ = cs.Close()
 			if err := ended(t, done); err != nil {
-				t.Errorf("Relay after the end of stdin = %v, want nil", err)
+				t.Errorf("RelayDial after the end of stdin = %v, want nil", err)
 			}
 
 			reqs := d.requests()
@@ -207,7 +224,7 @@ func TestRelayCarriesAConfirmation(t *testing.T) {
 	socket := socketPath(t)
 	startDaemon(t, r.srv, socket)
 	p := newPipes()
-	go func() { _ = mcp.Relay(t.Context(), socket, fullGrant, p.stdin, p.stdout) }()
+	go func() { _ = relay(t, mcp.NewStdio(p.stdin, p.stdout), socket) }()
 	cs := connectAgent(t, p, "2025-11-25", "accept")
 	out := mustCall(t, cs, "event_delete", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"})
 	if out["deleted"] != true {
@@ -267,7 +284,7 @@ func (h *blockingHub) Health(ctx context.Context, sel string) (service.Health, e
 }
 
 // A daemon that ends during a call: the call in flight returns a retry
-// tool error, and Relay returns ErrDaemonGone once the agent sends its
+// tool error, and RelayDial returns ErrDaemonGone once the agent sends its
 // next message (design §5.3). Relayed again to another daemon, the
 // session goes on without a new handshake from the agent (the relay
 // replays it): the next call is answered there.
@@ -282,7 +299,7 @@ func TestRelayAnswersRetryWhenItsDaemonEnds(t *testing.T) {
 	p := newPipes()
 	st := mcp.NewStdio(p.stdin, p.stdout)
 	relayed := make(chan error, 1)
-	go func() { relayed <- st.Relay(t.Context(), socket, fullGrant) }()
+	go func() { relayed <- relay(t, st, socket) }()
 	cs := connectAgent(t, p, "2025-11-25", "")
 
 	type result struct {
@@ -312,20 +329,24 @@ func TestRelayAnswersRetryWhenItsDaemonEnds(t *testing.T) {
 	}
 	select {
 	case err := <-relayed:
-		t.Fatalf("Relay returned %v before the agent's next message", err)
+		t.Fatalf("RelayDial returned %v before the agent's next message", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// The next call: Relay returns ErrDaemonGone, keeping the message;
-	// relayed to a new daemon, it is answered there.
+	// The next call: RelayDial returns ErrDaemonGone, keeping the message;
+	// relayed to a new daemon, it is answered there. The new daemon has a
+	// socket of its own: on Windows the old daemon's end of a connection
+	// may still be closing when its Close returns, and ctl.Listen then
+	// waits for the pipe's name, which is not what this test is about.
 	second := newRig(t, newHub())
+	socket = socketPath(t)
 	startDaemon(t, second.srv, socket)
 	next := make(chan map[string]any, 1)
 	go func() { next <- mustCall(t, cs, "status", nil) }()
 	if err := ended(t, relayed); !errors.Is(err, mcp.ErrDaemonGone) {
-		t.Fatalf("Relay = %v, want ErrDaemonGone", err)
+		t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
 	}
-	go func() { relayed <- st.Relay(t.Context(), socket, fullGrant) }()
+	go func() { relayed <- relay(t, st, socket) }()
 	select {
 	case out := <-next:
 		if got := accountsOf(out); len(got) != 2 {
@@ -341,13 +362,13 @@ func TestRelayAnswersRetryWhenItsDaemonEnds(t *testing.T) {
 
 // A daemon that answers the relay's requests without serving them (here a
 // 400 for every one, as a daemon of another version refusing the grant
-// header) is not a daemon gone: Relay says it was refused, so pcb mcp
+// header) is not a daemon gone: RelayDial says it was refused, so pcb mcp
 // waits before it probes again instead of looping, and the agent's
 // message stays queued for the next attempt.
 func TestRelayRefusedIsNotADaemonGone(t *testing.T) {
 	t.Parallel()
 	socket := socketPath(t)
-	ln, err := net.Listen("unix", socket)
+	ln, err := ctl.Listen(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +380,7 @@ func TestRelayRefusedIsNotADaemonGone(t *testing.T) {
 	p := newPipes()
 	st := mcp.NewStdio(p.stdin, p.stdout)
 	relayed := make(chan error, 1)
-	go func() { relayed <- st.Relay(t.Context(), socket, fullGrant) }()
+	go func() { relayed <- relay(t, st, socket) }()
 	connected := make(chan *sdkmcp.ClientSession, 1)
 	go func() {
 		cs, err := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).Connect(t.Context(), p.t, nil)
@@ -369,14 +390,16 @@ func TestRelayRefusedIsNotADaemonGone(t *testing.T) {
 		connected <- cs
 	}()
 	if err := ended(t, relayed); !errors.Is(err, mcp.ErrRelayRefused) || errors.Is(err, mcp.ErrDaemonGone) {
-		t.Fatalf("Relay = %v, want ErrRelayRefused", err)
+		t.Fatalf("RelayDial = %v, want ErrRelayRefused", err)
 	}
 	_ = refusing.Close()
 
 	// The agent's initialize waited in the queue: a daemon that serves
-	// answers it.
+	// answers it (on a socket of its own, as in
+	// TestRelayAnswersRetryWhenItsDaemonEnds).
+	socket = socketPath(t)
 	startDaemon(t, newRig(t, newHub()).srv, socket)
-	go func() { relayed <- st.Relay(t.Context(), socket, fullGrant) }()
+	go func() { relayed <- relay(t, st, socket) }()
 	select {
 	case cs := <-connected:
 		if cs == nil {
@@ -399,7 +422,7 @@ func TestStdioMovesFromARelayToTheProcess(t *testing.T) {
 	p := newPipes()
 	st := mcp.NewStdio(p.stdin, p.stdout)
 	relayed := make(chan error, 1)
-	go func() { relayed <- st.Relay(t.Context(), socket, fullGrant) }()
+	go func() { relayed <- relay(t, st, socket) }()
 	cs := connectAgent(t, p, "2025-11-25", "")
 	mustCall(t, cs, "status", nil)
 	d.kill()
@@ -407,7 +430,7 @@ func TestStdioMovesFromARelayToTheProcess(t *testing.T) {
 	next := make(chan map[string]any, 1)
 	go func() { next <- mustCall(t, cs, "calendars_list", nil) }()
 	if err := ended(t, relayed); !errors.Is(err, mcp.ErrDaemonGone) {
-		t.Fatalf("Relay = %v, want ErrDaemonGone", err)
+		t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
 	}
 	own := newRig(t, newHub())
 	served := make(chan error, 1)
@@ -426,5 +449,135 @@ func TestStdioMovesFromARelayToTheProcess(t *testing.T) {
 	_ = cs.Close()
 	if err := ended(t, served); err != nil {
 		t.Errorf("ServeStdio after the end of stdin = %v", err)
+	}
+}
+
+// closeWatch is a connection that reports its Close.
+type closeWatch struct {
+	net.Conn
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *closeWatch) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// A call the relay gets a connection for just as its daemon ends, and
+// that fails before a byte of it was written (the HTTP client sees the
+// daemon's close on that connection first: "server closed idle
+// connection", which it does not retry for a POST), never reached the
+// daemon: it goes to the next backend, here the process itself, instead
+// of being answered retry.
+func TestCallUnsentAsTheDaemonEndsMovesToTheProcess(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, newHub())
+	socket := socketPath(t)
+	d := startDaemon(t, r.srv, socket)
+	var mu sync.Mutex
+	var conns []*closeWatch
+	dial := func(ctx context.Context) (net.Conn, error) {
+		c, err := ctl.DialConn(ctx, socket)
+		if err != nil {
+			return nil, err
+		}
+		w := &closeWatch{Conn: c, closed: make(chan struct{})}
+		mu.Lock()
+		conns = append(conns, w)
+		mu.Unlock()
+		return w, nil
+	}
+	// Armed, the next request given a connection (the idle one, or a new
+	// one when the last answer has not yet freed it) kills the daemon and
+	// waits until the client has closed every connection on seeing the
+	// daemon's close, before the request is written.
+	var armed atomic.Bool
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
+		if !armed.CompareAndSwap(true, false) {
+			return
+		}
+		d.kill()
+		mu.Lock()
+		open := slices.Clone(conns)
+		mu.Unlock()
+		for _, c := range open {
+			select {
+			case <-c.closed:
+			case <-time.After(10 * time.Second):
+				t.Error("a connection to the killed daemon is still open after 10 s")
+			}
+		}
+		// The client's writer goroutine ends on that close: let it, so
+		// the request fails as unsent instead of being written to a
+		// closed connection (which the client retries on a new one).
+		time.Sleep(50 * time.Millisecond)
+	}})
+
+	p := newPipes()
+	st := mcp.NewStdio(p.stdin, p.stdout)
+	relayed := make(chan error, 1)
+	go func() { relayed <- st.RelayDial(ctx, dial, fullGrant) }()
+	cs := connectAgent(t, p, "2025-11-25", "")
+	mustCall(t, cs, "status", nil)
+
+	armed.Store(true)
+	type answer struct {
+		out  map[string]any
+		terr *toolErr
+	}
+	next := make(chan answer, 1)
+	go func() {
+		out, terr := call(t, cs, "calendars_list", nil)
+		next <- answer{out, terr}
+	}()
+	select {
+	case err := <-relayed:
+		if !errors.Is(err, mcp.ErrDaemonGone) {
+			t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
+		}
+	case a := <-next:
+		t.Fatalf("calendars_list answered by the relay: %v, %+v; want it moved to the next backend", a.out, a.terr)
+	case <-time.After(15 * time.Second):
+		t.Fatal("RelayDial still running 15 s after its daemon ended")
+	}
+	if armed.Load() {
+		t.Fatal("the call never got a connection: the race was not set up")
+	}
+	own := newRig(t, newHub())
+	served := make(chan error, 1)
+	go func() { served <- own.srv.ServeStdio(t.Context(), st, fullGrant) }()
+	select {
+	case a := <-next:
+		if a.terr != nil || a.out["calendars"] == nil {
+			t.Errorf("calendars_list in process = %v, %+v", a.out, a.terr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiting call was not answered in process")
+	}
+	_ = cs.Close()
+	if err := ended(t, served); err != nil {
+		t.Errorf("ServeStdio after the end of stdin = %v", err)
+	}
+}
+
+// RelayDial's dial may fail with an error of its own (ctl.DialConn's
+// ErrNoDaemon once the pipe is gone on Windows), not a net.OpError: the
+// daemon is gone all the same, and the agent's message is kept for the
+// next backend, never refused.
+func TestRelayDialFailureIsTheDaemonGone(t *testing.T) {
+	t.Parallel()
+	dial := func(context.Context) (net.Conn, error) { return nil, errors.New("no pcb daemon answers") }
+	p := newPipes()
+	st := mcp.NewStdio(p.stdin, p.stdout)
+	relayed := make(chan error, 1)
+	go func() { relayed <- st.RelayDial(t.Context(), dial, fullGrant) }()
+	go func() { // the agent's initialize: it waits for the next backend
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		_, _ = sdkmcp.NewClient(&sdkmcp.Implementation{Name: "agent", Version: "0"}, nil).Connect(ctx, p.t, nil)
+	}()
+	if err := ended(t, relayed); !errors.Is(err, mcp.ErrDaemonGone) {
+		t.Fatalf("RelayDial = %v, want ErrDaemonGone", err)
 	}
 }

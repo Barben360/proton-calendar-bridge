@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -111,6 +112,38 @@ func TestBridgeServesCalDAV(t *testing.T) {
 	}
 	if got, want := resp.Header.Get("WWW-Authenticate"), `realm="pcb `+id+`"`; !strings.Contains(got, want) {
 		t.Errorf("WWW-Authenticate = %q, want it to hold %s", got, want)
+	}
+}
+
+// A session end (the window's logoff or shutdown message closes
+// BridgeOptions.SessionEnd) cuts the drain to 2 s: a request still being
+// read (its headers half sent) holds the listener's Shutdown, which would
+// otherwise wait the full 5 s.
+func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
+	t.Parallel()
+	l := newLab(t)
+	ended := make(chan struct{})
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, SessionEnd: ended})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	conn, err := net.Dial("tcp", b.Info().Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "PROPFIND / HTTP/1.1\r\nHost: x\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the server has read it: the connection is active
+	close(ended)
+	start := time.Now()
+	if err := b.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if d := time.Since(start); d < 1800*time.Millisecond || d >= 4500*time.Millisecond {
+		t.Errorf("Stop took %s, want the 2 s session-end drain", d)
 	}
 }
 

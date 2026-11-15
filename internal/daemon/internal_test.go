@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -60,7 +64,9 @@ func TestStopListenerDrainsARequestInFlight(t *testing.T) {
 	<-entered
 	stopped := make(chan struct{})
 	go func() {
-		stopListener(srv, slog.New(slog.DiscardHandler), drainTimeout)
+		ctx, cancel := (&drain{}).context()
+		defer cancel()
+		stopListener(ctx, srv, slog.New(slog.DiscardHandler))
 		close(stopped)
 	}()
 	select {
@@ -91,7 +97,9 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 	res := make(chan error, 1)
 	go get(url, res)
 	<-entered
-	stopListener(srv, slog.New(slog.DiscardHandler), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	stopListener(ctx, srv, slog.New(slog.DiscardHandler))
 	select {
 	case err := <-res:
 		if err == nil {
@@ -99,6 +107,39 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the stuck request still runs after stopListener returned")
+	}
+}
+
+// The session-end cut is one 2 s budget for every stop of a Run, counted
+// from the first: the control socket's stop after the listener's gets what
+// is left of it, not 2 s more.
+func TestSessionEndDrainIsSharedByTheStops(t *testing.T) {
+	t.Parallel()
+	ended := make(chan struct{})
+	d := &drain{ended: ended}
+	start := time.Now()
+	first, cancel := d.context()
+	defer cancel()
+	close(ended)
+	time.Sleep(time.Second)
+	second, cancel2 := d.context()
+	defer cancel2()
+	for _, ctx := range []context.Context{first, second} {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("a stop's drain outlived the session-end cut")
+		}
+	}
+	if e := time.Since(start); e < 1900*time.Millisecond || e > 2900*time.Millisecond {
+		t.Errorf("the stops ended %v after the first began, want 2 s", e)
+	}
+	late, cancel3 := d.context()
+	defer cancel3()
+	select {
+	case <-late.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Error("a stop begun after the 2 s waits; want it cut at once")
 	}
 }
 
@@ -281,5 +322,93 @@ func TestLogPassInventsNoProtonAnswer(t *testing.T) {
 	}
 	if strings.Contains(got, "proton_status") || strings.Contains(got, "proton_code") {
 		t.Errorf("a status or code was invented:\n%s", got)
+	}
+}
+
+// Any other failure to open the control channel: on Unix the socket's
+// directory must be writable; on Windows there is no socket file, the pipe
+// is named after the state directory, which must be this user's.
+func TestControlHintForAnyOtherFailure(t *testing.T) {
+	t.Parallel()
+	dir := "state"
+	got := controlHint(errors.New("boom"), filepath.Join(dir, "pcb.sock"))
+	want := "make sure " + dir + " is writable by this user"
+	if runtime.GOOS == "windows" {
+		want = "make sure " + dir + " exists and is this user's (pcb doctor checks it), then start pcb-ui or pcb serve again"
+	}
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
+// A control pipe already served (Windows) names both causes and the way
+// out: another pcb of this state, or a squatter to step around.
+func TestControlHintForATakenPipe(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("%w: %s", ctl.ErrPipeTaken, `\\.\pipe\pcb-0123456789abcdef`)
+	got := controlHint(err, filepath.Join("state", "pcb.sock"))
+	want := "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set PCB_STATE_DIR to another directory"
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
+// A pipe name nothing answers on, still held after Listen's wait, is most
+// likely the previous pcb of this state still ending: try again, and only
+// then step around it; never "stop the other pcb".
+func TestControlHintForAHeldPipe(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("%w: %s", ctl.ErrPipeHeld, `\\.\pipe\pcb-0123456789abcdef`)
+	got := controlHint(err, filepath.Join("state", "pcb.sock"))
+	want := "the previous pcb-ui or pcb serve of this state may still be ending: start again in a moment; if this persists, another process holds the name: set PCB_STATE_DIR to another directory"
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
+// The start line names the socket's path, and on Windows the pipe that
+// serves it (its name is a hash of the state directory): the live check
+// reads it there.
+func TestControlStartLogNamesThePipeOnWindows(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "pcb") // short: sun_path holds 108 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "pcb.sock")
+	var logs bytes.Buffer
+	stop, err := startControl(slog.New(slog.NewJSONHandler(&logs, nil)), nil, ctl.Daemon{Socket: socket}, nil, nil, nil, nil, &drain{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	// Windows has no pcb.sock: its lines name the pipe alone.
+	startMsg, stopMsg := "control socket started", "control socket stopped"
+	if runtime.GOOS == "windows" {
+		startMsg, stopMsg = "control pipe started", "control pipe stopped"
+	}
+	var started, stopped map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			switch rec["msg"] {
+			case startMsg:
+				started = rec
+			case stopMsg:
+				stopped = rec
+			}
+		}
+	}
+	if started == nil || stopped == nil {
+		t.Fatalf("want the lines %q and %q:\n%s", startMsg, stopMsg, logs.String())
+	}
+	path, hasPath := started["path"]
+	pipe, hasPipe := started["pipe"].(string)
+	switch {
+	case runtime.GOOS == "windows" && (hasPath || !strings.HasPrefix(pipe, `\\.\pipe\pcb-`)):
+		t.Errorf("start line = %v, want the pipe's name and no pcb.sock", started)
+	case runtime.GOOS != "windows" && (path != socket || hasPipe):
+		t.Errorf("start line = %v, want the path %s and no pipe", started, socket)
 	}
 }

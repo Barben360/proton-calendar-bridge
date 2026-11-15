@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -279,9 +280,149 @@ func TestRunCutsWhatOutlivesTheDrain(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("a stuck request held Run past the drain")
 	}
-	if d := time.Since(start); d < 4*time.Second {
-		t.Errorf("Run returned after %v: the drain did not wait for the request in flight", d)
+	if d := time.Since(start); d < 4500*time.Millisecond {
+		t.Errorf("Run returned after %v: the drain did not wait 5 s for the request in flight", d)
 	}
+}
+
+// stuckRequest starts a daemon on a slowHub (o changes its options) and a
+// PROPFIND that the hub holds until the test ends; it returns once the
+// request is in the handler, with the channel that gets the time its
+// client saw it end (the drain's cut).
+func stuckRequest(t *testing.T, mod func(*daemon.Options)) (*running, <-chan time.Time) {
+	t.Helper()
+	e := newEnv(t)
+	id, password := e.login(t)
+	hub := newSlowHub(e)
+	t.Cleanup(func() { close(hub.release) })
+	r := e.start(t, hub, mod)
+	_, port, _ := net.SplitHostPort(r.info.Addr)
+	cut := make(chan time.Time, 1)
+	go func() {
+		if resp, err := r.propfind(t.Context(), "http://127.0.0.1:"+port+"/dav/"+id+"/", password); err == nil {
+			_ = resp.Body.Close()
+		}
+		cut <- time.Now()
+	}()
+	<-hub.entered
+	return r, cut
+}
+
+// drainedWithin fails unless the stuck request is cut between minD and
+// maxD after start, and Run then returns nil. The drain is timed, not
+// Run: stopping the sync loops after it takes what it takes.
+func drainedWithin(t *testing.T, r *running, cut <-chan time.Time, start time.Time, minD, maxD time.Duration) {
+	t.Helper()
+	select {
+	case at := <-cut:
+		if d := at.Sub(start); d < minD || d >= maxD {
+			t.Errorf("the request in flight was cut %v after the stop began, want within [%v, %v)", d, minD, maxD)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stuck request outlived the drain")
+	}
+	select {
+	case <-r.fin:
+		if r.err != nil {
+			t.Errorf("Run = %v, want nil", r.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain")
+	}
+}
+
+// A session end (logoff, shutdown, console close) closes SessionEnd before
+// the stop: the drain lasts 2 s, not 5 s, so it ends before Windows ends
+// the process (spec §5.11).
+func TestSessionEndCutsTheDrainToTwoSeconds(t *testing.T) {
+	t.Parallel()
+	ended := make(chan struct{})
+	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = ended })
+	close(ended)
+	start := time.Now()
+	r.cancel()
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
+}
+
+// SessionEnd closing once the drain has begun (the root context's SIGTERM
+// won the race, ruling F4) still cuts it to 2 s after its start.
+func TestSessionEndDuringTheDrainCutsItToTwoSeconds(t *testing.T) {
+	t.Parallel()
+	ended := make(chan struct{})
+	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = ended })
+	start := time.Now()
+	r.cancel()
+	time.Sleep(500 * time.Millisecond)
+	close(ended)
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
+}
+
+// SessionEnd closing after 2 s of drain ends it at once.
+func TestLateSessionEndEndsTheDrainAtOnce(t *testing.T) {
+	t.Parallel()
+	ended := make(chan struct{})
+	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = ended })
+	start := time.Now()
+	r.cancel()
+	time.Sleep(3 * time.Second)
+	close(ended)
+	drainedWithin(t, r, cut, start, 3*time.Second, 4500*time.Millisecond)
+}
+
+// The whole stop on a session end, the sync loops' end after the drain
+// included, stays well before Windows ends the process (about 5 s), and
+// its length is logged. Not parallel: it times Run itself.
+func TestRunStopsWithinFourAndAHalfSecondsOnASessionEnd(t *testing.T) {
+	var logs syncBuffer
+	ended := make(chan struct{})
+	r, cut := stuckRequest(t, func(o *daemon.Options) {
+		o.SessionEnd = ended
+		o.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	})
+	close(ended)
+	start := time.Now()
+	r.cancel()
+	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
+	if d := time.Since(start); d >= 4500*time.Millisecond {
+		t.Errorf("Run returned %v after the stop began, want under 4.5 s", d)
+	}
+	var stopped map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "daemon stopped" {
+			stopped = rec
+		}
+	}
+	if stopped == nil || stopped["stop"] == nil {
+		t.Errorf("no \"daemon stopped\" record with its stop duration:\n%s", logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the logger's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// An open SessionEnd leaves the drain at 5 s.
+func TestDrainIsFiveSecondsWhileSessionEndIsOpen(t *testing.T) {
+	t.Parallel()
+	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = make(chan struct{}) })
+	start := time.Now()
+	r.cancel()
+	drainedWithin(t, r, cut, start, 4500*time.Millisecond, 6*time.Second)
 }
 
 // Closing Cut during the drain ends Run at once with ErrCut (exit 20).
@@ -384,17 +525,21 @@ func TestRunLogsAListenerThatCannotStart(t *testing.T) {
 			lines = append(lines, m)
 		}
 	}
+	stopMsg := "control socket stopped"
+	if runtime.GOOS == "windows" {
+		stopMsg = "control pipe stopped"
+	}
 	at, stopped := -1, -1
 	for i, m := range lines {
 		switch {
 		case m["level"] == "ERROR" && m["msg"] == "the CalDAV listener cannot start" && m["addr"] == "127.0.0.1:0" && m["error"] == "address already in use":
 			at = i
-		case m["msg"] == "control socket stopped":
+		case m["msg"] == stopMsg:
 			stopped = i
 		}
 	}
-	if at < 0 || (stopped >= 0 && stopped < at) {
-		t.Errorf("log %s: want an ERROR naming the listener, its address and the reason, before the stop", buf.String())
+	if at < 0 || stopped < 0 || stopped < at {
+		t.Errorf("log %s: want an ERROR naming the listener, its address and the reason, before the %q line", buf.String(), stopMsg)
 	}
 }
 

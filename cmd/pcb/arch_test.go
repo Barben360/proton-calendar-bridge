@@ -36,3 +36,33 @@ func TestPcbHasNoGUIDependency(t *testing.T) {
 		t.Fatalf("CGO_ENABLED=0 go build: %v\n%s", err, out)
 	}
 }
+
+// Both binaries carry the zone database (spec §5.6): a machine with no
+// zoneinfo (Windows) still loads every IANA zone. internal/ical imports
+// time/tzdata for it; each binary's Windows and Linux builds are checked.
+func TestBinariesEmbedTheZoneDatabase(t *testing.T) {
+	for _, tc := range []struct{ goos, pkg string }{
+		{"windows", "."},
+		{"linux", "."},
+		{"windows", "../pcb-ui"},
+		{"linux", "../pcb-ui"},
+	} {
+		cmd := exec.Command("go", "list", "-deps", tc.pkg)
+		cmd.Env = append(os.Environ(), "GOOS="+tc.goos, "CGO_ENABLED=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("GOOS=%s go list -deps %s: %v\n%s", tc.goos, tc.pkg, err, out)
+		}
+		deps := strings.Fields(string(out))
+		if len(deps) < 50 {
+			t.Fatalf("GOOS=%s %s: %d packages: the check would pass vacuously", tc.goos, tc.pkg, len(deps))
+		}
+		found := false
+		for _, d := range deps {
+			found = found || d == "time/tzdata"
+		}
+		if !found {
+			t.Errorf("GOOS=%s %s does not link time/tzdata", tc.goos, tc.pkg)
+		}
+	}
+}

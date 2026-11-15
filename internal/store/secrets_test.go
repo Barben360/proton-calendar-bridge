@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -80,9 +81,7 @@ func TestSecretsRoundTripTwoAccounts(t *testing.T) {
 	if g := got["userB"]; g.RefreshToken != b.RefreshToken || g.Relogin != nil {
 		t.Fatalf("account B = %+v", g)
 	}
-	if info, _ := os.Stat(f.secrets.Path); info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %o", info.Mode().Perm())
-	}
+	acltest.WantPrivate(t, f.secrets.Path, 0o600)
 }
 
 func TestSealedFileHoldsNoPlaintext(t *testing.T) {

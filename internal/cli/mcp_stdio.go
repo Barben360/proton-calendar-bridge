@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -86,8 +89,8 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 			return err
 		}
 		if up {
-			log.Info("relaying to the daemon on the control socket", "socket", socket)
-			err := st.Relay(ctx, socket, g)
+			log.Info("relaying to the daemon on the "+ctl.Channel, ctl.AddrAttr(socket))
+			err := st.RelayDial(ctx, func(ctx context.Context) (net.Conn, error) { return ctl.DialConn(ctx, socket) }, g)
 			switch {
 			case errors.Is(err, mcp.ErrDaemonGone):
 				log.Info("the daemon went away: looking for another, or serving the session here")
@@ -256,13 +259,19 @@ func (a *app) serveSession(ctx context.Context, st *mcp.Stdio, g mcp.Grant, dirs
 	srv := mcp.NewServer(mcp.Options{Hub: mh, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
 		LoginGuard: func(ctx context.Context) error { return sealerGuard(ctx, dirs, cfg, a.Keyring) }})
 
+	// A session end (on Windows a console close, logoff or shutdown, as
+	// SIGTERM) cuts the control socket's drain to 2 s, as in pcb serve.
+	sigs, unsubscribe := a.Signals()
+	defer unsubscribe()
+	_, _, ended, endSignals := stopSignals(ctx, sigs, sessionEndSignal)
+	defer endSignals()
 	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRun()
 	ready, ran := make(chan struct{}), make(chan error, 1)
 	go func() {
 		ran <- daemon.Run(runCtx, daemon.Options{
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: "mcp", LogLevel: cfg.Log.Level, Logger: log, Warn: a.Stderr,
-			NoListener: true, WaitForLogin: true, MCP: srv,
+			NoListener: true, WaitForLogin: true, MCP: srv, SessionEnd: ended,
 			Ready: func(daemon.Info) { close(ready) },
 		})
 	}()
@@ -308,13 +317,14 @@ func raced(err error) error {
 // bus, none on it, or a locked keyring: auto would fall back to the key
 // file), it refuses (must-act). An agent host that scrubs the session bus
 // cannot fix a desktop's state to the key file by accident. An explicit
-// backend, and a state whose sealer is recorded, pass.
+// backend, and a state whose sealer is recorded, pass; so does every state
+// on Windows, where auto has one outcome (DPAPI) whatever the session.
 //
 // The session daemon checks it before it opens the accounts (opening a
 // new state records its sealer), and passes it to the MCP server for its
 // login tool.
 func sealerGuard(ctx context.Context, dirs paths.Dirs, cfg config.Config, kr service.Keyring) error {
-	if cfg.Secrets.Backend != "auto" {
+	if cfg.Secrets.Backend != "auto" || runtime.GOOS == "windows" {
 		return nil
 	}
 	layout, err := doctor.Accounts(dirs.State)

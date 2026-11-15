@@ -10,7 +10,7 @@ Every `pcb` command, how to pick the account a command acts on, the `--json` out
 |---|---|
 | `pcb login` | Prompts for what is missing; or set `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`. The username decides: a known address is a relogin, a new one adds an account. |
 | `pcb login --username alice` | The username may be a flag (default: `$PCB_USERNAME`, else asked). |
-| `pcb login --password-fd 3 3<pwfile` | Reads the password from a file descriptor: the password never goes in a flag. |
+| `pcb login --password-fd 3 3<pwfile` | Reads the password from a file descriptor: the password never goes in a flag. On Windows only `0`, `1` or `2` (the standard handles; another number is refused): `cmd /c "pcb login --password-fd 0 < pwfile"` hands the file's bytes as they are. Not `Get-Content pwfile \| pcb …` in Windows PowerShell 5.1: its pipe re-encodes as ASCII (`$OutputEncoding`) and mangles a non-ASCII password (PowerShell 7 sends UTF-8). |
 | `pcb login --unattended-relogin` | Stores the credentials so pcb can log in again without you. |
 | `pcb login --non-interactive` | Never prompts: exits 10 naming what is missing. `--non-interactive` is accepted by every command. |
 | `pcb login resume --captcha-token T` | Finishes a login after you solved the CAPTCHA Proton asked for. |
@@ -35,7 +35,7 @@ Details: [security](security.md#log-in).
 |---|---|
 | `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, alerts). |
 | `pcb status --daemon` | Exits 20 when no daemon answers (the container's health check). |
-| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. |
+| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. |
 
 ### Calendars and events
 
@@ -66,6 +66,8 @@ Details: [Thunderbird](thunderbird.md#caldav-app-passwords).
 | `pcb install [--system] [--plan]` | Runs `pcb serve` as a systemd service ([service](service.md)). |
 | `pcb uninstall [--delete-data] [--plan]` | Removes the service, and with `--delete-data` the data ([service](service.md#uninstall)). |
 | `pcb service start\|stop\|restart\|status\|logs [-f]` | Manages the installed service. |
+
+On Windows there is no service: `pcb install` and every `pcb service` command exit 20 with `no service on Windows`, hint `use pcb-ui; "Start at login" runs it at each login`. `pcb serve` runs in a terminal (Ctrl-C stops it). `pcb uninstall` stops nothing and refuses (exit 20) while `pcb-ui`, `pcb serve` or an agent session (`pcb mcp`) serves the state; it turns `pcb-ui`'s "Start at login" off (deletes its Run value) when that value starts the `pcb-ui.exe` beside this `pcb.exe` on the default directories, and keeps it otherwise, saying why. With `--delete-data` it also logs out and deletes the config and state directories, the sealing key included ([install](install.md#remove-it-from-windows)).
 
 ### Agents
 

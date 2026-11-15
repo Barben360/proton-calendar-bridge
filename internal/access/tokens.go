@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -137,7 +136,7 @@ func (s *TokenStore) refresh(force bool) error {
 	if !st.exists {
 		return nil
 	}
-	data, err := os.ReadFile(s.path())
+	data, err := atomicfile.ReadFile(s.path())
 	if err != nil {
 		s.loaded, s.loadErr = false, fmt.Errorf("MCP token list unreadable: %w", err)
 		return s.loadErr

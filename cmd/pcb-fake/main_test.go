@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -118,6 +119,9 @@ func TestAccountFileIsRefusedUnlessPrivateAndComplete(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
+			if c.mode != 0o600 && runtime.GOOS == "windows" {
+				t.Skip("Windows has no mode bits: TestAccountFileWithAnOpenACLIsRefused covers its access list")
+			}
 			code, out, errb := run(t, "serve", "--account", accountFile(t, c.content, c.mode))
 			if code != exitcode.MustAct || !strings.Contains(errb, c.want) {
 				t.Fatalf("exit %d, want %d with %q\nstdout: %s\nstderr: %s", code, exitcode.MustAct, c.want, out, errb)

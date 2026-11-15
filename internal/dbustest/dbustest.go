@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,9 +31,13 @@ const config = `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Config
 
 // Start runs dbus-daemon on a private session bus and returns its address.
 // The daemon stops at cleanup. A missing dbus-daemon skips the test, or
-// fails it when CI is set.
+// fails it when CI is set; on Windows, which has no session bus (pcb seals
+// with DPAPI there), the test is always skipped.
 func Start(t testing.TB) (addr string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no D-Bus session bus: pcb seals with DPAPI there")
+	}
 	bin, err := exec.LookPath("dbus-daemon")
 	if err != nil {
 		if os.Getenv("CI") != "" {

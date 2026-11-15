@@ -155,7 +155,7 @@ func TestLogfileReopenAppendsAndCountsExistingBytes(t *testing.T) {
 func TestLogfileTightensAnExistingFile(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no modes")
+		t.Skip("Unix modes: on Windows the log takes the access list of the state directory pcb-ui makes private first (acl.MkdirAll)")
 	}
 	path := filepath.Join(t.TempDir(), "ui.log")
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {

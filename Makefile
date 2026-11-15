@@ -6,7 +6,11 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
 	-X $(PKG)/internal/buildinfo.Date=$(DATE)
-OUT     ?= bin/pcb
+# GOOS=windows builds append .exe (make build ui GOOS=windows; pcb-ui only on
+# Windows itself: it needs cgo).
+GOOS    ?= $(shell go env GOOS)
+EXE     := $(if $(filter windows,$(GOOS)),.exe)
+OUT     ?= bin/pcb$(EXE)
 # make install puts pcb in $(PREFIX)/bin (M5-P23); pcb install then sets up
 # the service.
 PREFIX  ?= $(HOME)/.local
@@ -23,20 +27,38 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test shellcheck actionlint pcb-fake rehearse screenshots
+.PHONY: build install ui winres install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
 
 install: build
-	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb
+	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb$(EXE)
 
 # pcb-ui, the desktop app (M7): cgo and the GL/X development headers
 # (libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev on Debian), so it is not part of make build.
-UI_OUT ?= bin/pcb-ui
+# On Windows (mingw-w64 gcc): a GUI binary (-H=windowsgui, no console
+# window) with its icon and version resource (make winres).
+UI_OUT ?= bin/pcb-ui$(EXE)
 
-ui:
-	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)" -o $(UI_OUT) ./cmd/pcb-ui
+ui: winres
+	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)$(if $(filter windows,$(GOOS)), -H=windowsgui)" -o $(UI_OUT) ./cmd/pcb-ui
+
+# The Windows resource of pcb-ui.exe: the icon (internal/ui/desktop/icons/app.svg
+# rendered at 256 px by cmd/pcb-ui/winres) and the version, written by the
+# pinned go-winres to cmd/pcb-ui/rsrc_windows_amd64.syso (gitignored), which
+# go build links. Windows has four numbers: v1.2.3-4-gabc is 1.2.3.0, a
+# version that is not a tag is 0.0.0.0. A no-op on other systems.
+WINVER := $(or $(shell echo '$(VERSION)' | sed -nE 's/^v?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3.0/p'),0.0.0.0)
+
+winres:
+ifeq ($(GOOS),windows)
+	mkdir -p bin
+	env -u GOOS -u GOARCH go run ./cmd/pcb-ui/winres -o bin/pcb-ui-256.png
+	env -u GOOS -u GOARCH go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 --out cmd/pcb-ui/rsrc \
+		--icon bin/pcb-ui-256.png --manifest gui --product-name pcb-ui --file-description "pcb desktop app" \
+		--original-filename pcb-ui.exe --product-version $(WINVER) --file-version $(WINVER)
+endif
 
 # The icon is the window's app icon, installed as the desktop entry's Icon.
 install-ui: ui
@@ -101,6 +123,9 @@ live-preflight:
 live-preflight-test:
 	scripts/live/guard_test.sh
 
+vmtest-test:
+	bash scripts/win/vmtest_test.sh
+
 # shellcheck of the live-session scripts, pinned by digest so CI and a
 # workstation run the same one (the runner's own v0.11.0 crashes on
 # preflight.sh: "Non-exhaustive patterns in function checkCmd").
@@ -111,7 +136,8 @@ shellcheck:
 	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(SHELLCHECK_IMAGE) -x \
 		scripts/install.sh scripts/install_test.sh \
 		scripts/release/check.sh scripts/release/check_test.sh scripts/release/macos-smoke.sh \
-		scripts/release/package.sh scripts/release/package_test.sh
+		scripts/release/package.sh scripts/release/package_test.sh \
+		scripts/win/vmtest.sh scripts/win/vmtest_test.sh
 
 # The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
 ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

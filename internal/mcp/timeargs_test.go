@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // the zones the Windows mapping names, on a host with no zoneinfo
 
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -246,9 +247,6 @@ func TestLocalZoneResolution(t *testing.T) {
 		{"TZ a path with no name", "linux", tz("/etc/localtime"), noLink},
 		{"TZ empty", "linux", tz(""), link("/usr/share/zoneinfo/Asia/Tokyo")},
 		{"TZ unknown", "linux", tz("Mars/Olympus"), link("/usr/share/zoneinfo/Asia/Tokyo")},
-		{"Windows, TZ empty", "windows", tz(""), link("/usr/share/zoneinfo/Asia/Tokyo")},
-		{"Windows, TZ a POSIX rule", "windows", tz("CET-1CEST,M3.5.0,M10.5.0/3"), noLink},
-		{"Windows, TZ a name", "windows", tz("Asia/Tokyo"), noLink},
 	} {
 		if loc := mcp.LocalZoneFrom(tc.goos, tc.env, tc.link, noFile); loc != time.Local {
 			t.Errorf("%s: zone %v, want the process's time.Local", tc.name, loc)
@@ -266,5 +264,27 @@ func TestLocalZoneResolution(t *testing.T) {
 	}
 	if got := mcp.ZoneLabel(paris, at); got != "Europe/Paris" {
 		t.Errorf("label of Europe/Paris %q", got)
+	}
+}
+
+// On Windows the process's zone is the IANA zone of the Windows zone key;
+// a key CLDR does not map, or none, keeps time.Local (wall clocks read in
+// it, labelled by offset), never UTC.
+func TestWindowsZoneNamesTheMappedZone(t *testing.T) {
+	key := func(k string, ok bool) func() (string, bool) { return func() (string, bool) { return k, ok } }
+	if got := mcp.WindowsZone(key("W. Europe Standard Time", true)).String(); got != "Europe/Berlin" {
+		t.Errorf("W. Europe Standard Time: zone %q, want Europe/Berlin", got)
+	}
+	if got := mcp.WindowsZone(key("Tokyo Standard Time", true)).String(); got != "Asia/Tokyo" {
+		t.Errorf("Tokyo Standard Time: zone %q, want Asia/Tokyo", got)
+	}
+	for name, k := range map[string]func() (string, bool){
+		"unmapped key":            key("Mars Standard Time", true),
+		"no key":                  key("", false),
+		"key ignored when not ok": key("W. Europe Standard Time", false),
+	} {
+		if loc := mcp.WindowsZone(k); loc != time.Local {
+			t.Errorf("%s: zone %v, want the process's time.Local", name, loc)
+		}
 	}
 }

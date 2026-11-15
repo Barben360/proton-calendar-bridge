@@ -37,3 +37,6 @@ func SetRenameHook(f func(from, to string) error) (restore func()) {
 	renameHook = f
 	return func() { renameHook = old }
 }
+
+// ForeignOS exposes foreignOS.
+func ForeignOS(sealer, goos string) string { return foreignOS(sealer, goos) }

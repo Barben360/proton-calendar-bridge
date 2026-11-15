@@ -548,9 +548,6 @@ func serveWaiting(t *testing.T, r *rig) *serveRun {
 // account address in state want, and returns that account's status.
 func waitForServe(t *testing.T, r *rig, address string, want service.ServeState) ctl.AccountStatus {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	deadline := time.Now().Add(30 * time.Second)
 	var last ctl.Status
 	for {
@@ -580,9 +577,6 @@ const noDaemonNote = "Note: no pcb daemon is running; this command runs on its o
 // account the login adds is served at once.
 func TestLoginGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	s := serveWaiting(t, r)
 	noInProcess(t, r)
@@ -608,9 +602,6 @@ func TestLoginGoesThroughTheDaemon(t *testing.T) {
 // back to waiting for a login (ruling M5-R8).
 func TestLogoutGoesThroughTheDaemon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive") // no daemon yet: in process
 	serveWaiting(t, r)
@@ -829,10 +820,17 @@ func TestCommandsPrintTheServiceWarningsOnStderr(t *testing.T) {
 
 // createState runs a first command, which creates the state: with no
 // session bus it warns once on stderr that auto chose the key file, and
-// says why (live 2026-11-13, F1).
+// says why (live 2026-11-13, F1). On Windows auto has one outcome, DPAPI:
+// nothing to warn about.
 func createState(t *testing.T, r *rig) {
 	t.Helper()
 	r.want(exitcode.OK, "status")
+	if runtime.GOOS == "windows" {
+		if strings.Contains(r.errb.String(), "sealer chosen") {
+			t.Fatalf("the first command's stderr %q warns about the sealer: DPAPI is no fallback", r.errb.String())
+		}
+		return
+	}
 	if want := "Warning: sealer chosen (sealer: keyfile, backend: auto, reason: no Secret Service answered on the session bus)"; !strings.Contains(r.errb.String(), want) {
 		t.Fatalf("the first command's stderr %q lacks %q", r.errb.String(), want)
 	}

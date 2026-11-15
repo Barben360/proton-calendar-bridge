@@ -186,6 +186,8 @@ func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) strin
 		return "keyring locked"
 	case as.Login.Secrets == service.SecretsKeyringUnavailable:
 		return "keyring unavailable"
+	case as.Login.Secrets == service.SecretsKeyUnavailable:
+		return "key unavailable"
 	}
 	switch as.Phase {
 	case "needs-login", "logged-out":

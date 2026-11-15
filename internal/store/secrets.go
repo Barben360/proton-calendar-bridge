@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -181,7 +182,7 @@ func (s *Secrets) load() (accounts map[string]Account, gen, mirror uint64, err e
 // open reads and opens the file with no rollback check; a missing file
 // (found false) is an empty store of generation 0.
 func (s *Secrets) open() (accounts map[string]Account, gen uint64, found bool, err error) {
-	raw, err := os.ReadFile(s.Path)
+	raw, err := atomicfile.ReadFile(s.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]Account{}, 0, false, nil
 	}
@@ -235,7 +236,7 @@ func (s *Secrets) decode(raw []byte) (map[string]Account, uint64, error) {
 // writes nothing, so a lost key can never turn into an overwrite. If fn fails
 // nothing is written either.
 func (s *Secrets) Update(ctx context.Context, fn func(accounts map[string]Account) error) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Dir(s.Path)); err != nil {
 		return err
 	}
 	unlock, err := filelock.Lock(ctx, s.LockPath)
@@ -311,10 +312,20 @@ func stateWriteCause(err error) string {
 		return ErrNewerState.Error()
 	case errors.Is(err, ErrGenerationOutOfRange):
 		return "state.json holds a secrets generation out of range"
+	case errors.As(err, &pe) && isDir(pe.Path):
+		// Windows refuses to open a directory as a file with "Access is
+		// denied", which would send a person after permissions.
+		return "state.json or its lock cannot be used: is a directory"
 	case errors.As(err, &pe):
 		return "state.json or its lock cannot be used: " + pe.Err.Error()
 	}
 	return "state.json cannot be read or written"
+}
+
+// isDir reports whether path is a directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Wipe removes the sealed file under the store lock (a logout, or a store
@@ -324,7 +335,7 @@ func stateWriteCause(err error) string {
 // an error): a caller that rewrites state.json from scratch seeds it with
 // next, since the mirror write fails when state.json is unreadable.
 func (s *Secrets) Wipe(ctx context.Context) (next uint64, err error) {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Dir(s.Path)); err != nil {
 		return 0, err
 	}
 	unlock, err := filelock.Lock(ctx, s.LockPath)

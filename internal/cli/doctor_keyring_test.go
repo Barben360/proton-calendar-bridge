@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -109,6 +110,9 @@ func doctorResults(t *testing.T, r *rig) map[string]doctorResult {
 // keyringRig is a rig logged in on a state the desktop keyring seals.
 func keyringRig(t *testing.T) *rig {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the desktop keyring (secret-service) is Linux's sealer: [secrets] backend secret-service is a config fault on Windows (config's TestCheckBackend)")
+	}
 	r := newRig(t, &protontest.Options{})
 	r.keyring = &memKeyring{}
 	toml := "[proton]\nbase_url = \"" + r.f.URL + "\"\n[secrets]\nbackend = \"secret-service\"\n"
@@ -163,6 +167,9 @@ func TestDoctorWarnsLockedKeyring(t *testing.T) {
 }
 
 func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("auto never falls back to the key file on Windows (DPAPI: service's TestNewStateOnWindowsSealsWithDPAPI); doctor's choice of key check there is doctor's TestChecksOnWindows and TestChecksOnWindowsWithTheKeyFileBackend")
+	}
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	r.want(exitcode.OK, "login", "--non-interactive")
@@ -184,6 +191,9 @@ func TestDoctorReportsAKeyFileStateAsKeyFile(t *testing.T) {
 // set and a pcb user unit installed when unit is.
 func desktopRig(t *testing.T, ui, unit bool) *rig {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fakes XDG desktop entries and a systemd unit under a host root joined with drive paths; Windows has neither")
+	}
 	r := stubRig(t, &stubAPI{})
 	r.hostRoot = t.TempDir()
 	data := t.TempDir()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -386,6 +387,9 @@ func TestParseExisting(t *testing.T) {
 
 func writeScript(t *testing.T, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in for the proton-cal helper is a /bin/sh script, and that helper is Unix-only")
+	}
 	p := filepath.Join(t.TempDir(), "fake.sh")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
 		t.Fatal(err)

@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -262,7 +262,7 @@ func (l *Local) dropPending(ctx context.Context) {
 // waited for Proton's challenge, so a TooSoon is waited out instead of
 // refused; the returned time is the one the attempt is stamped with.
 func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), time.Time, error) {
-	if err := os.MkdirAll(l.o.GuardDir, 0o700); err != nil {
+	if err := acl.MkdirAll(l.o.GuardDir); err != nil {
 		return nil, now, acquireError(err, l.o.GuardDir)
 	}
 	release, err := loginguard.Acquire(l.o.GuardDir, loginguard.MinInterval, now, l.log())

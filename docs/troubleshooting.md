@@ -8,7 +8,7 @@ What to do when pcb stops, refuses or misbehaves. Each entry gives the symptom, 
 pcb doctor
 ```
 
-`pcb doctor` runs every check (service, daemon, listener, certificate, clients, sealer, key file) and prints the fix for each failure. It exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. `pcb status` shows the live state and the alerts, each with its fix. In a stopped container, run it through `docker compose run` ([container](container.md#when-the-container-stops-or-restarts-in-a-loop)).
+`pcb doctor` runs every check (service, daemon, listener, certificate, clients, sealer, key file; on Windows also the access lists, `elevated`, the DPAPI key, the time zone and "Start at login") and prints the fix for each failure. It exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. `pcb status` shows the live state and the alerts, each with its fix. In a stopped container, run it through `docker compose run` ([container](container.md#when-the-container-stops-or-restarts-in-a-loop)).
 
 ## Index
 
@@ -33,6 +33,7 @@ pcb doctor
 | The container restarts in a loop | A fault exit 10 (repair) or 20 (may pass); Docker restarts after both | Stop it, `docker compose run --rm --no-deps --entrypoint pcb pcb doctor`, start it. [Container](container.md#when-the-container-stops-or-restarts-in-a-loop) |
 | `pcb serve` exits 20 in the container | `/data` not writable by 65532, or `config`/`state` not 0700 | [Prepare /data](container.md#prepare-data) |
 | No tray icon on GNOME | The AppIndicator extension is missing or off | Install and enable AppIndicator and KStatusNotifierItem Support. [Desktop](desktop.md#no-tray-icon-on-gnome) |
+| `pcb-ui` on Windows exits 10, `pcb-ui needs OpenGL 2.0` | No OpenGL 2.0: a VM without 3D acceleration, a remote desktop session | Mesa's software `opengl32.dll` beside `pcb-ui.exe`, and `GALLIUM_DRIVER=llvmpipe`. [Below](#pcb-ui-needs-opengl-20) |
 | `pcb-ui` shows a dialog and exits 20 | `pcb serve` (the service, the container) already serves this state | `pcb service stop` first, or use one of them. [One server per state](desktop.md#one-server-per-state-directory) |
 | `pcb is already serving (pid N, kind K)`, exit 20 | Another `pcb serve`, `pcb-ui` (`ui`) or agent session (`mcp`) holds the state | Stop it, or let commands go through it. [Thunderbird](thunderbird.md#what-pcb-serve-does) |
 | `pcb-ui` says `bridge stopped: <error>` | An error in `config.toml` after "Restart bridge" | Fix the file, press "Restart bridge". [Desktop](desktop.md#edit-the-configuration) |
@@ -42,4 +43,30 @@ pcb doctor
 | `pcb install` refuses, exit 10 | A path with a space, `%`, `$` or a non-ASCII letter | [Service](service.md#when-pcb-install-refuses-a-path) |
 | A command run as root refuses, `sudo -u pcb pcb ...` | The state belongs to the `pcb` user | Run it as `pcb`. [System service](service.md#run-it-as-a-system-service) |
 | pcb refuses to start, `account files of an older pcb are beside the per-account layout` | An older binary was run after the upgrade | Remove those files or move the state directory aside. [Upgrade](install.md#no-downgrade-after-the-multi-account-layout) |
-| `pcb login`, `sync` or `serve` exit 20 on Windows | No file lock or control socket off Unix | Run pcb on Linux. [Platforms](install.md#macos-and-windows) |
+| Windows: "Windows protected your PC" at the first start | SmartScreen: the binaries are not signed yet | More info, then Run anyway. [Windows](install.md#windows) |
+| Windows: `pcb install` or `pcb service` exits 20, `no service on Windows` | There is no Windows service | Use `pcb-ui`: Settings, "Start at login" runs it at each login. [Desktop](desktop.md#on-windows) |
+| Windows: exit 10, `DPAPI could not protect the sealing key for this Windows user` at the first login | Windows signed you in without your password (over SSH with a key, for example), so it cannot protect a new key | Sign in to Windows once with your password, then retry; or set `[secrets] backend = "keyfile"` and move the state directory aside before the next `pcb login`. [Security](security.md#on-windows-dpapi) |
+| Windows: `key-unavailable`; exit 20, `DPAPI could not unprotect the sealing key for this Windows user` | Windows cannot decrypt the sealing key in this session: a sign-in without your password; also another Windows account's key, or a profile reset | Sign in to Windows once with your password, then retry. Do not log out: the stored session is intact. If it stays after a password sign-in, the key is lost for good: `pcb logout`, then `pcb login`. [Security](security.md#on-windows-dpapi) |
+| Windows: exit 10, `the stored secrets cannot be opened with the key file …secrets.key.dpapi`; `pcb doctor` says the key `is damaged or not pcb's` | The DPAPI key file was damaged, replaced, or protected for the whole machine instead of your account | Restore it from a backup together with `secrets.sealed`, or `pcb logout` then `pcb login`. [Security](security.md#on-windows-dpapi) |
+| Exit 10, `the state in <dir> was created on Windows (sealer dpapi)` (or `on Linux`) | A state directory copied between systems: a DPAPI key opens on Windows only, a desktop keyring on Linux only | Use it on that system, or move the directory aside and `pcb login`. [Security](security.md#a-state-moved-between-systems) |
+| Windows: exit 10, `its access list … lets <account> in` | Another Windows account may read a file or directory of pcb (a folder made in Explorer often lets in several: all are listed) | `pcb doctor` prints, for each file or directory, the `icacls` command that removes every such account (PowerShell). [Security](security.md#on-windows-files-and-the-pipe) |
+| Windows: exit 10, `belongs to … Administrators (an elevated pcb made it)` (the group's name is in your Windows language) | pcb was once run as administrator and created that directory | Run pcb elevated again, or take ownership with the `icacls … /setowner` command it prints; then run pcb from a normal terminal |
+| Windows: `pcb doctor` warns `elevated` | pcb runs as administrator | Run it from a normal (not elevated) terminal: what an elevated pcb creates is owned by Administrators |
+| Windows: exit 20, `the control pipe … is owned by another user` | Another Windows account's process holds the name of pcb's control pipe | Run pcb as the account that runs `pcb-ui`; if that is you, find the process that created the pipe, or set `PCB_STATE_DIR` to another directory. [Security](security.md#on-windows-files-and-the-pipe) |
+| Windows: exit 20, `the control pipe is already served` when `pcb-ui` or `pcb serve` starts | Another `pcb-ui` or `pcb serve` of this state, or another account's process, holds the pipe's name | Stop the other one; if none runs, set `PCB_STATE_DIR` to another directory |
+| Windows: exit 20, `the control pipe's name is still held, and nothing answers on it` when `pcb-ui` or `pcb serve` starts | The previous `pcb-ui` or `pcb serve` of this state is still ending (a restart), or a process holds the pipe's name without serving it | Wait a moment and start again; if it persists, another process holds the name: set `PCB_STATE_DIR` to another directory |
+| Windows: `pcb doctor` warns `the Windows time zone … has no IANA name in pcb's table`, or `the Windows time zone cannot be read` | pcb has no IANA name for this Windows time zone, so agents get times with UTC offsets | Set `[mcp] timezone` in `config.toml` to your zone, such as `Europe/Paris` |
+
+## pcb-ui needs OpenGL 2.0
+
+**Symptom.** On Windows, `pcb-ui` does not open. Started from a terminal it prints `Error: pcb-ui needs OpenGL 2.0, which this display does not offer` with the driver's own message and exits 10; started from Explorer or at login it shows the same text in a message box.
+
+**Cause.** `pcb-ui` draws with OpenGL 2.0. Without a graphics driver that provides it, Windows offers only its own OpenGL 1.1: a virtual machine without 3D acceleration, some remote desktop sessions, a machine with only the basic display driver.
+
+**Fix.** Install or enable the graphics driver (in a VM, turn on 3D acceleration). Where that is not possible, Mesa's software renderer works around it:
+
+1. Download a Mesa build for Windows, for example the `mesa-dist-win` release archive `mesa3d-<version>-release-mingw.7z` (its `x64` folder holds `opengl32.dll` and `libgallium_wgl.dll`; the `msvc` archive may have no `opengl32.dll`), and check it against the checksum its release page shows.
+2. Copy `opengl32.dll` and `libgallium_wgl.dll` from `x64` into the folder of `pcb-ui.exe`. Windows loads a DLL beside the program before its own, so only `pcb-ui` uses them.
+3. Make Mesa draw on the processor: `setx GALLIUM_DRIVER llvmpipe` (a variable of your Windows account), then start `pcb-ui` again from Explorer or a new terminal. Without it Mesa may pick its Direct3D 12 driver, and `pcb-ui` then closes as soon as its window opens, with no message.
+
+pcb does not ship Mesa. `pcb` itself needs no OpenGL.

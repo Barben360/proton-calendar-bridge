@@ -12,12 +12,15 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // Checks lists the checks pcb doctor and the desktop app run, with one
 // failing check per directory when the user directories cannot be located:
 // the process checks, then the account checks of each account directory,
-// named by the account (design §4.6). env looks up an environment variable;
+// named by the account (design §4.6), then the checks of the OS
+// (tailChecks: on Linux pcb-ui beside the service, on Windows elevation,
+// the time zone and Start at login). env looks up an environment variable;
 // host is the machine (the pcb-ui.desktop and service checks); keyring is
 // the desktop keyring a state sealed with it uses; live is the running
 // daemon's listener (nil: none).
@@ -25,12 +28,9 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 	checks := []Check{PlatformCheck{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}}
 	dirs, err := paths.Resolve(env)
 	if err != nil {
-		fix := func(override, xdg string) string {
-			return "set HOME, " + override + " or " + xdg + " to an absolute path"
-		}
 		return append(checks,
-			FailedCheck{Label: "config dir", Message: err.Error(), Fix: fix(paths.EnvConfigDir, "XDG_CONFIG_HOME")},
-			FailedCheck{Label: "state dir", Message: err.Error(), Fix: fix(paths.EnvStateDir, "XDG_STATE_HOME")})
+			FailedCheck{Label: "config dir", Message: err.Error(), Fix: dirFix(paths.EnvConfigDir, configBase)},
+			FailedCheck{Label: "state dir", Message: err.Error(), Fix: dirFix(paths.EnvStateDir, stateBase)})
 	}
 	checks = append(checks,
 		DirModeCheck{Label: "config dir", Path: dirs.Config, Want: 0o700},
@@ -48,9 +48,14 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 		}
 		checks = append(checks, sc)
 	}
-	if layout.Sealer == service.SealerSecretService {
+	switch {
+	case layout.Sealer == service.SealerSecretService:
 		checks = append(checks, KeyringCheck{Keyring: keyring})
-	} else { // the key file, also while the layout cannot be read
+	case layout.Sealer == service.SealerDPAPI, layout.Fresh && runtime.GOOS == "windows" && cfg.Secrets.Backend != service.SealerKeyFile:
+		// A fresh state on Windows gets DPAPI's key unless the key file is
+		// asked for (service's chooseSealerOn).
+		checks = append(checks, DPAPIKeyCheck{Path: filepath.Join(dirs.State, seal.DPAPIKeyName), Sealed: anySealed(layout.Accounts), StateDir: dirs.State})
+	default: // the key file, also while the layout cannot be read
 		checks = append(checks, KeyFileCheck{Path: cfg.Secrets.KeyFile})
 	}
 	bind := &Bind{Listen: cfg.CalDAV.Listen} // resolved once for both CalDAV checks
@@ -88,33 +93,17 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 			checks = append(checks, named{prefix: prefix, Check: c})
 		}
 	}
-	return append(checks, DesktopCheck{AppDirs: desktopDirs(env, host), ServiceInstalled: func() bool { return serviceInstalled(host) }})
+	return append(checks, tailChecks(env, host, cfg.MCP.Timezone)...)
 }
 
-// serviceInstalled reports whether a pcb systemd unit is installed, user or
-// system scope (an ambiguous install counts: both are units).
-func serviceInstalled(host install.Host) bool {
-	_, _, err := install.Detect(host)
-	return err == nil || errors.Is(err, install.ErrAmbiguous)
-}
-
-// desktopDirs are the applications directories pcb-ui.desktop is looked
-// for in: $XDG_DATA_HOME/applications (default ~/.local/share/applications),
-// then the two system ones. A custom PREFIX install is not found.
-func desktopDirs(env func(string) string, host install.Host) []string {
-	var dirs []string
-	data := env("XDG_DATA_HOME")
-	if !filepath.IsAbs(data) {
-		if home := env("HOME"); filepath.IsAbs(home) {
-			data = filepath.Join(home, ".local", "share")
-		} else {
-			data = ""
+// anySealed reports whether an account directory holds secrets.sealed.
+func anySealed(accounts []Account) bool {
+	for _, a := range accounts {
+		if exists(filepath.Join(a.Dir, "secrets.sealed")) {
+			return true
 		}
 	}
-	if data != "" {
-		dirs = append(dirs, filepath.Join(data, "applications"))
-	}
-	return append(dirs, host.Path("/usr/local/share/applications"), host.Path("/usr/share/applications"))
+	return false
 }
 
 // warnCheck is a warning found without a check of its own to run.

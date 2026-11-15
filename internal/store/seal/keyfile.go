@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
 const keySize = 32
@@ -65,7 +67,8 @@ func (k *KeyFile) key(create bool) ([]byte, error) {
 	return key, err
 }
 
-// read loads the key, failing closed on loose permissions or a wrong size.
+// read loads the key, failing closed on loose permissions (a mode or an
+// access list letting others in) or a wrong size.
 func (k *KeyFile) read() ([]byte, error) {
 	f, err := os.Open(k.Path)
 	if err != nil {
@@ -76,8 +79,8 @@ func (k *KeyFile) read() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, &KeyModeError{Path: k.Path, Mode: info.Mode().Perm()}
+	if err := checkKeyAccess(k.Path, info); err != nil {
+		return nil, err
 	}
 	key := make([]byte, keySize+1)
 	n, err := f.Read(key)
@@ -90,25 +93,40 @@ func (k *KeyFile) read() ([]byte, error) {
 	return key[:keySize], nil
 }
 
-// create writes a new random key unless one appeared meanwhile. The key is
-// written to a private temporary file and hard linked into place, so a
-// concurrent reader never sees a partial key and the first writer wins.
+// create writes a new random key unless one appeared meanwhile (createOnce).
 func (k *KeyFile) create() error {
-	dir := filepath.Dir(k.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	key := make([]byte, keySize)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("random key: %w", err)
+	}
+	defer clear(key)
+	return createOnce(k.Path, key)
+}
+
+// createOnce writes data, a new key (KeyFile's raw, DPAPI's protected), to
+// path unless a file is there already: the first creator wins and a later
+// one keeps the first's. The directory is made private (acl.MkdirAll) and
+// must stay so (checkKeyDir: on Windows the key takes its access list).
+// data goes to a private temporary file (atomicfile.KeyPrefix) hard linked
+// into place, so a concurrent reader never sees a partial key; without hard
+// links the final path is created exclusively, then written.
+func createOnce(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := acl.MkdirAll(dir); err != nil {
+		if derr := checkKeyDir(dir); derr != nil { // made meanwhile, not as pcb makes it
+			return derr
+		}
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".key-*")
+	if err := checkKeyDir(dir); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, atomicfile.KeyPrefix+"*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name()) //nolint:errcheck // the key lives on through the link
-	key := make([]byte, keySize)
-	if _, err := rand.Read(key); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("random key: %w", err)
-	}
-	if _, err := tmp.Write(key); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -119,35 +137,36 @@ func (k *KeyFile) create() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	err = link(tmp.Name(), k.Path)
+	err = link(tmp.Name(), path)
 	switch {
 	case err == nil:
-		syncDir(dir)
+		atomicfile.SyncDir(dir)
 	case errors.Is(err, fs.ErrExist):
 		err = nil // another writer won: its key stands
 	case noHardLinks(err):
-		err = k.createExclusive(dir, key)
+		err = createInPlace(dir, path, data)
 	default:
-		return fmt.Errorf("creating key file %s: %w", k.Path, err)
+		return fmt.Errorf("creating key file %s: %w", path, err)
 	}
 	if err != nil {
-		return fmt.Errorf("creating key file %s: %w", k.Path, err)
+		return fmt.Errorf("creating key file %s: %w", path, err)
 	}
 	return nil
 }
 
-// createExclusive is the fallback for filesystems without hard links: the
-// final path is created exclusively, then written. A reader that wins the
-// race sees a short file, which read refuses by its exact size.
-func (k *KeyFile) createExclusive(dir string, key []byte) error {
-	f, err := os.OpenFile(k.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+// createInPlace is createOnce's fallback for filesystems without hard
+// links: path is created exclusively, then written. A reader that wins the
+// race sees a short file, which the readers refuse (KeyFile by its exact
+// size, DPAPI as a blob it cannot unprotect).
+func createInPlace(dir, path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(key); err != nil {
+	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -158,7 +177,7 @@ func (k *KeyFile) createExclusive(dir string, key []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	syncDir(dir)
+	atomicfile.SyncDir(dir)
 	return nil
 }
 
@@ -173,12 +192,4 @@ func noHardLinks(err error) bool {
 		}
 	}
 	return false
-}
-
-// syncDir fsyncs a directory, best effort.
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
 }

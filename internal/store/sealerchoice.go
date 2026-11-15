@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -34,7 +33,7 @@ func WriteSealerChoice(stateDir string, c SealerChoice) error {
 // ReadSealerChoice is the choice recorded in stateDir; false when there is
 // none or it cannot be read (it only explains, nothing depends on it).
 func ReadSealerChoice(stateDir string) (SealerChoice, bool) {
-	raw, err := os.ReadFile(filepath.Join(stateDir, sealerChoiceName))
+	raw, err := atomicfile.ReadFile(filepath.Join(stateDir, sealerChoiceName))
 	if err != nil {
 		return SealerChoice{}, false
 	}

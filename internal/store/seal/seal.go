@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 )
 
 // Sealer seals and opens secrets. Implementations never put the key or the
@@ -35,18 +37,37 @@ var (
 	// ErrNoService means no Secret Service answers on the session bus (or
 	// there is no session bus): the desktop keyring cannot be used.
 	ErrNoService = errors.New("no Secret Service answers on the session bus")
-	// ErrKeyMode means the key file's mode lets other users in: it is
-	// refused, readable or not (fails closed). The error is a *KeyModeError.
+	// ErrKeyMode means the key file's mode (on Windows, its access list) lets
+	// other users in: it is refused, readable or not (fails closed). The
+	// error is a *KeyModeError.
 	ErrKeyMode = errors.New("the key file is accessible by others")
 )
 
-// KeyModeError is a key file refused for its mode.
+// KeyModeError is a key file refused for its mode, or on Windows for its
+// access list.
 type KeyModeError struct {
 	Path string
-	Mode fs.FileMode
+	Mode fs.FileMode // the refused mode (Unix)
+	// Open is acl.Check's refusal of the access list (Windows): the accounts
+	// it lets in; nil on Unix and for an owner refusal.
+	Open *acl.OpenError
+	// Dir is set when Path is the directory a new key file would be made in
+	// (Windows: the key would take its access list); Owner then names the
+	// account owning it when that, not Open, is the refusal.
+	Dir   bool
+	Owner string
 }
 
 func (e *KeyModeError) Error() string {
+	switch {
+	case e.Dir && e.Owner != "":
+		return "key file directory " + e.Path + " belongs to " + e.Owner + ": pcb refuses to make a key there. Fix: run pcb doctor"
+	case e.Dir && e.Open != nil:
+		return "key file directory " + e.Path + ": its access list lets " + e.Open.Who() + " in: pcb refuses to make a key there. Fix: run pcb doctor"
+	}
+	if e.Open != nil {
+		return "key file " + e.Path + ": its access list lets " + e.Open.Who() + " in: pcb refuses it. Fix: run pcb doctor"
+	}
 	return fmt.Sprintf("key file %s is accessible by others (mode %04o). Fix: chmod 600 %s", e.Path, e.Mode, e.Path)
 }
 

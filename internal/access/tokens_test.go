@@ -11,13 +11,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 )
 
 func newTokenStore(t *testing.T) (*access.TokenStore, *clock, string) {
@@ -335,21 +335,10 @@ func TestTokenFileStrictDecoding(t *testing.T) {
 
 func TestTokenFileMode0600(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
-	}
 	s, _, dir := newTokenStore(t)
 	addToken(t, s, access.Token{Name: "claude", Caps: []string{"read"}})
-	fi, err := os.Stat(filepath.Join(dir, "mcp-tokens.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
-	}
-	if di, err := os.Stat(dir); err != nil || di.Mode().Perm() != 0o700 {
-		t.Errorf("directory mode = %v, %v; want 0700", di.Mode().Perm(), err)
-	}
+	acltest.WantPrivate(t, filepath.Join(dir, "mcp-tokens.json"), 0o600)
+	acltest.WantPrivate(t, dir, 0o700)
 }
 
 func TestTokenListEmptyWithoutAFile(t *testing.T) {

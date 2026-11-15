@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
@@ -189,7 +192,7 @@ func (a *hubAccount) retire(before func() error) (gone bool, err error) {
 // root's layout.lock and sync.lock, both taken without waiting: an M5 pcb
 // holding sync.lock is Blocked (ruling R2: with the layout in place neither
 // is touched). A new state (no layout.json, no account, no legacy file, no
-// interrupted migration) instead gets its sealer chosen (chooseSealer)
+// interrupted migration) instead gets its sealer chosen (chooseSealerOn)
 // and recorded in layout.json under the same locks; an existing layout is
 // never probed, and o.Sealer, when set, wins. It removes the pending adds
 // older than pendingExpiry and the abandoned adds older than abandonedAge,
@@ -207,16 +210,26 @@ func OpenHub(o HubOptions) (*Hub, error) {
 	}
 	root := base.Dirs.State
 	base.GuardDir = root
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	if err := acl.MkdirAll(root); err != nil {
+		if cerr := checkStateRoot(root); cerr != nil { // made meanwhile, not as pcb makes it
+			return nil, cerr
+		}
 		return nil, blocked("cannot create the state directory "+root, "make sure its parent directory is writable by this user")
 	}
+	// Windows: the files written here take its access list.
+	if err := checkStateRoot(root); err != nil {
+		return nil, err
+	}
+	// A crash while a DPAPI key was being created left its temporary file
+	// (a protected key) here; the accounts' own are their Local's.
+	atomicfile.RemoveStale(root, base.Now(), atomicfile.KeyPrefix)
 	kr := o.Keyring
 	if kr == nil {
 		kr = seal.DBusKeyring("")
 	}
 	var choose func() (string, string, error)
 	if base.Sealer == nil {
-		choose = func() (string, string, error) { return chooseSealer(base.Config.Secrets.Backend, kr) }
+		choose = func() (string, string, error) { return chooseSealerOn(runtime.GOOS, base.Config.Secrets.Backend, kr) }
 	}
 	chosen := func(name, reason string) {
 		log := base.Logger
@@ -332,14 +345,19 @@ func newState(info store.LayoutInfo) bool {
 // answer before it counts as absent.
 const ProbeTimeout = 2 * time.Second
 
-// chooseSealer is the sealer a new state records, by [secrets] backend:
-// keyfile, secret-service (refused, exit 10, when the keyring cannot be
-// used) or auto (secret-service when the keyring answers within
+// chooseSealerOn is the sealer a new state records on goos (a
+// runtime.GOOS), by [secrets] backend. On Windows: keyfile, else dpapi (the
+// config refuses secret-service there), the keyring never probed.
+// Elsewhere: keyfile, secret-service (refused, exit 10, when the keyring
+// cannot be used) or auto (secret-service when the keyring answers within
 // ProbeTimeout and is unlocked, else keyfile). reason is why auto fell back
 // to the key file ("" otherwise).
-func chooseSealer(backend string, kr Keyring) (name, reason string, err error) {
+func chooseSealerOn(goos, backend string, kr Keyring) (name, reason string, err error) {
 	if backend == "keyfile" {
 		return SealerKeyFile, "", nil
+	}
+	if goos == "windows" {
+		return SealerDPAPI, "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
 	defer cancel()
@@ -382,18 +400,21 @@ func logSealerChoice(log *slog.Logger, root, backend, name, reason string, at ti
 }
 
 // NewSealer is the sealer layout.json names for the state root: the key
-// file's, or the desktop keyring's with its one key for the whole root
-// (its absolute path names the keyring item). pcb doctor builds the
-// sealer through it too.
+// file's, DPAPI's with its one key in the root (seal.DPAPIKeyName), or the
+// desktop keyring's with its one key for the whole root (its absolute path
+// names the keyring item). pcb doctor builds the sealer through it too.
 func NewSealer(root, name, keyFile string, kr Keyring) (seal.Sealer, error) {
-	if name != SealerSecretService {
-		return &seal.KeyFile{Path: keyFile}, nil
+	switch name {
+	case SealerDPAPI:
+		return &seal.DPAPI{Path: filepath.Join(root, seal.DPAPIKeyName)}, nil
+	case SealerSecretService:
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
+		}
+		return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return nil, blocked("cannot resolve the state directory "+root, "give an absolute state directory")
-	}
-	return &seal.SecretService{Keyring: kr, StateDir: abs}, nil
+	return &seal.KeyFile{Path: keyFile}, nil
 }
 
 // DeleteSealingKey deletes the desktop keyring item ("pcb sealing key") of
@@ -807,8 +828,8 @@ func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) 
 	return res, err
 }
 
-// Sealer is the name of what seals the state's secrets: SealerKeyFile or
-// SealerSecretService.
+// Sealer is the name of what seals the state's secrets: SealerKeyFile,
+// SealerSecretService or SealerDPAPI.
 func (h *Hub) Sealer() string { return h.o.Sealer.Name() }
 
 // log is the Hub's logger (Options.Logger), or one that drops everything.
@@ -967,10 +988,10 @@ func (h *Hub) add() (*hubAccount, error) {
 		return nil, blocked("cannot draw a local account ID", "run the command again")
 	}
 	dir := store.AccountDir(h.root, id)
-	if err := os.MkdirAll(store.AccountsDir(h.root), 0o700); err != nil {
+	if err := acl.MkdirAll(store.AccountsDir(h.root)); err != nil {
 		return nil, blocked("cannot create "+store.AccountsDir(h.root), "make sure "+h.root+" is writable by this user")
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := acl.Mkdir(dir); err != nil {
 		return nil, blocked("cannot create the account directory "+dir, "make sure "+h.root+" is writable by this user")
 	}
 	l, err := h.newLocal(dir)

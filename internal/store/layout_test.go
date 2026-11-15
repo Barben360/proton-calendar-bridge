@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -145,12 +147,8 @@ func checkMigrated(t *testing.T, root string, before map[string]string, id strin
 	}
 	delete(got, "layout.json")
 	sameTree(t, got, want)
-	if runtime.GOOS != "windows" {
-		for _, dir := range []string{store.AccountsDir(root), store.AccountDir(root, id)} {
-			if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
-				t.Errorf("%s: %v, %v; want mode 0700", dir, info, err)
-			}
-		}
+	for _, dir := range []string{store.AccountsDir(root), store.AccountDir(root, id)} {
+		acltest.WantPrivate(t, dir, 0o700)
 	}
 }
 
@@ -182,11 +180,7 @@ func TestFreshStateHasNoLayout(t *testing.T) {
 	if v := layoutVersion(t, root); v != 2 {
 		t.Errorf("layout.json version %d", v)
 	}
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(store.AccountsDir(root)); err != nil || info.Mode().Perm() != 0o700 {
-			t.Errorf("accounts/: %v, %v; want mode 0700", info, err)
-		}
-	}
+	acltest.WantPrivate(t, store.AccountsDir(root), 0o700)
 	if info, err := store.ReadLayout(root); err != nil || info.Version != 2 || len(info.Accounts) != 0 {
 		t.Fatalf("ReadLayout after = %+v, %v", info, err)
 	}
@@ -294,7 +288,7 @@ func TestMigrationResumesAfterEachStep(t *testing.T) {
 	root := t.TempDir()
 	writeM5State(t, root)
 	before := tree(t, root)
-	if err := os.MkdirAll(filepath.Join(store.AccountsDir(root), id+".migrating"), 0o700); err != nil {
+	if err := acl.MkdirAll(filepath.Join(store.AccountsDir(root), id+".migrating")); err != nil { // as Migrate makes it
 		t.Fatal(err)
 	}
 	if got, migrated, err := store.Migrate(root, noNewID(t)); err != nil || !migrated || got != id {
@@ -595,27 +589,70 @@ func TestLayoutWithoutSealerIsKeyFile(t *testing.T) {
 	if err != nil || info.Version != 2 || info.Sealer != "keyfile" {
 		t.Fatalf("ReadLayout(M6 layout) = %+v, %v; want sealer keyfile", info, err)
 	}
-	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2,"sealer":"secret-service"}`))
-	if info, err := store.ReadLayout(root); err != nil || info.Sealer != "secret-service" {
-		t.Fatalf("ReadLayout(secret-service) = %+v, %v", info, err)
+	writeFile(t, filepath.Join(root, "layout.json"), []byte(`{"version":2,"sealer":"`+nativeSealer+`"}`))
+	if info, err := store.ReadLayout(root); err != nil || info.Sealer != nativeSealer {
+		t.Fatalf("ReadLayout(%s) = %+v, %v", nativeSealer, info, err)
+	}
+}
+
+// nativeSealer is the sealer other than the key file that this system's
+// pcb has: DPAPI on Windows, the desktop keyring elsewhere.
+var nativeSealer = map[bool]string{true: "dpapi", false: "secret-service"}[runtime.GOOS == "windows"]
+
+// A state sealed by another system's pcb (a dpapi state copied off
+// Windows, a secret-service one onto it) is an unknown sealer here, which
+// names that system; CreateLayout refuses to record one.
+func TestForeignSealerIsUnknownHere(t *testing.T) {
+	foreign, want := "dpapi", "Windows"
+	if runtime.GOOS == "windows" {
+		foreign, want = "secret-service", "Linux"
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "layout.json")
+	writeFile(t, path, []byte(`{"version":2,"sealer":"`+foreign+`"}`))
+	_, err := store.ReadLayout(root)
+	var fe *store.ForeignSealerError
+	if !errors.Is(err, store.ErrUnknownSealer) || !errors.As(err, &fe) || fe.OS != want || fe.Sealer != foreign || fe.Path != path {
+		t.Fatalf("ReadLayout = %#v (%v); want a ForeignSealerError naming %s", err, err, want)
+	}
+	if msg := err.Error(); msg != path+": sealer \""+foreign+"\" belongs to pcb on "+want {
+		t.Errorf("message = %q", msg)
+	}
+	if _, _, err := store.Migrate(root, noNewID(t)); !errors.As(err, &fe) {
+		t.Errorf("Migrate = %v; want a ForeignSealerError", err)
+	}
+	fresh := t.TempDir()
+	if err := store.CreateLayout(fresh, foreign); !errors.As(err, &fe) || fe.OS != want {
+		t.Errorf("CreateLayout(%s) = %v; want a ForeignSealerError", foreign, err)
+	}
+	if got := tree(t, fresh); len(got) != 0 {
+		t.Errorf("a refused CreateLayout wrote %v", got)
+	}
+	// A sealer no pcb has stays a plain unknown sealer.
+	writeFile(t, path, []byte(`{"version":2,"sealer":"tpm"}`))
+	if _, err := store.ReadLayout(root); !errors.Is(err, store.ErrUnknownSealer) || errors.As(err, &fe) {
+		t.Errorf("ReadLayout(tpm) = %v; want ErrUnknownSealer, no system named", err)
+	}
+	for _, tc := range []struct{ sealer, goos, want string }{
+		{"dpapi", "linux", "Windows"}, {"dpapi", "darwin", "Windows"}, {"dpapi", "windows", ""},
+		{"secret-service", "windows", "Linux"}, {"secret-service", "linux", ""}, {"secret-service", "darwin", ""},
+		{"keyfile", "windows", ""}, {"keyfile", "linux", ""}, {"tpm", "windows", ""}, {"tpm", "linux", ""},
+	} {
+		if got := store.ForeignOS(tc.sealer, tc.goos); got != tc.want {
+			t.Errorf("foreignOS(%q, %q) = %q, want %q", tc.sealer, tc.goos, got, tc.want)
+		}
 	}
 }
 
 func TestCreateLayoutWritesTheLayoutAndAccounts(t *testing.T) {
 	root := t.TempDir()
-	if err := store.CreateLayout(root, "secret-service"); err != nil {
+	if err := store.CreateLayout(root, nativeSealer); err != nil {
 		t.Fatal(err)
 	}
 	sameTree(t, tree(t, root), map[string]string{
-		"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"secret-service\"}\n"})
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(store.AccountsDir(root)); err != nil || info.Mode().Perm() != 0o700 {
-			t.Errorf("accounts/: %v, %v; want mode 0700", info, err)
-		}
-		if info, err := os.Stat(filepath.Join(root, "layout.json")); err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("layout.json: %v, %v; want mode 0600", info, err)
-		}
-	}
+		"accounts": isDir, "layout.json": "{\"version\":2,\"sealer\":\"" + nativeSealer + "\"}\n"})
+	acltest.WantPrivate(t, store.AccountsDir(root), 0o700)
+	acltest.WantPrivate(t, filepath.Join(root, "layout.json"), 0o600)
 	var synced []string
 	defer store.OnSyncDir(func(dir string) { synced = append(synced, dir) })()
 	root2 := t.TempDir()
@@ -630,20 +667,20 @@ func TestCreateLayoutWritesTheLayoutAndAccounts(t *testing.T) {
 	if id, migrated, err := store.Migrate(root, noNewID(t)); err != nil || migrated || id != "" {
 		t.Fatalf("Migrate after CreateLayout = %q, %v, %v", id, migrated, err)
 	}
-	if got := layoutSealer(t, root); got != "secret-service" {
+	if got := layoutSealer(t, root); got != nativeSealer {
 		t.Errorf("sealer after Migrate = %q", got)
 	}
 }
 
 func TestCreateLayoutNeverOverwrites(t *testing.T) {
 	root := t.TempDir()
-	if err := store.CreateLayout(root, "secret-service"); err != nil {
+	if err := store.CreateLayout(root, nativeSealer); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateLayout(root, "keyfile"); err != nil {
 		t.Fatalf("second CreateLayout = %v; a racing creator is harmless", err)
 	}
-	if got := layoutSealer(t, root); got != "secret-service" {
+	if got := layoutSealer(t, root); got != nativeSealer {
 		t.Fatalf("sealer = %q; the first creator's must stay", got)
 	}
 }
@@ -714,13 +751,7 @@ func TestSealerChoiceRoundTrip(t *testing.T) {
 	if !ok || got != want {
 		t.Fatalf("read %+v, %v; want %+v", got, ok, want)
 	}
-	fi, err := os.Stat(filepath.Join(dir, "sealer-choice.json"))
-	if err != nil {
-		t.Fatalf("sealer-choice.json: %v", err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("sealer-choice.json: mode %v, want 0600", fi.Mode().Perm())
-	}
+	acltest.WantPrivate(t, filepath.Join(dir, "sealer-choice.json"), 0o600)
 	if err := os.WriteFile(filepath.Join(dir, "sealer-choice.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}

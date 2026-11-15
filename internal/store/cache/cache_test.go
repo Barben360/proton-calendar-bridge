@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 )
 
 func sha32(s string) string {
@@ -87,18 +89,8 @@ func TestOpenCreates0600WAL(t *testing.T) {
 	if err := c.db.QueryRowContext(bg, `PRAGMA busy_timeout`).Scan(&busy); err != nil || busy != 5000 {
 		t.Errorf("busy_timeout = %d, %v", busy, err)
 	}
-	if runtime.GOOS == "windows" {
-		return
-	}
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		fi, err := os.Stat(p)
-		if err != nil {
-			t.Errorf("%s: %v", p, err)
-			continue
-		}
-		if fi.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %o, want 600", p, fi.Mode().Perm())
-		}
+		acltest.WantPrivate(t, p, 0o600)
 	}
 }
 
@@ -964,5 +956,18 @@ func TestTombstonesCarryTheUIDAndChangesReadsThem(t *testing.T) {
 	}
 	if none, err := c.Changes(bg, "cal", seq(t, c)); err != nil || len(none) != 0 {
 		t.Errorf("Changes since the head = %+v, %v; want none", none, err)
+	}
+}
+
+// A Windows drive path must not read as the URI's authority (file:C:/x
+// fails with "invalid uri authority"): it gets the leading slash.
+func TestURIPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/var/lib/pcb/pcb.db":     "/var/lib/pcb/pcb.db",
+		"C:/Users/a b/pcb/pcb.db": "/C:/Users/a b/pcb/pcb.db",
+	} {
+		if got := uriPath(in); got != want {
+			t.Errorf("uriPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

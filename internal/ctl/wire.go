@@ -1,5 +1,7 @@
 // Package ctl is the control socket (CTL) of pcb serve: JSON over HTTP/1.1
-// on <state>/pcb.sock, internal and versioned under /v2/, and its client.
+// on <state>/pcb.sock (on Windows, a named pipe private to the user, named
+// after the state directory), internal and versioned under /v2/, and its
+// client.
 // Every answer is one output.Envelope: 200 when the command succeeds, 422
 // when it fails (its exit code, message and hint), 400, 403, 404, 405 or
 // 413 for a transport error (ruling M5-Rpre1).
@@ -131,14 +133,26 @@ var (
 	ErrUnsafeDir = errors.New("the control socket's directory is open to other users")
 	// ErrNotASocket: a file that is not a socket holds the path.
 	ErrNotASocket = errors.New("a file that is not a socket holds the control socket's path")
-	// ErrUnsupported: no control socket off Unix (ruling M5-P3).
+	// ErrUnsupported: no control socket off Unix and Windows (ruling M5-P3).
 	ErrUnsupported = errors.New("no control socket on this system")
+	// ErrPipeTaken: the control pipe's name is already served on Windows,
+	// by another pcb of the same state or another user's process.
+	ErrPipeTaken = errors.New("the control pipe is already served")
+	// ErrPipeHeld, an ErrPipeTaken: nothing answers on the control pipe's
+	// name, and it stayed held while Listen waited: the previous pcb of
+	// this state still closing it, or a process that holds it without
+	// serving.
+	ErrPipeHeld error = pipeHeld{}
+	// ErrCloseStuck: the control pipe's listener did not close within its
+	// bound (Windows, boundClose): the daemon logs it and stops anyway.
+	ErrCloseStuck = errors.New("the control pipe's listener did not close in time")
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 	// ErrRefused: Dial refuses the control socket: not a socket, another
-	// user's, or answered by another user's process. A person must act; no
-	// retry helps (the doctor's exit 10). The error's text says which.
-	ErrRefused = errors.New("pcb refuses this control socket")
+	// user's, or answered by another user's process (Windows: the pipe,
+	// another user's). A person must act; no retry helps (the doctor's exit
+	// 10). The error's text says which.
+	ErrRefused = errors.New("pcb refuses this " + Channel)
 )
 
 // refusal is a refused control socket: its text is msg, and
@@ -167,3 +181,13 @@ type ShowUIRequest struct {
 type ShowUI struct {
 	Shown bool `json:"shown"`
 }
+
+// pipeHeld is ErrPipeHeld.
+type pipeHeld struct{}
+
+func (pipeHeld) Error() string {
+	return "the control pipe's name is still held, and nothing answers on it"
+}
+
+// Is makes ErrPipeHeld an ErrPipeTaken.
+func (pipeHeld) Is(target error) bool { return target == ErrPipeTaken }

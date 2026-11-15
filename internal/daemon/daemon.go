@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
@@ -51,7 +53,53 @@ const (
 	// drainTimeout bounds the wait for requests in flight when the daemon
 	// stops; what still runs then is cut.
 	drainTimeout = 5 * time.Second
+	// sessionEndDrain is the whole drain when the session ends (logoff,
+	// shutdown, a console closed: Options.SessionEnd): Windows ends the
+	// process about 5 s after the event (spec §5.11). A cut drain loses only
+	// what a crash would: files are replaced atomically and the cache is
+	// SQLite in WAL mode, so the next start recovers.
+	sessionEndDrain = 2 * time.Second
 )
+
+// drain bounds the stops of one Run (the listener's, the control socket's):
+// each waits up to drainTimeout for what is in flight; once ended is closed,
+// before or during them, all end sessionEndDrain after the first began (at
+// once if that is past). A nil ended never closes.
+type drain struct {
+	ended <-chan struct{}
+	once  sync.Once
+	start time.Time
+}
+
+// began is when the first stop began (now, when none has yet).
+func (d *drain) began() time.Time {
+	d.once.Do(func() { d.start = time.Now() })
+	return d.start
+}
+
+// context is the context one stop waits under; cancel releases it.
+func (d *drain) context() (context.Context, context.CancelFunc) {
+	d.began()
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	if d.ended == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.ended:
+		}
+		t := time.NewTimer(time.Until(d.start.Add(sessionEndDrain)))
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+			cancel()
+		}
+	}()
+	return ctx, cancel
+}
 
 // Hub is what the daemon needs of the accounts: *service.Hub.
 type Hub interface {
@@ -98,9 +146,13 @@ type Options struct {
 	// /mcp included, still opens; Ready gets a zero Info.
 	NoListener bool
 	// Cut closing while Run stops ends the stop at once with ErrCut.
-	Cut     <-chan struct{}
-	OnState func(accountID string, s service.ServeState)
-	OnPass  func(accountID string, p service.WatchPass)
+	Cut <-chan struct{}
+	// SessionEnd closed before or while Run stops marks the end of the
+	// session (logoff, shutdown, a console closed): the drain lasts 2 s in
+	// all instead of up to 5 s per stop. nil: never.
+	SessionEnd <-chan struct{}
+	OnState    func(accountID string, s service.ServeState)
+	OnPass     func(accountID string, p service.WatchPass)
 	// Ready is called once the control socket and the CalDAV listener are
 	// bound, before the listener accepts (NoListener: once the control
 	// socket is, with a zero Info).
@@ -140,8 +192,8 @@ func (i Info) AccountURL(localID string) string { return i.Base + service.Accoun
 // holds its locks and found a login to serve (with WaitForLogin: its locks
 // only), the control socket then the CalDAV listener (a refused start binds
 // neither; NoListener: the control socket only). The end of ctx drains the
-// listener for up to 5 s, stops the control socket then Hub.Serve and
-// returns nil. Hub.Serve ending on its
+// listener for up to 5 s (2 s once o.SessionEnd is closed), stops the
+// control socket then Hub.Serve and returns nil. Hub.Serve ending on its
 // own ends Run the same way, with its error; so does a failed listener
 // (Blocked), unless Hub.Serve's error is one a person must act on. Closing
 // o.Cut meanwhile makes Run return at once with ErrCut. The control socket
@@ -161,6 +213,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	cc := o.Config.CalDAV
 	started := time.Now()
+	drained := &drain{ended: o.SessionEnd}
 	// The sync loops outlive ctx until the listener is drained, so the
 	// requests in flight still read their cache handles.
 	syncCtx, stopSync := context.WithCancel(context.WithoutCancel(ctx))
@@ -180,10 +233,15 @@ func Run(ctx context.Context, o Options) error {
 	}()
 	// finish stops Hub.Serve and returns its error over err: a person is
 	// needed, which matters more than a listener that failed meanwhile.
+	// Stopping Hub.Serve after the drain is not bounded (the caller closes
+	// the Hub once Run returns, so the loops must have ended): the log says
+	// how long the whole stop took, the drain included.
 	finish := func(err error) error {
 		return unlessCut(log, o.Cut, func() error {
 			stopSync()
-			if serr := <-synced; serr != nil {
+			serr := <-synced
+			log.Info("daemon stopped", "stop", time.Since(drained.began()).Round(10*time.Millisecond))
+			if serr != nil {
 				return serr
 			}
 			return err
@@ -210,7 +268,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	var published atomic.Pointer[ctl.Listener]
 	stopControl, err := startControl(log, o.Hub, ctl.NewDaemon(o.Kind, o.Dirs.Socket(), o.LogLevel, started), published.Load, o.ShowUI,
-		mcpStatus(o.MCP, remoteMCP), relay)
+		mcpStatus(o.MCP, remoteMCP), relay, drained)
 	if err != nil {
 		return finish(err)
 	}
@@ -299,7 +357,12 @@ func Run(ctx context.Context, o Options) error {
 		result = &exitcode.Error{Code: exitcode.Blocked, Err: causeError("the CalDAV listener failed", err),
 			Hint: "run pcb serve again"}
 	}
-	if err := unlessCut(log, o.Cut, func() error { stopListener(srv, log, drainTimeout); return nil }); err != nil {
+	if err := unlessCut(log, o.Cut, func() error {
+		ctx, cancel := drained.context()
+		defer cancel()
+		stopListener(ctx, srv, log)
+		return nil
+	}); err != nil {
 		return err
 	}
 	return finish(result)
@@ -354,38 +417,54 @@ func (w *wrapped) Error() string { return w.msg }
 func (w *wrapped) Unwrap() error { return w.err }
 
 // startControl serves the control socket of d (d.Socket) on hub and
-// returns what stops it: it closes the socket, which removes it. Off Unix
-// there is no control socket (ruling M5-P3); any other failure to open it
-// is exit 20 with a hint for its cause.
+// returns what stops it: it closes the socket, which removes it, after
+// waiting for the requests in flight under drained. Off Unix
+// and Windows there is no control socket (ruling M5-P3); on Windows it is a
+// named pipe (ctl.Listen). Any other failure to open it is exit 20 with a
+// hint for its cause.
 func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *ctl.Listener, showUI func(account string) error,
-	mcpStatus func() *ctl.MCP, relay http.Handler) (stop func(), err error) {
+	mcpStatus func() *ctl.MCP, relay http.Handler, drained *drain) (stop func(), err error) {
 	ln, err := ctl.Listen(d.Socket)
 	switch {
 	case errors.Is(err, ctl.ErrUnsupported):
 		log.Debug("no control socket on this system")
 		return func() {}, nil
+	case err != nil && onWindows: // no pcb.sock: the pipe of the state directory, which Listen's error names
+		log.Error("the control pipe cannot start", "dir", filepath.Dir(d.Socket), "error", reasonOf(err))
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control pipe of %s: %w", filepath.Dir(d.Socket), err),
+			Hint: controlHint(err, d.Socket)}
 	case err != nil:
 		log.Error("the control socket cannot start", "path", d.Socket, "error", reasonOf(err))
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
+	}
+	what := "control socket"
+	if onWindows {
+		what = "control pipe"
 	}
 	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-			log.Warn("the control socket failed: pcb status shows the offline view", "error", err.Error())
+			log.Warn("the "+what+" failed: pcb status shows the offline view", "error", err.Error())
 		}
 	}()
-	log.Info("control socket started", "path", d.Socket)
+	started := []any{"path", d.Socket}
+	if onWindows {
+		started = []any{"pipe", ln.Addr().String()} // the pipe's name, for the live check
+	}
+	log.Info(what+" started", started...)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			ctx, cancel := drained.context()
 			defer cancel()
-			_ = srv.Shutdown(ctx)
+			if err := srv.Shutdown(ctx); errors.Is(err, ctl.ErrCloseStuck) {
+				log.Warn("the control pipe's listener did not close in time: pcb stops without it", "error", err.Error())
+			}
 			<-done
-			log.Info("control socket stopped")
+			log.Info(what + " stopped")
 		})
 	}, nil
 }
@@ -430,9 +509,20 @@ func controlHint(err error, socket string) string {
 		return "chmod 700 " + dir
 	case errors.Is(err, ctl.ErrNotASocket):
 		return "move " + socket + " away: pcb serve keeps its control socket there"
+	case errors.Is(err, ctl.ErrPipeHeld):
+		return "the previous pcb-ui or pcb serve of this state may still be ending: start again in a moment; if this persists, another process holds the name: set " +
+			paths.EnvStateDir + " to another directory"
+	case errors.Is(err, ctl.ErrPipeTaken):
+		return "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set " +
+			paths.EnvStateDir + " to another directory"
+	case onWindows: // the pipe is named after dir, which holds no socket file
+		return "make sure " + dir + " exists and is this user's (pcb doctor checks it), then start pcb-ui or pcb serve again"
 	}
 	return "make sure " + dir + " is writable by this user"
 }
+
+// onWindows is set on Windows, where the control channel is a named pipe.
+const onWindows = runtime.GOOS == "windows"
 
 // certNotAfter is the end of the listener's certificate, nil without TLS.
 func certNotAfter(conf *tls.Config) *time.Time {
@@ -450,14 +540,13 @@ func certNotAfter(conf *tls.Config) *time.Time {
 	return &t
 }
 
-// stopListener stops accepting, waits up to timeout for the requests in
+// stopListener stops accepting, waits until ctx ends for the requests in
 // flight, then cuts what is left.
-func stopListener(srv *http.Server, log *slog.Logger, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func stopListener(ctx context.Context, srv *http.Server, log *slog.Logger) {
+	start := time.Now()
 	if err := srv.Shutdown(ctx); err != nil {
 		_ = srv.Close()
-		log.Warn("listener stopped, requests still running after the drain were cut", "drain", timeout)
+		log.Warn("listener stopped, requests still running after the drain were cut", "drain", time.Since(start).Round(100*time.Millisecond))
 		return
 	}
 	log.Info("listener stopped")
@@ -504,8 +593,12 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 	default:
 		res, err := tlsutil.SelfSigned(tlsutil.Options{Dir: tlsDir, Hostnames: cc.Hostnames, BindIP: ip})
 		if err != nil {
-			return nil, "", &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot prepare the TLS certificate: %w", err),
-				Hint: "make sure " + tlsDir + " is writable by this user"}
+			code, hint := exitcode.Blocked, "make sure "+tlsDir+" is writable by this user"
+			var open *acl.OpenError
+			if errors.As(err, &open) { // Windows: an access list the person fixes, as pcb doctor says
+				code, hint = exitcode.MustAct, "run pcb doctor for the fix"
+			}
+			return nil, "", &exitcode.Error{Code: code, Err: fmt.Errorf("cannot prepare the TLS certificate: %w", err), Hint: hint}
 		}
 		cert, fingerprint = res.Certificate, res.Fingerprint
 		notAfter := res.Leaf.NotAfter.UTC().Format(time.RFC3339)

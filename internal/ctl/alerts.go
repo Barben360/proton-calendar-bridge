@@ -25,6 +25,7 @@ const (
 	CodeTLSExpired         = "tls-certificate-expired"
 	CodeKeyringLocked      = "keyring-locked"
 	CodeKeyringUnavailable = "keyring-unavailable"
+	CodeKeyUnavailable     = "key-unavailable"
 
 	SeverityError   = "error"
 	SeverityWarning = "warning"
@@ -80,6 +81,13 @@ func Alerts(in AlertInput) []Alert {
 	}
 	if in.Login.Secrets == service.SecretsKeyringUnavailable {
 		add(CodeKeyringUnavailable, SeverityError, "the desktop keyring is not available", service.KeyringUnavailableFix, "")
+	}
+	if in.Login.Secrets == service.SecretsKeyUnavailable {
+		msg := in.Login.SecretsCause
+		if msg == "" {
+			msg = "Windows cannot unprotect the sealing key in this session"
+		}
+		add(CodeKeyUnavailable, SeverityError, msg, service.DPAPIUnprotectFix, "")
 	}
 	if f := in.Login.ClientsFile; f != "" {
 		add(CodeClientsUnreadable, SeverityError, "the CalDAV clients file cannot be loaded: every CalDAV request answers 503",

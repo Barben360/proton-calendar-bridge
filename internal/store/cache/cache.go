@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite" // the "sqlite" driver
@@ -144,6 +145,17 @@ type Cache struct {
 	noPins bool
 }
 
+// uriPath is abs as the path of a file: URI. A Windows drive path gets the
+// leading slash its URI form needs (file:/C:/dir/pcb.db), else C: reads as
+// the authority and SQLite refuses it.
+func uriPath(abs string) string {
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
 // Path is the cache file inside the state directory.
 func Path(stateDir string) string { return filepath.Join(stateDir, "pcb.db") }
 
@@ -183,7 +195,7 @@ func Open(path, accountID string) (*Cache, error) {
 			return nil, ioError(err)
 		}
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "_txlock=immediate" +
+	u := url.URL{Scheme: "file", Path: uriPath(abs), RawQuery: "_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -481,7 +493,7 @@ func openReadOnly(abs, accountID string) (*Cache, error) {
 	if _, err := os.Stat(abs + "-wal"); errors.Is(err, os.ErrNotExist) {
 		query = "immutable=1&_pragma=query_only(1)"
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: query}
+	u := url.URL{Scheme: "file", Path: uriPath(abs), RawQuery: query}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("cache: %w", err)
@@ -553,16 +565,35 @@ func (c *Cache) checkReadOnly(ctx context.Context, path, account string) error {
 	return nil
 }
 
+// RemoveRetry bounds how long Remove waits for another handle on the cache
+// (Windows only: SQLite opens it without FILE_SHARE_DELETE, so a running
+// serve, or a scanner, makes the removal fail until it lets go).
+var RemoveRetry = 2 * time.Second
+
 // Remove deletes the cache file with its -wal and -shm; missing is fine.
+// Where another handle on a file blocks the removal, it is retried every
+// 50 ms, the three files together for at most RemoveRetry.
 func Remove(path string) error {
+	deadline := time.Now().Add(RemoveRetry)
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		for {
+			err := os.Remove(p)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if !fileBusy(err) || !time.Now().Before(deadline) {
+				return err
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	syncDir(filepath.Dir(path))
 	return nil
 }
+
+// IsBusy reports that err is Remove's failure over a file another handle
+// holds open (Windows only; never on Unix).
+func IsBusy(err error) bool { return fileBusy(err) }
 
 // syncDir fsyncs a directory, best effort; tests watch it.
 var syncDir = atomicfile.SyncDir

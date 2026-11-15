@@ -1,10 +1,13 @@
 package atomicfile_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,6 +66,36 @@ func TestWriteRenameFailureRemovesTemp(t *testing.T) {
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
 			t.Errorf("temp file %s left behind", e.Name())
+		}
+	}
+}
+
+// A directory where the file should be fails at once with the error Go
+// gives on Unix (EEXIST), never a permission error: Windows' rename returns
+// access denied there, which would be retried as a reader's and read as a
+// permission fault (exit 10 where Unix gives 20).
+func TestWriteOverADirectoryFailsAtOnceAsOnUnix(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "d")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if full {
+			if err := os.WriteFile(filepath.Join(target, "x"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		start := time.Now()
+		err := atomicfile.Write(target, []byte("x"))
+		if !errors.Is(err, syscall.EEXIST) || errors.Is(err, fs.ErrPermission) {
+			t.Errorf("non-empty %v: err = %v, want EEXIST and no permission error", full, err)
+		}
+		if d := time.Since(start); d >= atomicfile.RenameRetry/2 {
+			t.Errorf("non-empty %v: failed after %v, want no retry", full, d)
+		}
+		if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
+			t.Errorf("non-empty %v: the directory was replaced (%v)", full, err)
 		}
 	}
 }
@@ -159,5 +192,54 @@ func TestRemoveStaleNeverFollowsSymlinks(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("the link target %s was removed: %v", p, err)
 		}
+	}
+}
+
+func TestReadFileReadsWhatWriteWrote(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := atomicfile.Write(p, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := atomicfile.ReadFile(p)
+	if err != nil || string(b) != "v1" {
+		t.Fatalf("ReadFile = %q, %v; want v1", b, err)
+	}
+}
+
+func TestOpenMissingIsNotExist(t *testing.T) {
+	_, err := atomicfile.Open(filepath.Join(t.TempDir(), "missing"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open missing = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// Rename moves a symbolic link itself: the link lands at the new name, still
+// pointing at its target, which stays where it was.
+func TestRenameMovesALinkNotItsTarget(t *testing.T) {
+	dir := t.TempDir()
+	target, link, moved := filepath.Join(dir, "target"), filepath.Join(dir, "link"), filepath.Join(dir, "moved")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("this user may not create symbolic links (no developer mode or privilege): %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := atomicfile.Rename(link, moved); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(moved); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("Lstat(moved) = %v, %v; want the link", fi, err)
+	}
+	if got, err := os.Readlink(moved); err != nil || got != target {
+		t.Errorf("moved points at %q, %v; want %q", got, err, target)
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "x" {
+		t.Errorf("target = %q, %v; want it untouched", b, err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the old link name is still there: %v", err)
 	}
 }

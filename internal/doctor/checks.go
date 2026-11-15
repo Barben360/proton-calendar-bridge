@@ -12,8 +12,15 @@ import (
 )
 
 // PlatformCheck reports whether pcb is supported on GOOS/GOARCH
-// (runtime.GOOS and runtime.GOARCH in production).
+// (runtime.GOOS and runtime.GOARCH in production): Linux amd64 and arm64
+// are, and so is windows/amd64 since its live check (windowsTested);
+// anything else runs, unsupported.
 type PlatformCheck struct{ GOOS, GOARCH string }
+
+// windowsTested is whether windows/amd64 passed the live checks
+// (spec/HUMAN-CHECKS.md step 12, spec/experiments/W1-windows-live.md):
+// without them pcb doctor would warn that it is untested.
+const windowsTested = true
 
 // Name implements Check.
 func (PlatformCheck) Name() string { return "platform" }
@@ -21,14 +28,22 @@ func (PlatformCheck) Name() string { return "platform" }
 // Run implements Check.
 func (c PlatformCheck) Run(context.Context) Result {
 	r := Result{Name: c.Name(), Status: StatusOK, Message: c.GOOS + "/" + c.GOARCH}
-	if c.GOOS != "linux" || (c.GOARCH != "amd64" && c.GOARCH != "arm64") {
+	switch {
+	case c.GOOS == "linux" && (c.GOARCH == "amd64" || c.GOARCH == "arm64"):
+	case c.GOOS == "windows" && c.GOARCH == "amd64":
+		if !windowsTested {
+			r.Status = StatusWarn
+			r.Message += ": runs, untested"
+		}
+	default:
 		r.Status = StatusWarn
 		r.Message += ": runs, unsupported"
 	}
 	return r
 }
 
-// DirModeCheck verifies that a directory grants no more than Want.
+// DirModeCheck verifies that a directory grants no more than Want (on
+// Windows: that its access list and owner keep other users out).
 type DirModeCheck struct {
 	Label string
 	Path  string
@@ -51,13 +66,29 @@ func (c DirModeCheck) Run(context.Context) Result {
 	case !info.IsDir():
 		r.Status, r.Message = StatusError, c.Path+" is not a directory"
 	default:
-		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
-			r.Status = StatusError
-			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
-			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
+		r = judgeAccess(r, c.Path, true, info.Mode().Perm(), c.Want)
+	}
+	return r
+}
+
+// judgeAccess rates an existing path as pcb uses it: by its access list and,
+// for a directory, its owner on Windows (aclProblem), else by its mode
+// against want.
+func judgeAccess(r Result, path string, dir bool, mode, want fs.FileMode) Result {
+	if msg, fix, checked := aclProblem(path, dir); checked {
+		if msg != "" {
+			r.Status, r.Message, r.Fix = StatusError, msg, fix
 		} else {
-			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
+			r.Status, r.Message = StatusOK, path+" private"
 		}
+		return r
+	}
+	if extra := mode &^ want; extra != 0 {
+		r.Status = StatusError
+		r.Message = path + " has mode " + modeString(mode) + ", want " + modeString(want)
+		r.Fix = "chmod " + modeString(want) + " " + shellquote.Quote(path)
+	} else {
+		r.Status, r.Message = StatusOK, path+" "+modeString(mode)
 	}
 	return r
 }
@@ -105,7 +136,8 @@ func (c ConfigCheck) Run(context.Context) Result {
 	return r
 }
 
-// FileModeCheck verifies that a regular file grants no more than Want.
+// FileModeCheck verifies that a regular file grants no more than Want (on
+// Windows: that its access list keeps other users out).
 type FileModeCheck struct {
 	Label string
 	Path  string
@@ -128,13 +160,7 @@ func (c FileModeCheck) Run(context.Context) Result {
 	case !info.Mode().IsRegular():
 		r.Status, r.Message = StatusError, c.Path+" is not a regular file"
 	default:
-		if extra := info.Mode().Perm() &^ c.Want; extra != 0 {
-			r.Status = StatusError
-			r.Message = c.Path + " has mode " + modeString(info.Mode().Perm()) + ", want " + modeString(c.Want)
-			r.Fix = "chmod " + modeString(c.Want) + " " + shellquote.Quote(c.Path)
-		} else {
-			r.Status, r.Message = StatusOK, c.Path+" "+modeString(info.Mode().Perm())
-		}
+		r = judgeAccess(r, c.Path, false, info.Mode().Perm(), c.Want)
 	}
 	return r
 }

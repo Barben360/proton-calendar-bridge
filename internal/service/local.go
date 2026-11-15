@@ -230,20 +230,24 @@ func (l *Local) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// keyFile is the path named in store errors.
 // The sealers' names (seal.Sealer.Name, layout.json's "sealer").
 const (
 	SealerKeyFile       = "keyfile"
 	SealerSecretService = "secret-service"
+	SealerDPAPI         = "dpapi"
 )
 
 // keyringRef stands for the desktop keyring where the error mappers take a
 // key file's path: the key of a secret-service state is no file.
 const keyringRef = "<the desktop keyring>"
 
-// keyFile is the key file's path, or keyringRef for a secret-service state;
-// it is only a name for the messages (Status.KeyFile reads the config).
+// keyFile is the key file's path (a dpapi state's in the state directory),
+// or keyringRef for a secret-service state; it is only a name for the
+// messages.
 func (l *Local) keyFile() string {
+	if d, ok := l.o.Sealer.(*seal.DPAPI); ok {
+		return d.Path
+	}
 	if l.o.Sealer.Name() == SealerSecretService {
 		return keyringRef
 	}
@@ -251,11 +255,19 @@ func (l *Local) keyFile() string {
 }
 
 // keyFix is the hint for a key that cannot be used, by where it lives.
-func (l *Local) keyFix() string {
-	if l.keyFile() == keyringRef {
-		return keyringFailFix
+func (l *Local) keyFix() string { return keyFixFor(l.keyFile()) }
+
+// keyHint is keyFix for err, a failure to use the key: DPAPI's own fixes
+// when Windows could not protect or unprotect the key.
+func (l *Local) keyHint(err error) string {
+	var dp *seal.ProtectError
+	switch {
+	case errors.As(err, &dp) && dp.Unprotect:
+		return DPAPIUnprotectFix
+	case errors.As(err, &dp):
+		return dpapiProtectFix(l.keyFile())
 	}
-	return keyFix
+	return l.keyFix()
 }
 
 // keyWhat names where the sealing key lives, for a message: "the key file
@@ -377,7 +389,12 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 		if cause := keyCause(err); cause != "" {
 			msg = "cannot read the stored secrets (" + cause + "), so they were kept"
 		}
-		return LogoutResult{}, keyFailure(err, msg, "make secrets.sealed in "+l.o.Dirs.State+" readable by the user pcb runs as, then run pcb logout again")
+		hint := "make secrets.sealed in " + l.o.Dirs.State + " readable by the user pcb runs as, then run pcb logout again"
+		var dp *seal.ProtectError
+		if errors.As(err, &dp) {
+			hint = l.keyHint(err) // the DPAPI key is out of this session's reach
+		}
+		return LogoutResult{}, keyFailure(err, msg, hint)
 	default:
 		res.WasLoggedIn = len(accounts) > 0
 		res.Revoked = len(accounts) > 0
@@ -396,10 +413,14 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	unlockSync, held := l.logoutSyncLock()
 	err = cache.Remove(cache.Path(l.o.Dirs.State))
 	unlockSync()
-	if err != nil {
+	busy := err != nil && held && cache.IsBusy(err)
+	if err != nil && !busy {
 		return LogoutResult{}, blocked("the secrets are gone but the event cache could not be removed",
 			"remove pcb.db (and its -wal and -shm files) from "+l.o.Dirs.State+", then run pcb logout again")
 	}
+	// Where a file open elsewhere cannot be removed (Windows), a sync of
+	// another process holding the cache is what the result reports: it
+	// finishes with the cache, and a later pcb logout removes it.
 	res.SyncRunning = held
 	// Seeded with the wiped generation + 1: over an unreadable state.json
 	// (the reset logout is) the mirror write failed and SaveState cannot
@@ -450,8 +471,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 		Unattended: st.Unattended,
 		Address:    st.Address,
 	}
-	if s.Sealer == SealerKeyFile {
-		s.KeyFile = l.o.Config.Secrets.KeyFile
+	if s.Sealer == SealerKeyFile || s.Sealer == SealerDPAPI {
+		s.KeyFile = l.keyFile()
 		// The keyring's sealer has no file to be absent.
 		if _, err := os.Stat(s.KeyFile); errors.Is(err, os.ErrNotExist) {
 			s.KeyFileAbsent = true
@@ -471,6 +492,7 @@ func (l *Local) Status(context.Context) (Status, error) {
 		var (
 			rb *store.RolledBackError
 			ue *store.UnsupportedError
+			pe *seal.ProtectError
 		)
 		unreadable := "the stored secrets cannot be opened; see the key file"
 		if l.keyFile() == keyringRef {
@@ -485,6 +507,8 @@ func (l *Local) Status(context.Context) (Status, error) {
 			s.Secrets = "locked" // the keyring unlocks with the desktop session: nothing is lost
 		case errors.Is(err, seal.ErrNoService):
 			s.Secrets = SecretsKeyringUnavailable // no keyring answers here: nothing is lost either (R15)
+		case errors.As(err, &pe) && pe.Unprotect:
+			s.Secrets, s.SecretsCause = SecretsKeyUnavailable, pe.Error() // the key opens in a password logon: nothing is lost
 		case err != nil:
 			s.Secrets, s.Phase, s.Reason = "unreadable", string(store.PhaseNeedsLogin), unreadable
 		default:

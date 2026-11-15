@@ -5,19 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync/atomic"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ErrDaemonGone is Relay's end when the daemon went away: the agent's
+// ErrDaemonGone is RelayDial's end when the daemon went away: the agent's
 // next message is queued, for the next backend (another daemon, or this
 // process become the session daemon).
 var ErrDaemonGone = errors.New("the pcb daemon went away")
 
-// ErrRelayRefused is Relay's end when the daemon answered without serving
+// ErrRelayRefused is RelayDial's end when the daemon answered without serving
 // the session (a refused request, before any answer): the agent's
 // messages stay queued, and a new attempt should wait first.
 var ErrRelayRefused = errors.New("the pcb daemon did not serve the relay")
@@ -26,33 +27,45 @@ var ErrRelayRefused = errors.New("the pcb daemon did not serve the relay")
 // request after initialize.
 const protocolVersionHeader = "Mcp-Protocol-Version"
 
-// Relay bridges stdio to the daemon's /mcp on the control socket, message
-// by message. See (*Stdio).Relay.
-func Relay(ctx context.Context, socket string, g Grant, in io.Reader, out io.Writer) error {
-	return NewStdio(in, out).Relay(ctx, socket, g)
-}
-
-// Relay serves st through the daemon's /mcp on the control socket at
-// socket, sending g as the grant (RelayAuth) on every request, until
+// RelayDial serves st through the daemon's /mcp over the connections dial
+// opens (pcb mcp passes ctl.DialConn: the control socket, or its named pipe
+// on Windows), sending g as the grant (RelayAuth) on every request, until
 // stdin ends (nil, after up to 5 s for the answers still due), ctx ends
 // (its error) or the daemon goes away: then the tool calls in flight are
-// answered retry and, once the agent sent its next message, Relay returns
-// ErrDaemonGone (stdin ending meanwhile: nil). A daemon that answers
-// without serving the session (a refused request before any answer) ends
-// it with ErrRelayRefused, the agent's messages kept.
+// answered retry and, once the agent sent its next message, RelayDial
+// returns ErrDaemonGone (stdin ending meanwhile: nil). A dial failure
+// counts as the daemon gone, as a Unix socket that cannot be dialled does.
+// A daemon that answers without serving the session (a refused request
+// before any answer) ends it with ErrRelayRefused, the agent's messages
+// kept. A call the daemon never received (none of it written) before any
+// answer ends it with ErrDaemonGone, not ErrRelayRefused: the session
+// moves to the next backend without the refusal's wait.
+//
+// A call counts as delivered once its request was written, so dial's
+// connections must refuse a write once the daemon closed its end, as a
+// Unix socket and a named pipe do (an AF_UNIX socket on Windows accepts
+// it): a call sent after the daemon ended then goes to the next backend
+// instead of being answered retry.
 //
 // The SDK's connection sends Mcp-Protocol-Version only for a session it
-// initialised itself (E19): Relay adds the version the agent's initialize
-// settled to every request that lacks one.
-func (st *Stdio) Relay(ctx context.Context, socket string, g Grant) error {
+// initialised itself (E19): RelayDial adds the version the agent's
+// initialize settled to every request that lacks one.
+func (st *Stdio) RelayDial(ctx context.Context, dial func(context.Context) (net.Conn, error), g Grant) error {
 	grant, err := json.Marshal(g)
 	if err != nil {
 		return err
 	}
 	base := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
+			c, err := dial(ctx)
+			var op *net.OpError
+			if err != nil && !errors.As(err, &op) {
+				err = &net.OpError{Op: "dial", Net: "pipe", Err: err}
+			}
+			if err != nil {
+				return nil, err
+			}
+			return &sentConn{Conn: c}, nil
 		},
 		DisableCompression: true,
 	}
@@ -95,22 +108,56 @@ type relayTransport struct {
 	st    *Stdio
 }
 
+// A request that fails before a byte of it was written on its connection
+// is unsent: the HTTP client does not retry a POST on an idle connection
+// the daemon closed as the request took it ("server closed idle
+// connection"), though the daemon never saw it.
 func (t *relayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
+	var conn *sentConn
+	var before int64
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		if c, ok := info.Conn.(*sentConn); ok {
+			conn, before = c, c.n.Load()
+		}
+	}}
+	req = req.Clone(httptrace.WithClientTrace(req.Context(), trace))
 	req.Header.Set(RelayGrantHeader, t.grant)
 	if req.Header.Get(protocolVersionHeader) == "" {
 		if v := t.st.negotiated(); v != "" {
 			req.Header.Set(protocolVersionHeader, v)
 		}
 	}
-	return t.base.RoundTrip(req)
+	resp, err := t.base.RoundTrip(req)
+	if err != nil && conn != nil && conn.n.Load() == before {
+		err = &unsentError{err}
+	}
+	return resp, err
 }
+
+// sentConn counts the bytes written on a connection to the daemon.
+type sentConn struct {
+	net.Conn
+	n atomic.Int64
+}
+
+func (c *sentConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// unsentError is a request that failed before any of it was written.
+type unsentError struct{ err error }
+
+func (e *unsentError) Error() string { return e.err.Error() }
+func (e *unsentError) Unwrap() error { return e.err }
 
 // undelivered reports whether a failed write never reached the daemon, so
 // the message may go to the next backend: the socket could not be dialled,
-// or the daemon no longer knows the session (it restarted, or the session
-// idled out).
+// the request failed before any of it was written, or the daemon no longer
+// knows the session (it restarted, or the session idled out).
 func undelivered(err error) bool {
 	var op *net.OpError
-	return errors.Is(err, sdkmcp.ErrSessionMissing) || (errors.As(err, &op) && op.Op == "dial")
+	var unsent *unsentError
+	return errors.Is(err, sdkmcp.ErrSessionMissing) || errors.As(err, &unsent) || (errors.As(err, &op) && op.Op == "dial")
 }

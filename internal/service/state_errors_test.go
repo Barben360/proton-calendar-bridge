@@ -9,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // The messages of a state this pcb cannot read (state-I1, I2): the cause
@@ -33,6 +35,22 @@ func TestStateAndStoreMessages(t *testing.T) {
 			`secrets.sealed is sealed with "tpm2", which this pcb cannot use`, "upgrade pcb"},
 		{"newer state.json", stateError(fmt.Errorf("/s/state.json: %w", store.ErrNewerState)), exitcode.MustAct,
 			"state.json was written by a newer pcb", "upgrade pcb"},
+		// Windows could not protect a new DPAPI key (a logon without the
+		// password): a person acts, told how.
+		{"dpapi protect", storeError(fmt.Errorf("seal: %w", &seal.ProtectError{Err: errors.New("access is denied")}), filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not protect the sealing key for this Windows user: access is denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move state aside before the next pcb login"},
+		{"dpapi protect, mapped", mapError(&seal.ProtectError{Err: errors.New("denied")}, filepath.Join("state", "secrets.key.dpapi")), exitcode.MustAct,
+			"DPAPI could not protect the sealing key for this Windows user: denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move state aside before the next pcb login"},
+		// Windows could not unprotect the existing key in this session: a
+		// person signs in, and nothing suggests a logout.
+		{"dpapi unprotect", storeError(fmt.Errorf("load: %w", &seal.ProtectError{Unprotect: true, Err: errors.New("key not valid for use in specified state")}), filepath.Join("state", "secrets.key.dpapi")), exitcode.Blocked,
+			"DPAPI could not unprotect the sealing key for this Windows user: key not valid for use in specified state",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"},
+		{"dpapi unprotect, mapped", mapError(&seal.ProtectError{Unprotect: true, Err: errors.New("access is denied")}, filepath.Join("state", "secrets.key.dpapi")), exitcode.Blocked,
+			"DPAPI could not unprotect the sealing key for this Windows user: access is denied",
+			"sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"},
 		{"store unusable", storeError(errors.New("odd"), keyFile), exitcode.Blocked,
 			"cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)"},
 	} {
@@ -47,22 +65,22 @@ func TestStateAndStoreMessages(t *testing.T) {
 }
 
 // A state.json this user cannot read is intact: the text names the file,
-// owner and mode and asks for permissions, never a logout (A12 I1); malformed
-// JSON keeps the reset hint; a newer file keeps "upgrade pcb".
+// owner and mode (Windows: owner) and asks for permissions, never a logout
+// (A12 I1); malformed JSON keeps the reset hint; a newer file keeps
+// "upgrade pcb".
 func TestStateErrorSplitsUnreadableMalformedAndNewer(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs chmod 000 to be enforced")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	write := func(body string, mode os.FileMode) {
+	write := func(body string, unreadable bool) {
 		t.Helper()
-		_ = os.Chmod(path, 0o600)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
+		if unreadable {
+			acltest.Unreadable(t, path)
 		}
 	}
 	check := func(name, msgPart, hint string) {
@@ -76,15 +94,19 @@ func TestStateErrorSplitsUnreadableMalformedAndNewer(t *testing.T) {
 			t.Errorf("%s: %q hint %q, want %q hint %q", name, ee.Error(), ee.Hint, msgPart, hint)
 		}
 	}
-	write(`{"phase":"ready"}`, 0o000)
+	write(`{"phase":"ready"}`, true)
 	cu := store.CurrentUser()
 	check("unreadable", "the login state file "+path+" cannot be read by this user (owner ", "make it readable by "+cu+" (or run pcb as its owner)")
 	_, err := store.LoadState(dir)
-	if msg := stateError(err).Error(); !strings.Contains(msg, "mode 0000)") {
-		t.Errorf("unreadable: %q lacks the mode", msg)
+	want := "mode 0000)"
+	if runtime.GOOS == "windows" {
+		want = "(owner " + cu + ")" // a file this user made: no mode on Windows
 	}
-	write(`{not json`, 0o600)
+	if msg := stateError(err).Error(); !strings.Contains(msg, want) {
+		t.Errorf("unreadable: %q lacks %q", msg, want)
+	}
+	write(`{not json`, false)
 	check("malformed", "the login state file cannot be read", "run pcb logout to reset it")
-	write(`{"phase":"ready","field_from_the_future":1}`, 0o600)
+	write(`{"phase":"ready","field_from_the_future":1}`, false)
 	check("newer", "state.json was written by a newer pcb", "upgrade pcb")
 }

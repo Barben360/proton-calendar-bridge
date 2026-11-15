@@ -96,6 +96,7 @@ detect_platform() {
   case $s in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) die_usage "Windows: download pcb_windows_amd64.zip from https://github.com/Barben360/proton-calendar-bridge/releases (install.sh is for Linux and macOS)" ;;
   *) die_usage "unsupported OS: $s (Linux or macOS)" ;;
   esac
   case $m in

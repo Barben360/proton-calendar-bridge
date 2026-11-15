@@ -1,6 +1,6 @@
 # Desktop app
 
-How to use `pcb-ui`, the Linux desktop app: the tray icon, the window, adding an account, starting at login, its logs, and removing it.
+How to use `pcb-ui`, the desktop app for Linux and Windows: the tray icon, the window, adding an account, starting at login, its logs, and removing it.
 
 An account, with its adapters, the CalDAV connection to copy into Thunderbird, and its calendars:
 
@@ -20,7 +20,7 @@ The window follows your desktop's light or dark theme.
 
 `pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs.
 
-It is Linux only for now (X11 and Wayland with a StatusNotifierItem tray). `pcb` itself stays one static binary with no GUI dependency. Building it: [install](install.md#build-from-a-clone).
+It runs on Linux (X11 and Wayland with a StatusNotifierItem tray) and on Windows 10 and 11 ([On Windows](#on-windows)). `pcb` itself stays one static binary with no GUI dependency. Building it: [install](install.md#build-from-a-clone).
 
 ## Start it
 
@@ -86,11 +86,25 @@ Without a tray, `pcb-ui` opens its window and says so once, and closing that win
 
 ## Start at login
 
-Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file.
+Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead ([below](#on-windows)).
+
+## On Windows
+
+`pcb-ui.exe` from the release zip ([install](install.md#windows)) runs the same bridge on Windows 10 (1809 or later) and 11.
+
+| | On Windows |
+|---|---|
+| Tray | Always there, in the notification area (it may sit under the arrow of hidden icons). Its menu has Quit. |
+| Start at login | Settings, "Start at login" writes the value `pcb-ui` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the absolute path of `pcb-ui.exe` and `--background`. Switching it off deletes the value. Moving the folder breaks it: switch it off and on again from the new place. |
+| Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
+| Sign out, shutdown | `pcb-ui` gets up to 2 seconds to stop cleanly; what is cut short is recovered at the next start. |
+| `pcb-ui.exe --version`, `--help` | Print to the terminal they are typed in, or to a redirected file. Started from Explorer, `pcb-ui` has no console window. |
+| Open config.toml, logs | Open in the program Windows associates with them. `.toml` often has none: Windows then asks which app to open it with (Notepad will do). |
+| Display | `pcb-ui` needs OpenGL 2.0. A virtual machine without 3D acceleration or a remote desktop session may lack it: `pcb-ui` then says so and exits ([troubleshooting](troubleshooting.md#pcb-ui-needs-opengl-20)). |
 
 ## Edit the configuration
 
-Settings, "Open config.toml" opens the file; press "Restart bridge" afterwards. An error in the file stops the bridge:
+Settings, "Open config.toml" opens the file, made empty first when there is none (every setting then keeps its default); press "Restart bridge" afterwards. An error in the file stops the bridge:
 
 - the window says `bridge stopped: <error>`;
 - the tray shows attention;
@@ -104,7 +118,7 @@ On a desktop session whose keyring (GNOME Keyring, KWallet) is unlocked, a new s
 
 ## Logs
 
-`<state>/logs/pcb-ui.log`, rotated at 10 MiB to `pcb-ui.log.1` (one rotation).
+`<state>/logs/pcb-ui.log` (on Windows `%LOCALAPPDATA%\pcb\logs\pcb-ui.log`), rotated at 10 MiB to `pcb-ui.log.1` (one rotation).
 
 The log level in Settings lasts until the bridge restarts; set `[log] level` in `config.toml` to keep it.
 
@@ -123,6 +137,6 @@ With no service installed, it logs out and deletes:
 - the state's `pcb sealing key` keyring item;
 - `~/.config/autostart/pcb-ui.desktop`.
 
-It refuses (exit 20, naming it) while `pcb-ui`, `pcb serve` or an agent session serves that state. The binary and desktop entry under `$(PREFIX)` stay; remove them by hand.
+It refuses (exit 20, naming it) while `pcb-ui`, `pcb serve` or an agent session serves that state. The binary and desktop entry under `$(PREFIX)` stay; remove them by hand. On Windows: [install](install.md#remove-it-from-windows).
 
 Why it works this way: [a separate desktop binary that runs the daemon in process](../spec/decisions/0015-pcb-ui.md).

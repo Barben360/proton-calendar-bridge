@@ -32,17 +32,32 @@ func (a *app) newService() *cobra.Command {
 	} {
 		subs = append(subs, &cobra.Command{
 			Use: v.verb, Short: v.short, Args: NoArgs,
-			RunE: func(cmd *cobra.Command, _ []string) error { return a.serviceVerb(cmd, scope, v.verb, v.done) },
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				if a.GOOS == "windows" {
+					return Finish(cmd, nil, "", errNoService())
+				}
+				return a.serviceVerb(cmd, scope, v.verb, v.done)
+			},
 		})
 	}
 	status := &cobra.Command{
 		Use: "status", Short: "Show the state of the pcb service", Args: NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return a.serviceStatus(cmd, scope) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if a.GOOS == "windows" {
+				return Finish(cmd, nil, "", errNoService())
+			}
+			return a.serviceStatus(cmd, scope)
+		},
 	}
 	var follow bool
 	logs := &cobra.Command{
 		Use: "logs", Short: "Print the last 200 lines of the pcb service's journal", Args: NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return a.serviceLogs(cmd, scope, follow) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if a.GOOS == "windows" {
+				return Finish(cmd, nil, "", errNoService())
+			}
+			return a.serviceLogs(cmd, scope, follow)
+		},
 	}
 	logs.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new lines")
 	NoJSON(logs)
@@ -164,6 +179,9 @@ func (j *journalWriter) Write(p []byte) (int, error) {
 // or why there is none.
 func (a *app) serviceResult(ctx context.Context) doctor.Result {
 	const name = "service"
+	if a.GOOS == "windows" { // the name stays, so the JSON lists the same results
+		return doctor.Result{Name: name, Status: doctor.StatusSkip, Message: "no service on Windows: pcb-ui's Start at login runs it"}
+	}
 	h := a.Host
 	if !install.SystemdRunning(h) {
 		return doctor.Result{Name: name, Status: doctor.StatusSkip, Message: "no systemd here"}

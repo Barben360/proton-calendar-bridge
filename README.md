@@ -7,7 +7,7 @@
 [![CI](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/github/license/Barben360/proton-calendar-bridge)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/Barben360/proton-calendar-bridge)](go.mod)
-[![Platform: Linux](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-blue)](docs/install.md#requirements)
+[![Platform: Linux, Windows](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64%20%7C%20Windows%20amd64-blue)](docs/install.md#requirements)
 [![Status: early](https://img.shields.io/badge/status-early-yellow)](docs/status.md)
 
 > [!IMPORTANT]
@@ -15,9 +15,9 @@
 
 Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI agents. The calendar counterpart of Proton Mail Bridge.
 
-- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a Linux desktop app.
+- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux and Windows.
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
-- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container.
+- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows 10 and 11 as `pcb-ui`.
 
 ## What it does for you
 
@@ -48,7 +48,7 @@ flowchart LR
     pcb <-->|"CLI, --json"| you["You, scripts"]
 ```
 
-One process serves every account: the desktop app, the `pcb serve` daemon (systemd or container), or `pcb mcp` started by an agent. The CLI (`pcb status`, `pcb login`, `pcb client show`) talks to whichever one runs, over a local socket only your user can open.
+One process serves every account: the desktop app, the `pcb serve` daemon (systemd or container), or `pcb mcp` started by an agent. The CLI (`pcb status`, `pcb login`, `pcb client show`) talks to whichever one runs, over a local socket (a named pipe on Windows) only your user can open.
 
 ## Choose how to run it
 
@@ -58,6 +58,7 @@ One process serves every account: the desktop app, the `pcb serve` daemon (syste
 | An always-on bridge on a server or a home lab | `pcb install` (systemd) | [service](docs/service.md) |
 | The same, in Docker | the container image | [container](docs/container.md) |
 | Only an AI agent on this machine, no daemon | `pcb mcp`, started by the agent | [agents](docs/agents.md) |
+| The bridge on Windows 10 or 11 | `pcb-ui.exe` from the release zip | [Windows](docs/install.md#windows) |
 
 Install a release (Linux and macOS, amd64 and arm64; no sudo):
 
@@ -148,6 +149,10 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **modelcontextprotocol/go-sdk** v1.8.0 (the official MCP Go SDK; Apache-2.0, with the contributions not yet relicensed under MIT): the MCP server, transports and test client of the MCP adapter, used as a dependency, nothing copied; audited in experiment E19 (`spec/experiments/E19-mcp-go-sdk.md`). It brings `google/jsonschema-go` (MIT), `segmentio/encoding` and `segmentio/asm` (MIT), `yosida95/uritemplate` (BSD-3-Clause) and `golang.org/x/oauth2` (BSD-3-Clause).
 - **Fyne** v2.8.2 (fyne.io/fyne/v2, BSD-3-Clause): the toolkit of `pcb-ui` (window, tray, notifications, headless test driver, which also renders the screenshots), used as a dependency, nothing copied (`internal/ui/desktop`, `cmd/pcb-ui`).
 - **Inter** 4.1 (rsms/inter, SIL Open Font License 1.1, license in `internal/ui/desktop/fonts/OFL.txt`): the text font of `pcb-ui`, four static files from the release archive (Regular, SemiBold, Italic, SemiBoldItalic) embedded unmodified (`internal/ui/desktop/theme.go`).
+- **fyne-io/oksvg** (BSD-3-Clause, Fyne's fork of srwiley/oksvg) and **srwiley/rasterx** (BSD-3-Clause), both already in Fyne's dependencies: they render `pcb-ui`'s SVG icon to the PNG that becomes `pcb-ui.exe`'s icon at build time (`cmd/pcb-ui/winres`), used as libraries, nothing copied.
+- **tc-hib/go-winres** v0.3.3 (0BSD): writes `pcb-ui.exe`'s icon and version resource at build time (`make winres`), run as a pinned tool, never linked into a binary.
+- **Microsoft/go-winio** v0.6.2 (MIT): the named pipe of the control channel on Windows, private to the user (`internal/ctl`), used as a library, nothing copied.
+- **golang.org/x/sys/windows** (BSD-3-Clause): the Windows calls for the file locks, the replacement of files, DPAPI, the access lists, the registry, the time zone, and `pcb-ui`'s console, session end and file opening, used as a library, nothing copied.
 - **godbus/dbus** v5.2.4 (BSD-2-Clause): the D-Bus client of the Secret Service sealer and of the desktop notifications, used as a dependency, nothing copied. The Secret Service client is written from the freedesktop.org specification, with no other implementation read (`internal/store/seal`).
 - **Thunderbird's CalDAV provider** (mozilla/releases-comm-central, MPL-2.0): read for experiment E08 (`spec/experiments/E08-thunderbird-caldav.md`), source only, no code copied.
 - **develonrails/carbonate** (MIT), **jmdlab/cal-gateway** (MIT) and **WentTheFox/caloxide** (MIT; derives from hydroxide, ferroxide and protoxide, all MIT), for the sync design notes (ideas audited, no code copied; the feed research is in `spec/experiments/raw/m2-feed-research.md`, citations by file and line): carbonate's measured pitfall that a cursor derived at `latest` loses events and its ID-driven re-read that ignores `Action`; jmdlab's order (read the feed head before the full listing) and its rule that a re-read row answering 404 is a delete; caloxide's feed endpoint shapes and its 30 s poll with exponential backoff. Rewritten with our own tests (`internal/syncer`, `internal/store/cache`).
@@ -158,6 +163,7 @@ Logic reused from another project is audited, rewritten with our own tests and c
   - carbonate's and caloxide's live notes on Proton's refusals (signing with the member's address key, bare `SEQUENCE`, RECURRENCE-ID with RRULE), and caloxide's member permission bits (`Write = 8`, `internal/proton/calendar`).
 - **WentTheFox/caloxide** (MIT), for the idle cadence: its standby idea, slowing the poll when nobody uses the bridge (idea audited from the sync research, no code copied). Rewritten with our own definition of idle (no authenticated request for 35 minutes, longer than Thunderbird's 30-minute refresh), a wake on the first request, and our own tests (`internal/service`, `internal/syncer`).
 - **Proton Mail Bridge** (and the author's headless Bridge container), for the container and credential model: one `/data` volume, login with `docker exec -it`, state kept in the volume, and a bridge password the user can look up again (`pcb client show`). The usage model only: ideas, no code read or copied; our own image, units and tests (`Dockerfile`, `internal/install`, `internal/ctl`).
+- **Unicode CLDR** `windowsZones.xml` release 49 (Unicode License v3, <https://www.unicode.org/license.txt>): the mapping of Windows time zone keys to IANA zones, territory 001 entries only, kept as a table generated by `go generate` (`internal/winzone`, version in `winzone.CLDRVersion`, source file pinned by SHA-256 in the generator). Data, no code.
 - The other prior art listed in the [design spec](spec/SPEC.md): design references only; nothing from them is used in this repository so far.
 
 </details>

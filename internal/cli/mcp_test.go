@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/dbustest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
+	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -196,6 +200,56 @@ func TestMCPStdioBecomesTheDaemon(t *testing.T) {
 	}
 }
 
+// pcb mcp's session daemon drains its control socket like pcb serve: with
+// a relay's request in flight (its body half sent) and one SIGTERM on both
+// paths, it stops in 2 s on Windows, where SIGTERM is a console close,
+// logoff or shutdown (spec §5.11), and waits the full 5 s elsewhere.
+func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{})
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	sigs := make(chan os.Signal, 2)
+	m := startMCPWith(t, r, nil, func(io *cli.IO) {
+		io.Signals = func() (<-chan os.Signal, func()) { return sigs, func() {} }
+	})
+	cs := m.connect("2025-11-25")
+	mcpStatus(t, cs)
+
+	g, err := mcp.Profile("read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := ctl.DialConn(t.Context(), r.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "POST /mcp HTTP/1.1\r\nHost: pcb\r\nContent-Type: application/json\r\n"+
+		"Accept: application/json, text/event-stream\r\n"+mcp.RelayGrantHeader+": "+string(grant)+"\r\n"+
+		"Content-Length: 1000\r\n\r\n{"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // the handler reads the body: the request is in flight
+	start := time.Now()
+	m.stop()                // SIGTERM through Execute's context
+	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
+	if code := m.exit(); code != exitcode.OK {
+		t.Fatalf("exit %d, want 0\nstderr: %s", code, m.errb.String())
+	}
+	d := time.Since(start)
+	minD, maxD := 4500*time.Millisecond, 10*time.Second
+	if runtime.GOOS == "windows" {
+		minD, maxD = 1800*time.Millisecond, 4500*time.Millisecond
+	}
+	if d < minD || d >= maxD {
+		t.Errorf("pcb mcp stopped %v after SIGTERM, want within [%v, %v) on %s\nstderr: %s", d, minD, maxD, runtime.GOOS, m.errb.String())
+	}
+}
+
 // With a daemon running (pcb serve), pcb mcp relays to it: same accounts,
 // the profile asked for (here the read-only one, never the default), the
 // daemon counts a relay session, and serve.lock stays the daemon's.
@@ -343,6 +397,9 @@ func (u unitRunner) Stream(_ context.Context, stdout, _ io.Writer, name string, 
 // long pcb mcp waits for that unit's daemon (IO.UnitWait).
 func userUnitHost(t *testing.T, r *rig, active, sub string, wait time.Duration) func(*cli.IO) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a systemd user unit under a fake host root: the Root is joined with the config dir, a drive path on Windows, which has no systemd")
+	}
 	root := t.TempDir()
 	unit := filepath.Join(root, r.env["XDG_CONFIG_HOME"], "systemd", "user", "pcb.service")
 	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
@@ -486,8 +543,11 @@ func TestMCPStdioWritesNothingButProtocolOnStdout(t *testing.T) {
 				t.Errorf("stdout holds %d lines, want the session's answers:\n%s", lines, out)
 			}
 			want := "serving this agent session"
-			if mode == "relay" {
-				want = "relaying to the daemon"
+			switch {
+			case mode == "relay" && runtime.GOOS == "windows": // the pipe, not a pcb.sock
+				want = `msg="relaying to the daemon on the control pipe" pipe=` + `\\.\pipe\pcb-`
+			case mode == "relay":
+				want = `msg="relaying to the daemon on the control socket" socket=`
 			}
 			if !strings.Contains(m.errb.String(), want) {
 				t.Errorf("stderr lacks %q:\n%s", want, m.errb.String())
@@ -530,6 +590,29 @@ func TestSealerGuardRefusesWithoutAKeyring(t *testing.T) {
 	}
 }
 
+// On Windows auto always gives DPAPI, whatever the session: the guard lets
+// pcb mcp create a new state with no keyring at all, and that state records
+// dpapi.
+func TestSealerGuardPassesOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only: elsewhere auto depends on the session (TestSealerGuardRefusesWithoutAKeyring)")
+	}
+	t.Parallel()
+	r := newRig(t, nil)
+	if err := cli.SealerGuard(t.Context(), func(k string) string { return r.env[k] }, seal.DBusKeyring("")); err != nil {
+		t.Fatalf("guard on a new Windows state = %v, want nil", err)
+	}
+	m := startMCP(t, r, seal.DBusKeyring(""))
+	cs := m.connect("2025-11-25")
+	if got := mcpStatus(t, cs); len(got) != 0 {
+		t.Errorf("status accounts on a new state = %v", got)
+	}
+	layout, err := os.ReadFile(filepath.Join(r.dirs.State, "layout.json"))
+	if err != nil || !strings.Contains(string(layout), `"dpapi"`) {
+		t.Errorf("layout.json = %q (%v), want the dpapi sealer", layout, err)
+	}
+}
+
 // An explicit [secrets] backend is honoured as by every command, a state
 // that has its layout is never probed, and a keyring that answers lets
 // auto choose it: the guard passes. pcb mcp then serves a new keyfile
@@ -537,7 +620,11 @@ func TestSealerGuardRefusesWithoutAKeyring(t *testing.T) {
 func TestSealerGuardAllowsAnExplicitBackend(t *testing.T) {
 	t.Parallel()
 	noBus := seal.DBusKeyring("")
-	for _, backend := range []string{"keyfile", "secret-service"} {
+	backends := []string{"keyfile", "secret-service"}
+	if runtime.GOOS == "windows" {
+		backends = backends[:1] // secret-service is a config fault there (config's TestCheckBackend)
+	}
+	for _, backend := range backends {
 		r := newRig(t, nil)
 		writeConfig(t, r, "[secrets]\nbackend = \""+backend+"\"\n")
 		if err := cli.SealerGuard(t.Context(), func(k string) string { return r.env[k] }, noBus); err != nil {

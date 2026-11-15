@@ -45,8 +45,9 @@ func (a *app) newDoctor() *cobra.Command {
 
 // doctorFailure is pcb doctor's failure, nil without an error result (ux-I2):
 // exit 20 when every error may pass by itself (Result.Transient: the
-// daemon did not answer its control socket cleanly), else 10: a file, a
-// mode, config.toml or an alert a person must fix.
+// daemon did not answer its control socket cleanly, or a DPAPI key out of
+// this logon's reach), else 10: a file, a mode, config.toml or an alert a
+// person must fix.
 func doctorFailure(results []doctor.Result) error {
 	n, transient := 0, true
 	for _, r := range results {
@@ -110,7 +111,7 @@ func (d doctorDaemon) results() []doctor.Result {
 	st := d.st
 	switch {
 	case d.unplaced:
-		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
+		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the " + ctl.Channel + " cannot be located: offline checks only"}}
 	case d.err != nil:
 		// A dial or status that failed may pass; a socket pcb refuses
 		// (ctl.ErrRefused) needs a person (ruling A11).

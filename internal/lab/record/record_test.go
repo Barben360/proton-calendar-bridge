@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -112,13 +113,15 @@ func TestRecorderRedactsBodyAndQueryAndWritesStableFile(t *testing.T) {
 	if p != filepath.Join(dir, "auth.json") {
 		t.Errorf("path = %s", p)
 	}
-	st, _ := os.Stat(p)
-	if st.Mode().Perm() != 0o644 {
-		t.Errorf("mode = %v", st.Mode().Perm())
-	}
-	dst, _ := os.Stat(dir)
-	if dst.Mode().Perm() != 0o755 {
-		t.Errorf("dir mode = %v", dst.Mode().Perm())
+	if runtime.GOOS != "windows" { // the recordings are public: Windows has no mode to say so
+		st, _ := os.Stat(p)
+		if st.Mode().Perm() != 0o644 {
+			t.Errorf("mode = %v", st.Mode().Perm())
+		}
+		dst, _ := os.Stat(dir)
+		if dst.Mode().Perm() != 0o755 {
+			t.Errorf("dir mode = %v", dst.Mode().Perm())
+		}
 	}
 	b1, _ := os.ReadFile(p)
 	s := string(b1)

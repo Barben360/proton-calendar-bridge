@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -250,10 +251,14 @@ func TestKeyringCheck(t *testing.T) {
 
 func TestAccountsReportsTheRecordedSealer(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "layout.json"), `{"version": 2, "sealer": "secret-service"}`)
+	native := service.SealerSecretService // this system's sealer other than the key file
+	if runtime.GOOS == "windows" {
+		native = service.SealerDPAPI
+	}
+	writeFile(t, filepath.Join(root, "layout.json"), `{"version": 2, "sealer": "`+native+`"}`)
 	l, err := doctor.Accounts(root)
-	if err != nil || l.Sealer != "secret-service" {
-		t.Fatalf("got %q, %v; want secret-service", l.Sealer, err)
+	if err != nil || l.Sealer != native {
+		t.Fatalf("got %q, %v; want %s", l.Sealer, err, native)
 	}
 	writeFile(t, filepath.Join(root, "layout.json"), `{"version": 2}`)
 	if l, err = doctor.Accounts(root); err != nil || l.Sealer != "keyfile" {

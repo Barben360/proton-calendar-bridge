@@ -35,15 +35,18 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // snapshot is every path under root with its mode, size, modification
-// time and content.
+// time and content. It stats each path rather than reading the directory
+// listing's copy (d.Info): on NTFS a directory's entry in its parent's
+// listing keeps a stale modification time until something opens the
+// directory, so a read-only walk would show it "changed".
 func snapshot(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		fi, err := d.Info()
+		fi, err := os.Lstat(p)
 		if err != nil {
 			return err
 		}
@@ -117,7 +120,7 @@ func TestAccountsOfTheV2Layout(t *testing.T) {
 		t.Errorf("layout = %+v, want %+v", layout, want)
 	}
 	if after := snapshot(t, root); !slices.Equal(before, after) {
-		t.Errorf("Accounts changed the state")
+		t.Errorf("Accounts changed the state:\nbefore %q\nafter  %q", before, after)
 	}
 }
 

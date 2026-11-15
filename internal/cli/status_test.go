@@ -19,6 +19,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 type statusStub struct{ stubAPI }
@@ -157,9 +158,6 @@ func startDaemon(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener) {
 // startDaemonWith is startDaemon, with mod changing the server first.
 func startDaemonWith(t *testing.T, r *rig, hub ctl.Hub, ln *ctl.Listener, mod func(*ctl.Server)) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
-	}
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +418,7 @@ func TestOnlyNoDaemonFallsBackOffline(t *testing.T) {
 func TestStatusRefusesAForeignSocketPath(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("the control channel is a named pipe on Windows: pcb never looks at a file at the socket path (internal/ctl tests a foreign pipe's refusal)")
 	}
 	r := stubRig(t, &stubAPI{statusPhase: "ready"})
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {
@@ -539,6 +537,9 @@ func TestStatusSaysWhenTheKeyFileIsAbsent(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, &protontest.Options{})
 	key := config.Defaults(r.dirs).Secrets.KeyFile
+	if runtime.GOOS == "windows" { // auto seals with DPAPI: its key is in the state directory
+		key = filepath.Join(r.dirs.State, seal.DPAPIKeyName)
+	}
 	check := func(when string, absent bool) {
 		t.Helper()
 		want := "key_file: " + key + "\n"

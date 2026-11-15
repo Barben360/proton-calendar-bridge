@@ -10,8 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
@@ -64,14 +66,55 @@ var ErrNewerLayout = errors.New("layout.json was written by a newer pcb")
 // record. Like ErrNewerLayout it fails closed.
 var ErrUnknownSealer = errors.New("layout.json names a sealer this pcb does not know")
 
-// Sealer names layout.json records; they are seal.KeyFile's and
-// seal.SecretService's Name (Task 0's Name tests pin the same strings).
+// Sealer names layout.json records; they are seal.KeyFile's,
+// seal.SecretService's and seal.DPAPI's Name (their Name tests pin the same
+// strings).
 const (
 	sealerKeyFile       = "keyfile"
 	sealerSecretService = "secret-service"
+	sealerDPAPI         = "dpapi"
 )
 
-func knownSealer(s string) bool { return s == sealerKeyFile || s == sealerSecretService }
+// knownSealer reports whether this pcb opens a state sealed by s: the key
+// file everywhere, DPAPI on Windows, the desktop keyring elsewhere.
+func knownSealer(s string) bool {
+	return (s == sealerKeyFile || s == sealerSecretService || s == sealerDPAPI) && foreignOS(s, runtime.GOOS) == ""
+}
+
+// foreignOS is the system whose pcb seals with sealer, when it is not goos
+// (a runtime.GOOS): "Windows" for dpapi off Windows, "Linux" for
+// secret-service on Windows; "" for a sealer goos has, or one no pcb has.
+func foreignOS(sealer, goos string) string {
+	switch {
+	case sealer == sealerDPAPI && goos != "windows":
+		return "Windows"
+	case sealer == sealerSecretService && goos == "windows":
+		return "Linux"
+	}
+	return ""
+}
+
+// ForeignSealerError is a layout.json (Path) naming a sealer of pcb on
+// another system (OS): a state copied from it. errors.Is(err,
+// ErrUnknownSealer) holds for it.
+type ForeignSealerError struct{ Path, Sealer, OS string }
+
+func (e *ForeignSealerError) Error() string {
+	return e.Path + ": sealer \"" + e.Sealer + "\" belongs to pcb on " + e.OS
+}
+
+// Is makes errors.Is(err, ErrUnknownSealer) hold.
+func (e *ForeignSealerError) Is(target error) bool { return target == ErrUnknownSealer }
+
+// unknownSealerError is the error for a sealer this pcb does not open, in
+// the layout.json at path: a *ForeignSealerError when another system's pcb
+// has it.
+func unknownSealerError(path, sealer string) error {
+	if sys := foreignOS(sealer, runtime.GOOS); sys != "" {
+		return &ForeignSealerError{Path: path, Sealer: sealer, OS: sys}
+	}
+	return fmt.Errorf("%s: sealer %q: %w", path, sealer, ErrUnknownSealer)
+}
 
 // renameHook, when set, runs after each rename Migrate makes; its error
 // stops Migrate there, as a crash right after that rename would (tests).
@@ -175,7 +218,7 @@ type layoutFile struct {
 // when there is none, sealer "keyfile" when it names none.
 func readLayoutFile(stateDir string) (layoutFile, error) {
 	path := filepath.Join(stateDir, layoutName)
-	raw, err := os.ReadFile(path)
+	raw, err := atomicfile.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return layoutFile{Sealer: sealerKeyFile}, nil
 	}
@@ -197,7 +240,7 @@ func readLayoutFile(stateDir string) (layoutFile, error) {
 		case l.Sealer == "" && !sealerPresent(raw):
 			l.Sealer = sealerKeyFile
 		case !knownSealer(l.Sealer):
-			return layoutFile{}, fmt.Errorf("%s: sealer %q: %w", path, l.Sealer, ErrUnknownSealer)
+			return layoutFile{}, unknownSealerError(path, l.Sealer)
 		}
 		return l, nil
 	case l.Version > LayoutVersion:
@@ -342,7 +385,7 @@ func exists(path string) bool {
 
 // makeDir makes dir (0700) unless it exists, and fsyncs parent after.
 func makeDir(parent, dir string) error {
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	if err := acl.Mkdir(dir); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil
 		}
@@ -352,9 +395,9 @@ func makeDir(parent, dir string) error {
 	return nil
 }
 
-// rename is os.Rename, then renameHook.
+// rename is atomicfile.Rename, then renameHook.
 func rename(from, to string) error {
-	if err := os.Rename(from, to); err != nil {
+	if err := atomicfile.Rename(from, to); err != nil {
 		return err
 	}
 	if renameHook != nil {
@@ -373,14 +416,14 @@ func writeLayout(stateDir, sealer string) error {
 }
 
 // CreateLayout makes the layout of a new state: accounts/ (0700), then
-// layout.json recording sealer, "keyfile" or "secret-service" (otherwise
+// layout.json recording sealer, one this pcb opens (knownSealer; otherwise
 // ErrUnknownSealer, nothing written). layout.json is created exclusively
 // and fsynced, with its directory: when one exists already, the first
 // creator's stays and CreateLayout returns nil, so a second creator that
 // raced the first is harmless. The caller holds the layout lock.
 func CreateLayout(stateDir, sealer string) error {
 	if !knownSealer(sealer) {
-		return fmt.Errorf("sealer %q: %w", sealer, ErrUnknownSealer)
+		return unknownSealerError(filepath.Join(stateDir, layoutName), sealer)
 	}
 	if err := makeDir(stateDir, AccountsDir(stateDir)); err != nil {
 		return err

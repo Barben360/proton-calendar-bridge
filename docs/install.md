@@ -6,7 +6,7 @@ This is still an early version. On Linux its author uses it with their own Proto
 
 ## Requirements
 
-- **Linux (amd64, arm64)** is supported. macOS (amd64, arm64) gets `pcb` only and is untested ([below](#macos-and-windows)).
+- **Linux (amd64, arm64)** is supported. macOS (amd64, arm64) gets `pcb` only and is untested; Windows 10 (1809 or later) and 11 (amd64) are supported too, both binaries ([below](#macos-and-windows)).
 - **`curl` or `wget`**, to install a release.
 - **Go** (the version in `go.mod`) and `make`, only to [build from a clone](#build-from-a-clone).
 - **systemd 252 or later** (Debian 12 or 13) to run pcb as a service ([service](service.md)).
@@ -15,9 +15,9 @@ This is still an early version. On Linux its author uses it with their own Proto
 
 ### macOS and Windows
 
-**macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux only for now), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
+**macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux and Windows only), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
-**Windows** only builds: `GOOS=windows` compiles `./cmd/pcb`, with no release archive, no `pcb-ui` and no service management. There is no file lock and no control socket, so `pcb login`, `pcb sync` and `pcb serve` exit 20 (`run pcb on Linux or macOS`). The rest of the CLI runs offline on the files.
+**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from a zip on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, a release runs them from the zip before it is published, and the bridge was checked live on a Windows 11 desktop as a standard user (CalDAV with `curl`: Thunderbird for Windows' own window was not checked). There is no service: `pcb-ui`, started at login, runs the bridge.
 
 ## Install a release
 
@@ -68,11 +68,43 @@ gh attestation verify pcb_linux_amd64.tar.gz --repo Barben360/proton-calendar-br
   --signer-workflow Barben360/proton-calendar-bridge/.github/workflows/release.yml
 ```
 
-The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).
+The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, and `pcb_windows_amd64.zip`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).
 
 ### Remove
 
-There is no uninstall command. Stop whatever runs pcb first (`pcb uninstall` for a service, then quit `pcb-ui`), then delete the files in the table above, from the prefix you used.
+There is no uninstall command. Stop whatever runs pcb first (`pcb uninstall` for a service, then quit `pcb-ui`), then delete the files in the table above, from the prefix you used. On Windows: [Remove it](#remove-it-from-windows).
+
+## Windows
+
+Windows 10 (1809 or later) and 11, amd64 ([above](#macos-and-windows)).
+
+1. Download `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases). It holds `pcb-ui.exe`, `pcb.exe`, `LICENSE` and `README.md`. To check it yourself, compare `Get-FileHash pcb_windows_amd64.zip` (PowerShell, SHA-256) with its line in the release's `checksums.txt`, or run `gh attestation verify` on it as [above](#check-a-download-yourself).
+2. Unzip it into a folder of your own, for example `%LOCALAPPDATA%\Programs\pcb`. No installer and no administrator rights are needed.
+3. Start `pcb-ui.exe`, then Add account in the window. Settings, "Start at login" starts it at each login ([desktop](desktop.md#start-at-login)).
+4. Optional, for the terminal: add that folder to your `PATH` (search the Start menu for "Edit environment variables for your account", edit `Path`, add the folder), then open a new terminal: `pcb status`, `pcb client show`, `pcb doctor` talk to the running `pcb-ui`.
+
+Until the binaries are signed, Windows SmartScreen may stop the first start with "Windows protected your PC" and an unknown publisher: choose More info, then Run anyway.
+
+What is different from Linux:
+
+| | On Windows |
+|---|---|
+| Files | config in `%APPDATA%\pcb`, state (sessions, cache, the sealing key, logs) in `%LOCALAPPDATA%\pcb`, only your Windows account (and the system) can open them |
+| Sealing key | protected by Windows for your account (DPAPI), in the state directory ([security](security.md#on-windows-dpapi)) |
+| Running at login | `pcb-ui`'s "Start at login"; `pcb install` and `pcb service` refuse (exit 20, `no service on Windows`) |
+| Display | `pcb-ui` needs OpenGL 2.0: some virtual machines and remote desktops lack it ([troubleshooting](troubleshooting.md#pcb-ui-needs-opengl-20)) |
+| Commands | the same as on Linux; hints and fixes are written for PowerShell |
+
+### Remove it from Windows
+
+Quit `pcb-ui` (its tray menu, Quit), then in a terminal in its folder:
+
+```powershell
+.\pcb.exe uninstall --delete-data --plan   # see what it would do
+.\pcb.exe uninstall --delete-data          # it asks; or --yes
+```
+
+It logs out, deletes `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb` (the sealing key included) and turns "Start at login" off when it starts this folder's `pcb-ui.exe`. Then delete the folder you unzipped. Without `--delete-data` it only turns "Start at login" off. It refuses (exit 20) while `pcb-ui`, `pcb serve` or an agent session (`pcb mcp`) still serves the state.
 
 ## Build from a clone
 
@@ -134,7 +166,7 @@ How to run it: [container](container.md).
 | Config directory (`config.toml`, the key file) | `~/.config/pcb` | `PCB_CONFIG_DIR`, or `$XDG_CONFIG_HOME/pcb` |
 | State directory (sessions, cache, CalDAV passwords, certificate, logs) | `~/.local/state/pcb` | `PCB_STATE_DIR`, or `$XDG_STATE_HOME/pcb` |
 
-A system service uses `/etc/pcb` and `/var/lib/pcb` ([service](service.md#run-it-as-a-system-service)); the container keeps both under `/data` ([container](container.md)).
+A system service uses `/etc/pcb` and `/var/lib/pcb` ([service](service.md#run-it-as-a-system-service)); the container keeps both under `/data` ([container](container.md)). On Windows the config directory is `%APPDATA%\pcb` and the state directory `%LOCALAPPDATA%\pcb` (`PCB_CONFIG_DIR` and `PCB_STATE_DIR` still override them; `XDG_*` and `HOME` are not read there).
 
 ## First login
 

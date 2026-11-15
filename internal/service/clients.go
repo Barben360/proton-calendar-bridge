@@ -68,12 +68,12 @@ func (l *Local) clientsError(err error) error {
 		if cause := keyCause(err); cause != "" {
 			msg += " (" + cause + ")"
 		}
-		return keyFailure(err, msg+", so nothing was stored", l.keyFix())
+		return keyFailure(err, msg+", so nothing was stored", l.keyHint(err))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return blocked("the operation was cancelled or timed out", "run the command again")
 	default:
 		return blocked("the CalDAV client list could not be read or written",
-			fmt.Sprintf("check clients.json and its permissions in %s (it must be valid JSON in the format pcb wrote, mode 0600)", l.o.Dirs.State))
+			fmt.Sprintf("check clients.json and its permissions in %s (it must be valid JSON in the format pcb wrote, %s)", l.o.Dirs.State, privateFile))
 	}
 }
 
@@ -332,7 +332,7 @@ func (l *Local) ShowClient(_ context.Context, idOrName string) (ClientCredential
 // is no way out.
 func (l *Local) unrevealable(name string, err error) error {
 	if cause := keyCause(err); cause != "" {
-		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), l.keyFix())
+		return keyFailure(err, fmt.Sprintf("the password of the CalDAV client %q cannot be shown: %s cannot be used (%s)", name, l.keyWhat(), cause), l.keyHint(err))
 	}
 	why := "its sealed copy does not open with " + l.keyWhat()
 	switch {

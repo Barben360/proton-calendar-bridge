@@ -5,6 +5,7 @@
 ## Build and test
 
 - Go module `github.com/Barben360/proton-calendar-bridge`; binaries `pcb` (static, no GUI) and `pcb-ui` (Fyne, cgo). Gate: `make lint test`; it compiles `cmd/pcb-ui`, so it needs a C compiler and the GL/X headers.
+- Windows: the Windows code compiles on Linux, so check it with `GOOS=windows go vet ./...` (and `GOOS=windows CGO_ENABLED=0 go build ./cmd/pcb`); `pcb-ui` for Windows builds only on Windows (cgo, MSYS2 UCRT64). Windows tests run through `scripts/win/vmtest.sh` on a Windows machine over SSH, its target in `PCB_WIN_SSH` (never written in the repository; `docs/development.md`), and in CI's `windows` and `windows-test` jobs. Only code that calls Windows APIs is build-tagged `windows`.
 - Live-session tooling: `make live-preflight-test` (guard), `make shellcheck` (pinned image, as CI), `make rehearse` (`pcb` against the loopback fake `cmd/pcb-fake`), `scripts/live/run.sh` (`spec/HUMAN-CHECKS.md`). `pcb-fake` and `pcb-lab` are developer tools, never built into the image.
 
 ## Live Proton calls

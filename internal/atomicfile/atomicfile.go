@@ -2,12 +2,28 @@
 package atomicfile
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 )
+
+// RenameRetry is how long Rename keeps retrying a rename that a reader or a
+// scanner blocks (Windows only).
+const RenameRetry = 2 * time.Second
+
+// ReadFile reads path through Open. Every read of a file Write replaces
+// goes through Open or ReadFile, so a replacement never waits for a reader.
+func ReadFile(path string) ([]byte, error) {
+	f, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read only
+	return io.ReadAll(f)
+}
 
 // Write replaces path with data: a temporary file in the same directory
 // (mode 0600), fsynced, then renamed over path. The directory is fsynced
@@ -33,7 +49,7 @@ func Write(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(f.Name(), path); err != nil {
+	if err := Rename(f.Name(), path); err != nil {
 		return err
 	}
 	SyncDir(filepath.Dir(path))

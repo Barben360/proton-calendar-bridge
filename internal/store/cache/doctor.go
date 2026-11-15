@@ -41,7 +41,7 @@ func Inspect(path string) (Info, error) {
 	if _, err := os.Stat(abs + "-wal"); errors.Is(err, fs.ErrNotExist) {
 		query = "immutable=1"
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: query}
+	u := url.URL{Scheme: "file", Path: uriPath(abs), RawQuery: query}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return info, err

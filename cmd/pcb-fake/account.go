@@ -23,7 +23,8 @@ type account struct {
 const defaultUsername = "pcbfake"
 
 // readAccount reads path: a regular file only its owner can read or write
-// (mode 0600 or stricter), strict TOML. Its errors never echo a value.
+// (mode 0600 or stricter; on Windows an access list of the user, SYSTEM and
+// Administrators only), strict TOML. Its errors never echo a value.
 func readAccount(path string) (account, error) {
 	fix := func(err error, hint string) error {
 		return &exitcode.Error{Code: exitcode.MustAct, Err: err, Hint: hint}
@@ -35,8 +36,8 @@ func readAccount(path string) (account, error) {
 	if !fi.Mode().IsRegular() {
 		return account{}, fix(fmt.Errorf("account file %s is not a regular file", path), "use a plain file, mode 0600")
 	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return account{}, fix(fmt.Errorf("account file %s has mode %#o: others can read it", path, perm), "chmod 600 "+path)
+	if hint, err := private(path, fi); err != nil {
+		return account{}, fix(err, hint)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

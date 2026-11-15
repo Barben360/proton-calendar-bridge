@@ -79,7 +79,7 @@ func Acquire(dir string, min time.Duration, now time.Time, log *slog.Logger) (re
 
 func check(dir string, min time.Duration, now time.Time, log *slog.Logger) error {
 	path := filepath.Join(dir, stampFile)
-	b, err := os.ReadFile(path)
+	b, err := atomicfile.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

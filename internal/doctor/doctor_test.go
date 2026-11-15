@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
@@ -18,6 +19,9 @@ import (
 )
 
 func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes: the access-list twin is TestDirModeCheckReportsAnOpenACL")
+	}
 	dir := filepath.Join(t.TempDir(), "d")
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
@@ -32,6 +36,9 @@ func TestDirModeCheckFlagsGroupReadable(t *testing.T) {
 }
 
 func TestDirModeCheckFixQuotesThePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a POSIX-quoted chmod fix: the Windows fix is acl.Fix, PowerShell-quoted (TestDirModeCheckReportsAnOpenACL, a path with an apostrophe)")
+	}
 	dir := filepath.Join(t.TempDir(), "my dir's")
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
@@ -61,26 +68,6 @@ func TestDirModeCheckOK(t *testing.T) {
 	got := doctor.DirModeCheck{Label: "config dir", Path: dir, Want: 0o700}.Run(context.Background())
 	if got.Status != doctor.StatusOK || got.Fix != "" {
 		t.Fatalf("got %+v", got)
-	}
-}
-
-func TestPlatformCheck(t *testing.T) {
-	for _, tt := range []struct {
-		goos, goarch string
-		want         doctor.Status
-	}{
-		{"linux", "amd64", doctor.StatusOK},
-		{"linux", "arm64", doctor.StatusOK},
-		{"windows", "amd64", doctor.StatusWarn},
-		{"linux", "riscv64", doctor.StatusWarn},
-	} {
-		got := doctor.PlatformCheck{GOOS: tt.goos, GOARCH: tt.goarch}.Run(context.Background())
-		if got.Status != tt.want {
-			t.Errorf("%s/%s: got %+v, want %s", tt.goos, tt.goarch, got, tt.want)
-		}
-		if tt.want == doctor.StatusWarn && !strings.Contains(got.Message, "unsupported") {
-			t.Errorf("%s/%s: message %q lacks \"unsupported\"", tt.goos, tt.goarch, got.Message)
-		}
 	}
 }
 
@@ -200,6 +187,9 @@ func TestDoctorConfigCheckOK(t *testing.T) {
 }
 
 func TestFileModeCheckFlagsGroupReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes: the access-list twin is TestModeChecksJudgeTheOwnerOfDirectoriesOnly")
+	}
 	path := filepath.Join(t.TempDir(), "secrets.key")
 	if err := os.WriteFile(path, []byte("k"), 0o640); err != nil {
 		t.Fatal(err)
@@ -223,9 +213,6 @@ func TestFileModeCheckFlagsGroupReadable(t *testing.T) {
 // this user cannot read (a container secret left host-owned) fails with
 // the cause, and so does one of the wrong size.
 func TestKeyFileCheckReadsTheKey(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
-	}
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "secrets.key")
 	check := doctor.KeyFileCheck{Path: path}
@@ -244,22 +231,22 @@ func TestKeyFileCheckReadsTheKey(t *testing.T) {
 	if got := check.Run(ctx); got.Status != doctor.StatusError || !strings.Contains(got.Message, "not a 32-byte key") || got.Fix == "" {
 		t.Errorf("31 bytes: %+v", got)
 	}
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode 0000 file")
-	}
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatal(err)
-	}
+	acltest.Unreadable(t, path)
 	got := check.Run(ctx)
-	want := fmt.Sprintf("not readable by this user (uid %d): permission denied", os.Geteuid())
-	if got.Status != doctor.StatusError || !strings.Contains(got.Message, want) || !strings.Contains(got.Fix, "chown") {
-		t.Errorf("mode 0000: %+v, want %q and a chown fix", got, want)
+	if runtime.GOOS == "windows" {
+		if got.Status != doctor.StatusError || !strings.Contains(got.Message, path+" is not readable by this user: ") ||
+			!strings.Contains(got.Fix, "icacls") || strings.Contains(got.Fix, "chown") || strings.Contains(got.Fix, "chmod") {
+			t.Errorf("unreadable: %+v, want an icacls fix and no chown or chmod", got)
+		}
+	} else {
+		want := fmt.Sprintf("not readable by this user (uid %d): permission denied", os.Geteuid())
+		if got.Status != doctor.StatusError || !strings.Contains(got.Message, want) || !strings.Contains(got.Fix, "chown") {
+			t.Errorf("mode 0000: %+v, want %q and a chown fix", got, want)
+		}
 	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := check.Run(ctx); got.Status != doctor.StatusError || got.Fix != "chmod 600 "+path {
-		t.Errorf("mode 0644: %+v", got)
+	acltest.OpenToOthers(t, path)
+	if got := check.Run(ctx); got.Status != doctor.StatusError || got.Fix != acltest.OthersFix(path) {
+		t.Errorf("open to others: %+v, want the fix %q", got, acltest.OthersFix(path))
 	}
 }
 
@@ -416,34 +403,31 @@ func TestSecretsCheckSaysUpgradeForANewerState(t *testing.T) {
 // A state.json this user cannot read gets the permission text; malformed JSON
 // keeps the reset hint; a newer file keeps "upgrade pcb" (A12 I1).
 func TestSecretsCheckSplitsUnreadableMalformedAndNewerState(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs chmod 000 to be enforced")
-	}
 	state := t.TempDir()
 	path := filepath.Join(state, "state.json")
-	run := func(body string, mode os.FileMode) doctor.Result {
+	run := func(body string, unreadable bool) doctor.Result {
 		t.Helper()
-		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
+		if unreadable {
+			acltest.Unreadable(t, path)
 		}
 		return doctor.SecretsCheck{StateDir: state, KeyFile: filepath.Join(state, "k")}.Run(context.Background())
 	}
-	got := run(`{"phase":"ready"}`, 0o000)
+	got := run(`{"phase":"ready"}`, true)
 	if got.Status != doctor.StatusError || !strings.HasPrefix(got.Message, "the login state file "+path+" cannot be read by this user (owner ") ||
 		got.Fix != "make it readable by "+store.CurrentUser()+" (or run pcb as its owner)" {
 		t.Errorf("unreadable: %+v", got)
 	}
-	got = run(`{not json`, 0o600)
+	got = run(`{not json`, false)
 	if got.Status != doctor.StatusError || got.Fix != "remove the damaged state.json, then log in again" {
 		t.Errorf("malformed: %+v", got)
 	}
-	got = run(`{"phase":"ready","field_from_the_future":1}`, 0o600)
+	got = run(`{"phase":"ready","field_from_the_future":1}`, false)
 	if got.Status != doctor.StatusError || got.Fix != "upgrade pcb" {
 		t.Errorf("newer: %+v", got)
 	}

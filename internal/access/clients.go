@@ -25,6 +25,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 )
@@ -107,7 +108,7 @@ type fileState struct {
 	mtime  time.Time
 	size   int64
 	ctime  int64       // change time in ns, 0 where unknown
-	info   os.FileInfo // for os.SameFile
+	info   os.FileInfo // for os.SameFile, its identity read at stat time (statFile)
 }
 
 func (a fileState) same(b fileState) bool {
@@ -154,7 +155,7 @@ func NewStore(dir string, now func() time.Time) *Store {
 func (s *Store) path() string { return filepath.Join(s.dir, fileName) }
 
 func stateOf(path string) (fileState, error) {
-	fi, err := os.Stat(path)
+	fi, err := statFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fileState{}, nil
 	}
@@ -180,7 +181,7 @@ func (s *Store) refresh(force bool) error {
 	if !st.exists {
 		return nil
 	}
-	data, err := os.ReadFile(s.path())
+	data, err := atomicfile.ReadFile(s.path())
 	if err != nil {
 		s.loaded, s.loadErr = false, fmt.Errorf("client list unreadable: %w", err)
 		return s.loadErr
@@ -219,7 +220,7 @@ func (s *Store) save(clients []record) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := acl.MkdirAll(s.dir); err != nil {
 		return err
 	}
 	if err := atomicfile.Write(s.path(), append(data, '\n')); err != nil {
@@ -255,7 +256,7 @@ func (s *Store) mutate(ctx context.Context, fn func(clients []record) ([]record,
 // dir/name, which unlock releases.
 func lockDir(ctx context.Context, dir, name string) (unlock func(), err error) {
 	processMu.Lock()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := acl.MkdirAll(dir); err != nil {
 		processMu.Unlock()
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	gpa "github.com/ProtonMail/go-proton-api"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
@@ -963,18 +965,16 @@ func TestLogoutOfAStoreThisPcbCannotRead(t *testing.T) {
 // hint fixes the cause instead of looping back to logout (exit 10).
 func TestLogoutKeepsAStoreItCannotRead(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 file")
-	}
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
-	if err := os.Chmod(e.secrets().Path, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(e.secrets().Path, 0o600) })
+	acltest.Unreadable(t, e.secrets().Path)
 	_, err := e.svc.Logout(t.Context(), service.LogoutRequest{Discard: true})
 	ee := wantExit(t, err, exitcode.MustAct) // ux-I3: a person fixes the permission
-	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": permission denied), so they were kept"; ee.Error() != want {
+	denied := "permission denied"
+	if runtime.GOOS == "windows" {
+		denied = "Access is denied."
+	}
+	if want := "cannot read the stored secrets (open " + e.secrets().Path + ": " + denied + "), so they were kept"; ee.Error() != want {
 		t.Errorf("message = %q, want %q", ee.Error(), want)
 	}
 	if want := "make secrets.sealed in " + e.dirs.State + " readable by the user pcb runs as, then run pcb logout again"; ee.Hint != want {
@@ -1533,19 +1533,21 @@ func TestRejectedCodeKeepsTheDeadline(t *testing.T) {
 // M5-R15 C2: the login's sealing names why the key file cannot be read.
 func TestLoginNamesWhyTheKeyCannotBeRead(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode 0000 file")
-	}
 	e := newEnv(t, protontest.Options{})
 	if err := os.MkdirAll(filepath.Dir(e.cfg.Secrets.KeyFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(e.cfg.Secrets.KeyFile, make([]byte, 32), 0o000); err != nil {
+	if err := os.WriteFile(e.cfg.Secrets.KeyFile, make([]byte, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	acltest.Unreadable(t, e.cfg.Secrets.KeyFile)
+	want := "permission denied"
+	if runtime.GOOS == "windows" {
+		want = "Access is denied"
+	}
 	_, err := e.svc.Login(t.Context(), e.req())
-	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) {
-		t.Fatalf("Login = %v, want the key file and permission denied", err)
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), e.cfg.Secrets.KeyFile) {
+		t.Fatalf("Login = %v, want the key file and %q", err, want)
 	}
 }
 

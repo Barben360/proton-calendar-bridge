@@ -279,6 +279,12 @@ const SecretsUnsupported = "unsupported"
 // (ruling R15).
 const SecretsKeyringUnavailable = "keyring-unavailable"
 
+// SecretsKeyUnavailable is Status.Secrets for a dpapi state whose key
+// Windows cannot unprotect in this session (a logon without the password):
+// the key and the session are intact, the phase is kept, as for
+// SecretsKeyringUnavailable; SecretsCause says why.
+const SecretsKeyUnavailable = "key-unavailable"
+
 // LogoutResult says what Logout did. Revoked is false when Proton could not
 // be told (the local secrets are gone anyway).
 // SyncRunning: another pcb process held the sync lock (pcb sync, its
@@ -293,6 +299,8 @@ type LogoutResult struct {
 // (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
 // waits for its code. Secrets is "sealed", "none", "unreadable", "locked" (the desktop keyring is locked),
 // "keyring-unavailable" (no desktop keyring answers: SecretsKeyringUnavailable),
+// "key-unavailable" (Windows cannot unprotect the DPAPI key in this session:
+// SecretsKeyUnavailable),
 // "unsupported" (written by a newer pcb, or sealed by another sealer: Reason
 // names which) or "rolled-back" (secrets.sealed older than the last one pcb
 // wrote).
@@ -305,11 +313,14 @@ type Status struct {
 	Address   string `json:"address,omitempty"`
 	AccountID string `json:"account_id,omitempty"`
 	Secrets   string `json:"secrets"`
-	KeyFile   string `json:"key_file"`
+	// SecretsCause is why Secrets is key-unavailable: Windows' error.
+	SecretsCause string `json:"secrets_cause,omitempty"`
+	KeyFile      string `json:"key_file"`
 	// KeyFileAbsent: no file at KeyFile (before the first login, or once
 	// deleted); another stat failure is not absence.
 	KeyFileAbsent bool `json:"key_file_absent"`
-	// Sealer is what seals the secrets: "keyfile" or "secret-service".
+	// Sealer is what seals the secrets: "keyfile", "secret-service" or
+	// "dpapi" (KeyFile is then the DPAPI key, in the state directory).
 	Sealer      string     `json:"sealer"`
 	Unattended  bool       `json:"unattended"`
 	CaptchaURL  string     `json:"captcha_url,omitempty"`

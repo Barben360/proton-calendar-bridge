@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -58,6 +60,12 @@ type IO struct {
 	// the function that unsubscribes: pcb serve exits at once on a second
 	// one while it stops (ruling M5-P22).
 	Signals func() (<-chan os.Signal, func())
+	// GOOS is the operating system install, uninstall and service act for
+	// ("": runtime.GOOS); tests set "windows" on any host.
+	GOOS string
+	// RunKey is pcb-ui's Run value uninstall removes on Windows (nil:
+	// runkey.System()).
+	RunKey runkey.Store
 }
 
 // osSignals is IO.Signals on the operating system's signals.
@@ -104,6 +112,12 @@ func (o IO) withDefaults() IO {
 	}
 	if o.Signals == nil {
 		o.Signals = osSignals
+	}
+	if o.GOOS == "" {
+		o.GOOS = runtime.GOOS
+	}
+	if o.RunKey == nil {
+		o.RunKey = runkey.System()
 	}
 	if o.Host.Run == nil {
 		o.Host = install.OSHost()

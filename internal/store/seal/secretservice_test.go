@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
@@ -108,6 +109,17 @@ func (g slowMissKeyring) Get(ctx context.Context, attrs map[string]string) ([]by
 		time.Sleep(150 * time.Millisecond)
 	}
 	return v, err
+}
+
+// The first Seal makes a missing state directory private, as every
+// directory pcb makes: mode 0700, or on Windows a protected access list
+// owned by the user.
+func TestSecretServiceMakesItsStateDirPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if _, err := (&seal.SecretService{Keyring: newMem(), StateDir: dir}).Seal([]byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	acltest.WantPrivate(t, dir, 0o700)
 }
 
 // Two processes sealing for the first time at once must agree on one key.

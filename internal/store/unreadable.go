@@ -2,11 +2,9 @@ package store
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"os/user"
-	"strconv"
 )
 
 // StateUnreadable reports whether err from LoadState is an OS failure to read
@@ -22,20 +20,14 @@ func StateUnreadable(err error) (path string, ok bool) {
 }
 
 // Unreadable describes path for a "cannot be read by this user" message:
-// "owner NAME, mode 0000" when stat works, "" otherwise.
+// "owner NAME, mode 0000" when stat works ("owner DOMAIN\name" on Windows,
+// which has no modes), "" otherwise.
 func Unreadable(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ""
 	}
-	owner := "unknown"
-	if uid, ok := fileOwner(path); ok {
-		owner = "#" + strconv.Itoa(uid)
-		if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.Username != "" {
-			owner = u.Username
-		}
-	}
-	return fmt.Sprintf("owner %s, mode %04o", owner, info.Mode().Perm())
+	return describeOwner(path, info)
 }
 
 // CurrentUser names the user pcb runs as.

@@ -16,7 +16,7 @@ Secrets never come from a flag. They come from:
 
 ### Login through the daemon
 
-When `pcb serve` runs (or the service, or `pcb-ui`), `pcb login` goes through it, over a control socket only its own user can open.
+When `pcb serve` runs (or the service, or `pcb-ui`), `pcb login` goes through it, over a control socket only its own user can open (a named pipe on Windows, [below](#on-windows-files-and-the-pipe)).
 
 - A login that waits for its 2FA code stays in the daemon for 5 minutes. `PCB_TOTP=<code> pcb login resume --totp` finishes it; the code is never an argument.
 - With no daemon, `pcb login` says so and logs in on its own.
@@ -56,9 +56,10 @@ Only `pcb login` offers it. `pcb-ui` and the login page an AI agent opens never 
 pcb seals your Proton session (and, with `--unattended-relogin`, your credentials) in `secrets.sealed`, and the CalDAV passwords in `clients.json`, with one key. That key is either:
 
 - a **key file**, by default in the config directory, beside the data; set `[secrets] key_file` to keep it on another mount ([container](container.md#the-key-file));
-- or an item in the **desktop keyring** ([below](#the-desktop-keyring-secret-service)).
+- or an item in the **desktop keyring** ([below](#the-desktop-keyring-secret-service));
+- or, on Windows, a key **protected by DPAPI** for your Windows account ([below](#on-windows-dpapi)).
 
-The key file must be exactly 32 bytes, and readable by pcb's user only: pcb refuses a key file others can read (mode 0444 included).
+The key file must be exactly 32 bytes, and readable by pcb's user only: pcb refuses a key file others can read (mode 0444 included; on Windows, an access list that lets another account in).
 
 | Problem | What happens |
 |---|---|
@@ -109,9 +110,37 @@ A login checks the keyring first and, when it is locked or not available, refuse
 - `pcb uninstall --delete-data` removes the item (a `remove keyring` step after the state directory). When the keyring is locked or not available it deletes the data anyway, and its output says how to delete the item by hand in Seahorse.
 - `pcb account remove` keeps it, since the key belongs to the state.
 
+## On Windows: DPAPI
+
+On Windows a new state keeps its sealing key in `secrets.key.dpapi` in the state directory (`%LOCALAPPDATA%\pcb`), encrypted by Windows for your account (DPAPI): only your Windows account, signed in, can decrypt it, and a copy of the file opens nowhere else.
+
+`[secrets] backend` chooses, once, when the state is created:
+
+| Value | Effect |
+|---|---|
+| `auto` (default) | DPAPI |
+| `keyfile` | the key file, a plain 32-byte key whose access list lets only you in (portable, so back it up like a password) |
+| `secret-service` | refused, exit 10: the desktop keyring exists on Linux only |
+
+- As with the key file, any program running as you can use the key: DPAPI protects it against other accounts and against a copy of the disk, not against your own processes.
+- When Windows cannot decrypt the key in the current session (you signed in without your password, for example over SSH with a key), commands exit 20 with `DPAPI could not unprotect the sealing key for this Windows user`, and `pcb status` shows `secrets: key-unavailable` and the alert `key-unavailable`, never `needs-login`. Nothing is lost: sign in to Windows once with your password, then retry. Do not log out. Creating the key at the first login fails the same way (exit 10, `DPAPI could not protect the sealing key`).
+- A reset Windows password (by an administrator, not changed by you) or a new Windows profile loses the key for good: if `key-unavailable` stays after a sign-in with your password, run `pcb logout`, then `pcb login`.
+- `pcb uninstall --delete-data` deletes the key with the state directory.
+
+### On Windows: files and the pipe
+
+- **Directories.** Every directory pcb creates (the state and config directories and its own subdirectories, the logs directory included) gets its own access list, not inherited from their parent: full control for your Windows account and for the system (`SYSTEM`), nothing else, with your account as their owner, also when pcb runs as administrator. What they hold inherits that list.
+- **Checks.** Where Linux checks a file's mode or owner, Windows checks its access list: a file or directory that lets in an account other than yours, `SYSTEM` or `Administrators` is refused with the same exit codes, and `pcb doctor` prints the `icacls` command that removes that account. A directory must be owned by you (or by Administrators, accepted only while pcb itself runs elevated).
+- **Elevated runs.** pcb does not refuse to run as administrator, but `pcb doctor` warns: run it from a normal terminal.
+- **The control pipe.** The CLI reaches `pcb-ui` or `pcb serve` over a named pipe whose access list lets only your account in, and which refuses connections from other machines. The bridge checks the account of each client, and the CLI checks that the pipe is owned by your account before it sends anything (a login or a 2FA code crosses it): a pipe owned by another account is refused (exit 20).
+
+### A state moved between systems
+
+A state created on Windows with DPAPI cannot be opened on Linux or macOS, and a state sealed by a Linux desktop keyring cannot be opened on Windows: pcb exits 10 and names the system the state was created on. Use it there, or move the state directory aside and run `pcb login` to start a new one. A key-file state moves with its key file.
+
 ## CalDAV passwords
 
-Each CalDAV app password is 24 random bytes (base64url), kept in `clients.json` (0600) in the state directory twice:
+Each CalDAV app password is 24 random bytes (base64url), kept in `clients.json` (0600; on Windows, the state directory's private access list) in the state directory twice:
 
 - as a salted SHA-256, for the check;
 - sealed with the key that seals your Proton session, so `pcb client show` can print it again.

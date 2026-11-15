@@ -313,7 +313,7 @@ func TestSelfSignedCertFieldsForNSS(t *testing.T) {
 
 func TestSelfSignedRepairsModesOnReuse(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
+		t.Skip("Unix modes: Windows repairs nothing and refuses an open access list (TestSecureRefusesAnOpenKey)")
 	}
 	dir := filepath.Join(t.TempDir(), "tls")
 	o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&now), InterfaceAddrs: noInterfaces(t)}
@@ -345,37 +345,5 @@ func TestSelfSignedRepairsModesOnReuse(t *testing.T) {
 	}
 	if len(res.Repaired) != 2 {
 		t.Errorf("Repaired = %v, want the directory and the key", res.Repaired)
-	}
-}
-
-func TestSelfSignedRefusesFilesOfAnotherUser(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("no Unix owners")
-	}
-	for _, foreign := range []string{"directory", "key"} {
-		t.Run(foreign, func(t *testing.T) {
-			dir := filepath.Join(t.TempDir(), "tls")
-			o := tlsutil.Options{Dir: dir, BindIP: net.ParseIP("192.168.1.5"), Now: clock(&now), InterfaceAddrs: noInterfaces(t)}
-			if _, err := tlsutil.SelfSigned(o); err != nil {
-				t.Fatal(err)
-			}
-			target := map[string]string{"directory": dir, "key": tlsutil.KeyPath(dir)}[foreign]
-			target, _ = filepath.Abs(target)
-			restore := tlsutil.SetOwner(func(fi fs.FileInfo) (int, bool) {
-				if fi.Name() == filepath.Base(target) {
-					return os.Getuid() + 1, true
-				}
-				return os.Getuid(), true
-			})
-			defer restore()
-			before, _ := os.ReadFile(tlsutil.KeyPath(dir))
-			_, err := tlsutil.SelfSigned(o)
-			if err == nil || !strings.Contains(err.Error(), "owned by another user") {
-				t.Fatalf("SelfSigned with a foreign %s = %v, want a refusal", foreign, err)
-			}
-			if after, _ := os.ReadFile(tlsutil.KeyPath(dir)); !slices.Equal(before, after) {
-				t.Error("the refused start replaced the key")
-			}
-		})
 	}
 }

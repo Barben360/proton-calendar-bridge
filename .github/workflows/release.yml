@@ -2,8 +2,8 @@ name: release
 # A vX.Y.Z or vX.Y.Z-PRERELEASE tag publishes a release
 # (spec/designs/2026-11-14-release-process-design.md §5.1).
 #
-# Order: checks → builds (pcb, pcb-ui) → archives → macOS smoke → image →
-# Release. Each step runs only when everything before it passed, so the
+# Order: checks → builds (pcb, pcb-ui) → archives → macOS and Windows
+# smoke → image → Release. Each step runs only when everything before it passed, so the
 # outward steps come last and in the order a user meets them: nothing is
 # pushed while a check or a build can still fail, the image (and its tags,
 # latest included) moves only once every binary was built and the darwin
@@ -50,7 +50,7 @@ defaults:
     shell: bash
 env:
   # The release files besides checksums.txt, which covers exactly these.
-  ASSETS: install.sh pcb_darwin_amd64.tar.gz pcb_darwin_arm64.tar.gz pcb_linux_amd64.tar.gz pcb_linux_arm64.tar.gz
+  ASSETS: install.sh pcb_darwin_amd64.tar.gz pcb_darwin_arm64.tar.gz pcb_linux_amd64.tar.gz pcb_linux_arm64.tar.gz pcb_windows_amd64.zip
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -168,7 +168,7 @@ jobs:
           echo "$tags"
 
   # pcb is static (CGO_ENABLED=0, -trimpath: make build), so one runner
-  # cross-compiles the four targets.
+  # cross-compiles the five targets.
   pcb:
     needs: checks
     runs-on: ubuntu-latest
@@ -184,10 +184,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Build pcb for the four targets
+      - name: Build pcb for the five targets
         run: |
-          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-            GOOS=${t%-*} GOARCH=${t#*-} make build VERSION="$GITHUB_REF_NAME" OUT="bin/$t/pcb"
+          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
+            out=bin/$t/pcb
+            [ "${t%-*}" != windows ] || out=$out.exe
+            GOOS=${t%-*} GOARCH=${t#*-} make build VERSION="$GITHUB_REF_NAME" OUT="$out"
           done
       # One artifact per target; overwrite: a re-run of this job replaces
       # its own artifacts (each name belongs to one job).
@@ -213,6 +215,12 @@ jobs:
         with:
           name: pcb-darwin-arm64
           path: bin/darwin-arm64/pcb
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-windows-amd64
+          path: bin/windows-amd64/pcb.exe
           if-no-files-found: error
           overwrite: true
 
@@ -277,8 +285,46 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  # pcb-ui for Windows needs cgo: built natively with MinGW-w64 (UCRT64,
+  # the toolchain the Windows tests use), make ui adds -H=windowsgui and the
+  # go-winres resources (icon, manifest, version).
+  ui-windows:
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: make mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: Build pcb-ui
+        shell: msys2 {0}
+        run: make ui VERSION="$GITHUB_REF_NAME"
+      - name: pcb-ui prints the tag
+        run: |
+          bin/pcb-ui.exe --version > v.txt
+          cat v.txt
+          [[ $(cat v.txt) == "pcb-ui $GITHUB_REF_NAME "* ]] || { echo "::error::pcb-ui.exe --version does not print $GITHUB_REF_NAME"; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcb-ui-windows-amd64
+          path: bin/pcb-ui.exe
+          if-no-files-found: error
+          overwrite: true
+
   package:
-    needs: [pcb, pcb-arm64, ui]
+    needs: [pcb, pcb-arm64, ui, ui-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -294,7 +340,7 @@ jobs:
           path: ${{ runner.temp }}/artifacts
       # Artifacts drop the file modes; each binary is checked to be the
       # target's before it goes into that target's archive.
-      - name: Check the binaries and package the four archives
+      - name: Check the binaries and package the five archives
         run: |
           [ ! -e dist ] || { echo "::error::dist exists before packaging"; exit 1; }
           declare -A want=(
@@ -302,11 +348,25 @@ jobs:
             [linux-arm64]='^ELF 64-bit LSB .*ARM aarch64'
             [darwin-amd64]='^Mach-O 64-bit x86_64 executable'
             [darwin-arm64]='^Mach-O 64-bit arm64 executable'
+            # file's wording moved between releases ("executable (GUI) x86-64"
+            # to "executable for MS Windows 10.00 (GUI), x86-64").
+            [windows-amd64]='^PE32\+ executable.*\(console\).*x86-64'
+            [windows-amd64-ui]='^PE32\+ executable.*\(GUI\).*x86-64'
           )
-          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+          for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
             os=${t%-*} arch=${t#*-}
             stage=$RUNNER_TEMP/stage/$t
             mkdir -p "$stage"
+            if [ "$os" = windows ]; then
+              install -m 0755 "$RUNNER_TEMP/artifacts/pcb-$t/pcb.exe" "$stage/pcb.exe"
+              install -m 0755 "$RUNNER_TEMP/artifacts/pcb-ui-$t/pcb-ui.exe" "$stage/pcb-ui.exe"
+              kind=$(file -b "$stage/pcb.exe")
+              [[ $kind =~ ${want[$t]} ]] || { echo "::error::pcb.exe for $t is: $kind"; exit 1; }
+              kind=$(file -b "$stage/pcb-ui.exe")
+              [[ $kind =~ ${want[${t}-ui]} ]] || { echo "::error::pcb-ui.exe for $t is: $kind"; exit 1; }
+              scripts/release/package.sh "$os" "$arch" "$stage" dist
+              continue
+            fi
             install -m 0755 "$RUNNER_TEMP/artifacts/pcb-$t/pcb" "$stage/pcb"
             bins=(pcb)
             if [ "$os" = linux ]; then
@@ -324,10 +384,10 @@ jobs:
         run: |
           read -ra assets <<<"$ASSETS"
           # sha256sum with no names would hash stdin.
-          [ "${#assets[@]}" -eq 5 ] || { echo "::error::ASSETS does not name 5 files"; exit 1; }
+          [ "${#assets[@]}" -eq 6 ] || { echo "::error::ASSETS does not name 6 files"; exit 1; }
           cp scripts/install.sh dist/install.sh
           (cd dist && sha256sum "${assets[@]}" > checksums.txt)
-          [ "$(wc -l < dist/checksums.txt)" -eq 5 ] || { echo "::error::checksums.txt does not have 5 lines"; exit 1; }
+          [ "$(wc -l < dist/checksums.txt)" -eq 6 ] || { echo "::error::checksums.txt does not have 6 lines"; exit 1; }
           diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd dist && printf '%s\n' * | sort) || { echo "::error::dist does not hold exactly the release files"; exit 1; }
           cat dist/checksums.txt
       # The linux/amd64 archive as a user gets it: dist laid out as
@@ -392,11 +452,45 @@ jobs:
       - name: Install the darwin archive with install.sh and run pcb
         run: bash scripts/release/macos-smoke.sh dist "$GITHUB_REF_NAME"
 
+  # The Windows archive is run before anything is published: its checksum
+  # is checked against checksums.txt, it is unpacked as a user would, and
+  # both binaries run (Git Bash on windows-latest provides bash, sha256sum and jq).
+  windows-smoke:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: The zip is the one checksums.txt names
+        run: (cd dist && grep ' pcb_windows_amd64.zip$' checksums.txt | sha256sum --strict -c -)
+      # Windows' own unpacker, as a user's: Expand-Archive.
+      - name: Unpack the zip
+        shell: pwsh
+        run: Expand-Archive -Path dist/pcb_windows_amd64.zip -DestinationPath unpacked
+      - name: The zip holds exactly its four files
+        run: |
+          diff <(printf '%s\n' LICENSE README.md pcb-ui.exe pcb.exe) <(cd unpacked && printf '%s\n' * | LC_ALL=C sort) || { echo "::error::the zip does not hold exactly its four files"; exit 1; }
+      - name: pcb.exe prints the tag
+        run: |
+          got=$(unpacked/pcb.exe version --json | jq -r .data.version)
+          [ "$got" = "$GITHUB_REF_NAME" ] || { echo "::error::pcb.exe version --json prints $got, want $GITHUB_REF_NAME"; exit 1; }
+          echo "pcb.exe prints $got"
+      - name: pcb-ui.exe prints the tag
+        run: |
+          unpacked/pcb-ui.exe --version > v.txt
+          cat v.txt
+          [[ $(cat v.txt) == "pcb-ui $GITHUB_REF_NAME "* ]] || { echo "::error::pcb-ui.exe --version does not print $GITHUB_REF_NAME"; exit 1; }
+
   # Version tags, X.Y and latest as checks decided (check.sh image-tags).
   # A failure after the list was tagged (its attestation) leaves the tags
   # on an unattested list and publishes no Release: re-run failed jobs.
   image:
-    needs: [checks, macos]
+    needs: [checks, macos, windows-smoke]
     permissions:
       contents: read
       packages: write
@@ -412,7 +506,7 @@ jobs:
       owner-only: true
 
   release:
-    needs: [checks, package, image]
+    needs: [checks, package, image, windows-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -446,7 +540,7 @@ jobs:
         run: |
           read -ra assets <<<"$ASSETS"
           diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd dist && printf '%s\n' * | sort) || { echo "::error::dist does not hold exactly the release files"; exit 1; }
-          [ "$(wc -l < dist/checksums.txt)" -eq 5 ] || { echo "::error::checksums.txt does not have 5 lines"; exit 1; }
+          [ "$(wc -l < dist/checksums.txt)" -eq 6 ] || { echo "::error::checksums.txt does not have 6 lines"; exit 1; }
           (cd dist && sha256sum --strict -c checksums.txt)
       # The checks ran minutes ago: the tag must still name the commit that
       # was built, and no Release of it may have been published since. A
@@ -484,9 +578,9 @@ jobs:
           diff <(printf '%s\n' "${assets[@]}" checksums.txt | sort) <(cd "$draft" && printf '%s\n' * | sort) || { echo "::error::the draft does not hold exactly the release files"; exit 1; }
           cmp dist/checksums.txt "$draft/checksums.txt" || { echo "::error::the draft's checksums.txt is not the attested one"; exit 1; }
           n=$(wc -l < "$draft/checksums.txt")
-          [ "$n" -eq 5 ] || { echo "::error::the draft's checksums.txt has $n lines, want 5"; exit 1; }
+          [ "$n" -eq 6 ] || { echo "::error::the draft's checksums.txt has $n lines, want 6"; exit 1; }
           (cd "$draft" && sha256sum --strict -c checksums.txt)
-          echo "the draft's 5 files match checksums.txt"
+          echo "the draft's 6 files match checksums.txt"
       - name: Publish the draft
         run: |
           if [ "$LATEST" = yes ]; then latest=true; else latest=false; fi

@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // isolate points the XDG dirs at a temp tree and returns the config dir.
@@ -24,17 +27,31 @@ func isolate(t *testing.T) string {
 	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("APPDATA", filepath.Join(root, "cfg")) // Windows' base of the same directories
+	t.Setenv("LOCALAPPDATA", filepath.Join(root, "state"))
 	return filepath.Join(root, "cfg", "pcb")
+}
+
+// openDir makes dir, open to other users (mode 0750; on Windows an access
+// list letting Everyone in), and returns the fix pcb doctor gives for it.
+func openDir(t *testing.T, dir string) (fix string) {
+	t.Helper()
+	if err := acl.MkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		acltest.OpenToOthers(t, dir)
+		return acl.Fix(dir, acltest.Everyone)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return "chmod 700 " + dir
 }
 
 func TestDoctorExitCode(t *testing.T) {
 	cfg := isolate(t)
-	if err := os.MkdirAll(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	fix := openDir(t, cfg)
 	code, out, errs := run("doctor", "--json")
 	if code != exitcode.MustAct || errs != "" { // ux-I2: a mode to fix is the person's
 		t.Fatalf("code=%d stderr=%q", code, errs)
@@ -43,7 +60,7 @@ func TestDoctorExitCode(t *testing.T) {
 		OK   bool `json:"ok"`
 		Data struct {
 			Results []struct {
-				Name, Status, Fix string
+				Name, Status, Message, Fix string
 			} `json:"results"`
 		} `json:"data"`
 		Error struct {
@@ -69,21 +86,36 @@ func TestDoctorExitCode(t *testing.T) {
 	}
 	// No account yet: the process checks, then "accounts" in place of the
 	// account checks (design §4.6).
-	if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
+	if runtime.GOOS == "windows" {
+		// The DPAPI key for the key file, and Windows' own checks, whose
+		// statuses depend on the machine (elevation, zone, Start at login).
+		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon"; got != want {
+			t.Fatalf("names = %s, want %s", got, want)
+		}
+		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "ok,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
+			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
+		}
+		// No systemd on Windows: pcb-ui's Start at login is the service.
+		if got := env.Data.Results[len(env.Data.Results)-2]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+			t.Errorf("service = %+v", got)
+		}
+	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
-	}
-	if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
+	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
 		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
-	if !strings.Contains(env.Data.Results[1].Fix, "chmod 700 "+cfg) {
+	if !strings.Contains(env.Data.Results[1].Fix, fix) {
 		t.Fatalf("fix = %q", env.Data.Results[1].Fix)
 	}
 }
 
 func TestDoctorTextOK(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Linux list (12 lines, service: no systemd here); TestDoctorTextOKOnWindows checks Windows' list")
+	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
 	code, out, errs := run("doctor")
@@ -128,14 +160,9 @@ func TestDoctorTextOK(t *testing.T) {
 
 func TestDoctorTextShowsFix(t *testing.T) {
 	cfg := isolate(t)
-	if err := os.MkdirAll(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(cfg, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	fix := openDir(t, cfg)
 	code, out, _ := run("doctor")
-	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: chmod 700 "+cfg) {
+	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "   fix: "+fix) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 }
@@ -146,10 +173,16 @@ func TestDoctorReportsUnresolvableDirs(t *testing.T) {
 	t.Setenv("PCB_CONFIG_DIR", "")
 	t.Setenv("PCB_STATE_DIR", "")
 	t.Setenv("HOME", "")
+	// Windows resolves them from %APPDATA% and %LOCALAPPDATA% alone.
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	configFix, stateFix := "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path", "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path"
+	if runtime.GOOS == "windows" {
+		configFix, stateFix = "fix: set PCB_CONFIG_DIR or APPDATA to an absolute path", "fix: set PCB_STATE_DIR or LOCALAPPDATA to an absolute path"
+	}
 	code, out, errs := run("doctor")
 	if code != exitcode.MustAct || !strings.Contains(out, "✗  config dir") || !strings.Contains(out, "✗  state dir") ||
-		!strings.Contains(out, "fix: set HOME, PCB_CONFIG_DIR or XDG_CONFIG_HOME to an absolute path") ||
-		!strings.Contains(out, "fix: set HOME, PCB_STATE_DIR or XDG_STATE_HOME to an absolute path") {
+		!strings.Contains(out, configFix) || !strings.Contains(out, stateFix) {
 		t.Fatalf("code=%d stdout=%q", code, out)
 	}
 	if want := "Error: pcb doctor found 2 errors\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; errs != want {
@@ -283,13 +316,12 @@ func TestDoctorTransientDaemonErrorIsExit20(t *testing.T) {
 	if want := "Error: pcb doctor found 1 error\nHint: fix what the failed checks name (marked ✗), then run pcb doctor again\n"; r.errb.String() != want {
 		t.Errorf("stderr = %q, want %q", r.errb.String(), want)
 	}
-	// With a mode to fix as well, a person must act: 10.
+	// With a mode (on Windows an access list) to fix as well, a person must
+	// act: 10.
 	if err := os.MkdirAll(r.dirs.Config, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(r.dirs.Config, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	acltest.OpenToOthers(t, r.dirs.Config)
 	r.want(exitcode.MustAct, "doctor")
 }
 
@@ -302,8 +334,19 @@ func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
 	r := clientRig(t)
 	r.want(exitcode.OK, "client", "add", "phone")
 	r.want(exitcode.OK, "logout")
-	key := filepath.Join(r.dirs.Config, "secrets.key")
-	if err := os.WriteFile(key, []byte(strings.Repeat("k", 32)), 0o600); err != nil {
+	key, newKey := filepath.Join(r.dirs.Config, "secrets.key"), []byte(strings.Repeat("k", 32))
+	if runtime.GOOS == "windows" { // auto sealed with DPAPI: a new DPAPI key in the state directory
+		key = filepath.Join(r.dirs.State, seal.DPAPIKeyName)
+		other := filepath.Join(t.TempDir(), seal.DPAPIKeyName)
+		if _, err := (&seal.DPAPI{Path: other}).Seal(nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if newKey, err = os.ReadFile(other); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(key, newKey, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r.want(exitcode.OK, "doctor")
@@ -317,7 +360,7 @@ func TestDoctorWarnsAboutPasswordsTheKeyNoLongerOpens(t *testing.T) {
 func TestDoctorRefusedControlSocketIsExit10(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
-		t.Skip("no control socket off Unix")
+		t.Skip("the control channel is a named pipe on Windows: pcb never looks at a file at the socket path (internal/ctl tests a foreign pipe's refusal)")
 	}
 	r := stubRig(t, &stubAPI{})
 	if err := os.MkdirAll(r.dirs.State, 0o700); err != nil {

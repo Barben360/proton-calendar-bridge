@@ -2,7 +2,7 @@
 
 - **Date**: 2026-11-13
 - **Decided by**: author (a separate binary, the daemon in process, Linux first, the keyring sealer built in M7), the rest the agent's calls (M7 design, `spec/designs/2026-11-12-multi-account-and-ui-design.md` §5, and the implementation plan, not published)
-- **Status**: accepted, built in M7 (live session pending, `spec/HUMAN-CHECKS.md` step 9, in the throwaway VM with a GNOME session); amends 0001 (GUIs are no longer only "later clients of the local API": one is built, and it runs the daemon itself), SPEC §3 and §7.3 (the Secret Service sealer is built)
+- **Status**: accepted, built in M7 (live session pending, `spec/HUMAN-CHECKS.md` step 9, in the throwaway VM with a GNOME session); Windows added by decision 0018; amends 0001 (GUIs are no longer only "later clients of the local API": one is built, and it runs the daemon itself), SPEC §3 and §7.3 (the Secret Service sealer is built)
 
 `pcb-ui` is a desktop app for Linux (X11 and Wayland with a StatusNotifierItem tray): a tray icon, a window with the accounts, an add-account wizard, desktop notifications. It is a **second binary**, `cmd/pcb-ui`, built with cgo (Fyne draws through OpenGL). `pcb` stays `CGO_ENABLED=0` and the container image stays distroless static: `cmd/pcb/arch_test.go` (`TestPcbHasNoGUIDependency`) fails when `go list -deps ./cmd/pcb` holds a `fyne.io/` package.
 
@@ -19,6 +19,6 @@ Why:
 Consequences and limits:
 - Building `pcb-ui` needs the GL and X development headers (`README.md`, "Build"); it is not part of `make build`. CI installs them in the jobs that compile it.
 - GNOME shows no tray icon without the AppIndicator extension; `pcb-ui` then opens its window and says so once.
-- Linux only. Windows is next, macOS is not planned. The UI logic hard-codes Linux only in `platform_linux.go` and `cmd/pcb-ui/*_linux.go`.
+- Linux first; macOS is not planned. Windows: built, decision 0018, supported since its live check (0018). The UI logic keeps each system's code in `platform_<os>.go` and `cmd/pcb-ui/*_<os>.go`.
 - Fyne and godbus are new dependencies, credited in `README.md` (SPEC §20); nothing was copied.
 - Cost if wrong: the Fyne layer is replaceable (`internal/ui` is toolkit-free); the daemon-in-process choice would cost a CTL client in the UI.

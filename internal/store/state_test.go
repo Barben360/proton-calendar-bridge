@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -70,19 +71,17 @@ func TestStateMalformedFailsClosed(t *testing.T) {
 	}
 }
 
+// The state directory and state.json are private: modes 0700 and 0600, on
+// Windows a protected access list, even under a parent open to others.
 func TestStateMode0600(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("no Unix modes")
-	}
-	dir := filepath.Join(t.TempDir(), "state")
+	parent := t.TempDir()
+	acltest.OpenToOthers(t, parent)
+	dir := filepath.Join(parent, "state")
 	if err := store.SaveState(dir, store.State{Phase: store.PhaseReady}); err != nil {
 		t.Fatal(err)
 	}
-	for path, want := range map[string]os.FileMode{filepath.Join(dir, "state.json"): 0o600, dir: 0o700} {
-		if info, _ := os.Stat(path); info.Mode().Perm() != want {
-			t.Errorf("%s mode %o, want %o", path, info.Mode().Perm(), want)
-		}
-	}
+	acltest.WantPrivate(t, filepath.Join(dir, "state.json"), 0o600)
+	acltest.WantPrivate(t, dir, 0o700)
 }
 
 func TestUpdateStateWaitsForTheLock(t *testing.T) {

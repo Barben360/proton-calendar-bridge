@@ -8,7 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -244,6 +244,7 @@ func mapError(err error, keyFile string) error {
 		use *store.UnsupportedError
 		ne  net.Error
 		ue  *url.Error
+		pe  *seal.ProtectError
 	)
 	cf := cacheFailure(err)
 	switch {
@@ -288,6 +289,10 @@ func mapError(err error, keyFile string) error {
 		return keyringLockedError()
 	case errors.Is(err, seal.ErrNoService):
 		return keyringUnavailableError()
+	case errors.As(err, &pe) && pe.Unprotect:
+		return blocked(pe.Error(), DPAPIUnprotectFix) // transient like keyringUnavailableError: never needs-login
+	case errors.As(err, &pe):
+		return mustAct(pe.Error(), dpapiProtectFix(keyFile))
 	case errors.Is(err, seal.ErrNoKey) && keyFile == keyringRef:
 		return mustAct("the sealing key is not in the desktop keyring", "pcb logout then pcb login")
 	case errors.Is(err, seal.ErrCorrupt) && keyFile == keyringRef:
@@ -341,40 +346,28 @@ func unsupportedStore(e *store.UnsupportedError) *exitcode.Error {
 	return mustAct(e.Explain(), "upgrade pcb")
 }
 
-// CheckStateOwner refuses euid 0 on a state directory another user owns (a
-// system install's pcb user): every file root writes there would become
-// root's, and that user could no longer read it (state Minor). userName
-// names a UID (nil or failing: "#UID", which sudo takes too). A directory
-// that does not exist yet, or a system without owners, passes.
-func CheckStateOwner(stateDir string, euid int, userName func(uid int) (string, error)) error {
-	if euid != 0 {
-		return nil
-	}
-	uid, ok := store.DirOwner(stateDir)
-	if !ok || uid == 0 {
-		return nil
-	}
-	name, sudoName := "#"+strconv.Itoa(uid), "'#"+strconv.Itoa(uid)+"'"
-	if userName != nil {
-		if n, err := userName(uid); err == nil && n != "" {
-			name, sudoName = n, n
-		}
-	}
-	return mustAct("the state directory belongs to "+name+": run pcb as that user", "sudo -u "+sudoName+" pcb …")
-}
-
-// keyCause is why the key file or the sealed store could not be used, safe
-// to show (it never holds a secret): the OS error with its operation and
-// path (permission denied, read-only file system) or the key file's mode
-// refusal; "" when there is none to give (M5-R15 C2).
+// keyCause is why the key file, the sealed store or the login lock could
+// not be used, safe to show (it never holds a secret): the OS error with its
+// operation and path (permission denied, read-only file system) or the key
+// file's mode (Windows: access list) refusal; "" when there is none to give
+// (M5-R15 C2).
 func keyCause(err error) string {
 	var (
 		me *seal.KeyModeError
 		se *seal.KeySizeError
 		pe *fs.PathError
 		le *os.LinkError
+		dp *seal.ProtectError
 	)
 	switch {
+	case errors.As(err, &dp):
+		return dp.Error()
+	case errors.As(err, &me) && me.Dir && me.Owner != "":
+		return "its directory belongs to " + me.Owner + ", and pcb refuses to make a key there"
+	case errors.As(err, &me) && me.Dir && me.Open != nil:
+		return "its directory's access list lets " + me.Open.Who() + " in, and pcb refuses to make a key there"
+	case errors.As(err, &me) && me.Open != nil:
+		return "its access list lets " + me.Open.Who() + " in, and pcb refuses it"
 	case errors.As(err, &me):
 		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
 	case errors.As(err, &se):
@@ -394,7 +387,13 @@ func keyCause(err error) string {
 // systemd does not restart pcb serve); any other cause (a full disk) stays
 // Blocked, as it may pass.
 func keyFault(err error) bool {
-	var me *seal.KeyModeError
+	var (
+		me *seal.KeyModeError
+		dp *seal.ProtectError
+	)
+	if errors.As(err, &dp) { // DPAPI: a new key it cannot protect needs a person, a key out of this session's reach does not
+		return !dp.Unprotect
+	}
 	return errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || // a wrong size is ErrCorrupt
 		errors.As(err, &me) || errors.Is(err, fs.ErrPermission)
 }
@@ -408,8 +407,40 @@ func keyFailure(err error, msg, hint string) *exitcode.Error {
 	return blocked(msg, hint)
 }
 
+// dpapiProtectFix is the hint when Windows could not protect a new DPAPI
+// key (keyFile, in the state directory): DPAPI needs a logon with the
+// user's password; a key file needs a new state, the sealer being chosen
+// once.
+func dpapiProtectFix(keyFile string) string {
+	return "sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move " +
+		filepath.Dir(keyFile) + " aside before the next pcb login"
+}
+
+// DPAPIUnprotectFix is the hint when Windows could not unprotect the DPAPI
+// key in this session (not a damaged key). Like keyringUnavailableError's
+// the failure is Blocked: no needs-login mark, no logout suggested, which
+// would discard secrets a password logon still opens. The alert's fix says
+// the same.
+const DPAPIUnprotectFix = "sign in to Windows once with this account's password (not over SSH with a key), then retry: the stored secrets are kept"
+
 // keyFix is the hint for a key file that cannot be used.
-const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, mode 0600 (pcb doctor)"
+const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, " + privateFile + " (pcb doctor)"
+
+// dpapiKeyFix is keyFix's for the DPAPI key file (Windows only), which holds
+// the blob Windows protects, not a 32-byte key.
+const dpapiKeyFix = "the DPAPI key file must be readable by the user pcb runs as, no other account in its access list (pcb doctor)"
+
+// keyFixFor is the hint for a key that cannot be used, by where it lives:
+// keyFile is the key file, seal.DPAPIKeyName's, or keyringRef.
+func keyFixFor(keyFile string) string {
+	switch {
+	case keyFile == keyringRef:
+		return keyringFailFix
+	case filepath.Base(keyFile) == seal.DPAPIKeyName:
+		return dpapiKeyFix
+	}
+	return keyFix
+}
 
 // keyringFailFix is keyFix's for a key in the desktop keyring that cannot be used.
 const keyringFailFix = "check that the desktop keyring is running and unlocked (pcb doctor)"
@@ -418,7 +449,7 @@ const keyringFailFix = "check that the desktop keyring is running and unlocked (
 // the key file, a rolled-back file is a MustAct; anything else is a store
 // that cannot be used.
 func storeError(err error, keyFile string) error {
-	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
+	if errors.Is(err, seal.ErrNoKey) || errors.Is(err, seal.ErrCorrupt) || errors.Is(err, seal.ErrProtect) || errors.Is(err, seal.ErrLocked) || errors.Is(err, seal.ErrNoService) || errors.Is(err, store.ErrRolledBack) ||
 		errors.Is(err, store.ErrUnsupported) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return mapError(err, keyFile)
 	}
@@ -430,7 +461,7 @@ func storeError(err error, keyFile string) error {
 		if keyFile == keyringRef { // a PathError of the sealed file or the state directory, not of a key
 			return keyFailure(err, "cannot use the stored secrets: "+cause, "make sure the state directory and its files are readable and writable by this user (pcb doctor)")
 		}
-		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
+		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFixFor(keyFile)+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
 }
@@ -477,16 +508,27 @@ func (l *Local) stateWriteError(err error) error {
 
 // acquireError maps what loginguard.Acquire returns: its own refusals are
 // already *exitcode.Error; the raw rest (no file locks off Unix, an
-// unwritable directory) becomes Blocked.
+// unwritable directory) becomes Blocked, naming the file-system cause (the
+// lock or the stamp that failed, and why) and no other error's text.
 func acquireError(err error, stateDir string) error {
 	var ee *exitcode.Error
 	switch {
 	case errors.As(err, &ee):
 		return err
 	case errors.Is(err, filelock.ErrUnsupported):
-		return final("login locking needs a Unix system", "run pcb on Linux or macOS")
+		return unsupportedLock("login")
 	}
-	return blocked("cannot take the login lock", "make sure "+stateDir+" is writable by this user")
+	msg := "cannot take the login lock"
+	if cause := keyCause(err); cause != "" {
+		msg += ": " + cause
+	}
+	return blocked(msg, "make sure "+stateDir+" is writable by this user")
+}
+
+// unsupportedLock is the final failure of a lock (what: "login", "sync") on
+// a system without file locks (filelock.ErrUnsupported).
+func unsupportedLock(what string) *exitcode.Error {
+	return final(what+" locking needs Linux, macOS or Windows", "run pcb on Linux, macOS or Windows")
 }
 
 // keysError is the secret-free reason a calendar's keys did not unlock:
@@ -572,10 +614,14 @@ func layoutError(err error, root string, legacy []string) error {
 	var (
 		ee *exitcode.Error
 		pe *fs.PathError
+		fe *store.ForeignSealerError
 	)
 	switch {
 	case errors.As(err, &ee):
 		return err
+	case errors.As(err, &fe):
+		return mustAct("the state in "+root+" was created on "+fe.OS+" (sealer "+fe.Sealer+"): this pcb cannot open it here",
+			"use it with pcb on "+fe.OS+", or move "+root+" aside and run pcb login to start a new state")
 	case errors.Is(err, store.ErrLegacyBesideLayout):
 		msg := "account files of an older pcb are beside the per-account layout"
 		if len(legacy) > 0 {

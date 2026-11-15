@@ -20,10 +20,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 )
 
@@ -83,7 +83,9 @@ type Result struct {
 // one (ECDSA P-256, Validity) and writes it atomically, the key 0600.
 // On Unix, a directory or a reused key owned by another user is refused,
 // and a directory wider than 0700 or a reused key wider than 0600 is
-// narrowed (ruling M3-R32).
+// narrowed (ruling M3-R32). On Windows, an access list letting in another
+// account than the user, SYSTEM or Administrators, or a directory owned by
+// another account, is refused, and nothing is narrowed.
 func SelfSigned(o Options) (Result, error) {
 	if o.Now == nil {
 		o.Now = time.Now
@@ -125,13 +127,10 @@ func SelfSigned(o Options) (Result, error) {
 	return res, nil
 }
 
-// secure refuses path when another user owns it and narrows its mode to
-// want; it returns path when it narrowed it. A missing path is left to be
-// created. Nothing is checked on Windows (no Unix modes or owners).
+// secure checks path before pcb uses it; it returns the paths it repaired.
+// A missing path is left to be created; a path of the wrong type is
+// refused; then guard checks who may use it (per OS).
 func secure(path string, want fs.FileMode, dir bool) ([]string, error) {
-	if runtime.GOOS == "windows" {
-		return nil, nil
-	}
 	info, err := os.Stat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -141,16 +140,7 @@ func secure(path string, want fs.FileMode, dir bool) ([]string, error) {
 	case info.IsDir() != dir:
 		return nil, fmt.Errorf("%s is not a %s", path, map[bool]string{true: "directory", false: "regular file"}[dir])
 	}
-	if uid, ok := ownerOf(info); ok && uid != os.Getuid() {
-		return nil, fmt.Errorf("%s is owned by another user (uid %d): pcb will not use it", path, uid)
-	}
-	if info.Mode().Perm()&^want == 0 {
-		return nil, nil
-	}
-	if err := os.Chmod(path, want); err != nil {
-		return nil, fmt.Errorf("restrict %s: %w", path, err)
-	}
-	return []string{path}, nil
+	return guard(path, info, want, dir)
 }
 
 // staleReason says why leaf must be replaced, "" if it can be kept.
@@ -267,7 +257,7 @@ func generate(o Options, now time.Time) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("encode the TLS key: %w", err)
 	}
-	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
+	if err := acl.MkdirAll(o.Dir); err != nil {
 		return Result{}, fmt.Errorf("create %s: %w", o.Dir, err)
 	}
 	if err := os.Chmod(o.Dir, 0o700); err != nil { // an older directory, or the umask
@@ -292,11 +282,11 @@ func generate(o Options, now time.Time) (Result, error) {
 // LoadPair reads a PEM certificate (chain) and its key. A missing file is
 // an error wrapping fs.ErrNotExist.
 func LoadPair(certPath, keyPath string) (tls.Certificate, *x509.Certificate, error) {
-	certPEM, err := os.ReadFile(certPath)
+	certPEM, err := atomicfile.ReadFile(certPath)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyPEM, err := atomicfile.ReadFile(keyPath)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
@@ -320,7 +310,7 @@ func Inspect(dir string) (*x509.Certificate, error) {
 
 // ReadCertificate reads the first certificate of a PEM file.
 func ReadCertificate(path string) (*x509.Certificate, error) {
-	data, err := os.ReadFile(path)
+	data, err := atomicfile.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

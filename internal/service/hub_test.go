@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
@@ -23,6 +26,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // The fake's users of the Hub tests, and the password of b (a's is the
@@ -345,16 +349,10 @@ func TestOpenHubRefusesDamagedLayout(t *testing.T) {
 // too: no restart fixes it.
 func TestOpenHubRefusesUnreadableLayout(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
-		t.Skip("file modes do not stop root, nor apply on Windows")
-	}
 	e := newHubEnv(t)
 	_ = e.open(t).Close()
 	path := filepath.Join(e.dirs.State, "layout.json")
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	acltest.Unreadable(t, path)
 	_, err := service.OpenHub(e.options())
 	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Error(), "cannot use the state layout") || !strings.Contains(ee.Error(), path) {
 		t.Errorf("error = %q, want the unreadable layout.json named", ee.Error())
@@ -1360,5 +1358,266 @@ func TestAbandonLoginKeepsTheStoredSession(t *testing.T) {
 	}
 	if info := find(h.Accounts(), ra.Account); info == nil || info.Phase != string(service.StateReady) {
 		t.Errorf("after a second AbandonLogin: %+v, want ready", info)
+	}
+}
+
+// On Windows a new state is sealed with DPAPI unless [secrets] backend is
+// keyfile, without asking the desktop keyring; elsewhere the choice is
+// unchanged.
+func TestChooseSealerOnWindows(t *testing.T) {
+	kr := &fakeKeyring{}
+	for _, tc := range []struct{ goos, backend, want string }{
+		{"windows", "auto", service.SealerDPAPI},
+		{"windows", "keyfile", service.SealerKeyFile},
+		{"linux", "keyfile", service.SealerKeyFile},
+		{"linux", "auto", service.SealerSecretService}, // an unlocked keyring answers
+	} {
+		name, reason, err := service.ChooseSealerOn(tc.goos, tc.backend, kr)
+		if name != tc.want || reason != "" || err != nil {
+			t.Errorf("chooseSealerOn(%q, %q) = %q, %q, %v; want %q", tc.goos, tc.backend, name, reason, err, tc.want)
+		}
+	}
+	if asked, _, _ := kr.counts(); asked != 1 {
+		t.Errorf("the keyring was asked %d times, want once (linux auto only)", asked)
+	}
+	if _, _, err := service.ChooseSealerOn("windows", "auto", nil); err != nil {
+		t.Errorf("windows auto with no keyring: %v", err)
+	}
+}
+
+// A state whose layout.json names another system's sealer (a dpapi state
+// copied off Windows, a secret-service one onto it) is a MustAct naming that
+// system, with the way out.
+func TestForeignStateNamesItsOS(t *testing.T) {
+	t.Parallel()
+	foreign, sys := service.SealerDPAPI, "Windows"
+	if runtime.GOOS == "windows" {
+		foreign, sys = service.SealerSecretService, "Linux"
+	}
+	e := newHubEnv(t)
+	if err := os.MkdirAll(filepath.Join(e.dirs.State, "accounts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dirs.State, "layout.json"), []byte(`{"version":2,"sealer":"`+foreign+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.OpenHub(e.options())
+	if got := exitcode.From(err); got != exitcode.MustAct {
+		t.Fatalf("OpenHub = %v (exit %d), want exit %d", err, got, exitcode.MustAct)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "created on "+sys) || !strings.Contains(msg, "sealer "+foreign) || !strings.Contains(msg, e.dirs.State) {
+		t.Errorf("message %q does not name %s, the sealer and the state", msg, sys)
+	}
+	if h := exitcode.HintOf(err); !strings.Contains(h, "pcb on "+sys) || !strings.Contains(h, "move "+e.dirs.State) || !strings.Contains(h, "pcb login") {
+		t.Errorf("hint = %q", h)
+	}
+}
+
+func TestNewSealerDPAPIKeyLivesInTheState(t *testing.T) {
+	root := t.TempDir()
+	cfgKey := filepath.Join(t.TempDir(), "secrets.key")
+	s, err := service.NewSealer(root, service.SealerDPAPI, cfgKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := s.(*seal.DPAPI)
+	if !ok || d.Path != filepath.Join(root, "secrets.key.dpapi") || s.Name() != service.SealerDPAPI {
+		t.Fatalf("NewSealer(dpapi) = %#v, want a DPAPI sealer on %s", s, filepath.Join(root, "secrets.key.dpapi"))
+	}
+	if s, _ := service.NewSealer(root, service.SealerKeyFile, cfgKey, nil); s.(*seal.KeyFile).Path != cfgKey {
+		t.Errorf("NewSealer(keyfile) = %#v", s)
+	}
+}
+
+// On Windows a new state records dpapi and its first login writes the
+// DPAPI key in the state directory, never the configured key file; Status
+// names that key.
+func TestNewStateOnWindowsSealsWithDPAPI(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("DPAPI is Windows only: TestChooseSealerOnWindows covers the choice here")
+	}
+	t.Parallel()
+	e := newHubEnv(t)
+	e.keyring = &fakeKeyring{}
+	h := e.open(t)
+	if got := layoutSealer(t, e); got != service.SealerDPAPI {
+		t.Fatalf("layout sealer = %q, want dpapi", got)
+	}
+	if h.Sealer() != service.SealerDPAPI {
+		t.Errorf("Hub.Sealer = %q", h.Sealer())
+	}
+	e.skip(t, h)
+	id := e.mustLogin(t, h, userA).Account
+	key := filepath.Join(e.dirs.State, seal.DPAPIKeyName)
+	if err := (&seal.DPAPI{Path: key}).Check(); err != nil {
+		t.Fatalf("DPAPI key after the login: %v", err)
+	}
+	if _, err := os.Stat(e.cfg.Secrets.KeyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the configured key file %s was written (%v)", e.cfg.Secrets.KeyFile, err)
+	}
+	st := accountStatus(t, h, id)
+	if st.Secrets != "sealed" || st.Sealer != service.SealerDPAPI || st.KeyFile != key || st.KeyFileAbsent {
+		t.Errorf("status = secrets %q sealer %q key %q absent %v; want sealed, dpapi, %s", st.Secrets, st.Sealer, st.KeyFile, st.KeyFileAbsent, key)
+	}
+	if asked, _, _ := e.keyring.(*fakeKeyring).counts(); asked != 0 {
+		t.Errorf("the keyring was asked %d times, want 0", asked)
+	}
+}
+
+// OpenHub removes from the state root the temporary key files a crash left
+// while the DPAPI key was being created (older than atomicfile.StaleAfter),
+// not a recent one (a creation in progress) nor another file.
+func TestOpenHubRemovesStaleKeyTempsAtTheRoot(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	if err := acl.MkdirAll(e.dirs.State); err != nil {
+		t.Fatal(err)
+	}
+	now := e.clk.Now()
+	files := map[string]time.Time{
+		".key-stale":  now.Add(-2 * time.Hour),
+		".key-recent": now.Add(-time.Minute),
+		"other-old":   now.Add(-2 * time.Hour),
+	}
+	for name, at := range files {
+		p := filepath.Join(e.dirs.State, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.open(t)
+	for name, keep := range map[string]bool{".key-stale": false, ".key-recent": true, "other-old": true} {
+		_, err := os.Stat(filepath.Join(e.dirs.State, name))
+		if gone := errors.Is(err, os.ErrNotExist); gone == keep {
+			t.Errorf("%s: gone %v, want kept %v (%v)", name, gone, keep, err)
+		}
+	}
+}
+
+// flakySealer is a key-file sealer that names itself dpapi and, once fail
+// is set, cannot open its key as Windows cannot in a logon without the
+// password (an unprotect *seal.ProtectError); with failSeal, only sealing
+// fails, as a new key Windows cannot protect.
+type flakySealer struct {
+	seal.KeyFile
+	fail, failSeal atomic.Bool
+}
+
+func (*flakySealer) Name() string { return service.SealerDPAPI }
+
+func unprotectFailure() error {
+	return &seal.ProtectError{Unprotect: true, Err: errors.New("CryptUnprotectData: Access is denied")}
+}
+
+func (s *flakySealer) Open(sealed, aad []byte) ([]byte, error) {
+	if s.fail.Load() {
+		return nil, unprotectFailure()
+	}
+	return s.KeyFile.Open(sealed, aad)
+}
+
+func (s *flakySealer) Seal(plaintext, aad []byte) ([]byte, error) {
+	switch {
+	case s.fail.Load():
+		return nil, unprotectFailure()
+	case s.failSeal.Load():
+		return nil, &seal.ProtectError{Err: errors.New("CryptProtectData: Access is denied")}
+	}
+	return s.KeyFile.Seal(plaintext, aad)
+}
+
+// openFlaky opens a Hub sealed by a flakySealer, logged in as userA.
+func openFlaky(t *testing.T, e *hubEnv) (*flakySealer, *service.Hub, string, service.API) {
+	t.Helper()
+	sealer := &flakySealer{KeyFile: seal.KeyFile{Path: e.cfg.Secrets.KeyFile}}
+	o := e.options()
+	o.Sealer = sealer
+	h, err := service.OpenHub(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	e.skip(t, h)
+	a := e.mustLogin(t, h, userA).Account
+	api, _, err := h.Account(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealer, h, a, api
+}
+
+// The CalDAV client commands give DPAPI's own fixes, never the key file's:
+// a key out of this session's reach is Blocked with the sign-in hint (add
+// and show), a new password Windows cannot protect is a MustAct with the
+// protect hint (add).
+func TestClientCommandsNameDPAPIFailures(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	sealer, _, _, api := openFlaky(t, e)
+	if _, err := api.AddClient(t.Context(), "phone"); err != nil {
+		t.Fatal(err)
+	}
+	check := func(what string, err error, code exitcode.Code, hint string) {
+		t.Helper()
+		if got := exitcode.From(err); got != code || exitcode.HintOf(err) != hint || !strings.Contains(err.Error(), "DPAPI could not") {
+			t.Errorf("%s = %v (exit %d, hint %q), want exit %d, hint %q", what, err, got, exitcode.HintOf(err), code, hint)
+		}
+	}
+	sealer.failSeal.Store(true)
+	_, err := api.AddClient(t.Context(), "tablet")
+	protectHint := "sign in to Windows once with this account's password (not over SSH with a key), then retry; or set [secrets] backend = \"keyfile\" in config.toml and move " +
+		filepath.Dir(e.cfg.Secrets.KeyFile) + " aside before the next pcb login"
+	check("add, protect failure", err, exitcode.MustAct, protectHint)
+	sealer.failSeal.Store(false)
+	sealer.fail.Store(true)
+	_, err = api.AddClient(t.Context(), "tablet")
+	check("add, unprotect failure", err, exitcode.Blocked, service.DPAPIUnprotectFix)
+	_, err = api.ShowClient(t.Context(), "phone")
+	check("show, unprotect failure", err, exitcode.Blocked, service.DPAPIUnprotectFix)
+}
+
+// A DPAPI key Windows cannot unprotect in this session is treated as an
+// unavailable keyring: a pass fails Blocked with the cause and the
+// sign-in hint (never a logout), Status keeps the phase and names the
+// cause, the alert is key-unavailable without needs-login, and state.json
+// keeps its phase.
+func TestUnavailableDPAPIKeyIsNotANeedsLogin(t *testing.T) {
+	t.Parallel()
+	e := newHubEnv(t)
+	sealer, h, a, api := openFlaky(t, e)
+	sealer.fail.Store(true)
+
+	const cause = "DPAPI could not unprotect the sealing key for this Windows user: CryptUnprotectData: Access is denied"
+	_, err := api.Sync(t.Context(), service.SyncRequest{})
+	if got := exitcode.From(err); got != exitcode.Blocked || err.Error() != cause {
+		t.Errorf("Sync = %v (exit %d), want exit 20 %q", err, got, cause)
+	}
+	if hint := exitcode.HintOf(err); hint != service.DPAPIUnprotectFix || strings.Contains(hint, "logout") {
+		t.Errorf("hint = %q, want %q", hint, service.DPAPIUnprotectFix)
+	}
+	st := accountStatus(t, h, a)
+	if st.Secrets != service.SecretsKeyUnavailable || st.Phase != "ready" || st.SecretsCause != cause {
+		t.Errorf("Status = secrets %q phase %q cause %q, want key-unavailable, the phase kept (ready), the cause", st.Secrets, st.Phase, st.SecretsCause)
+	}
+	var codes []string
+	for _, al := range ctl.Alerts(ctl.AlertInput{Account: a, Login: st, Now: e.clk.Now()}) {
+		codes = append(codes, al.Code)
+		if al.Code == ctl.CodeKeyUnavailable && (al.Message != cause || al.Fix != service.DPAPIUnprotectFix) {
+			t.Errorf("alert = %+v, want the cause and the sign-in fix", al)
+		}
+	}
+	if !slices.Contains(codes, ctl.CodeKeyUnavailable) || slices.Contains(codes, ctl.CodeNeedsLogin) {
+		t.Errorf("alerts = %v, want %s and no %s", codes, ctl.CodeKeyUnavailable, ctl.CodeNeedsLogin)
+	}
+	if stored, err := store.LoadState(store.AccountDir(e.dirs.State, a)); err != nil || stored.Phase != store.PhaseReady {
+		t.Errorf("state.json phase = %q (%v), want ready kept", stored.Phase, err)
+	}
+	// Once the key opens again, the account serves with nothing re-sealed.
+	sealer.fail.Store(false)
+	if _, err := api.Sync(t.Context(), service.SyncRequest{}); err != nil {
+		t.Errorf("Sync after the key opens again = %v", err)
 	}
 }

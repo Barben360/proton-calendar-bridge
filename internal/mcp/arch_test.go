@@ -20,6 +20,7 @@ func TestMCPArch(t *testing.T) {
 		module + "/internal/exitcode":      true,
 		module + "/internal/mcp/loginpage": true,
 		module + "/internal/access":        true,
+		module + "/internal/winzone":       true,
 	}
 	const sdk = "github.com/modelcontextprotocol/go-sdk/"
 	for _, goos := range []string{"linux", "darwin", "windows"} {

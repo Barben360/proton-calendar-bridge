@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
@@ -99,6 +101,25 @@ func TestAcquireErrorIsBlocked(t *testing.T) {
 			t.Errorf("acquireError(%v) = %#v, want Blocked with a hint", err, got)
 		}
 	}
+	// The file-system cause is named (the stamp's rename failing, say);
+	// another error's text is not.
+	rename := fmt.Errorf("recording the login time: %w", &os.LinkError{Op: "rename", Old: "/state/.tmp-1", New: "/state/login.stamp", Err: errors.New("the filename syntax is incorrect")})
+	if got := acquireError(rename, "/state"); !strings.Contains(got.Error(), "rename /state/.tmp-1 /state/login.stamp: the filename syntax is incorrect") {
+		t.Errorf("acquireError(rename) = %q, want it to name the rename and its cause", got)
+	}
+	if got := acquireError(errors.New("hunter2"), "/state"); strings.Contains(got.Error(), "hunter2") {
+		t.Errorf("acquireError leaked an unknown error's text: %q", got)
+	}
+	// File locks exist on Linux, macOS and Windows: a system without them
+	// names all three, never "a Unix system" alone.
+	if got := acquireError(filelock.ErrUnsupported, "/state"); got.Error() != "login locking needs Linux, macOS or Windows" ||
+		exitcode.HintOf(got) != "run pcb on Linux, macOS or Windows" {
+		t.Errorf("acquireError(ErrUnsupported) = %q, hint %q", got, exitcode.HintOf(got))
+	}
+	if got := unsupportedLock("sync"); got.Error() != "sync locking needs Linux, macOS or Windows" || exitcode.HintOf(got) != "run pcb on Linux, macOS or Windows" ||
+		exitcode.From(got) != exitcode.Blocked {
+		t.Errorf("unsupportedLock(sync) = %q, hint %q, exit %d", got, exitcode.HintOf(got), exitcode.From(got))
+	}
 	guard := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("busy"), Hint: "wait for it to finish"}
 	if got := acquireError(guard, "/state"); got != guard { //nolint:errorlint // identity is the point
 		t.Errorf("a guard refusal was rewrapped: %v", got)
@@ -146,5 +167,29 @@ func TestCalendarErrorShowsTheUnverifiedNote(t *testing.T) {
 	note := &syncer.UnverifiedError{Rows: 2}
 	if got := calendarError(context.Background(), fmt.Errorf("x: %w", note)); got != note.Error() {
 		t.Errorf("calendarError = %q, want %q", got, note.Error())
+	}
+}
+
+// keyCause names what refused the key file: its mode on Unix, the accounts
+// its access list lets in on Windows, by name and SID (acl.OpenError.Who);
+// either is a key fault (exit 10).
+func TestKeyCauseNamesTheModeOrTheAccessList(t *testing.T) {
+	for _, tc := range []struct {
+		err  *seal.KeyModeError
+		want string
+	}{
+		{&seal.KeyModeError{Path: "k", Mode: 0o644}, "mode 0644 lets other users read it, and pcb refuses it"},
+		{&seal.KeyModeError{Path: "k", Open: &acl.OpenError{Path: "k", Grantees: []acl.Grantee{{SID: "S-1-1-0", Account: "Everyone"}}}},
+			"its access list lets Everyone (S-1-1-0) in, and pcb refuses it"},
+		{&seal.KeyModeError{Path: "d", Dir: true, Open: &acl.OpenError{Path: "d", Grantees: []acl.Grantee{{SID: "S-1-1-0", Account: "Everyone"}, {SID: "S-1-5-21-9"}}}},
+			"its directory's access list lets Everyone (S-1-1-0) and S-1-5-21-9 in, and pcb refuses to make a key there"},
+	} {
+		err := fmt.Errorf("open: %w", tc.err)
+		if got := keyCause(err); got != tc.want {
+			t.Errorf("keyCause(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+		if !keyFault(err) {
+			t.Errorf("keyFault(%v) = false, want a key fault", tc.err)
+		}
 	}
 }

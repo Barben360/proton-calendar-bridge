@@ -96,11 +96,14 @@ const waitingLine = "Waiting for a login: run pcb login"
 
 // stopSignals watches sigs: stop is closed on the first signal or the end
 // of ctx (Execute turns the first signal into that end too), cut on the
-// second signal. end stops the watch.
-func stopSignals(ctx context.Context, sigs <-chan os.Signal) (stop, cut <-chan struct{}, end func()) {
-	stopC, cutC, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+// second signal. ended is closed, before stop when it comes first, on a
+// sessionEnd signal (nil: none) received before the cut, also after the
+// end of ctx: Execute's context ends on the same signal, and either may be
+// seen first (ruling F4). end stops the watch.
+func stopSignals(ctx context.Context, sigs <-chan os.Signal, sessionEnd os.Signal) (stop, cut, ended <-chan struct{}, end func()) {
+	stopC, cutC, endedC, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
-		var once sync.Once
+		var once, endOnce sync.Once
 		stopping := func() { once.Do(func() { close(stopC) }) }
 		ctxDone := ctx.Done()
 		for n := 0; ; {
@@ -110,7 +113,10 @@ func stopSignals(ctx context.Context, sigs <-chan os.Signal) (stop, cut <-chan s
 			case <-ctxDone:
 				stopping()
 				ctxDone = nil
-			case <-sigs:
+			case s := <-sigs:
+				if sessionEnd != nil && s == sessionEnd {
+					endOnce.Do(func() { close(endedC) })
+				}
 				stopping()
 				if n++; n == 2 {
 					close(cutC)
@@ -120,7 +126,7 @@ func stopSignals(ctx context.Context, sigs <-chan os.Signal) (stop, cut <-chan s
 		}
 	}()
 	var once sync.Once
-	return stopC, cutC, func() { once.Do(func() { close(done) }) }
+	return stopC, cutC, endedC, func() { once.Do(func() { close(done) }) }
 }
 
 // waitNotice prints waitingLine each time an account's loop begins waiting
@@ -155,14 +161,15 @@ func (n *waitNotice) intro(none bool) {
 
 // serve runs the daemon (daemon.Run) on hub: a signal (the end of cmd's
 // context, or the first of a.Signals) drains the listener and ends with
-// exit 0; a second signal meanwhile ends at once with exit 20 (ruling
-// M5-P22). Hub.Serve stopping on an error drains the listener and ends
+// exit 0 (a drain of 2 s at most when the signal is a session end:
+// sessionEndSignal); a second signal meanwhile ends at once with exit 20
+// (ruling M5-P22). Hub.Serve stopping on an error drains the listener and ends
 // with that error.
 func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Dirs, cfg config.Config, waitForLogin bool) error {
 	ctx := cmd.Context()
 	sigs, unsubscribe := a.Signals()
 	defer unsubscribe()
-	stopping, cut, endSignals := stopSignals(ctx, sigs)
+	stopping, cut, ended, endSignals := stopSignals(ctx, sigs, sessionEndSignal)
 	defer endSignals()
 	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopRun()
@@ -182,7 +189,8 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 	return daemon.Run(runCtx, daemon.Options{
 		Dirs: dirs, Config: cfg, Hub: hub, Kind: "serve", LogLevel: cfg.Log.Level, MCP: mcpServer,
 		Logger: log, Warn: a.Stderr, Listen: a.Listen, WaitForLogin: waitForLogin, Cut: cut,
-		OnState: notice.state,
+		SessionEnd: ended,
+		OnState:    notice.state,
 		OnPass: func(id string, p service.WatchPass) {
 			l := log.With("account", id)
 			daemon.LogPass(l, p)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // sys is a fake host: a temp Root and a runner that records each command
@@ -69,6 +71,9 @@ func (s *sys) mode(p string) os.FileMode {
 
 func newSys(t *testing.T) *sys {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("sys fakes a Linux host (systemd, /home/alice, /etc/pcb and /var/lib/pcb paths, uid ownership, hard links)")
+	}
 	s := &sys{t: t, root: t.TempDir(), euid: 1000,
 		env:   map[string]string{"HOME": "/home/alice", "USER": "alice"},
 		users: map[string]bool{"root": true}, out: map[string]string{}, codes: map[string]int{}, ids: map[string][2]int{}}
@@ -535,5 +540,114 @@ func TestInstallRefusesAHardLinkedSystemConfig(t *testing.T) {
 	}
 	if got := s.ownerSet("/etc/pcb/config.toml"); got != "" {
 		t.Errorf("the linked file was chowned to %s", got)
+	}
+}
+
+func writeTree(t *testing.T, root string, files ...string) {
+	t.Helper()
+	for _, f := range files {
+		p := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Windows cannot remove a locked file nor its directory: removing the held
+// directory deletes everything else, then releases the lock, then removes
+// serve.lock and the directory (ruling 9, every OS).
+func TestRemoveHeldDirReleasesLast(t *testing.T) {
+	t.Parallel()
+	state := filepath.Join(t.TempDir(), "pcb")
+	writeTree(t, state, "accounts/a/state.json", "layout.json", "secrets.key.dpapi")
+	release, err := service.HoldServe(state, "uninstall")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+
+	calls := 0
+	hooks := install.Hooks{HeldDir: state, HeldFile: "serve.lock", ReleaseServe: func() {
+		calls++
+		entries, err := os.ReadDir(state)
+		if err != nil {
+			t.Errorf("state unreadable when released: %v", err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if len(names) != 1 || names[0] != "serve.lock" {
+			t.Errorf("when released the directory holds %q, want only serve.lock", names)
+		}
+		release()
+	}}
+	steps := []install.Step{{Action: install.ActionRemove, Kind: install.KindDir, Path: state}}
+	if err := install.Apply(t.Context(), install.Host{}, steps, hooks); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("ReleaseServe ran %d times, want 1", calls)
+	}
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("state survived: %v", err)
+	}
+}
+
+// The cli passes the directory where it lies on the host (Root included):
+// the step's path is matched through Host.Path (F26).
+func TestRemoveHeldDirMatchesThroughRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the step path /x/pcb is not absolute on Windows, which removeDir refuses")
+	}
+	t.Parallel()
+	root := t.TempDir()
+	state := filepath.Join(root, "x", "pcb")
+	writeTree(t, state, "layout.json", "serve.lock")
+	released := false
+	h := install.Host{Root: root}
+	hooks := install.Hooks{HeldDir: state, HeldFile: "serve.lock", ReleaseServe: func() { released = true }}
+	if err := install.Apply(t.Context(), h, []install.Step{{Action: install.ActionRemove, Kind: install.KindDir, Path: "/x/pcb"}}, hooks); err != nil {
+		t.Fatal(err)
+	}
+	if !released {
+		t.Error("the lock was never released: HeldDir is not matched through Host.Path")
+	}
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("state survived: %v", err)
+	}
+}
+
+func TestAutostartStep(t *testing.T) {
+	t.Parallel()
+	on, off := install.AutostartStep(true, ""), install.AutostartStep(false, "")
+	const path = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\pcb-ui`
+	if on.Action != install.ActionRemove || on.Kind != install.KindAutostart || on.Path != path || on.Note != install.AutostartNote {
+		t.Errorf("present = %+v", on)
+	}
+	if off.Action != install.ActionSkip || off.Kind != install.KindAutostart || off.Note != "absent" {
+		t.Errorf("absent = %+v", off)
+	}
+	kept := install.AutostartStep(true, "starts pcb-ui on the default directories, not these")
+	if kept.Action != install.ActionKeep || !strings.Contains(kept.Note, "not these: kept") {
+		t.Errorf("kept = %+v", kept)
+	}
+	if install.AutostartStep(false, "x").Action != install.ActionSkip {
+		t.Error("an absent value is skipped whatever keepWhy says")
+	}
+	called := false
+	if err := install.Apply(t.Context(), install.Host{}, []install.Step{on, off, kept}, install.Hooks{Autostart: func() error { called = true; return nil }}); err != nil || !called {
+		t.Errorf("Apply: called=%v err=%v", called, err)
+	}
+	steps := []install.Step{on}
+	if err := install.Apply(t.Context(), install.Host{}, steps, install.Hooks{}); err != nil || !strings.Contains(steps[0].Note, "not removed") {
+		t.Errorf("no hook: err=%v note=%q", err, steps[0].Note)
+	}
+	boom := errors.New("boom")
+	if err := install.Apply(t.Context(), install.Host{}, []install.Step{on}, install.Hooks{Autostart: func() error { return boom }}); !errors.Is(err, boom) {
+		t.Errorf("hook failure = %v", err)
 	}
 }

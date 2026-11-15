@@ -1,5 +1,6 @@
 // Package filelock provides exclusive advisory file locks between processes.
-// They are Unix only: off Unix every call returns ErrUnsupported.
+// They work on Unix (flock) and Windows (LockFileEx); elsewhere every call
+// returns ErrUnsupported.
 package filelock
 
 import (
@@ -8,8 +9,8 @@ import (
 	"time"
 )
 
-// ErrUnsupported is returned off Unix, where there is no file lock.
-var ErrUnsupported = errors.New("file locks need a Unix system")
+// ErrUnsupported is returned on systems with no file lock.
+var ErrUnsupported = errors.New("file locks are not supported on this system")
 
 const retryEvery = 50 * time.Millisecond
 

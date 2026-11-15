@@ -4,12 +4,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
+	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
 // copyTree copies the regular files and directories of src to dst, modes
@@ -63,6 +66,9 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 	r.want(exitcode.OK, "login", "--non-interactive", "--json")
 	acct := accountDir(t, r)
 	key := config.Defaults(r.dirs).Secrets.KeyFile
+	if runtime.GOOS == "windows" { // auto seals with DPAPI: its key is in the state directory
+		key = filepath.Join(r.dirs.State, seal.DPAPIKeyName)
+	}
 	snap := t.TempDir()
 	copyTree(t, filepath.Dir(r.dirs.Config), filepath.Join(snap, "cfg"))
 	copyTree(t, filepath.Dir(r.dirs.State), filepath.Join(snap, "state"))
@@ -97,11 +103,7 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}, ""}
-	unreadable := fault{"key file unreadable", func(t *testing.T) {
-		if err := os.Chmod(key, 0o000); err != nil {
-			t.Fatal(err)
-		}
-	}, ""}
+	unreadable := fault{"key file unreadable", func(t *testing.T) { acltest.Unreadable(t, key) }, ""}
 	badState := fault{"state.json unreadable", func(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(acct, "state.json"), []byte("{not json"), 0o600); err != nil {
 			t.Fatal(err)
@@ -141,9 +143,6 @@ func TestKeyAndStateFaultsAreExit10InEveryCommand(t *testing.T) {
 	for _, c := range cases {
 		name := strings.Join(c.args, " ") + ", " + c.f.name
 		if !t.Run(name, func(t *testing.T) {
-			if c.f.name == unreadable.name && os.Geteuid() == 0 {
-				t.Skip("root reads a mode 0000 file")
-			}
 			r.t = t
 			defer func() { r.t = parent }()
 			restore(t)

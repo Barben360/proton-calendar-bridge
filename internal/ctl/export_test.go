@@ -27,3 +27,7 @@ func DialForTest(ctx context.Context, path string, now func() time.Time, peer fu
 	}
 	return c, err
 }
+
+// Unreachable is the error of a daemon that cannot be reached at path
+// (Dial's, for a failure that is neither ErrNoDaemon nor a refusal).
+var Unreachable = unreachable

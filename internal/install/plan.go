@@ -14,6 +14,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 )
@@ -41,6 +42,9 @@ const (
 	// KindKeyring is the state's "pcb sealing key" item in the desktop
 	// keyring (ruling R13); its Path is the state directory it belongs to.
 	KindKeyring = "keyring"
+	// KindAutostart is pcb-ui's Run value in the Windows registry; its
+	// Path names it.
+	KindAutostart = "autostart"
 )
 
 // Step is one thing an install or uninstall does, or would do. Paths are
@@ -389,6 +393,21 @@ func PlanUninstall(ctx context.Context, h Host, req UninstallRequest) ([]Step, e
 
 // AutostartNote is the note of the step removing pcb-ui's autostart entry.
 const AutostartNote = "pcb-ui's autostart entry"
+
+// AutostartStep is the step removing pcb-ui's Run value (Windows), skipped
+// when absent. keepWhy, when set, keeps a present value instead, saying why
+// in the note: the value carries no environment and names one executable,
+// so it is not this invocation's to delete.
+func AutostartStep(present bool, keepWhy string) Step {
+	st := Step{Action: ActionRemove, Kind: KindAutostart, Path: `HKCU\` + runkey.KeyPath + `\` + runkey.Value, Note: AutostartNote}
+	switch {
+	case !present:
+		st.Action, st.Note = ActionSkip, "absent"
+	case keepWhy != "":
+		st.Action, st.Note = ActionKeep, AutostartNote+" "+keepWhy+": kept"
+	}
+	return st
+}
 
 // PlanDeleteDesktop lists the steps of pcb uninstall --delete-data where no
 // service is installed (pcb-ui, or pcb run by hand; live 2026-11-13, F10):

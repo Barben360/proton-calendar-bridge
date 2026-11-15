@@ -6,13 +6,13 @@ import (
 	"errors"
 	"maps"
 	"net/http"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ical"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
@@ -455,13 +455,7 @@ func TestServeReadsOnItsOwnHandle(t *testing.T) {
 	path := cache.Path(e.dirs.State)
 	unreadable := func(t *testing.T) {
 		t.Helper()
-		if os.Geteuid() == 0 {
-			t.Skip("root reads a file of mode 0: this check needs another user")
-		}
-		if err := os.Chmod(path, 0); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+		acltest.Unreadable(t, path)
 	}
 	t.Run("ReadsUseServesOpenHandle", func(t *testing.T) {
 		unreadable(t) // the file no longer opens: only Serve's open handle reads it

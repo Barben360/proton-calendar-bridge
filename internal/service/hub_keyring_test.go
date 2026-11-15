@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -117,6 +118,17 @@ func (k *fakeKeyring) Locked(context.Context) (bool, error) {
 var _ service.Keyring = (*fakeKeyring)(nil)
 var _ service.Keyring = seal.Keyring(nil) // the same method set both ways
 
+// linuxKeyringOnly skips a test of the desktop keyring sealer, or of auto
+// choosing between it and the key file, on Windows: there auto always gives
+// DPAPI (TestChooseSealerOnWindows, TestNewStateOnWindowsSealsWithDPAPI) and
+// a secret-service state is refused (TestForeignStateNamesItsOS).
+func linuxKeyringOnly(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the desktop keyring (secret-service) is no sealer on Windows: auto gives DPAPI there (TestNewStateOnWindowsSealsWithDPAPI)")
+	}
+}
+
 func layoutSealer(t *testing.T, e *hubEnv) string {
 	t.Helper()
 	info, err := store.ReadLayout(e.dirs.State)
@@ -140,6 +152,7 @@ func accountStatus(t *testing.T, h *service.Hub, id string) service.Status {
 }
 
 func TestFreshStatePicksTheUnlockedKeyring(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	e.keyring = &fakeKeyring{}
@@ -167,6 +180,7 @@ func TestFreshStatePicksTheUnlockedKeyring(t *testing.T) {
 }
 
 func TestFreshStateWithoutKeyringUsesKeyFile(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t) // no Secret Service
 	h := e.open(t)
@@ -185,6 +199,7 @@ func TestFreshStateWithoutKeyringUsesKeyFile(t *testing.T) {
 }
 
 func TestFreshStateWithLockedKeyringUsesKeyFile(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	e.keyring = &fakeKeyring{locked: true}
@@ -211,12 +226,16 @@ func TestBackendKeyFileNeverAsksTheKeyring(t *testing.T) {
 func TestExistingStateKeepsItsKeyFile(t *testing.T) {
 	t.Parallel()
 	e := newHubEnv(t)
+	if runtime.GOOS == "windows" { // auto gives DPAPI there: a key-file state is made explicitly
+		e.cfg.Secrets.Backend = "keyfile"
+	}
 	h := e.open(t) // M6-like: keyfile
 	e.skip(t, h)
 	a := e.mustLogin(t, h, userA).Account
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
+	e.cfg.Secrets.Backend = "auto" // never asked again, on Windows neither
 	kr := &fakeKeyring{}
 	e.keyring = kr
 	h2 := e.open(t)
@@ -239,6 +258,7 @@ func TestExistingStateKeepsItsKeyFile(t *testing.T) {
 }
 
 func TestBackendSecretServiceWithoutKeyringIsMustAct(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	e.cfg.Secrets.Backend = "secret-service"
@@ -276,6 +296,7 @@ func TestUnknownSealerIsMustActUpgrade(t *testing.T) {
 // Status and the alerts say why, Proton is not called, and once it is
 // unlocked the account serves with nothing re-sealed.
 func TestLockedKeyringWaitsAndRecovers(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newServeEnv(t)
 	kr := &fakeKeyring{}
@@ -366,6 +387,7 @@ func TestLockedKeyringWaitsAndRecovers(t *testing.T) {
 // pass fails, the account waits (no park, no Restart), and it serves again
 // 30 s later without a new login.
 func TestKeyringLockedWhileServingWaitsAndRecovers(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newServeEnv(t)
 	kr := &fakeKeyring{}
@@ -455,6 +477,7 @@ func TestKeyringLockedWhileServingWaitsAndRecovers(t *testing.T) {
 
 // What a lost or foreign key says depends on where the key lives.
 func TestSecretServiceStateNamesTheKeyring(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	kr := &fakeKeyring{}
@@ -506,6 +529,7 @@ func serveUntilWaiting(t *testing.T, h *service.Hub, a string, waitForLogin bool
 // reason to refuse to start or to exit: Serve keeps running, and the
 // account serves once the keyring is unlocked.
 func TestLockedKeyringDoesNotEndServeWithoutWaitForLogin(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newServeEnv(t)
 	kr := &fakeKeyring{}
@@ -541,6 +565,7 @@ func TestLockedKeyringDoesNotEndServeWithoutWaitForLogin(t *testing.T) {
 // pcb sync --watch keeps retrying with its back-off when the keyring locks
 // mid-watch: it neither ends nor claims that pcb retries every 30 s.
 func TestWatchSyncSurvivesALockedKeyring(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newServeEnv(t)
 	kr := &fakeKeyring{}
@@ -611,6 +636,7 @@ func TestWatchSyncSurvivesALockedKeyring(t *testing.T) {
 // The wording of the other failures of a secret-service state names the
 // desktop keyring, not a key file.
 func TestSecretServiceStateWordsNameTheKeyring(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	kr := &fakeKeyring{}
@@ -679,6 +705,7 @@ func TestSecretServiceStateWordsNameTheKeyring(t *testing.T) {
 // the phase and says keyring-unavailable, with its own alert and no
 // needs-login (a logout would discard a good session).
 func TestKeyringUnavailableIsNotANeedsLogin(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	kr := &fakeKeyring{}
@@ -721,6 +748,7 @@ func TestKeyringUnavailableIsNotANeedsLogin(t *testing.T) {
 // no auth call, the login guard's slot is not spent, and the add leaves no
 // account behind.
 func TestLoginChecksTheKeyringBeforeSRP(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
@@ -770,6 +798,7 @@ func TestLoginChecksTheKeyringBeforeSRP(t *testing.T) {
 // are sealed with it. DeleteSealingKey (pcb uninstall --delete-data) is
 // what removes it.
 func TestAccountRemoveKeepsTheKeyringItem(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	e := newHubEnv(t)
 	kr := &fakeKeyring{}
@@ -804,6 +833,7 @@ func TestAccountRemoveKeepsTheKeyringItem(t *testing.T) {
 // key file for good, without a trace). Picking the keyring is an Info
 // record; an existing state chooses nothing and logs nothing.
 func TestAutoSealerChoiceIsLoggedAndRecorded(t *testing.T) {
+	linuxKeyringOnly(t)
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string

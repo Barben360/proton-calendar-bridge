@@ -6,3 +6,11 @@ func SetDevice(f func(string) (uint64, bool)) (restore func()) {
 	deviceOf = f
 	return func() { deviceOf = old }
 }
+
+// SetDPAPICheck replaces the DPAPI key's unprotect check and returns a
+// restore function.
+func SetDPAPICheck(f func(string) error) (restore func()) {
+	old := dpapiCheck
+	dpapiCheck = f
+	return func() { dpapiCheck = old }
+}
