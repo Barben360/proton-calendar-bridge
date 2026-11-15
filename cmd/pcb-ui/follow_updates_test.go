@@ -162,6 +162,8 @@ func TestFollowUpdatesDrawsTheNoticeEverywhereAndNotifiesOnce(t *testing.T) {
 			t.Errorf("%s notice = %+v, want an available v0.2.0 with the panel and %s", name, n, r.page)
 		}
 	}
+	// Run shows the notice, then notifies: wait for the notification.
+	waitFor(t, "the notification", func() bool { n, _ := r.notif.sent(); return len(n) >= 1 })
 	notes, clicks := r.notif.sent()
 	if len(notes) != 1 || notes[0].Code != "update-available" {
 		t.Fatalf("notifications = %+v, want exactly one update-available", notes)
