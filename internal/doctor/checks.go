@@ -13,13 +13,14 @@ import (
 
 // PlatformCheck reports whether pcb is supported on GOOS/GOARCH
 // (runtime.GOOS and runtime.GOARCH in production): Linux amd64 and arm64
-// are; windows/amd64 is untested until the live checks pass on Windows
-// (windowsTested); anything else runs, unsupported.
+// are, and so is windows/amd64 since its live check (windowsTested);
+// anything else runs, unsupported.
 type PlatformCheck struct{ GOOS, GOARCH string }
 
 // windowsTested is whether windows/amd64 passed the live checks
-// (spec/HUMAN-CHECKS.md): until then pcb doctor warns that it is untested.
-const windowsTested = false
+// (spec/HUMAN-CHECKS.md step 12, spec/experiments/W1-windows-live.md):
+// without them pcb doctor would warn that it is untested.
+const windowsTested = true
 
 // Name implements Check.
 func (PlatformCheck) Name() string { return "platform" }

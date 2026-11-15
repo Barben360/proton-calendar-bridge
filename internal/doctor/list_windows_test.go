@@ -47,7 +47,7 @@ func TestChecksOnWindows(t *testing.T) {
 			t.Errorf("a %q check ran on Windows: %+v", name, r)
 		}
 	}
-	if got := byName["platform"]; runtime.GOARCH == "amd64" && (got.Status != doctor.StatusWarn || got.Message != "windows/amd64: runs, untested") {
+	if got := byName["platform"]; runtime.GOARCH == "amd64" && (got.Status != doctor.StatusOK || got.Message != "windows/amd64") {
 		t.Errorf("platform: %+v", got)
 	}
 	// A fresh state under [secrets] backend = auto gets a DPAPI key.

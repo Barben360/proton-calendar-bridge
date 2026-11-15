@@ -25,7 +25,7 @@ func TestPlatform(t *testing.T) {
 	}{
 		{"linux", "amd64", doctor.StatusOK, "linux/amd64"},
 		{"linux", "arm64", doctor.StatusOK, "linux/arm64"},
-		{"windows", "amd64", doctor.StatusWarn, "windows/amd64: runs, untested"},
+		{"windows", "amd64", doctor.StatusOK, "windows/amd64"},
 		{"windows", "arm64", doctor.StatusWarn, "windows/arm64: runs, unsupported"},
 		{"darwin", "arm64", doctor.StatusWarn, "darwin/arm64: runs, unsupported"},
 		{"linux", "riscv64", doctor.StatusWarn, "linux/riscv64: runs, unsupported"},

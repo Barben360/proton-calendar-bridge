@@ -20,7 +20,7 @@ The window follows your desktop's light or dark theme.
 
 `pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs.
 
-It runs on Linux (X11 and Wayland with a StatusNotifierItem tray) and on Windows 10 and 11, where it is untested so far ([On Windows](#on-windows)). `pcb` itself stays one static binary with no GUI dependency. Building it: [install](install.md#build-from-a-clone).
+It runs on Linux (X11 and Wayland with a StatusNotifierItem tray) and on Windows 10 and 11 ([On Windows](#on-windows)). `pcb` itself stays one static binary with no GUI dependency. Building it: [install](install.md#build-from-a-clone).
 
 ## Start it
 
@@ -90,7 +90,7 @@ Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CO
 
 ## On Windows
 
-`pcb-ui.exe` from the release zip ([install](install.md#windows)) runs the same bridge on Windows 10 (1809 or later) and 11. It is untested so far: nobody has used it on a Windows desktop yet.
+`pcb-ui.exe` from the release zip ([install](install.md#windows)) runs the same bridge on Windows 10 (1809 or later) and 11.
 
 | | On Windows |
 |---|---|

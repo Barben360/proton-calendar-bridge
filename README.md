@@ -7,7 +7,7 @@
 [![CI](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Barben360/proton-calendar-bridge/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/github/license/Barben360/proton-calendar-bridge)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/Barben360/proton-calendar-bridge)](go.mod)
-[![Platform: Linux](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-blue)](docs/install.md#requirements)
+[![Platform: Linux, Windows](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64%20%7C%20Windows%20amd64-blue)](docs/install.md#requirements)
 [![Status: early](https://img.shields.io/badge/status-early%2C%20test%20accounts%20only-orange)](docs/status.md)
 
 > [!IMPORTANT]
@@ -15,9 +15,9 @@
 
 Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI agents. The calendar counterpart of Proton Mail Bridge.
 
-- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux (and Windows, untested).
+- **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux and Windows.
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
-- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows as `pcb-ui` (untested so far).
+- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows 10 and 11 as `pcb-ui`.
 
 > [!WARNING]
 > pcb is early software, built and tested against a fake Proton and checked live on a test account. Do not point it at an account you care about yet ([status](docs/status.md)).
@@ -61,7 +61,7 @@ One process serves every account: the desktop app, the `pcb serve` daemon (syste
 | An always-on bridge on a server or a home lab | `pcb install` (systemd) | [service](docs/service.md) |
 | The same, in Docker | the container image | [container](docs/container.md) |
 | Only an AI agent on this machine, no daemon | `pcb mcp`, started by the agent | [agents](docs/agents.md) |
-| The bridge on Windows 10 or 11 (untested so far) | `pcb-ui.exe` from the release zip | [Windows](docs/install.md#windows) |
+| The bridge on Windows 10 or 11 | `pcb-ui.exe` from the release zip | [Windows](docs/install.md#windows) |
 
 Install a release (Linux and macOS, amd64 and arm64; no sudo):
 

@@ -92,7 +92,7 @@ func TestDoctorExitCode(t *testing.T) {
 		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon"; got != want {
 			t.Fatalf("names = %s, want %s", got, want)
 		}
-		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "warn,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
+		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "ok,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
 			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
 		}
 		// No systemd on Windows: pcb-ui's Start at login is the service.
@@ -114,7 +114,7 @@ func TestDoctorExitCode(t *testing.T) {
 
 func TestDoctorTextOK(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs the doctor's platform check to say ok on windows/amd64 (Task 16): it warns \"runs, untested\" until then; the Windows list also has the dpapi key, elevated, time zone and start at login lines")
+		t.Skip("this is the Linux list (12 lines, service: no systemd here): the Windows list adds the dpapi key, elevated, time zone and start at login lines and has its own service line, checked in internal/doctor's TestChecksOnWindows")
 	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")

@@ -6,7 +6,7 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 ## Requirements
 
-- **Linux (amd64, arm64)** is supported. macOS (amd64, arm64) gets `pcb` only and is untested; Windows 10 (1809 or later) and 11 (amd64) run both binaries, untested ([below](#macos-and-windows)).
+- **Linux (amd64, arm64)** is supported. macOS (amd64, arm64) gets `pcb` only and is untested; Windows 10 (1809 or later) and 11 (amd64) are supported too, both binaries ([below](#macos-and-windows)).
 - **`curl` or `wget`**, to install a release.
 - **Go** (the version in `go.mod`) and `make`, only to [build from a clone](#build-from-a-clone).
 - **systemd 252 or later** (Debian 12 or 13) to run pcb as a service ([service](service.md)).
@@ -17,7 +17,7 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 **macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux and Windows only), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
-**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from a zip on the releases page ([Windows](#windows)). This is **untested**: CI builds and tests both binaries on Windows, and a release runs them from the zip before it is published, but nobody has used the bridge on a Windows desktop yet; `pcb doctor` says `platform: windows/amd64: runs, untested`. There is no service: `pcb-ui`, started at login, runs the bridge.
+**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from a zip on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, a release runs them from the zip before it is published, and the whole bridge was checked live on a Windows 11 desktop as a standard user. There is no service: `pcb-ui`, started at login, runs the bridge.
 
 ## Install a release
 
@@ -76,7 +76,7 @@ There is no uninstall command. Stop whatever runs pcb first (`pcb uninstall` for
 
 ## Windows
 
-Windows 10 (1809 or later) and 11, amd64. **Untested**: see [above](#macos-and-windows).
+Windows 10 (1809 or later) and 11, amd64 ([above](#macos-and-windows)).
 
 1. Download `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases). It holds `pcb-ui.exe`, `pcb.exe`, `LICENSE` and `README.md`. To check it yourself, compare `Get-FileHash pcb_windows_amd64.zip` (PowerShell, SHA-256) with its line in the release's `checksums.txt`, or run `gh attestation verify` on it as [above](#check-a-download-yourself).
 2. Unzip it into a folder of your own, for example `%LOCALAPPDATA%\Programs\pcb`. No installer and no administrator rights are needed.
