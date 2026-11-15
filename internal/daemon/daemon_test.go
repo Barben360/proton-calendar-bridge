@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -524,17 +525,21 @@ func TestRunLogsAListenerThatCannotStart(t *testing.T) {
 			lines = append(lines, m)
 		}
 	}
+	stopMsg := "control socket stopped"
+	if runtime.GOOS == "windows" {
+		stopMsg = "control pipe stopped"
+	}
 	at, stopped := -1, -1
 	for i, m := range lines {
 		switch {
 		case m["level"] == "ERROR" && m["msg"] == "the CalDAV listener cannot start" && m["addr"] == "127.0.0.1:0" && m["error"] == "address already in use":
 			at = i
-		case m["msg"] == "control socket stopped":
+		case m["msg"] == stopMsg:
 			stopped = i
 		}
 	}
-	if at < 0 || (stopped >= 0 && stopped < at) {
-		t.Errorf("log %s: want an ERROR naming the listener, its address and the reason, before the stop", buf.String())
+	if at < 0 || stopped < 0 || stopped < at {
+		t.Errorf("log %s: want an ERROR naming the listener, its address and the reason, before the %q line", buf.String(), stopMsg)
 	}
 }
 
