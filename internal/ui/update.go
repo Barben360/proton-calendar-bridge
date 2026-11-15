@@ -1,0 +1,109 @@
+package ui
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/update"
+)
+
+// LaterFor is how long Later hides the update panel. It comes back after,
+// for the same version too: a fix only protects those who install it.
+const LaterFor = 48 * time.Hour
+
+// The preferences Updates keeps (Fyne's, per user).
+const (
+	prefNotified = "updateNotified"   // the version already notified
+	prefLater    = "updateLaterUntil" // RFC 3339: the panel hidden until then
+)
+
+// Prefs is where pcb-ui keeps what only it uses: fyne.Preferences.
+type Prefs interface {
+	String(key string) string
+	SetString(key, value string)
+}
+
+// UpdateNotice is what the window and the tray show of an update.
+// Available: a newer stable release exists (the tray line); Panel: the
+// window's panel too (not within Later). The zero notice shows nothing.
+type UpdateNotice struct {
+	Available                     bool
+	Version, Installed, URL, Hint string
+	Panel                         bool
+}
+
+// Updates decides, from update.json's cache and the preferences, what
+// pcb-ui shows of a newer release and when it notifies.
+type Updates struct {
+	Checker update.Checker
+	Path    string // update.json
+	Env     func(string) string
+	Prefs   Prefs
+	Hint    string // update.Hint, "" where the release page is the hint
+	Now     func() time.Time
+}
+
+// Enabled reports whether the check runs (the switch and PCB_UPDATE_CHECK).
+func (u *Updates) Enabled() bool { return update.Enabled(u.Env, update.Load(u.Path)) }
+
+// SetEnabled flips the switch in update.json.
+func (u *Updates) SetEnabled(ctx context.Context, on bool) error {
+	return update.Edit(ctx, u.Path, func(s *update.State) { s.Off = !on })
+}
+
+// Later hides the panel for LaterFor.
+func (u *Updates) Later() { u.Prefs.SetString(prefLater, u.Now().Add(LaterFor).Format(time.RFC3339)) }
+
+// Refresh is the notice now, and a notification the first time a version
+// shows up. Switched off or a dev build: nothing. A failed check keeps
+// update.json's last answer, so the panel does not come and go with the
+// network.
+func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
+	if !u.Enabled() {
+		return UpdateNotice{}, nil
+	}
+	now := u.Now()
+	res := u.Checker.Cached(ctx, u.Path, now)
+	if res.Err != nil {
+		st := update.Load(u.Path)
+		if st.Latest == "" || !update.Newer(u.Checker.Installed, st.Latest) {
+			return UpdateNotice{}, nil
+		}
+		res = update.Result{Latest: update.Release{Version: st.Latest, URL: st.URL}, Available: true}
+	}
+	if !res.Available {
+		return UpdateNotice{}, nil
+	}
+	n := UpdateNotice{Available: true, Version: res.Latest.Version, Installed: u.Checker.Installed, URL: res.Latest.URL, Hint: u.Hint, Panel: true}
+	if until, err := time.Parse(time.RFC3339, u.Prefs.String(prefLater)); err == nil && now.Before(until) {
+		n.Panel = false
+	}
+	var note *Notification
+	if u.Prefs.String(prefNotified) != n.Version {
+		u.Prefs.SetString(prefNotified, n.Version)
+		note = &Notification{Title: "pcb", Body: fmt.Sprintf("pcb %s is available (you have %s).", n.Version, n.Installed)}
+	}
+	return n, note
+}
+
+// Run refreshes at start, every interval and at each poke (Later, the
+// switch), showing each notice and notifying with the release page, until
+// ctx ends.
+func (u *Updates) Run(ctx context.Context, every time.Duration, poke <-chan struct{}, show func(UpdateNotice), notify func(Notification, string)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		n, note := u.Refresh(ctx)
+		show(n)
+		if note != nil {
+			notify(*note, n.URL)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-poke:
+		}
+	}
+}

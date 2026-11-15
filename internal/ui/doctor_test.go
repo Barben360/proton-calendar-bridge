@@ -10,7 +10,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
-// pcb doctor adds the service and daemon results to the checks the app runs.
+// pcb doctor adds the service, daemon and update results to the checks the
+// app runs (pcb-ui shows an update in its own panel).
 func TestDoctorChecksShared(t *testing.T) {
 	l := newLab(t)
 	b := l.start(t)
@@ -30,7 +31,7 @@ func TestDoctorChecksShared(t *testing.T) {
 	}
 	var cliNames []string
 	for _, r := range env.Data.Results {
-		if r.Name != "service" && r.Name != "daemon" {
+		if r.Name != "service" && r.Name != "daemon" && r.Name != "update" {
 			cliNames = append(cliNames, r.Name)
 		}
 	}
