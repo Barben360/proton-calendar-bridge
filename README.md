@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/github/license/Barben360/proton-calendar-bridge)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/Barben360/proton-calendar-bridge)](go.mod)
 [![Platform: Linux, Windows](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64%20%7C%20Windows%20amd64-blue)](docs/install.md#requirements)
-[![Status: early](https://img.shields.io/badge/status-early%2C%20test%20accounts%20only-orange)](docs/status.md)
+[![Status: early](https://img.shields.io/badge/status-early-yellow)](docs/status.md)
 
 > [!IMPORTANT]
 > proton-calendar-bridge is an independent project. It is not affiliated with, endorsed by or supported by Proton AG. Proton and Proton Calendar are trademarks of Proton AG.
@@ -18,9 +18,6 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 - **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux and Windows.
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
 - **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows 10 and 11 as `pcb-ui`.
-
-> [!WARNING]
-> pcb is early software, built and tested against a fake Proton and checked live on a test account. Do not point it at an account you care about yet ([status](docs/status.md)).
 
 ## What it does for you
 

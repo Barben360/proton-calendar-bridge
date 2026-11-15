@@ -2,7 +2,7 @@
 
 How to get `pcb` (and the desktop app `pcb-ui`) onto a machine, keep it up to date, and log in the first time. Once it is installed, pick how it runs: the [desktop app](desktop.md), a [systemd service](service.md) or a [container](container.md).
 
-This is still an early version: do not point pcb at a Proton account you care about yet. Use a test account. What is built and checked so far is in [status](status.md).
+This is still an early version. On Linux its author uses it with their own Proton account, and every feature works there. What is built and checked so far is in [status](status.md).
 
 ## Requirements
 

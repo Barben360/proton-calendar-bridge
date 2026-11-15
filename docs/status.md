@@ -2,7 +2,7 @@
 
 What is built, how each part was tested, and which checks against a real Proton account have run. pcb is built through milestone M8.
 
-**This is still an early version: do not point pcb at a Proton account you care about yet.** Use a test account.
+**This is still an early version.** On Linux its author uses it with their own Proton account, and every feature works there; the scripted live checks below run on a test account.
 
 ## What pcb is made of
 
