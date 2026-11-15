@@ -128,10 +128,12 @@
       <Custom Action="RefuseInstallFolder" After="SetPCBDEFAULTFOLDER" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; PCBDEFAULTFOLDER" />
       <!-- An install or upgrade (a new ProductCode: not Installed). -->
       <Custom Action="PcbRunWrite" Before="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND STARTATLOGIN = &quot;1&quot;" />
-      <!-- The uninstall (not the one an upgrade runs on the old product),
-           or an install with Start at login unticked; only this install's. -->
+      <!-- The uninstall of this product (not the one an upgrade runs on
+           the old product, nor another version's MSI whose REMOVE leaves
+           it no feature), or an install with Start at login unticked;
+           only this install's. -->
       <Custom Action="PcbRunDelete" Before="PcbRunWrite"
-              Condition="PCBRUNVALUE ~&gt;&lt; PCBRUNEXE AND ((REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE) OR (NOT Installed AND NOT REMOVE AND STARTATLOGIN &lt;&gt; &quot;1&quot;))" />
+              Condition="PCBRUNVALUE ~&gt;&lt; PCBRUNEXE AND ((Installed AND REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE) OR (NOT Installed AND NOT REMOVE AND STARTATLOGIN &lt;&gt; &quot;1&quot;))" />
     </InstallExecuteSequence>
 
     <!-- The screens: welcome, licence, features, Start at login, install,

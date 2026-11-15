@@ -27,6 +27,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# No pcb this script starts asks github.com for a newer release (decision
+# 0019); the processes it starts inherit it.
+$env:PCB_UPDATE_CHECK = 'off'
 
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\pcb'
 $UiExe = Join-Path $InstallDir 'pcb-ui.exe'
@@ -427,10 +430,12 @@ try {
     Check 'REMOVE=Cli: no PATH entry, the other entries intact' { Why-PathEntry 0 $others }
     Check 'REMOVE=Cli: a new terminal no longer finds pcb.exe' { Why-PcbGone }
     Check 'REMOVE=Cli: the Run value kept' { Why-Run $RunData }
-    Msiexec 'ADDLOCAL=Cli' @('/i', "`"$Msi`"", 'ADDLOCAL=Cli')
-    Check 'ADDLOCAL=Cli: pcb.exe back' { Why-Files @('pcb-ui.exe', 'pcb.exe') }
-    Check 'ADDLOCAL=Cli: the PATH entry back once' { Why-PathEntry 1 $others }
-    Check 'ADDLOCAL=Cli: a new terminal finds pcb.exe' { Why-PcbOnPath }
+    # As docs/install.md writes it: both features, so the same line also
+    # serves with another version's MSI (a major upgrade).
+    Msiexec 'ADDLOCAL=App,Cli' @('/i', "`"$Msi`"", 'ADDLOCAL=App,Cli')
+    Check 'ADDLOCAL=App,Cli: pcb.exe back' { Why-Files @('pcb-ui.exe', 'pcb.exe') }
+    Check 'ADDLOCAL=App,Cli: the PATH entry back once' { Why-PathEntry 1 $others }
+    Check 'ADDLOCAL=App,Cli: a new terminal finds pcb.exe' { Why-PcbOnPath }
 
     # 4. Uninstall: all gone but the data directories.
     Msiexec 'uninstall' @('/x', "`"$Msi`"")
@@ -522,7 +527,31 @@ try {
         Check 'upgrade: the Run value kept' { Why-Run $RunData }
         Check 'upgrade: the shortcut' { Why-Shortcut }
         Check 'upgrade: pcb-ui.exe and pcb.exe are the MSI''s' { Why-MsiExes }
-        Msiexec 'uninstall' @('/x', "`"$Msi`"")
+        # pcb (command line) removed with the installed version's MSI, put
+        # back with another version's (docs/install.md): a major upgrade,
+        # whose ADDLOCAL must name App too.
+        Msiexec 'REMOVE=Cli before an upgrade' @('/i', "`"$Msi`"", 'REMOVE=Cli')
+        Check 'REMOVE=Cli: no pcb.exe' { Why-Files @('pcb-ui.exe') }
+        Msiexec 'upgrade ADDLOCAL=App,Cli' @('/i', "`"$UpgradeMsi`"", 'ADDLOCAL=App,Cli')
+        Check 'upgrade ADDLOCAL=App,Cli: the new product replaced the old one' {
+            if (Test-Installed $productCode) { return "$productCode is still installed" }
+            if (-not (Test-Installed $upgradeProduct)) { return "$upgradeProduct is not installed" }
+            ''
+        }
+        Check 'upgrade ADDLOCAL=App,Cli: pcb-ui.exe and pcb.exe' { Why-Files @('pcb-ui.exe', 'pcb.exe') }
+        Check 'upgrade ADDLOCAL=App,Cli: the shortcut' { Why-Shortcut }
+        Check 'upgrade ADDLOCAL=App,Cli: the PATH entry once, found' { $w = Why-PathEntry 1 $others; if ($w) { $w } else { Why-PcbOnPath } }
+        Check 'upgrade ADDLOCAL=App,Cli: the Run value kept' { Why-Run $RunData }
+        # REMOVE=Cli with another version's MSI selects no feature of the
+        # new product: Windows Installer installs nothing and keeps the
+        # installed one, which must keep its Run value.
+        Msiexec 'REMOVE=Cli with another version''s MSI' @('/i', "`"$Msi`"", 'REMOVE=Cli')
+        Check 'REMOVE=Cli with another version''s MSI: the installed product, its files and Run value kept' {
+            if (-not (Test-Installed $upgradeProduct)) { return "$upgradeProduct is no longer installed" }
+            $w = Why-Files @('pcb-ui.exe', 'pcb.exe'); if ($w) { return $w }
+            Why-Run $RunData
+        }
+        Msiexec 'uninstall' @('/x', "`"$UpgradeMsi`"")
         Check 'uninstall after upgrades: all gone, data kept' {
             $w = Why-Uninstalled; if ($w) { return $w }
             $w = Why-Run $null; if ($w) { return $w }
