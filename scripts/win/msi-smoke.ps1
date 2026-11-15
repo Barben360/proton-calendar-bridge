@@ -99,6 +99,7 @@ function Msiexec([string] $name, [string[]] $arguments) {
     $script:check = $name
     $script:step++
     $log = Join-Path $Work ("{0:D2}.log" -f $script:step)
+    $script:lastLog = $log
     $all = $arguments + @('/qn', '/norestart', '/l*v', "`"$log`"")
     $p = Start-Process -FilePath msiexec.exe -ArgumentList $all -Wait -PassThru
     if ($p.ExitCode -ne 0) {
@@ -177,6 +178,16 @@ function Why-Run([string] $want) {
     if (-not $v) { return 'no Run value pcb-ui' }
     if ($v.Kind -ne 'String') { return "the Run value is $($v.Kind), want String" }
     if ($v.Data -cne $want) { return "the Run value is [$($v.Data)], want [$want]" }
+    return ''
+}
+
+# Why-PropertyUnset NAME: the last msiexec log's closing property dump
+# (Property(S): ...) has no NAME.
+function Why-PropertyUnset([string] $name) {
+    $dump = @(Select-String -LiteralPath $script:lastLog -Pattern '^Property\(S\): ' | ForEach-Object { $_.Line })
+    if (-not ($dump -match '^Property\(S\): ProductCode = ')) { return "no property dump in $($script:lastLog)" }
+    $set = @($dump -match ('^Property\(S\): ' + [regex]::Escape($name) + ' = '))
+    if ($set.Count) { return "$($set -join '; ') (log $($script:lastLog))" }
     return ''
 }
 
@@ -409,6 +420,7 @@ try {
     Set-Run $Elsewhere
     Msiexec 'install STARTATLOGIN=0 (PATH holding the dir, Run value of another pcb-ui.exe)' @('/i', "`"$Msi`"", 'STARTATLOGIN=0')
     Check 'STARTATLOGIN=0: the other Run value untouched' { Why-Run $Elsewhere }
+    Check 'STARTATLOGIN=0: cleared, not 0 (the checkbox would show it ticked)' { Why-PropertyUnset 'STARTATLOGIN' }
     Check 'PATH holding the dir: still once' { Why-PathEntry 1 $others }
     Msiexec 'uninstall (Run value of another pcb-ui.exe)' @('/x', "`"$Msi`"")
     Check 'uninstall: the other Run value untouched' { Why-Run $Elsewhere }
@@ -425,7 +437,21 @@ try {
 
     $elsewhereDir = Join-Path $Work 'elsewhere'
     MsiexecRefused 'install INSTALLFOLDER=<another folder> refused' @('/i', "`"$Msi`"", "INSTALLFOLDER=`"$elsewhereDir\`"")
-    Check 'INSTALLFOLDER refused: nothing written there' { if (Test-Path -LiteralPath $elsewhereDir) { "$elsewhereDir exists" } else { '' } }
+    Check 'INSTALLFOLDER refused: nothing written there, no Run value, no PATH entry' {
+        if (Test-Path -LiteralPath $elsewhereDir) { return "$elsewhereDir exists" }
+        $w = Why-Run $null; if ($w) { return $w }
+        Why-PathEntry 0 $others
+    }
+
+    # A default install over a zip install elsewhere (Review Focus 5): the
+    # Run value then starts the MSI's pcb-ui.exe, and the uninstall,
+    # finding it this install's, removes it.
+    Set-Run $Elsewhere
+    Msiexec 'install (defaults) over a Run value of another pcb-ui.exe' @('/i', "`"$Msi`"")
+    Check 'install over a zip install: the Run value starts the MSI''s pcb-ui.exe' { Why-Run $RunData }
+    Msiexec 'uninstall' @('/x', "`"$Msi`"")
+    Check 'uninstall: the Run value, now this install''s, gone' { Why-Run $null }
+    Check 'uninstall: program dir, shortcut and own registry key gone' { Why-Uninstalled }
 
     # 6. Major upgrades keep Start at login as pcb-ui left it.
     if ($UpgradeMsi) {

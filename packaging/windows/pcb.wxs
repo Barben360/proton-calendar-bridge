@@ -92,14 +92,28 @@
          reaches the execute sequence unchanged). -->
     <SetProperty Id="STARTATLOGIN" Value="1" After="SetPCBRUNEXE" Sequence="first"
                  Condition="NOT STARTATLOGIN AND NOT Installed AND (NOT WIX_UPGRADE_DETECTED OR PCBRUNVALUE ~&gt;&lt; PCBRUNEXE)" />
+    <!-- Only "1" turns it on: any other value (STARTATLOGIN=0) is cleared,
+         or the dialog's checkbox, ticked by any non-empty value, would
+         show it on. -->
+    <CustomAction Id="ClearStartAtLogin" Property="STARTATLOGIN" Value="{}" Execute="firstSequence" />
 
     <SetProperty Id="PcbRunWrite" Before="PcbRunWrite" Sequence="execute"
                  Value="&quot;[System64Folder]reg.exe&quot; add &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v pcb-ui /t REG_SZ /d &quot;\&quot;[INSTALLFOLDER]pcb-ui.exe\&quot; --background&quot; /f" />
-    <CustomAction Id="PcbRunWrite" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="check" />
+    <!-- A failed reg.exe (a policy that blocks it) is logged by
+         WixQuietExec and ignored: an optional checkbox does not roll the
+         install back. -->
+    <CustomAction Id="PcbRunWrite" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="ignore" />
     <SetProperty Id="PcbRunDelete" Before="PcbRunDelete" Sequence="execute"
                  Value="&quot;[System64Folder]reg.exe&quot; delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v pcb-ui /f" />
     <CustomAction Id="PcbRunDelete" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallUISequence>
+      <Custom Action="ClearStartAtLogin" After="SetSTARTATLOGIN" Condition="STARTATLOGIN AND STARTATLOGIN &lt;&gt; &quot;1&quot;" />
+    </InstallUISequence>
+    <!-- Neither reg.exe action has a rollback: they run just before
+         InstallFinalize, so only a failure in that last step would leave
+         the Run value changed. Accepted. -->
     <InstallExecuteSequence>
+      <Custom Action="ClearStartAtLogin" After="SetSTARTATLOGIN" Condition="STARTATLOGIN AND STARTATLOGIN &lt;&gt; &quot;1&quot;" />
       <Custom Action="RefuseInstallFolder" After="SetPCBDEFAULTFOLDER" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; PCBDEFAULTFOLDER" />
       <!-- An install or upgrade (a new ProductCode: not Installed). -->
       <Custom Action="PcbRunWrite" Before="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND STARTATLOGIN = &quot;1&quot;" />
@@ -112,7 +126,9 @@
     <!-- The screens: welcome, licence, features, Start at login, install,
          finish with "Launch pcb-ui". -->
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)license.rtf" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch pcb-ui" />
+    <!-- At an install or upgrade only: the maintenance finish screen
+         (Change, Repair, Remove) launches nothing. -->
+    <SetProperty Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch pcb-ui" After="CostFinalize" Sequence="ui" Condition="NOT Installed" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WixShellExecTarget" Value="[#PcbUiExe]" />
     <CustomAction Id="LaunchPcbUi" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />

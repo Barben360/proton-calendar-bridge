@@ -47,7 +47,8 @@ foreach ($f in @($Pcb, $PcbUi)) {
 $wix = Get-Command wix -ErrorAction SilentlyContinue
 if (-not $wix) { Refuse "no wix on PATH: dotnet tool install --global wix --version $WixVersion" }
 $got = (& wix --version -acceptEula wix7 | Out-String).Trim()
-if ($got -notlike "$WixVersion*") { Refuse "wix is $got, want $WixVersion" }
+# 7.0.1+<commit>, not 7.0.10.
+if ($got -notmatch ('^' + [regex]::Escape($WixVersion) + '(\+|$)')) { Refuse "wix is $got, want $WixVersion" }
 
 $src = Join-Path $PSScriptRoot '..\..\packaging\windows\pcb.wxs'
 $outFull = [IO.Path]::GetFullPath($Out)

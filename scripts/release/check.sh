@@ -114,7 +114,10 @@ case $cmd in
     v=${1#v}
     v=${v%%-*}
     IFS=. read -r major minor patch <<<"$v"
-    ((major <= 255 && minor <= 255 && patch <= 65535)) || die "$1: an MSI version is at most 255.255.65535"
+    # The lengths first: bash arithmetic wraps past 2^63.
+    if ((${#major} > 3 || ${#minor} > 3 || ${#patch} > 5)) || ((major > 255 || minor > 255 || patch > 65535)); then
+      die "$1: an MSI version is at most 255.255.65535"
+    fi
     echo "$v"
     ;;
   *)

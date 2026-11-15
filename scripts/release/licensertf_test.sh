@@ -34,7 +34,7 @@ grep -qF 'for a fee' "$tmp/out.rtf" || fail "the written RTF lacks the text"
 [ "$rc" = 1 ] || fail "a missing RTF: exit $rc, want 1"
 ok "write, then check; a missing RTF fails"
 
-# Paragraphs, escapes and characters beyond ASCII (U+00E9, U+1F600).
+# Paragraphs, escapes and characters beyond ASCII (U+00EB, U+1F600).
 printf 'a {b}\nc\\d\n\n\n  Zo\303\253 \360\237\230\200  \n' >"$tmp/in.txt"
 "${gen[@]}" "$tmp/in.txt" "$tmp/in.rtf" || fail "write exit $?"
 body=$(sed -n 's/.*\\fs18 //p' "$tmp/in.rtf")$'\n'$(sed -n '2,$p' "$tmp/in.rtf")
