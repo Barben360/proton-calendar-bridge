@@ -186,8 +186,9 @@ type closeSeen struct {
 }
 
 func (c *closeSeen) Close() error {
+	err := c.Listener.Close()
 	c.closed.Store(true)
-	return c.Listener.Close()
+	return err
 }
 
 func TestRestartReadsTheConfig(t *testing.T) {
@@ -236,6 +237,9 @@ func TestRestartReadsTheConfig(t *testing.T) {
 	}
 	if !opened[0].closed.Load() {
 		t.Errorf("Restart returned while the old listener on %s is still open", first)
+	}
+	if got := opened[1].Addr().String(); got != want {
+		t.Errorf("the restarted listener is on %s, want the new config's %s", got, want)
 	}
 	if opened[1].closed.Load() {
 		t.Errorf("the new listener on %s is closed after Restart", want)
