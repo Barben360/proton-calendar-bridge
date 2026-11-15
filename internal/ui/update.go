@@ -76,7 +76,9 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 		return UpdateNotice{}, nil
 	}
 	n := UpdateNotice{Available: true, Version: res.Latest.Version, Installed: u.Checker.Installed, URL: res.Latest.URL, Hint: u.Hint, Panel: true}
-	if until, err := time.Parse(time.RFC3339, u.Prefs.String(prefLater)); err == nil && now.Before(until) {
+	// A deadline more than LaterFor ahead was saved under a wrong clock:
+	// it does not count, or the panel could stay hidden for years.
+	if until, err := time.Parse(time.RFC3339, u.Prefs.String(prefLater)); err == nil && now.Before(until) && !until.After(now.Add(LaterFor)) {
 		n.Panel = false
 	}
 	var note *Notification

@@ -252,3 +252,17 @@ func TestUpdatesFallbackDoesNotTrustAnotherHost(t *testing.T) {
 		t.Errorf("tampered cache while offline: %+v, %+v, want nothing", n, note)
 	}
 }
+
+// Later pressed while the clock ran a year ahead: once the clock is right
+// again, the saved deadline is more than 48 h away and does not count.
+func TestUpdatesIgnoresALaterDeadlineTooFarAhead(t *testing.T) {
+	g, c := newGH(t), newClock()
+	u := newUpdates(t, g, "v0.1.0", c)
+	u.Refresh(context.Background())
+	c.add(365 * 24 * time.Hour)
+	u.Later()
+	c.add(-365 * 24 * time.Hour)
+	if n, _ := u.Refresh(context.Background()); !n.Panel {
+		t.Errorf("deadline a year ahead: %+v, want the panel shown", n)
+	}
+}

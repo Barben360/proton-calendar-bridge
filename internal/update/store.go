@@ -31,13 +31,27 @@ type State struct {
 func StorePath(stateDir string) string { return filepath.Join(stateDir, "update.json") }
 
 // Load reads path; a missing or unreadable file is the zero State (the
-// switch on, nothing cached).
+// switch on, nothing cached). Each field is read on its own: a damaged
+// cache field is dropped, never the switch with it.
 func Load(path string) State {
 	var st State
 	b, err := atomicfile.ReadFile(path)
-	if err != nil || json.Unmarshal(b, &st) != nil {
+	if err != nil {
 		return State{}
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(b, &fields) != nil {
+		return State{}
+	}
+	field := func(name string, v any) { _ = json.Unmarshal(fields[name], v) }
+	var off bool
+	var at time.Time
+	var latest, page string
+	field("off", &off)
+	field("checked_at", &at)
+	field("latest", &latest)
+	field("url", &page)
+	st.Off, st.CheckedAt, st.Latest, st.URL = off, at, latest, page
 	return st
 }
 

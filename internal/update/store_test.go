@@ -209,3 +209,21 @@ func TestCachedDoesNotTrustAnotherHostOnDisk(t *testing.T) {
 		t.Errorf("Cached = %+v after %d requests, want GitHub asked again", res, r.n.Load())
 	}
 }
+
+// A damaged cache field does not drop the switch: "off" stays off, and the
+// next write keeps it (docs/security.md: off means no call).
+func TestLoadKeepsTheSwitchWhenAnotherFieldIsBad(t *testing.T) {
+	p := storePath(t)
+	if err := os.WriteFile(p, []byte(`{"off":true,"checked_at":"not a time","latest":42}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := update.Load(p); !st.Off || !st.CheckedAt.IsZero() || st.Latest != "" {
+		t.Errorf("Load = %+v, want off kept, the bad fields zero", st)
+	}
+	if err := update.Edit(context.Background(), p, func(s *update.State) { s.Latest, s.CheckedAt = "v0.2.0", t0 }); err != nil {
+		t.Fatal(err)
+	}
+	if st := update.Load(p); !st.Off || st.Latest != "v0.2.0" {
+		t.Errorf("after a cache write: %+v, want off kept", st)
+	}
+}
