@@ -19,9 +19,6 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
 - **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container.
 
-> [!WARNING]
-> pcb is early software, built and tested against a fake Proton, checked live on a test account, and used by its author on Linux with their own Proton account, where every feature works. Other platforms and setups have seen less use ([status](docs/status.md)).
-
 ## What it does for you
 
 - **Your calendars in Thunderbird**, read and write: create, edit, move and delete events, single occurrences included. Each change goes to Proton and is read back before Thunderbird gets its answer.
