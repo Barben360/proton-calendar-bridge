@@ -426,6 +426,22 @@ const DPAPIUnprotectFix = "sign in to Windows once with this account's password 
 // keyFix is the hint for a key file that cannot be used.
 const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes, " + privateFile + " (pcb doctor)"
 
+// dpapiKeyFix is keyFix's for the DPAPI key file (Windows only), which holds
+// the blob Windows protects, not a 32-byte key.
+const dpapiKeyFix = "the DPAPI key file must be readable by the user pcb runs as, no other account in its access list (pcb doctor)"
+
+// keyFixFor is the hint for a key that cannot be used, by where it lives:
+// keyFile is the key file, seal.DPAPIKeyName's, or keyringRef.
+func keyFixFor(keyFile string) string {
+	switch {
+	case keyFile == keyringRef:
+		return keyringFailFix
+	case filepath.Base(keyFile) == seal.DPAPIKeyName:
+		return dpapiKeyFix
+	}
+	return keyFix
+}
+
 // keyringFailFix is keyFix's for a key in the desktop keyring that cannot be used.
 const keyringFailFix = "check that the desktop keyring is running and unlocked (pcb doctor)"
 
@@ -445,7 +461,7 @@ func storeError(err error, keyFile string) error {
 		if keyFile == keyringRef { // a PathError of the sealed file or the state directory, not of a key
 			return keyFailure(err, "cannot use the stored secrets: "+cause, "make sure the state directory and its files are readable and writable by this user (pcb doctor)")
 		}
-		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFix+"; check the permissions of the state directory")
+		return keyFailure(err, "cannot use the stored secrets or the key file "+keyFile+": "+cause, keyFixFor(keyFile)+"; check the permissions of the state directory")
 	}
 	return blocked("cannot use the stored secrets", "check the permissions of the state directory and of the files in it (pcb doctor)")
 }

@@ -255,12 +255,7 @@ func (l *Local) keyFile() string {
 }
 
 // keyFix is the hint for a key that cannot be used, by where it lives.
-func (l *Local) keyFix() string {
-	if l.keyFile() == keyringRef {
-		return keyringFailFix
-	}
-	return keyFix
-}
+func (l *Local) keyFix() string { return keyFixFor(l.keyFile()) }
 
 // keyHint is keyFix for err, a failure to use the key: DPAPI's own fixes
 // when Windows could not protect or unprotect the key.
