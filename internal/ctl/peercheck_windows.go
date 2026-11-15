@@ -10,10 +10,11 @@ import (
 )
 
 // refusedPeerHint is the hint a refused peer gets: another user's process,
-// or one whose token the daemon cannot read (pipeClientSID), such as an
-// elevated pcb talking to a daemon that is not elevated (an elevated ssh
-// session against the console's pcb-ui), whatever its login session.
-const refusedPeerHint = "run pcb as the user that runs pcb-ui or pcb serve, and not elevated (as administrator) when they are not"
+// or one whose token the daemon cannot read (pipeClientSID). An elevated
+// pcb talking to a daemon that is not elevated (an elevated ssh session
+// against the console's pcb-ui) may be such a client: Windows may deny a
+// normal process the token of an elevated one; not checked live.
+const refusedPeerHint = "run pcb as the user that runs pcb-ui or pcb serve; an elevated (administrator) pcb may be refused by one that is not elevated"
 
 // channel is what messages call the control channel: a named pipe here.
 const channel = "control pipe"

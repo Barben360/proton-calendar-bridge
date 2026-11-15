@@ -19,8 +19,8 @@ var clientSIDOf, serverSIDOf = pipeClientSID, pipeOwnerSID
 // pipeClientSID is the user SID of the process at the client end of c: its
 // token's user. A connection that is not a named pipe, or a process or
 // token this process cannot open, is an error: the server refuses it,
-// whatever SID it would have read (another user's process; an elevated
-// pcb's token, which a daemon that is not elevated may not read).
+// whatever SID it would have read (another user's process; possibly an
+// elevated pcb's, whose token a daemon that is not elevated may not read).
 //
 // The PID names the process that opened the client end, which may since
 // have exited, its handle living on in a child or a duplicate, and its PID

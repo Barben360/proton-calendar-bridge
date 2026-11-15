@@ -375,7 +375,7 @@ func TestServerRefusesAClientOfAnotherSID(t *testing.T) {
 			var ee *exitcode.Error
 			// Any elevated client of a normal daemon, whatever its login
 			// session: its token is what the daemon may not read.
-			if want := "run pcb as the user that runs pcb-ui or pcb serve, and not elevated (as administrator) when they are not"; !errors.As(err, &ee) || ee.Hint != want {
+			if want := "run pcb as the user that runs pcb-ui or pcb serve; an elevated (administrator) pcb may be refused by one that is not elevated"; !errors.As(err, &ee) || ee.Hint != want {
 				t.Errorf("error %v, want the hint %q", err, want)
 			}
 		})
