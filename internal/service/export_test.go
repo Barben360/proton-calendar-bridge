@@ -41,6 +41,11 @@ func (l *Local) BeforeKeyLoad(fn func()) { l.r.beforeLoad = fn }
 // the client ID. Set it before the first CheckClient.
 func (l *Local) SetTouchHook(f func(phase, id string)) { l.touchHook = f }
 
+// WaitTouches waits for the background touches started so far. Each one is
+// counted before the check that starts it returns, so a test calling this
+// after its checks finds no touch left to rewrite clients.json.
+func (l *Local) WaitTouches() { l.twg.Wait() }
+
 // SetTouchTimeout sets how long a background touch may wait for the clients lock.
 func (l *Local) SetTouchTimeout(d time.Duration) { l.touchTimeout = d }
 

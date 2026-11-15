@@ -937,6 +937,9 @@ func TestVerifyClientDoesNotChargeTheLimiter(t *testing.T) {
 	if found, err := e.svc.VerifyClient(t.Context(), sec.Password); !found || err != nil {
 		t.Errorf("VerifyClient(right) = %v, %v", found, err)
 	}
+	// The checks above touch the client in the background; one landing
+	// after the corruption would put a valid clients.json back.
+	e.svc.WaitTouches()
 	if err := os.WriteFile(filepath.Join(e.dirs.State, "clients.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
