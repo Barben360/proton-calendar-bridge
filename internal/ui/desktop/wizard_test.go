@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -21,8 +23,7 @@ type fakeWizard struct {
 	step     ui.Step
 	err      *exitcode.Error
 	calls    []string
-	pw       string // what Submit received
-	unatt    bool
+	pw       string             // what Submit received
 	script   map[string]ui.Step // call name -> step after
 	block    chan struct{}
 	doneErr  *exitcode.Error
@@ -69,13 +70,10 @@ func (f *fakeWizard) Account() string {
 	defer f.mu.Unlock()
 	return f.account
 }
-func (f *fakeWizard) UnattendedWarning() string {
-	return "If ticked: whoever can read the key file and secrets.sealed owns the Proton account"
-}
 func (f *fakeWizard) CaptchaURL() string { return "https://verify.example/captcha?token=t" }
-func (f *fakeWizard) Submit(_ context.Context, address string, password []byte, unattended bool) error {
+func (f *fakeWizard) Submit(_ context.Context, address string, password []byte) error {
 	f.mu.Lock()
-	f.pw, f.unatt = string(password), unattended
+	f.pw = string(password)
 	f.mu.Unlock()
 	f.enter("submit " + address)
 	return nil
@@ -107,22 +105,26 @@ func TestWizardScreensFollowSteps(t *testing.T) {
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
 	f.tapAdd()
-	if !f.has("Repair the session without me") || !f.has(f.wiz.UnattendedWarning()) {
-		t.Errorf("credentials screen lacks the unattended checkbox and its warning: %v", f.texts())
-	}
-	if f.has("unattended relogin is on") {
-		t.Errorf("the box is unticked but the screen says unattended relogin is on: %v", f.texts())
+	// Unattended relogin is pcb login --unattended-relogin only: the
+	// window offers no box for it and says nothing of it.
+	var checks []string
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if c, ok := o.(*widget.Check); ok {
+			checks = append(checks, c.Text)
+		}
+	})
+	if len(checks) != 0 || f.has("Repair the session") || f.has("If ticked") || f.has("unattended") {
+		t.Errorf("credentials screen offers unattended relogin: checks %q, texts %v", checks, f.texts())
 	}
 	test.Type(f.entry("name@example.org"), "carol@example.org")
 	pw := f.entry("Proton password")
 	test.Type(pw, "hunter2")
-	test.Tap(f.check("Repair the session without me"))
 	f.tap("Sign in")
 	if got := f.wiz.got(); !slices.Equal(got, []string{"submit carol@example.org"}) {
 		t.Fatalf("calls = %v", got)
 	}
-	if f.wiz.pw != "hunter2" || !f.wiz.unatt {
-		t.Errorf("Submit got pw=%q unattended=%v", f.wiz.pw, f.wiz.unatt)
+	if f.wiz.pw != "hunter2" {
+		t.Errorf("Submit got pw=%q", f.wiz.pw)
 	}
 	if !f.has("2FA code") {
 		t.Fatalf("not on the TOTP screen: %v", f.texts())

@@ -12,8 +12,8 @@ An account, with its adapters, the CalDAV connection to copy into Thunderbird, a
 Adding an account: the address and password first, then a 2FA code or a CAPTCHA when Proton asks for one:
 
 <p align="center">
-<img alt="pcb-ui's add-account wizard: address, Proton password and the unattended-relogin box" src="assets/ui/add-account-light.png#gh-light-mode-only" width="720">
-<img alt="pcb-ui's add-account wizard: address, Proton password and the unattended-relogin box" src="assets/ui/add-account-dark.png#gh-dark-mode-only" width="720">
+<img alt="pcb-ui's add-account wizard: address and Proton password" src="assets/ui/add-account-light.png#gh-light-mode-only" width="720">
+<img alt="pcb-ui's add-account wizard: address and Proton password" src="assets/ui/add-account-dark.png#gh-dark-mode-only" width="720">
 </p>
 
 The window follows your desktop's light or dark theme.

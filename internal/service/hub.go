@@ -808,8 +808,7 @@ func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) 
 }
 
 // Sealer is the name of what seals the state's secrets: SealerKeyFile or
-// SealerSecretService (the login wizard words its unattended-relogin line
-// by it).
+// SealerSecretService.
 func (h *Hub) Sealer() string { return h.o.Sealer.Name() }
 
 // log is the Hub's logger (Options.Logger), or one that drops everything.

@@ -15,11 +15,9 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/cli"
-	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginflow"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
-	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -73,7 +71,7 @@ func TestWizardPlainLogin(t *testing.T) {
 	if w.Step() != ui.StepCredentials {
 		t.Fatalf("first step = %q", w.Step())
 	}
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	if w.Step() != ui.StepDone || w.Err() != nil {
@@ -110,7 +108,7 @@ func TestWizardStillDrivesTheDesktop(t *testing.T) {
 	l.f.SetCaptchaFor(l.f.Username, "tok")
 	w := ui.NewWizard(b)
 	flow := w.Flow // the wizard runs the shared flow
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepCaptcha {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != ui.StepCaptcha {
 		t.Fatalf("Submit: %v, Step %q", err, w.Step())
 	}
 	l.forgetLastLogin(t)
@@ -134,7 +132,7 @@ func TestWizardTOTP(t *testing.T) {
 	b := l.start(t)
 	uri := l.f.SetTwoFA(l.f.Username, true)
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	if w.Step() != ui.StepTOTP {
@@ -164,7 +162,7 @@ func TestWizardTooManyWrongCodesBackToCredentials(t *testing.T) {
 	b := l.start(t)
 	l.f.SetTwoFA(l.f.Username, true)
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3 && w.Step() == ui.StepTOTP; i++ {
@@ -184,7 +182,7 @@ func TestWizardKeepsPasswordForCaptchaThenZeroes(t *testing.T) {
 	l.f.SetCaptchaFor(l.f.Username, "tok")
 	w := ui.NewWizard(b)
 	pw := []byte(l.f.Password)
-	if err := w.Submit(t.Context(), l.f.Username, pw, false); err != nil {
+	if err := w.Submit(t.Context(), l.f.Username, pw); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	if w.Step() != ui.StepCaptcha || w.CaptchaURL() == "" {
@@ -213,7 +211,7 @@ func TestWizardZeroesOnError(t *testing.T) {
 	l := newLab(t)
 	b := l.start(t)
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte("wrong password"), false); err == nil {
+	if err := w.Submit(t.Context(), l.f.Username, []byte("wrong password")); err == nil {
 		t.Fatal("a wrong password logged in")
 	}
 	if w.Step() != ui.StepCredentials || w.Err() == nil {
@@ -230,7 +228,7 @@ func TestWizardZeroesTheBufferWhenTheCaptchaRetryFails(t *testing.T) {
 	b := l.start(t)
 	l.f.SetCaptchaFor(l.f.Username, "tok")
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte("wrong password"), false); err != nil || w.Step() != ui.StepCaptcha {
+	if err := w.Submit(t.Context(), l.f.Username, []byte("wrong password")); err != nil || w.Step() != ui.StepCaptcha {
 		t.Fatalf("Submit: %v, Step %q (the fake must challenge before it checks the password)", err, w.Step())
 	}
 	buf := w.PasswordBuf()
@@ -269,7 +267,7 @@ func TestWizardErrorIsTheCLIText(t *testing.T) {
 	}
 	l.forgetLastLogin(t)
 	w := ui.NewWizard(b)
-	_ = w.Submit(t.Context(), l.f.Username, []byte("wrong password"), false)
+	_ = w.Submit(t.Context(), l.f.Username, []byte("wrong password"))
 	got := w.Err()
 	if got == nil {
 		t.Fatal("no error")
@@ -287,7 +285,7 @@ func TestWizardCancelDuringTOTPLeavesNoAccount(t *testing.T) {
 	b := l.start(t)
 	uri := l.f.SetTwoFA(l.f.Username, true)
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepTOTP {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != ui.StepTOTP {
 		t.Fatalf("Submit: %v, Step %q", err, w.Step())
 	}
 	if len(accountDirs(t, l)) == 0 {
@@ -317,7 +315,7 @@ func TestWizardCancelDuringCaptchaLeavesNoAccountAndZeroes(t *testing.T) {
 	b := l.start(t)
 	l.f.SetCaptchaFor(l.f.Username, "tok")
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepCaptcha {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != ui.StepCaptcha {
 		t.Fatalf("Submit: %v, Step %q", err, w.Step())
 	}
 	buf := w.PasswordBuf()
@@ -342,7 +340,7 @@ func TestWizardCancelKeepsAnExistingAccount(t *testing.T) {
 	l.f.SetTwoFA(l.f.Username, true)
 	l.forgetLastLogin(t)
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepTOTP {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != ui.StepTOTP {
 		t.Fatalf("Submit: %v, Step %q", err, w.Step())
 	}
 	w.Cancel()
@@ -356,7 +354,7 @@ func TestWizardRefusesWhileTheBridgeIsNotRunning(t *testing.T) {
 	l := newLab(t)
 	b := ui.NewBridge(ui.BridgeOptions{Env: l.env}) // never started
 	w := ui.NewWizard(b)
-	err := w.Submit(context.Background(), l.f.Username, []byte(l.f.Password), false)
+	err := w.Submit(context.Background(), l.f.Username, []byte(l.f.Password))
 	var ee *exitcode.Error
 	if !errors.As(err, &ee) || ee.Code != exitcode.Blocked || !strings.Contains(err.Error(), "the bridge is not running") || ee.Hint == "" {
 		t.Errorf("Submit = %v, want the Blocked not-running error with a hint", err)
@@ -390,7 +388,7 @@ func TestWizardCopiesThePassword(t *testing.T) {
 	l.f.SetCaptchaFor(l.f.Username, "tok")
 	w := ui.NewWizard(b)
 	pw := []byte(l.f.Password)
-	if err := w.Submit(t.Context(), l.f.Username, pw, false); err != nil {
+	if err := w.Submit(t.Context(), l.f.Username, pw); err != nil {
 		t.Fatal(err)
 	}
 	for i := range pw { // the caller wipes its own copy
@@ -399,21 +397,6 @@ func TestWizardCopiesThePassword(t *testing.T) {
 	l.forgetLastLogin(t)
 	if err := w.CaptchaSolved(t.Context()); err != nil || w.Step() != ui.StepDone {
 		t.Errorf("CaptchaSolved = %v, Step %q: the wizard relied on the caller's buffer", err, w.Step())
-	}
-}
-
-// The wizard's line under the unattended box is the shared conditional
-// sentence for the bridge's state (here a key file: no bus), never doctor's
-// "unattended relogin is on" (live 2026-11-13, F5).
-func TestWizardUnattendedWarningFitsTheState(t *testing.T) {
-	l := newLab(t)
-	b := l.start(t)
-	w := ui.NewWizard(b)
-	if got, want := w.UnattendedWarning(), loginflow.UnattendedWarningFor(service.SealerKeyFile); got != want {
-		t.Errorf("UnattendedWarning = %q, want %q", got, want)
-	}
-	if got := w.UnattendedWarning(); strings.HasPrefix(got, "unattended relogin is on") || got == doctor.UnattendedKeyringWarning("secrets.sealed") {
-		t.Errorf("UnattendedWarning = %q: doctor's line for a relogin that is on", got)
 	}
 }
 
@@ -427,7 +410,7 @@ func TestWizardIsSafeConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false)
+			_ = w.Submit(t.Context(), l.f.Username, []byte(l.f.Password))
 			_ = w.Step()
 			_ = w.Err()
 			_ = w.CaptchaURL()
@@ -456,7 +439,7 @@ func TestWizardCancelAfterTheBridgeRestarted(t *testing.T) {
 				l.f.SetCaptchaFor(l.f.Username, "tok")
 			}
 			w := ui.NewWizard(b)
-			if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != step {
+			if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != step {
 				t.Fatalf("Submit: %v, Step %q", err, w.Step())
 			}
 			if err := b.Stop(); err != nil {
@@ -507,7 +490,7 @@ func TestWizardLoginIsLogged(t *testing.T) {
 	}
 	l.f.SetCaptchaFor(l.f.Username, "wizard-captcha-tok")
 	w := ui.NewWizard(b)
-	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || w.Step() != ui.StepCaptcha {
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || w.Step() != ui.StepCaptcha {
 		t.Fatalf("Submit: %v, Step %q", err, w.Step())
 	}
 	id := w.Account()

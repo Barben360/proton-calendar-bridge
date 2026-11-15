@@ -45,35 +45,6 @@ const (
 	StepDone        Step = "done"
 )
 
-// UnattendedWarningFor is the line shown under the unattended-relogin box
-// (pcb-ui's wizard, the MCP login page) for a state sealed by sealer ("" when
-// unknown): what ticking it means, a sentence true whether the box is ticked
-// or not (live 2026-11-13, F5: pcb doctor's "unattended relogin is on" was
-// shown with the box unticked, and named the keyring on a key-file state).
-func UnattendedWarningFor(sealer string) string {
-	switch sealer {
-	case service.SealerSecretService:
-		return "If ticked: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account"
-	case service.SealerKeyFile:
-		return "If ticked: whoever can read the key file and secrets.sealed owns the Proton account"
-	}
-	return "If ticked: whoever can read secrets.sealed and the key that seals it (the desktop keyring or the key file) owns the Proton account"
-}
-
-// UnattendedWarning is UnattendedWarningFor the sealer of the flow's Hub
-// (a Hub that says it: service.Hub.Sealer); the generic line when the Hub
-// cannot be reached or does not say.
-func (f *Flow) UnattendedWarning() string {
-	h, err := f.hub()
-	if err != nil {
-		return UnattendedWarningFor("")
-	}
-	if s, ok := h.(interface{ Sealer() string }); ok {
-		return UnattendedWarningFor(s.Sealer())
-	}
-	return UnattendedWarningFor("")
-}
-
 // cancelTimeout bounds what Cancel does with the Hub.
 const cancelTimeout = 10 * time.Second
 
@@ -96,7 +67,6 @@ type Flow struct {
 	captchaURL string
 	pw         []byte // the password, until the login ends
 	username   string
-	unattended bool
 	captchaTok string // the token of the CAPTCHA challenge, for the retry
 	account    string // the local ID of the account being added
 	created    bool   // Submit made that account (it did not exist)
@@ -202,10 +172,11 @@ func wrongStep(want Step, got Step) error {
 }
 
 // Submit logs in (or adds) the account address, with the password (the
-// flow keeps its own copy: wipe the argument when it returns) and the
-// unattended-relogin choice. It goes to StepDone, StepTOTP or StepCaptcha, or
-// stays on the credentials with Err set.
-func (f *Flow) Submit(ctx context.Context, address string, password []byte, unattended bool) error {
+// flow keeps its own copy: wipe the argument when it returns). It never asks
+// for unattended relogin (pcb login --unattended-relogin only), so it turns
+// it off for an account that had it. It goes to StepDone, StepTOTP or
+// StepCaptcha, or stays on the credentials with Err set.
+func (f *Flow) Submit(ctx context.Context, address string, password []byte) error {
 	f.op.Lock()
 	defer f.op.Unlock()
 	h, err := f.hub()
@@ -220,7 +191,7 @@ func (f *Flow) Submit(ctx context.Context, address string, password []byte, unat
 	}
 	f.wipe()
 	f.pw = slices.Clone(password)
-	f.username, f.unattended = address, unattended
+	f.username = address
 	f.err = nil
 	f.mu.Unlock()
 
@@ -228,7 +199,7 @@ func (f *Flow) Submit(ctx context.Context, address string, password []byte, unat
 	for _, a := range h.Accounts() {
 		known[a.ID] = a.Phase
 	}
-	res, err := h.Login(ctx, service.LoginRequest{Username: address, Password: string(password), UnattendedRelogin: unattended, Entry: f.entry})
+	res, err := h.Login(ctx, service.LoginRequest{Username: address, Password: string(password), Entry: f.entry})
 	phase, existed := known[res.Account]
 	if err == nil && res.Account != "" {
 		f.mu.Lock()
@@ -254,7 +225,7 @@ func (f *Flow) CaptchaSolved(ctx context.Context) error {
 		f.mu.Unlock()
 		return wrongStep(StepCaptcha, got)
 	}
-	req := service.LoginRequest{Username: f.username, Password: string(f.pw), UnattendedRelogin: f.unattended, CaptchaToken: f.captchaTok, Entry: f.entry}
+	req := service.LoginRequest{Username: f.username, Password: string(f.pw), CaptchaToken: f.captchaTok, Entry: f.entry}
 	created := f.created
 	f.err = nil
 	f.mu.Unlock()

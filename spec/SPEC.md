@@ -309,7 +309,12 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
 - Unattended relogin [call, opt-in at login]: stores the login password and
   the TOTP seed (otpauth URI) sealed (§7.3), so an expired session is
   repaired without a human. Off by default; `doctor` says what it implies
-  (whoever unseals the store owns the account).
+  (whoever unseals the store owns the account). Only `pcb login --unattended-relogin` (and `pcb login resume`) asks for
+  it since 2026-11-15: `pcb-ui`'s wizard and the MCP login page offer no box, and a login through them (`loginflow`)
+  turns it off for the account, the stored password and TOTP seed replaced by tokens only. Why: the box's cost (whoever
+  unseals the store owns the account, not just a session) was hard to read in a window, a ticked box refused a 2FA
+  person's 6-digit code, and the one live unattended relogin met a CAPTCHA anyway (E02 row 5) [verified:
+  `TestFlowLoginTurnsUnattendedReloginOff`, `TestWizardScreensFollowSteps`, `TestLoginPageOffersNoUnattendedRelogin`].
 - Session lifetime and refresh-token rotation rules [partly verified: live 2026-11-12/14, E01: the access token lives
   24 h (`ExpiresIn` 86400), every refresh rotates both tokens, the long probe's session alive at 42 h; its 14-day
   window ends 2026-11-26; the session's whole lifetime stays assumed → E01]: decide
@@ -1476,7 +1481,7 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   `TestDeleteWithoutElicitationNeedsDeleteCap`, `TestRelayCarriesAConfirmation`]. Claude Code 2.1.325
   declares form elicitation and asked exactly `Delete the event on 2026-11-15 10:00 Europe/Paris: «pcb-m8 renamed»?`
   (decline: refused, nothing deleted; accept: deleted) `[verified: live 2026-11-14, spec/experiments/M8-live.md]`; what other clients declare is not known.
-- **Login and logout** (stdio and relay only). `login(username, unattended_relogin?)` takes no secret (the schema refuses
+- **Login and logout** (stdio and relay only). `login(username)` takes no secret (the schema refuses
   any other argument; the username must look like an address, so no shell, page or log can misread it). The
   process that owns the accounts acts:
   - `pcb-ui` raises its add-account wizard with the username filled in (a login the person is already in keeps its
@@ -1490,9 +1495,9 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   - any other (a session daemon, `pcb serve` reached by relay) opens a page for this one login at
     `http://127.0.0.1:<ephemeral port>/login/<128-bit nonce>` (never the `[caldav]` address): Host and Origin
     checked (403), `Cache-Control: no-store`, the username shown read-only, then the password, the 2FA code or the
-    CAPTCHA link, the unattended-relogin box always unticked with `pcb-ui`'s keyring warning (an agent's
-    `unattended_relogin: true` is a note, "The agent suggests unattended relogin", so a person with 2FA finishes with a
-    6-digit code) [verified: `TestLoginPageNeverTicksUnattended`], the nonce compared in constant time [verified:
+    CAPTCHA link, no unattended relogin (§5.2: no box, a posted `unattended` field is ignored, so a person with 2FA
+    finishes with a 6-digit code; the tool's `unattended_relogin` argument is gone since 2026-11-15) [verified:
+    `TestLoginPageOffersNoUnattendedRelogin`, `TestLoginToolRefusesWhatIsNoUsername`], the nonce compared in constant time [verified:
     `TestLoginPageComparesTheNonceInConstantTime`]; the first form post claims the page with a cookie and any other browser gets 410; it closes when the
     login ends, on Cancel, after 5 minutes or when replaced, removing a half-way add [verified: `TestLoginPageBindsLoopbackWithANonce`,
     `TestLoginPageSingleUse`, `TestLoginPageExpires`, `TestLoginPageRefusesForeignHostAndOrigin`, `TestLoginPageNoStore`,
@@ -1736,7 +1741,7 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   `failed to initialise GLFW` and panicked), and touches no state (the sealer is not chosen by a start that cannot show anything); `--version` and `--help` exit 0 before any toolkit starts
   [verified: `TestParseArgs`, `TestCheckDisplay`, `TestUnusableDisplayIsAPcbMessage` (the real `run` in a child, `DISPLAY` on no server); the same runs by hand, R11]. It runs the daemon in process (`ui.Bridge`, kind `ui`, wait for login, the same listener, control socket and `serve.lock` as `pcb serve`), shows
   a tray icon (three icons of our own: `ok`, `syncing`, `attention`; no Proton name or logo) and an 880 x 620 window in the Paper theme (light or dark with the desktop; a fixed accounts sidebar, each account with its initial, address and state; per account the alerts first, then grouped boxes: the CalDAV switch and the MCP selector (Off, Read-only, Read-write since 2026-11-14, `TestMCPSelectorCallsSetMCP`), the CalDAV connection (the server URL and the username each with Copy, since the live run of 2026-11-13, F6, `TestConnectionCopiesURLAndUsername`; the password masked behind Show and Copy), New password, and the calendars, each with a dot of its Proton colour (room kept when it has none, since 2026-11-14, `TestCalendarColourDot`) and, while its write gate is closed or undecided, a `read-only` badge whose reason shows on hover of an info icon beside it, drawn in a layer of the window's content rather than an overlay so the tip never takes the pointer from its icon (`TestReadOnlyReasonShowsOnHover`; a gate not known yet, keys not loaded, shows no badge, `TestCalendarReadOnlyFromGate`); Sign out or Sign in,
-  Remove; the "+" beside Accounts, or Add account when there is none, opens the wizard: address and password, an unattended-relogin opt-in (unticked) with one line saying what ticking it means for the state's sealer (below), the 2FA code, the CAPTCHA with "Open verification", then the CalDAV connection to copy;
+  Remove; the "+" beside Accounts, or Add account when there is none, opens the wizard: address and password (no unattended-relogin opt-in since 2026-11-15, §5.2), the 2FA code, the CAPTCHA with "Open verification", then the CalDAV connection to copy;
   Settings: start at login, log level, open the logs folder or `config.toml`, Restart bridge, the doctor report) [verified: `TestThemeContrast`, `TestAccountPaneOrderAndBadge`, `TestEmptyPaneOffersAdd`]. The logs folder opens as a `file://` URL with spaces and specials escaped [verified: `TestSettingsOpenFiles`, `TestFileURLEscapesSpacesAndSpecials`]. Closing the window hides it; Quit in the tray menu drains (5 s) and stops everything, after which `pcb status` says offline.
   `--background` starts in the tray only; when no tray host answers (GNOME without the AppIndicator extension) the window opens anyway and says once `your desktop shows no tray icons; on GNOME install the AppIndicator extension`,
   and closing it quits through the same drain as the tray's Quit, since nothing could bring a hidden window back (ruling R14) [verified: `TestCloseQuitsOnlyWithoutATray`].
@@ -1995,10 +2000,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
     [verified: `TestSealerCheckOnAFreshStateDoesNotClaimTheKeyFile`, `TestAccountsReportsTheRecordedSealer`, `TestKeyringCheck`, `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`, `TestSecretsCheckWithAKeyringMissingItsKeyErrors`,
     `TestSecretsCheckWithALockedKeyringLeavesItToTheKeyringCheck`, `TestSealedClientsCheckWithTheKeyring`, `TestDoctorSealerForARelativeStateDirUsesTheAbsoluteKeyringItem`, `TestDoctorChecksSecretsWithTheKeyring`, `TestDoctorWarnsLockedKeyring`,
     `TestDoctorReportsAKeyFileStateAsKeyFile`, `TestDoctorTextOK`].
-  - `pcb doctor`'s unattended-relogin warning is built by `doctor.UnattendedKeyringWarning(sealedPath)` (ruling R10) [verified: `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`]. The wizard and the MCP login page no longer show that line (live 2026-11-13, F5: it said `unattended relogin is on` under an unticked box, and named the keyring on a key-file state):
-    under the box they show `loginflow.UnattendedWarningFor(<the state's sealer>)`, a sentence true either way: `If ticked: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account` (keyring),
-    `If ticked: whoever can read the key file and secrets.sealed owns the Proton account` (key file), a generic one naming both when the Hub cannot be asked
-    [verified: `TestUnattendedWarningFollowsTheSealer`, `TestWizardUnattendedWarningFitsTheState`, `TestWizardScreensFollowSteps`, `TestLoginPageNeverTicksUnattended`, `TestAutoSealerChoiceIsLoggedAndRecorded` (`Hub.Sealer`)].
+  - `pcb doctor`'s unattended-relogin warning is built by `doctor.UnattendedKeyringWarning(sealedPath)` (ruling R10) [verified: `TestSecretsCheckWithTheKeyringNeedsNoKeyFile`]. The wizard and the MCP login page showed a conditional line under their unattended-relogin box from the live fixes of 2026-11-13 (F5) until 2026-11-15, when the box itself was removed (§5.2).
 - Login events (live 2026-11-13, F3: `pcb-ui.log` had no trace of three logins, a CAPTCHA and the add a click removed): the Hub logs them at Info, so `pcb-ui` and `pcb serve` (and `pcb mcp` as the session daemon) write the same lines.
   `login started` (`entry` = `cli` for `pcb login` in process or through the daemon, `wizard`, `mcp-login-page`; `account` = the local ID; `add`), then `login ended` with `outcome` = `ready`, `needs-2fa`, `needs-captcha`, `too-soon` (with `wait`)
   or `refused` (with `exit` and the `reason` the person reads, its URLs and addresses replaced by `<url>` and `<address>`); a login refused before an account is chosen (no password, the Hub closing, a login already running) gives `login refused` (`entry`, `exit`, `reason`, no `account`, no start); a 2FA code gives `login 2FA code` with the same outcomes. A removal gives `account removed` (`account`, `pending`, `by` = `cli`, `window`, `cancel`),
@@ -2216,7 +2218,7 @@ M7 delivered (2026-11-13, branch m7-pcb-ui; the live checks of `spec/HUMAN-CHECK
 | R7 | the view carries `Bridge` (`bridge stopped: <err>`, tray `attention`) and the actions refuse while the bridge is not running |
 | R8 | the one-line state precedence is: stopped, keyring locked, keyring unavailable (R15), login phase, CalDAV off, syncing, synced; a loop that reports no interval is shown against the 5 min idle cadence |
 | R9 | the notifier notifies the listed codes (six since R15: `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked`, `keyring-unavailable`) whatever their severity, so the `sync-stalled` warning notifies (the plan's "error-severity alerts" would have skipped it) |
-| R10 | the unattended-relogin warning is a format function, `doctor.UnattendedKeyringWarning(sealedPath)`, not one shared constant, so `pcb doctor` keeps the full path (since the live fixes of 2026-11-13, F5, only `pcb doctor` uses it; the wizard shows `loginflow.UnattendedWarningFor`) |
+| R10 | the unattended-relogin warning is a format function, `doctor.UnattendedKeyringWarning(sealedPath)`, not one shared constant, so `pcb doctor` keeps the full path (since the live fixes of 2026-11-13, F5, only `pcb doctor` uses it; since 2026-11-15 the wizard has no unattended-relogin box) |
 | R11 | the plan's manual run of `pcb-ui` against `pcb-fake` is not done by the agent (no display; a real run would open a window on the author's desktop and could probe the author's real keyring): `--version`, a no-display start and CI under `xvfb-run` instead, and the GUI session is step 9 |
 | R12 | `spec/HUMAN-CHECKS.md` step 9 runs in the throwaway VM with a GNOME session, not on the author's workstation |
 | R13 | `pcb uninstall --delete-data` deletes the state's `pcb sealing key` item when `layout.json` records `secret-service`; a locked or absent keyring is a note with the Seahorse fix, not a failure; `pcb account remove` keeps it |
