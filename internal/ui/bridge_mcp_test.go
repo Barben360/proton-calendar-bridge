@@ -107,7 +107,7 @@ func TestBridgeRaisesTheWizardForAnAgentLogin(t *testing.T) {
 	}
 	select {
 	case <-got:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
 		t.Fatal("ShowLogin was not called")
 	}
 	mu.Lock()

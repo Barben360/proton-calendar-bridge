@@ -286,7 +286,7 @@ func TestSecondInstanceShowsTheFirst(t *testing.T) {
 	}
 	select {
 	case <-rec.seen:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
 		t.Fatal("ShowUI was never called")
 	}
 	rec.mu.Lock()

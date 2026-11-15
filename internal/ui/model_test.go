@@ -405,7 +405,7 @@ func TestViewBridgeStopped(t *testing.T) {
 		t.Fatalf("running: Bridge=%q accounts=%d", v.Bridge, len(v.Accounts))
 	}
 	close(kill)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // a hang guard, not a deadline
 	for b.Err() == nil && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -546,7 +546,7 @@ func TestActionsRefuseAfterTheDaemonEnded(t *testing.T) {
 	}
 	id := l.login(t, b)
 	close(kill)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // a hang guard, not a deadline
 	for b.Err() == nil && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

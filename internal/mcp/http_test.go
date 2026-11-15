@@ -372,7 +372,7 @@ func TestRemoteMCPServesReadTools(t *testing.T) {
 	if err := cs.Close(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second) // a hang guard, not a deadline
 	for r.srv.LiveSessions()[mcp.EntryRemote] != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("live sessions after close = %v, want none", r.srv.LiveSessions())

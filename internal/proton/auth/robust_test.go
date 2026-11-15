@@ -12,14 +12,19 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 )
 
-// stallBound is how long the fake holds a stalled request at most: past it
-// the request is answered, so a call with no deadline of its own succeeds
-// (below the test API client's own 5 s timeout).
-const stallBound = 3 * time.Second
+// hold pins the next request to method and path: the fake never answers it
+// until the client gives up (or the test ends), so no timer can answer it
+// before the call's deadline fires.
+func hold(t *testing.T, f *protontest.Fake, method, path string) {
+	t.Helper()
+	h := f.HoldNext(method, path)
+	t.Cleanup(h.Release)
+}
 
 // TestLoginCallsHaveADeadline: a Proton that accepts the connection and
 // never answers does not hold a login call past its own deadline, even when
-// the caller's context has none (ruling A1). Not parallel: it shortens the
+// the caller's context has none (ruling A1). Without the deadline the call
+// would wait for the API client's own 5 s timeout, a different error. Not parallel: it shortens the
 // package's deadline.
 func TestLoginCallsHaveADeadline(t *testing.T) {
 	cases := []struct {
@@ -31,7 +36,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 			f := protontest.New(t, protontest.Options{})
 			m := manager(t, f)
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/info", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/info")
 				p, err := auth.Begin(context.Background(), m, f.Username, []byte(f.Password), "")
 				if p != nil {
 					p.Close()
@@ -43,21 +48,21 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 			f, tp := totpAccount(t)
 			p := begin(t, f, manager(t, f))
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/2fa", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/2fa")
 				return p.SubmitTOTP(context.Background(), tp.Code(t0))
 			}
 		}},
 		{"unlock auth info", http.MethodPost, "/auth/v4/info", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
 			return func() error {
-				f.StallNext(http.MethodPost, "/auth/v4/info", stallBound)
+				hold(t, f, http.MethodPost, "/auth/v4/info")
 				return s.Unlock(context.Background())
 			}
 		}},
 		{"unlock proof", http.MethodPut, "/core/v4/users/unlock", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
 			return func() error {
-				f.StallNext(http.MethodPut, "/core/v4/users/unlock", stallBound)
+				hold(t, f, http.MethodPut, "/core/v4/users/unlock")
 				return s.Unlock(context.Background())
 			}
 		}},

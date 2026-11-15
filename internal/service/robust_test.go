@@ -103,11 +103,13 @@ func TestLoginDeadlineIsBlocked(t *testing.T) {
 	auth.CallTimeout = time.Second
 	t.Cleanup(func() { auth.CallTimeout = old })
 	e := newEnv(t, protontest.Options{})
-	// Answered after 3 s: without the deadline the login succeeds.
-	e.f.StallNext(http.MethodPost, "/auth/v4/info", 3*time.Second)
+	// Never answered until the test ends: without the call deadline the login
+	// waits for the API client's own timeout, a different error.
+	h := e.f.HoldNext(http.MethodPost, "/auth/v4/info")
+	t.Cleanup(h.Release)
 	_, err := e.svc.Login(t.Context(), e.req())
 	if err == nil {
-		t.Fatal("a stalled login succeeded: no deadline")
+		t.Fatal("a stalled login succeeded")
 	}
 	ee := wantExit(t, err, exitcode.Blocked)
 	if ee.Err.Error() != "the operation was cancelled or timed out" || ee.Hint != "run the command again" {
