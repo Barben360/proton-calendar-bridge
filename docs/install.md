@@ -144,7 +144,7 @@ Until the binaries are signed, Windows SmartScreen may stop the first start with
 
 ### Remove it from Windows
 
-**Installed with the MSI.** Settings, Apps, Installed apps (Windows 10: Apps & features), `pcb`, Uninstall; or `msiexec /x pcb_windows_amd64.msi /qn`. It closes a running `pcb-ui` (Windows may ask first), then removes the program files, the Start-menu shortcut, the `PATH` entry, and "Start at login" when it starts the installed `pcb-ui.exe`. It keeps `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb`, your accounts, sessions and settings: installing again finds them. Files you added to the program folder yourself (Mesa's DLLs, for example) stay; delete the folder afterwards.
+**Installed with the MSI.** Settings, Apps, Installed apps (Windows 10: Apps & features), `pcb`, Uninstall; or `msiexec /x pcb_windows_amd64.msi /qn`. It closes a running `pcb-ui` (with the screens, a `Files in Use` dialog asks first; its "attempt to restart" wording does not apply here), then removes the program files, the Start-menu shortcut, the `PATH` entry, and "Start at login" when it starts the installed `pcb-ui.exe`. It keeps `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb`, your accounts, sessions and settings: installing again finds them. Files you added to the program folder yourself (Mesa's DLLs, for example) stay; delete the folder afterwards.
 
 To delete your data too, do it before the uninstall, while `pcb.exe` is still there (if you removed `pcb (command line)`, put it back first with `ADDLOCAL=App,Cli` as above): quit `pcb-ui` (its tray menu, Quit), then in a new terminal:
 
