@@ -371,8 +371,10 @@ func TestServerRefusesAClientOfAnotherSID(t *testing.T) {
 				t.Errorf("logs lack the warning naming %q:\n%s", tc.log, logs)
 			}
 			var ee *exitcode.Error
-			if !errors.As(err, &ee) || !strings.Contains(ee.Hint, "elevated pcb of another login session") {
-				t.Errorf("hint = %q, want one naming an elevated pcb of another login session", ee.Hint)
+			// Any elevated client of a normal daemon, whatever its login
+			// session: its token is what the daemon may not read.
+			if want := "run pcb as the user that runs pcb-ui or pcb serve, and not elevated (as administrator) when they are not"; !errors.As(err, &ee) || ee.Hint != want {
+				t.Errorf("error %v, want the hint %q", err, want)
 			}
 		})
 	}
