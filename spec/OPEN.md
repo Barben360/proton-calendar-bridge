@@ -226,7 +226,13 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 
 ## Parked by the Windows port
 
-Next projects (decision 0018): the MSI (WiX; `pcb-ui` required, `pcb` optional on the user's `PATH`, the same Run value, per-user) with a Start-menu shortcut carrying the app's ID, without which toasts from a zip install are best effort; Authenticode signing (SignPath Foundation or Azure Trusted Signing), until which SmartScreen warns about an unknown publisher; Windows on arm64.
+Next projects (decisions 0018 and 0020; the MSI itself is built, decision 0020): Authenticode signing (SignPath Foundation or Azure Trusted Signing) of the binaries and the MSI, until which SmartScreen warns about an unknown publisher; winget, Chocolatey or Scoop packages; Windows on arm64. Toasts from a zip install stay best effort (no Start-menu shortcut carrying the app's ID; the MSI has one).
+
+Limits of the MSI (decision 0020), parked:
+- A silent upgrade or a repair (silent or with the screens) closes `pcb-ui` (Restart Manager) and nothing starts it again until the next sign-in or a start from the Start menu; the screens' `Files in Use` dialog even says the installer will "attempt to restart" it, and a repair's finish screen has no "Launch pcb-ui" (live check F1, documented in `docs/install.md` and `docs/troubleshooting.md`): registering `pcb-ui` with `RegisterApplicationRestart` would let Restart Manager restart it.
+- The Run value's write has no rollback action: an install that fails after it leaves the value.
+- The `PATH` entry is matched as text: a hand-made entry with a trailing `\` or a `%VARIABLE%` is doubled, and the uninstall removes a hand-made entry identical to the installer's.
+- An MSI installed over a zip unzipped into the same folder replaces the zip's `pcb-ui.exe` and `pcb.exe` (smoke script and live check, `spec/experiments/W2-windows-msi-live.md` 13.9), except that a zip's `pcb.exe` stays when `pcb (command line)` is unticked (decision 0020); the docs still say to remove the zip first.
 
 Minors deferred by the reviews (the ledger, kept out of the repository; only the real limits, in the order of the code):
 - `scripts/win/vmtest.sh`: its stderr filter is asynchronous and may print after the exit; an argument ending in a backslash is mangled by the Windows C runtime's `\"` rule; `vmtest_test.sh` lacks `-ui` with `-race`, `run`'s arity and a failed-ssh probe case. `shellquote.PowerShell` leaves `--%` unquoted (in the safe set).

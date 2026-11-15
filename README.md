@@ -70,7 +70,7 @@ curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/d
 
 It puts `pcb` and `pcb-ui` in `~/.local/bin`, plus the desktop entry on Linux. Flags, checks and macOS: [docs/install.md](docs/install.md). Or build from a clone with Go (version in [go.mod](go.mod)); the "On a Linux desktop" and "Headless" steps below do.
 
-On Windows, unzip `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) and start `pcb-ui.exe`: no installer, no administrator rights ([Windows](docs/install.md#windows)).
+On Windows, run the installer `pcb_windows_amd64.msi` (from v0.2.0) or unzip `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) and start `pcb-ui.exe`: no administrator rights either way ([Windows](docs/install.md#windows)).
 
 ### On a Linux desktop
 
@@ -154,6 +154,7 @@ Logic reused from another project is audited, rewritten with our own tests and c
 - **Fyne** v2.8.2 (fyne.io/fyne/v2, BSD-3-Clause): the toolkit of `pcb-ui` (window, tray, notifications, headless test driver, which also renders the screenshots), used as a dependency, nothing copied (`internal/ui/desktop`, `cmd/pcb-ui`).
 - **Inter** 4.1 (rsms/inter, SIL Open Font License 1.1, license in `internal/ui/desktop/fonts/OFL.txt`): the text font of `pcb-ui`, four static files from the release archive (Regular, SemiBold, Italic, SemiBoldItalic) embedded unmodified (`internal/ui/desktop/theme.go`).
 - **fyne-io/oksvg** (BSD-3-Clause, Fyne's fork of srwiley/oksvg) and **srwiley/rasterx** (BSD-3-Clause), both already in Fyne's dependencies: they render `pcb-ui`'s SVG icon to the PNG that becomes `pcb-ui.exe`'s icon at build time (`cmd/pcb-ui/winres`), used as libraries, nothing copied.
+- **WiX Toolset** 7.0.1 (wixtoolset.org, MS-RL, used under its Open Source Maintenance Fee EULA, which the author accepted): builds `pcb_windows_amd64.msi` from `packaging/windows/pcb.wxs` (`scripts/release/mkmsi.ps1`), run as a pinned tool. Its UI and Util extensions put their standard installer screens and their custom actions (a quiet command, opening `pcb-ui` at the end) into the MSI; nothing copied into this repository.
 - **tc-hib/go-winres** v0.3.3 (0BSD): writes `pcb-ui.exe`'s icon and version resource at build time (`make winres`), run as a pinned tool, never linked into a binary.
 - **Microsoft/go-winio** v0.6.2 (MIT): the named pipe of the control channel on Windows, private to the user (`internal/ctl`), used as a library, nothing copied.
 - **golang.org/x/sys/windows** (BSD-3-Clause): the Windows calls for the file locks, the replacement of files, DPAPI, the access lists, the registry, the time zone, and `pcb-ui`'s console, session end and file opening, used as a library, nothing copied.

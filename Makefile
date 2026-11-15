@@ -27,7 +27,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui winres install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint pcb-fake rehearse screenshots
+.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -58,6 +58,22 @@ ifeq ($(GOOS),windows)
 	env -u GOOS -u GOARCH go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 --out cmd/pcb-ui/rsrc \
 		--icon bin/pcb-ui-256.png --manifest gui --product-name pcb-ui --file-description "pcb desktop app" \
 		--original-filename pcb-ui.exe --product-version $(WINVER) --file-version $(WINVER)
+endif
+
+# The Windows installer, bin/pcb_windows_amd64.msi, from bin/pcb.exe and
+# bin/pcb-ui.exe (make build ui first), on Windows only: WiX 7.0.1
+# (scripts/release/mkmsi.ps1 says how to install it), PowerShell, bash (Git
+# for Windows' or MSYS2's). Its version is the tag at HEAD (v1.2.3-rc.1 is
+# 1.2.3), else 0.0.0; MSI_TAG=v1.2.3 sets it. ICE checks included.
+MSI_TAG ?= $(shell git describe --tags --exact-match HEAD 2>/dev/null)
+
+msi:
+ifeq ($(GOOS),windows)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/mkmsi.ps1 \
+		-Version "$$(bash scripts/release/check.sh msi-version '$(MSI_TAG)')" \
+		-Pcb bin/pcb.exe -PcbUi bin/pcb-ui.exe -Out bin/pcb_windows_amd64.msi -Validate
+else
+	@echo "make msi: Windows only (WiX)" >&2; exit 2
 endif
 
 # The icon is the window's app icon, installed as the desktop entry's Icon.
@@ -136,7 +152,7 @@ shellcheck:
 	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(SHELLCHECK_IMAGE) -x \
 		scripts/install.sh scripts/install_test.sh \
 		scripts/release/check.sh scripts/release/check_test.sh scripts/release/macos-smoke.sh \
-		scripts/release/package.sh scripts/release/package_test.sh \
+		scripts/release/package.sh scripts/release/package_test.sh scripts/release/licensertf_test.sh \
 		scripts/win/vmtest.sh scripts/win/vmtest_test.sh
 
 # The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
@@ -144,11 +160,12 @@ ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47e
 actionlint:
 	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(ACTIONLINT_IMAGE) -color
 
-# The release scripts (scripts/release): the tag rules and the archives;
-# each prints PASS last.
+# The release scripts (scripts/release): the tag rules, the archives and
+# the MSI's licence RTF (a drift from LICENSE fails); each prints PASS last.
 release-test:
 	bash scripts/release/check_test.sh
 	bash scripts/release/package_test.sh
+	bash scripts/release/licensertf_test.sh
 
 # install.sh against a fake release of stub binaries (POSIX sh, as the
 # curl | sh users run it); prints PASS last.

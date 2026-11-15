@@ -47,7 +47,7 @@ scripts/win/vmtest.sh run 'go build -o pcb.exe ./cmd/pcb && pcb.exe version'  # 
 
 Each argument reaches `go test` as typed (one containing `"`, `%` or a newline is refused); `run` passes its line to `cmd.exe` as is. Run the tests as a standard user, not elevated: elevation hides the permission problems a real user meets. `make vmtest-test` tests the script itself against a fake ssh.
 
-CI's `windows` job vets, builds both binaries with `make build ui` and runs `pcb.exe version`, `pcb.exe doctor` and `pcb-ui.exe --version`; `windows-test` runs `go test -race` on a Windows runner, in three shards (`service`, `cli`, the rest).
+CI's `windows` job vets, builds both binaries with `make build ui VERSION=v0.0.0-ci` (the smoke's version check expects `v0.0.0`) and runs `pcb.exe version`, `pcb.exe doctor` and `pcb-ui.exe --version`, runs `scripts/release/check.sh msi-version` under Git Bash as the release does, then installs WiX 7.0.1 (`scripts/win/install-wix.ps1`), builds the MSI twice with `make msi MSI_TAG=v0.0.0-ci` (version `0.0.0`, ICE checks included), checks that it holds exactly those two binaries (`scripts/win/msi-contents.ps1`, and once against a wrong `pcb.exe`, which must fail) and runs `scripts/win/msi-smoke.ps1` on it, the second build as `-UpgradeMsi` (and once with a wrong `-Version`, which must fail); `windows-test` runs `go test -race` on a Windows runner, in three shards (`service`, `cli`, the rest).
 
 The Windows time zone table (`internal/winzone/zones_gen.go`) is generated from Unicode CLDR's `windowsZones.xml`. To adopt a new CLDR release, download that release's `common/supplemental/windowsZones.xml`, add its SHA-256 to `known` in `internal/winzone/gen.go`, then:
 
@@ -58,6 +58,24 @@ CLDR_XML=/path/to/windowsZones.xml go generate ./internal/winzone
 The generator refuses a file whose SHA-256 it does not know; the release goes into `winzone.CLDRVersion` and the README's Credits.
 
 The release's `pcb_windows_amd64.zip` is written by `scripts/release/mkzip.py` (Python's `zipfile`; `scripts/release/package.sh windows amd64 BINDIR OUTDIR` calls it): sorted entries, a fixed time (`SOURCE_DATE_EPOCH`), fixed modes, so the same inputs give the same bytes with the same zlib build (zlib-ng, the default of some distributions, compresses differently, so a workstation may not match the runners). `make release-test` checks it and needs `python3` and `unzip`.
+
+#### The installer
+
+`pcb_windows_amd64.msi` is built from `packaging/windows/pcb.wxs` by `scripts/release/mkmsi.ps1`, with WiX Toolset **7.0.1** exactly (a .NET tool: the .NET SDK 8 or later) and its UI and Util extensions. On Windows:
+
+```sh
+dotnet tool install --global wix --version 7.0.1
+wix extension add -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1 -acceptEula wix7
+make build ui      # bin/pcb.exe and bin/pcb-ui.exe (MSYS2 UCRT64), which the MSI packs
+make msi           # bin/pcb_windows_amd64.msi, then Windows Installer's ICE checks
+```
+
+WiX 7 makes every command accept its Open Source Maintenance Fee EULA. The author accepted it, so the scripts and CI pass `-acceptEula wix7` to `wix build` and to `wix extension add` alike (without it they fail). `make msi` needs PowerShell and bash (Git for Windows' or MSYS2's), and exits 2 off Windows. Its version is the tag at `HEAD` (`v1.2.3-rc.1` gives `1.2.3`: `scripts/release/check.sh msi-version`), else `0.0.0`; `MSI_TAG=v1.2.3` sets it. An ICE error fails it; the expected warnings are ICE61 (the same version may be installed again) and ICE91 (a per-user package).
+
+- The `UpgradeCode` in `pcb.wxs` is pcb's for good: a new one makes Windows install a second product beside the first instead of an upgrade. The fixed component GUIDs are never reused for other files.
+- The licence screen shows `packaging/windows/license.rtf`, generated from `LICENSE`: never edit it by hand. After a change to `LICENSE`, run `python3 -I scripts/release/licensertf.py LICENSE packaging/windows/license.rtf`; `make release-test` fails while the two differ.
+- `scripts/win/msi-smoke.ps1 -Msi bin\pcb_windows_amd64.msi [-Version X.Y.Z] [-UpgradeMsi <a second build>]` installs it silently for the current user, checks what it installed (the files, the shortcut and its app ID, "Start at login", the `PATH` entry seen by a new process), repairs it, removes and adds back `pcb (command line)`, installs it over a zip in its folder (the zip's programs, of the same file version, must be replaced), upgrades it with `-UpgradeMsi` (also with `ADDLOCAL=App,Cli` after `REMOVE=Cli`), uninstalls it and checks that the data directories stay. It prints `ok   <check>` per check and `PASS` last, or `FAIL <check>: <why>` and exits 1. It changes the user's `PATH` and Run value while it runs and puts them back at the end; pcb must not be installed from an MSI when it starts. Run it on a test machine, not one you use. CI runs it on every pull request.
+- A standard user's SSH session cannot reach the Windows Installer service: there `msiexec` exits 1601 and `wix msi validate` fails every ICE, so `scripts/win/vmtest.sh` cannot run `make msi` or the smoke script. On a test VM, run them in that user's console session (signed in at the screen, or a scheduled task started with `schtasks /create /it …` then `/run`). CI's runners are not affected.
 
 ### Smoke tests
 

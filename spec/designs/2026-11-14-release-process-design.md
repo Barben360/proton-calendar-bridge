@@ -1,7 +1,7 @@
 # Release process — design
 
 - **Date**: 2026-11-14
-- **Status**: approved 2026-11-14; built and merged 2026-11-14 (PR #3); rolled out 2026-11-14: `v0.1.0-rc.1` then `v0.1.0`, both on 62a4689 (`spec/HUMAN-CHECKS.md` §11)
+- **Status**: approved 2026-11-14; built and merged 2026-11-14 (PR #3); rolled out 2026-11-14: `v0.1.0-rc.1` then `v0.1.0`, both on 62a4689 (`spec/HUMAN-CHECKS.md` §11); §5.1 gains the Windows zip and MSI (2026-11-15)
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 ("updates/signed releases (while private)" leaves "not planned"), SPEC §13 "Until the repository is public" and "Later, when public" (the minisign [call] is replaced by GitHub attestations, and `install.sh` does not run `pcb install`), via a new decision 0017; `docs/install.md`, `docs/container.md`, `docs/development.md`, the README; the "private" wording left in SPEC §3, §13 and the `Makefile`'s `JOBS` comment (the repository is public now).
 
@@ -83,6 +83,8 @@ Trigger: push of a tag matching `v*`.
    - Linux: `pcb`, `pcb-ui`, `pcb-ui.desktop` (from `packaging/`), `pcb-ui.svg` (from `internal/ui/desktop/icons/app.svg`), `LICENSE`, `README.md`;
    - macOS: `pcb`, `LICENSE`, `README.md`.
    `checksums.txt` (SHA-256, `sha256sum` format) covers every archive and `install.sh`.
+
+   *Built:* Windows assets, after its port (decision 0018) and its installer (decision 0020, `spec/designs/2026-11-15-windows-msi-design.md`): `pcb_windows_amd64.zip` (`pcb.exe`, `pcb-ui.exe`, `LICENSE`, `README.md`; `scripts/release/mkzip.py`) and `pcb_windows_amd64.msi`, built on a Windows runner from the release's own `pcb.exe` and `pcb-ui.exe` by `scripts/release/mkmsi.ps1` (WiX 7.0.1, `-acceptEula wix7`), its `ProductVersion` the tag's `X.Y.Z`. Both are in `checksums.txt` and attested (step 5), and the Windows smoke job installs, checks and uninstalls the real MSI silently (`scripts/win/msi-smoke.ps1`) before the Release is published.
 4. **Image**: §5.2, release mode.
 5. **Attestations**: `actions/attest-build-provenance` on every archive, `install.sh` and `checksums.txt`, and on the image digest with `push-to-registry: true` (permissions `id-token: write`, `attestations: write`).
 6. **Release**: a draft with `gh release create --draft --generate-notes --verify-tag`, marked pre-release when the tag has a `-` suffix; the job re-downloads the draft's files and checks them against `checksums.txt`, then publishes it (backsight's pattern) [call]. Notes come from the squash-merged pull request titles; the author edits them on GitHub afterwards when needed [author]. The Release's "latest" flag follows the image's rule (§5.2): `--latest=false` unless the tag is the highest stable version, so `releases/latest`, and with it `install.sh`, never goes back to an older line [call, review: GitHub otherwise marks the newest-created release latest].

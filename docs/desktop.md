@@ -29,7 +29,7 @@ pcb-ui                       # the window and the tray icon
 pcb-ui --background          # tray only (the window opens anyway when no tray answers)
 ```
 
-After `make install-ui` it is also in your applications menu.
+After `make install-ui` it is also in your applications menu. On Windows the installer puts a `pcb-ui` shortcut in the Start menu.
 
 ## What it shows
 
@@ -52,7 +52,7 @@ The window then shows the account's connection details. Copy them into Thunderbi
 
 ## Connect an AI agent
 
-`pcb-ui` has no port for agents to set. The agent starts `pcb mcp`, the command-line binary, which hands the session to the running `pcb-ui`. So `pcb` must be installed next to `pcb-ui`: the release installer puts both, while from a clone `make install-ui` alone does not (run `make install install-ui`).
+`pcb-ui` has no port for agents to set. The agent starts `pcb mcp`, the command-line binary, which hands the session to the running `pcb-ui`. So `pcb` must be installed next to `pcb-ui`: the release installer puts both (on Windows, the MSI with `pcb (command line)` ticked, or the zip), while from a clone `make install-ui` alone does not (run `make install install-ui`).
 
 For Claude Code:
 
@@ -87,18 +87,18 @@ Without a tray, `pcb-ui` opens its window and says so once, and closing that win
 
 ## Start at login
 
-Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead ([below](#on-windows)).
+Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead, the one the installer's "Start at login" box writes too ([below](#on-windows)).
 
 ## On Windows
 
-`pcb-ui.exe` from the release zip ([install](install.md#windows)) runs the same bridge on Windows 10 (1809 or later) and 11.
+`pcb-ui.exe`, from the installer or the release zip ([install](install.md#windows)), runs the same bridge on Windows 10 (1809 or later) and 11.
 
 | | On Windows |
 |---|---|
 | Tray | Always there, in the notification area (it may sit under the arrow of hidden icons). Its menu has Quit. |
-| Start at login | Settings, "Start at login" writes the value `pcb-ui` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the absolute path of `pcb-ui.exe` and `--background`. Switching it off deletes the value. Moving the folder breaks it: switch it off and on again from the new place. |
-| Update available | The same panel and tray line, without "Copy update command": the release page has the zip. The notification of a new release only informs (Windows reports no click). |
-| Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
+| Start at login | Settings, "Start at login" writes the value `pcb-ui` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the absolute path of `pcb-ui.exe` and `--background`. Switching it off deletes the value. The installer's "Start at login" box writes the same value, so the switch shows it and turns it off; a repair of the installation does not turn it back on, and an upgrade keeps it as the switch left it. Moving the zip's folder breaks it: switch it off and on again from the new place. |
+| Update available | The same panel and tray line, without "Copy update command": the release page has the installer and the zip. The notification of a new release only informs (Windows reports no click). |
+| Notifications | Windows notifications. With the installer, its Start-menu shortcut names `pcb-ui` to Windows, so they show `pcb-ui`'s name and icon (checked live). Started from the zip, without that shortcut, they are best effort: some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
 | Sign out, shutdown | `pcb-ui` gets up to 2 seconds to stop cleanly; what is cut short is recovered at the next start. |
 | `pcb-ui.exe --version`, `--help` | Print to the terminal they are typed in, or to a redirected file. Started from Explorer, `pcb-ui` has no console window. |
 | Open config.toml, logs | Open in the program Windows associates with them. `.toml` often has none: Windows then asks which app to open it with (Notepad will do). |
@@ -139,6 +139,6 @@ With no service installed, it logs out and deletes:
 - the state's `pcb sealing key` keyring item;
 - `~/.config/autostart/pcb-ui.desktop`.
 
-It refuses (exit 20, naming it) while `pcb-ui`, `pcb serve` or an agent session serves that state. The binary and desktop entry under `$(PREFIX)` stay; remove them by hand. On Windows: [install](install.md#remove-it-from-windows).
+It refuses (exit 20, naming it) while `pcb-ui`, `pcb serve` or an agent session serves that state. The binary and desktop entry under `$(PREFIX)` stay; remove them by hand. On Windows (the installer's Settings, Apps entry, or the zip's folder): [install](install.md#remove-it-from-windows).
 
 Why it works this way: [a separate desktop binary that runs the daemon in process](../spec/decisions/0015-pcb-ui.md).

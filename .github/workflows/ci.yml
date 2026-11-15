@@ -251,7 +251,8 @@ jobs:
       - name: install.sh tests on the macOS shell
         run: sh scripts/install_test.sh
   # Both binaries on Windows (the Windows port): pcb and pcb-ui are built and
-  # run, and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
+  # run, packed into the MSI, which the smoke script installs, repairs,
+  # upgrades and uninstalls (decision 0020), and the tests run natively. MinGW-w64 (UCRT64, the toolchain of the
   # release's ui-windows job) gives cgo its gcc and the steps their make; with
   # path-type: inherit the runner's go stays on PATH, and so does its jq (from the
   # runner image, not an msys2 package: a change of image shows up there). The runner's user
@@ -259,7 +260,7 @@ jobs:
   # skip themselves when acl.Elevated() reports true.
   windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -286,7 +287,9 @@ jobs:
         run: CGO_ENABLED=1 go vet ./...
       - name: Build pcb and pcb-ui
         shell: msys2 {0}
-        run: make build ui
+        # v0.0.0-ci: the MSI of a build that is not a tag is 0.0.0, and the
+        # smoke checks that the installed binaries report that version.
+        run: make build ui VERSION=v0.0.0-ci
       - name: pcb version and doctor
         shell: msys2 {0}
         run: |
@@ -302,6 +305,63 @@ jobs:
           cat v.txt
           grep -q '^pcb-ui ' v.txt
           powershell -NoProfile -Command '(Get-Item bin/pcb-ui.exe).VersionInfo.ProductName' | tr -d '\r' | grep -qx 'pcb-ui'
+      # release.yml's msi and windows-smoke jobs run check.sh directly under
+      # their default shell, bash: Git for Windows' bash, not MSYS2's.
+      - name: check.sh msi-version runs under Git Bash, as in the release
+        shell: bash
+        run: |
+          v=$(scripts/release/check.sh msi-version v0.2.0-rc.1)
+          [ "$v" = 0.2.0 ] || { echo "::error::check.sh msi-version v0.2.0-rc.1 printed '$v' under Git Bash, want 0.2.0"; exit 1; }
+      # WiX 7.0.1 exactly (decision 0020), a .NET tool from nuget.org: the
+      # runner image's .NET SDK installs it. The release's msi job runs the
+      # same script.
+      - name: Install WiX 7.0.1 and its UI and Util extensions
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\install-wix.ps1
+      # Twice: the second build (another ProductCode, the same UpgradeCode)
+      # is the smoke's major upgrade. MSI_TAG v0.0.0-ci goes through
+      # check.sh msi-version's tag parsing, as a release's tag: 0.0.0.
+      - name: Build the MSI (make msi, with the ICE checks)
+        shell: msys2 {0}
+        run: |
+          make msi MSI_TAG=v0.0.0-ci
+          mkdir -p bin/upgrade
+          mv bin/pcb_windows_amd64.msi bin/upgrade/
+          make msi MSI_TAG=v0.0.0-ci
+          ls -l bin/pcb_windows_amd64.msi bin/upgrade/pcb_windows_amd64.msi
+      # msiexec /a only unpacks the files; the release runs the same script
+      # against the zip's binaries.
+      - name: The MSI holds exactly bin's pcb.exe and pcb-ui.exe
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-contents.ps1 -Msi bin\pcb_windows_amd64.msi -Dir bin
+      # pcb-ui.exe in the place of pcb.exe: the check must refuse it.
+      - name: The contents check fails on another pcb.exe
+        shell: pwsh
+        run: |
+          $wrong = Join-Path $env:RUNNER_TEMP 'wrong-bin'
+          New-Item -ItemType Directory -Path $wrong | Out-Null
+          Copy-Item -LiteralPath bin\pcb-ui.exe -Destination (Join-Path $wrong 'pcb-ui.exe')
+          Copy-Item -LiteralPath bin\pcb-ui.exe -Destination (Join-Path $wrong 'pcb.exe')
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-contents.ps1 -Msi bin\pcb_windows_amd64.msi -Dir $wrong
+          $code = $LASTEXITCODE
+          $out
+          if ($code -ne 1) { Write-Output "::error::msi-contents.ps1 exited $code on another pcb.exe, want 1"; exit 1 }
+          if (-not ($out -match '^msi-contents: FAIL the MSI''s pcb\.exe is not ')) { Write-Output '::error::msi-contents.ps1 did not name pcb.exe'; exit 1 }
+          exit 0
+      # The runner's user is an elevated administrator and reaches the
+      # Windows Installer service directly; the MSI still installs per user.
+      - name: The MSI smoke fails on a wrong version
+        shell: pwsh
+        run: |
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-smoke.ps1 -Msi bin\pcb_windows_amd64.msi -Version 9.9.9
+          $code = $LASTEXITCODE
+          $out
+          if ($code -eq 0) { Write-Output '::error::the MSI smoke passed on a wrong version'; exit 1 }
+          if (-not ($out -match '^FAIL ProductVersion is 9\.9\.9: ProductVersion is \[0\.0\.0\]$')) { Write-Output '::error::the MSI smoke did not fail on the version'; exit 1 }
+          exit 0
+      - name: MSI smoke (install, repairs, features, upgrade, uninstall)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-smoke.ps1 -Msi bin\pcb_windows_amd64.msi -Version 0.0.0 -UpgradeMsi bin\upgrade\pcb_windows_amd64.msi
   windows-test:
     runs-on: windows-latest
     timeout-minutes: 30

@@ -152,7 +152,24 @@ test_reachable() {
   want_status "a branch name" 2 bash -c "$in_w" _ "$w" "$check" main
 }
 
-for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_tag_grammar_in_publish test_on_main test_reachable; do
+test_msi_version() {
+  [ "$("$check" msi-version v1.2.3)" = 1.2.3 ] || fail "v1.2.3"
+  [ "$("$check" msi-version v0.2.0-rc.1)" = 0.2.0 ] || fail "v0.2.0-rc.1"
+  [ "$("$check" msi-version v255.255.65535)" = 255.255.65535 ] || fail "the largest MSI version"
+  # Not a tag (a pull request's build): 0.0.0.
+  [ "$("$check" msi-version "")" = 0.0.0 ] || fail "no tag"
+  local bad
+  # 2^64+1 wraps to 1 in bash arithmetic: refused by its length.
+  for bad in 1.2.3 v1.2 v1.2.3+meta v1.2.3- v256.0.0 v0.256.0 v0.0.65536 "v1.2.3 " \
+    v18446744073709551617.0.0 v0.18446744073709551617.0 v0.0.18446744073709551617; do
+    want_status "msi-version refuses '$bad'" 2 "$check" msi-version "$bad"
+  done
+  want_status "msi-version with two tags" 2 "$check" msi-version v1.2.3 v1.2.4
+  local err; err=$("$check" msi-version v256.0.0 2>&1 >/dev/null || true)
+  [ "$err" = "check: v256.0.0: an MSI version is at most 255.255.65535" ] || fail "message: $err"
+}
+
+for case_name in test_tag_kind test_is_latest test_is_latest_minor test_image_tags test_image_tag_list test_tag_grammar_in_publish test_on_main test_reachable test_msi_version; do
   "$case_name"
   echo "ok   $case_name"
 done
