@@ -149,12 +149,7 @@ func run(args []string) int {
 		quit()
 	}()
 	go follow(ctx, bridge, win, tray, log)
-	// An interface holding a nil *Tray is not nil: pass nil itself.
-	var updTray updateTray
-	if tray != nil {
-		updTray = tray
-	}
-	go followUpdates(ctx, updates, set.poke, win, updTray, desktopNotifier{}, log)
+	go followUpdates(ctx, updates, set.poke, win, trayOrNil(tray), desktopNotifier{}, log)
 
 	a.Run()
 	cancel()
@@ -239,6 +234,15 @@ type updateTray interface{ SetUpdate(n ui.UpdateNotice) }
 
 type updateNotifier interface {
 	Notify(note ui.Notification, onClick func(account string)) error
+}
+
+// trayOrNil is t as an updateTray, or a true nil when there is no tray: an
+// interface holding a nil *Tray is not nil, and followUpdates would call it.
+func trayOrNil(t *desktop.Tray) updateTray {
+	if t == nil {
+		return nil
+	}
+	return t
 }
 
 // desktopNotifier sends through the desktop's notification service.

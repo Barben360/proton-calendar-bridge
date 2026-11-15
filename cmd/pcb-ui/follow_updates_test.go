@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/test"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
+	"github.com/Barben360/proton-calendar-bridge/internal/ui/desktop"
 	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
 
@@ -174,8 +175,12 @@ func TestFollowUpdatesDrawsTheNoticeEverywhereAndNotifiesOnce(t *testing.T) {
 	if n := tray.seen()[1]; n.Panel || !n.Available {
 		t.Errorf("tray after Later = %+v, want the line kept, the panel flag off", n)
 	}
+	// Run shows, then notifies, in one iteration: once a third notice is
+	// drawn, the iteration that drew the second has finished notifying.
+	pokeLoop(r.poke)
+	waitFor(t, "a third refresh", func() bool { return len(r.win.seen()) >= 3 })
 	if notes, _ := r.notif.sent(); len(notes) != 1 {
-		t.Errorf("%d notifications after Later, want still 1", len(notes))
+		t.Errorf("%d notifications after Later and a refresh, want still 1", len(notes))
 	}
 
 	// A click on the notification opens the release page.
@@ -195,4 +200,14 @@ func TestFollowUpdatesWithoutATray(t *testing.T) {
 		t.Errorf("window notice = %+v", n)
 	}
 	waitFor(t, "the notification", func() bool { n, _ := r.notif.sent(); return len(n) == 1 })
+}
+
+func TestTrayOrNil(t *testing.T) {
+	if got := trayOrNil(nil); got != nil {
+		t.Errorf("trayOrNil(nil) = %#v, want a nil interface (followUpdates tests it against nil)", got)
+	}
+	tray := &desktop.Tray{}
+	if got := trayOrNil(tray); got != updateTray(tray) {
+		t.Errorf("trayOrNil(tray) = %#v, want the tray itself", got)
+	}
 }
