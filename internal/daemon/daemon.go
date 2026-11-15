@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
@@ -577,8 +578,12 @@ func listenerTLS(log *slog.Logger, warn io.Writer, ip net.IP, tlsDir string, cc 
 	default:
 		res, err := tlsutil.SelfSigned(tlsutil.Options{Dir: tlsDir, Hostnames: cc.Hostnames, BindIP: ip})
 		if err != nil {
-			return nil, "", &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot prepare the TLS certificate: %w", err),
-				Hint: "make sure " + tlsDir + " is writable by this user"}
+			code, hint := exitcode.Blocked, "make sure "+tlsDir+" is writable by this user"
+			var open *acl.OpenError
+			if errors.As(err, &open) { // Windows: an access list the person fixes, as pcb doctor says
+				code, hint = exitcode.MustAct, "run pcb doctor for the fix"
+			}
+			return nil, "", &exitcode.Error{Code: code, Err: fmt.Errorf("cannot prepare the TLS certificate: %w", err), Hint: hint}
 		}
 		cert, fingerprint = res.Certificate, res.Fingerprint
 		notAfter := res.Leaf.NotAfter.UTC().Format(time.RFC3339)
