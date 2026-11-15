@@ -109,11 +109,12 @@ func readPasswordFD(fd int) (string, error) {
 	if fd < 0 {
 		return "", UsageError(errors.New("--password-fd needs a descriptor number"))
 	}
-	if isTerminalFD(fd) {
+	h := descriptor(fd)
+	if isTerminalFD(int(h)) {
 		return "", &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("--password-fd %d is a terminal", fd),
 			Hint: "pipe the password in (pcb login --password-fd 3 3<file), or omit --password-fd to be prompted"}
 	}
-	f := os.NewFile(uintptr(fd), "password-fd")
+	f := os.NewFile(h, "password-fd")
 	if f == nil {
 		return "", UsageError(fmt.Errorf("--password-fd %d is not a usable descriptor", fd))
 	}

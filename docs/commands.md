@@ -10,7 +10,7 @@ Every `pcb` command, how to pick the account a command acts on, the `--json` out
 |---|---|
 | `pcb login` | Prompts for what is missing; or set `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`. The username decides: a known address is a relogin, a new one adds an account. |
 | `pcb login --username alice` | The username may be a flag (default: `$PCB_USERNAME`, else asked). |
-| `pcb login --password-fd 3 3<pwfile` | Reads the password from a file descriptor: the password never goes in a flag. |
+| `pcb login --password-fd 3 3<pwfile` | Reads the password from a file descriptor: the password never goes in a flag. On Windows, `0` is the standard input (`Get-Content pwfile \| pcb login --password-fd 0`). |
 | `pcb login --unattended-relogin` | Stores the credentials so pcb can log in again without you. |
 | `pcb login --non-interactive` | Never prompts: exits 10 naming what is missing. `--non-interactive` is accepted by every command. |
 | `pcb login resume --captcha-token T` | Finishes a login after you solved the CAPTCHA Proton asked for. |
