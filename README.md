@@ -70,7 +70,7 @@ curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/d
 
 It puts `pcb` and `pcb-ui` in `~/.local/bin`, plus the desktop entry on Linux. Flags, checks and macOS: [docs/install.md](docs/install.md). Or build from a clone with Go (version in [go.mod](go.mod)); the "On a Linux desktop" and "Headless" steps below do.
 
-On Windows, run the installer `pcb_windows_amd64.msi` (from the next release) or unzip `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) and start `pcb-ui.exe`: no administrator rights either way ([Windows](docs/install.md#windows)).
+On Windows, run the installer `pcb_windows_amd64.msi` (from v0.2.0) or unzip `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) and start `pcb-ui.exe`: no administrator rights either way ([Windows](docs/install.md#windows)).
 
 ### On a Linux desktop
 

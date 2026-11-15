@@ -1,7 +1,7 @@
 # Windows MSI installer — design
 
 - **Date**: 2026-11-15
-- **Status**: approved by the author on 2026-11-15.
+- **Status**: approved by the author on 2026-11-15; built 2026-11-15 (decision 0020); live check `spec/experiments/W2-windows-msi-live.md`. Where the build differs from §4: the *Built:* notes after its table.
 - **Decided by**: author (marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: decision 0018 ("Next: an MSI"), `spec/OPEN.md` (the MSI leaves "next projects"), SPEC §13 "Platforms", `docs/install.md`, `docs/desktop.md`, `docs/status.md`, the README, the release process (`spec/designs/2026-11-14-release-process-design.md` §5.1).
 
@@ -39,6 +39,16 @@ WiX version: **7.0.1**, with its OSMF EULA accepted in CI (`-acceptEula wix7`) [
 | Running pcb-ui | Closed before files are replaced or removed (Restart Manager, or `util:CloseApplication` if pcb-ui does not answer it: the builder checks on the VM which works with pcb-ui's session-end watcher) |
 | Upgrades | `MajorUpgrade` with a fixed UpgradeCode, `AllowSameVersionUpgrades="yes"` (an MSI version has three fields, so `v0.2.0-rc.1` and `v0.2.0` are both 0.2.0 and the final must replace the candidate; the cost: installing the candidate over the final is also accepted); a downgrade message otherwise [call, approved] |
 | Version | `ProductVersion` from the tag (`vX.Y.Z[-…]` → `X.Y.Z`); a non-tag build (pull requests) uses `0.0.0` or the last tag's numbers |
+
+*Built:* the install folder is fixed: another `INSTALLFOLDER` is refused, because the `PATH` entry is the text `[LocalAppDataFolder]Programs\pcb` (no trailing `\`), so that Windows Installer's text match does not double a hand-made entry.
+
+*Built:* Start at login is not a component: a deferred `reg.exe` custom action (WixQuietExec, as the user, failure ignored) writes the Run value at an install or upgrade, and another deletes it at the uninstall or an unticked install, only when it starts this install's `pcb-ui.exe`; a component's HKCU value comes back at a `/fomus` repair.
+
+*Built:* `STARTATLOGIN` is normalised: only `1` is on, any other value is cleared (a checkbox shows any non-empty value ticked); it defaults to `1` at a first install, and at an upgrade only when the Run value starts this install's `pcb-ui.exe`.
+
+*Built:* over a zip unzipped into the folder, each component deletes its `.exe` before the copy (`RemoveFile On="install"`: Windows Installer keeps a file of an equal version, and an rc zip's `pcb-ui.exe` has the final MSI's), and the zip's `LICENSE` and `README.md` go at the uninstall (found by the live check, F2).
+
+*Built:* Restart Manager is enough to close `pcb-ui` (its session-end drain); no `util:CloseApplication`.
 
 ## 5. Testing
 

@@ -17,7 +17,7 @@ This is still an early version. On Linux its author uses it with their own Proto
 
 **macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux and Windows only), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
-**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from an installer (`pcb_windows_amd64.msi`, from the next release) or a zip, both on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, a release runs them from the zip before it is published, and the bridge was checked live on a Windows 11 desktop as a standard user (CalDAV with `curl`: Thunderbird for Windows' own window was not checked). There is no service: `pcb-ui`, started at login, runs the bridge.
+**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from an installer (`pcb_windows_amd64.msi`, from v0.2.0) or a zip, both on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, and the installer; a release runs them from the zip, and installs, checks and uninstalls its installer, before it is published; the bridge was checked live on a Windows 11 desktop as a standard user (CalDAV with `curl`: Thunderbird for Windows' own window was not checked), and so was the installer. There is no service: `pcb-ui`, started at login, runs the bridge.
 
 ## Install a release
 
@@ -68,7 +68,7 @@ gh attestation verify pcb_linux_amd64.tar.gz --repo Barben360/proton-calendar-br
   --signer-workflow Barben360/proton-calendar-bridge/.github/workflows/release.yml
 ```
 
-The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, and `pcb_windows_amd64.zip` and (from the next release) `pcb_windows_amd64.msi`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).
+The archives are `pcb_<os>_<arch>.tar.gz` with `os` `linux` or `darwin` and `arch` `amd64` or `arm64`, and `pcb_windows_amd64.zip` and (from v0.2.0) `pcb_windows_amd64.msi`, on the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases).
 
 ### Remove
 
@@ -86,11 +86,11 @@ Windows 10 (1809 or later) and 11, amd64 ([above](#macos-and-windows)), two ways
 | Start at login | a ticked box in the installer, then pcb-ui's Settings | pcb-ui's Settings |
 | Remove | Settings, Apps | `pcb uninstall`, then delete the folder |
 
-Neither needs administrator rights. The installer is new and not checked live yet; the zip stays as the portable option.
+Neither needs administrator rights. The installer was checked live on a Windows 11 desktop as a standard user: the double-click install and its screens, the shortcut and notifications under `pcb-ui`'s name, "Start at login" across a restart, a repair, upgrades and the uninstall. The zip stays as the portable option.
 
 ### The installer
 
-1. Download `pcb_windows_amd64.msi` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) (from the next release; until then use [the zip](#the-zip)). To check it, compare `Get-FileHash pcb_windows_amd64.msi` (PowerShell, SHA-256) with its line in the release's `checksums.txt`, or run `gh attestation verify` on it as [above](#check-a-download-yourself).
+1. Download `pcb_windows_amd64.msi` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) (from v0.2.0; for an older release use [the zip](#the-zip)). To check it, compare `Get-FileHash pcb_windows_amd64.msi` (PowerShell, SHA-256) with its line in the release's `checksums.txt`, or run `gh attestation verify` on it as [above](#check-a-download-yourself).
 2. Open it. Until it is signed, SmartScreen may stop it with "Windows protected your PC" and an unknown publisher: choose More info, then Run anyway. No administrator prompt follows: it installs for your Windows account only.
 3. The screens: the licence (MIT); the features, `pcb-ui` (always installed) and `pcb (command line)` (ticked: untick it for `pcb-ui` alone); "Start at login", ticked (`pcb-ui` starts in the tray when you sign in to Windows; its Settings change that later); then the install, and a last screen whose "Launch pcb-ui" box starts it.
 4. In `pcb-ui`, Add account. In a terminal opened after the install, `pcb status`, `pcb client show`, `pcb doctor` talk to the running `pcb-ui`.
@@ -106,18 +106,22 @@ What it installs:
 
 Your accounts and settings stay where `pcb` keeps them ([below](#where-pcb-keeps-its-files)), not in the program folder. Each Windows account that wants the bridge installs it for itself.
 
-From a terminal (PowerShell or `cmd`, in the download's folder), with no screens: `STARTATLOGIN=0` or `1` sets "Start at login" (only `1` turns it on), `REMOVE=Cli` and `ADDLOCAL=Cli` remove or add `pcb (command line)`:
+From a terminal (PowerShell or `cmd`, in the download's folder), with no screens: `STARTATLOGIN=0` or `1` sets "Start at login" (only `1` turns it on), `REMOVE=Cli` and `ADDLOCAL=App,Cli` remove or add `pcb (command line)`:
 
 ```powershell
-msiexec /i pcb_windows_amd64.msi /qn                  # both features, Start at login on
-msiexec /i pcb_windows_amd64.msi /qn STARTATLOGIN=0   # Start at login off
-msiexec /i pcb_windows_amd64.msi /qn REMOVE=Cli       # installed already: remove pcb.exe and its PATH entry
-msiexec /i pcb_windows_amd64.msi /qn ADDLOCAL=Cli     # and put them back
+msiexec /i pcb_windows_amd64.msi /qn                    # both features, Start at login on
+msiexec /i pcb_windows_amd64.msi /qn STARTATLOGIN=0     # Start at login off
+msiexec /i pcb_windows_amd64.msi /qn REMOVE=Cli         # installed already: remove pcb.exe and its PATH entry
+msiexec /i pcb_windows_amd64.msi /qn ADDLOCAL=App,Cli   # and put them back
 ```
 
-**Upgrade.** Open the newer MSI the same way: it replaces the installed version. "Start at login" stays as `pcb-ui`'s switch left it, unless `STARTATLOGIN` is given on the command line. A running `pcb-ui` is closed first, cleanly, as at a Windows sign-out (with the screens, Windows may ask first); nothing starts it again after a silent upgrade (`/qn`): it comes back at your next sign-in when "Start at login" is on, or start it from the Start menu. With the screens, the last screen's "Launch pcb-ui" starts it. The same version can be installed again (a release candidate and its final release share one installer version); an older one is refused: `A newer version of pcb is already installed. Uninstall it first to install this one.`
+Run `REMOVE=Cli` with the installer of the installed version: another version's installs nothing then, and the installed one stays as it was. `ADDLOCAL` names `App` too: with another version's installer the line is an upgrade, which installs only the features it names, so `ADDLOCAL=Cli` alone would remove `pcb-ui`.
 
-**From the zip to the installer.** Quit `pcb-ui`, run `.\pcb.exe uninstall` in the zip's folder (it turns "Start at login" off when that starts this folder's `pcb-ui.exe`, and keeps your accounts), then delete the folder and its `PATH` entry, and install the MSI: your accounts and settings carry over. Left in place, the zip's `PATH` entry comes before the installer's, so terminals would still find the zip's `pcb.exe`. The installer itself only touches a "Start at login" value for another `pcb-ui.exe` when its box is ticked (it then starts the installed one); a `PATH` entry you made by hand for the expanded folder (for example `C:\Users\<you>\AppData\Local\Programs\pcb`, no trailing `\` and no `%VARIABLE%`) is not added twice, and goes at the uninstall.
+**Upgrade.** Open the newer MSI the same way: it replaces the installed version. "Start at login" stays as `pcb-ui`'s switch left it, unless `STARTATLOGIN` is given on the command line. A running `pcb-ui` is closed first, cleanly, as at a Windows sign-out (with the screens, a `Files in Use` dialog names `pcb desktop app` first and offers to close it and "attempt to restart" it: the restart does not happen); nothing starts it again after a silent upgrade (`/qn`): it comes back at your next sign-in when "Start at login" is on, or start it from the Start menu. With the screens, the last screen's "Launch pcb-ui" starts it. The same version can be installed again (a release candidate and its final release share one installer version); an older one is refused: `A newer version of pcb is already installed. Uninstall it first to install this one.`
+
+**Repair.** Open the installed version's MSI again and choose Repair (or `msiexec /fa pcb_windows_amd64.msi /qn`): it copies `pcb-ui.exe` and `pcb.exe` again and leaves "Start at login" as `pcb-ui`'s switch left it. Replacing both programs, it closes a running `pcb-ui` as an upgrade does, and nothing starts it again: the `Files in Use` dialog's "attempt to restart" does not, and a repair's last screen has no "Launch pcb-ui". Start it from the Start menu afterwards.
+
+**From the zip to the installer.** Quit `pcb-ui`, run `.\pcb.exe uninstall` in the zip's folder (it turns "Start at login" off when that starts this folder's `pcb-ui.exe`, and keeps your accounts), then delete the folder and its `PATH` entry, and install the MSI: your accounts and settings carry over. Left in place, the zip's `PATH` entry comes before the installer's, so terminals would still find the zip's `pcb.exe`. A zip unzipped into `%LOCALAPPDATA%\Programs\pcb` itself is replaced: the installer puts its own `pcb-ui.exe` and `pcb.exe` there, even over a zip of the same version, and the uninstall also removes the zip's `LICENSE` and `README.md`. The installer itself only touches a "Start at login" value for another `pcb-ui.exe` when its box is ticked (it then starts the installed one); a `PATH` entry you made by hand for the expanded folder (for example `C:\Users\<you>\AppData\Local\Programs\pcb`, no trailing `\` and no `%VARIABLE%`) is not added twice, and goes at the uninstall.
 
 ### The zip
 
@@ -142,7 +146,7 @@ Until the binaries are signed, Windows SmartScreen may stop the first start with
 
 **Installed with the MSI.** Settings, Apps, Installed apps (Windows 10: Apps & features), `pcb`, Uninstall; or `msiexec /x pcb_windows_amd64.msi /qn`. It closes a running `pcb-ui` (Windows may ask first), then removes the program files, the Start-menu shortcut, the `PATH` entry, and "Start at login" when it starts the installed `pcb-ui.exe`. It keeps `%APPDATA%\pcb` and `%LOCALAPPDATA%\pcb`, your accounts, sessions and settings: installing again finds them. Files you added to the program folder yourself (Mesa's DLLs, for example) stay; delete the folder afterwards.
 
-To delete your data too, do it before the uninstall, while `pcb.exe` is still there (if you removed `pcb (command line)`, put it back first with `ADDLOCAL=Cli` as above): quit `pcb-ui` (its tray menu, Quit), then in a new terminal:
+To delete your data too, do it before the uninstall, while `pcb.exe` is still there (if you removed `pcb (command line)`, put it back first with `ADDLOCAL=App,Cli` as above): quit `pcb-ui` (its tray menu, Quit), then in a new terminal:
 
 ```powershell
 pcb uninstall --delete-data --plan   # see what it would do

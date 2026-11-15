@@ -229,7 +229,7 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 Next projects (decisions 0018 and 0020; the MSI itself is built, decision 0020): Authenticode signing (SignPath Foundation or Azure Trusted Signing) of the binaries and the MSI, until which SmartScreen warns about an unknown publisher; winget, Chocolatey or Scoop packages; Windows on arm64. Toasts from a zip install stay best effort (no Start-menu shortcut carrying the app's ID; the MSI has one).
 
 Limits of the MSI (decision 0020), parked:
-- A silent upgrade closes `pcb-ui` (Restart Manager) and nothing starts it again until the next sign-in or a start from the Start menu: registering `pcb-ui` with `RegisterApplicationRestart` would let Restart Manager restart it.
+- A silent upgrade or a repair (silent or with the screens) closes `pcb-ui` (Restart Manager) and nothing starts it again until the next sign-in or a start from the Start menu; the screens' `Files in Use` dialog even says the installer will "attempt to restart" it, and a repair's finish screen has no "Launch pcb-ui" (live check F1, documented in `docs/install.md` and `docs/troubleshooting.md`): registering `pcb-ui` with `RegisterApplicationRestart` would let Restart Manager restart it.
 - The Run value's write has no rollback action: an install that fails after it leaves the value.
 - The `PATH` entry is matched as text: a hand-made entry with a trailing `\` or a `%VARIABLE%` is doubled, and the uninstall removes a hand-made entry identical to the installer's.
 - An MSI installed over a zip unzipped into the same folder: only the Run value is checked (the smoke script); replacing the zip's files is for the live check, and the docs say to remove the zip first.
