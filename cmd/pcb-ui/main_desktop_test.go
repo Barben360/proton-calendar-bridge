@@ -137,14 +137,58 @@ func newSettings(t *testing.T) (*settings, *[]string) {
 
 func TestSettingsOpenFiles(t *testing.T) {
 	s, opened := newSettings(t)
+	s.configPath = filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(s.configPath, []byte("[log]\nlevel = \"debug\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.OpenLogs(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.OpenConfig(); err != nil {
 		t.Fatal(err)
 	}
-	if got := *opened; len(got) != 2 || got[0] != "/state/logs" || got[1] != "/cfg/config.toml" {
+	if got := *opened; len(got) != 2 || got[0] != "/state/logs" || got[1] != s.configPath {
 		t.Errorf("opened %q, want the logs folder then the config file", got)
+	}
+	if b, _ := os.ReadFile(s.configPath); string(b) != "[log]\nlevel = \"debug\"\n" {
+		t.Errorf("config.toml is now %q: an existing file must be left as it is", b)
+	}
+}
+
+// With no config.toml (every key at its default, the usual case), Open
+// config.toml first makes an empty one in a private config directory:
+// opening a missing file failed with "The system cannot find the file
+// specified" (live check on Windows, 2026-11-15).
+func TestSettingsOpenConfigMakesAMissingFile(t *testing.T) {
+	s, opened := newSettings(t)
+	dir := filepath.Join(t.TempDir(), "cfg", "pcb")
+	s.configPath = filepath.Join(dir, "config.toml")
+	if err := s.OpenConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if got := *opened; len(got) != 1 || got[0] != s.configPath {
+		t.Errorf("opened %q, want %q", got, s.configPath)
+	}
+	b, err := os.ReadFile(s.configPath)
+	if err != nil || len(b) != 0 {
+		t.Fatalf("config.toml: %q, %v; want an empty file", b, err)
+	}
+	acltest.WantPrivate(t, dir, 0o700)
+	acltest.WantPrivate(t, s.configPath, 0o600)
+}
+
+func TestSettingsOpenConfigFailsWithoutOpening(t *testing.T) {
+	s, opened := newSettings(t)
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.configPath = filepath.Join(file, "pcb", "config.toml") // its directory cannot be made
+	if err := s.OpenConfig(); err == nil {
+		t.Fatal("no error for a config directory that cannot be made")
+	}
+	if len(*opened) != 0 {
+		t.Errorf("opened %q after the failure", *opened)
 	}
 }
 

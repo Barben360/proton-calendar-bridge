@@ -99,12 +99,12 @@ Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CO
 | Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
 | Sign out, shutdown | `pcb-ui` gets up to 2 seconds to stop cleanly; what is cut short is recovered at the next start. |
 | `pcb-ui.exe --version`, `--help` | Print to the terminal they are typed in, or to a redirected file. Started from Explorer, `pcb-ui` has no console window. |
-| Open config.toml, logs | Open in the program Windows associates with them; `.toml` may have none: then open `%APPDATA%\pcb\config.toml` in a text editor. |
+| Open config.toml, logs | Open in the program Windows associates with them. `.toml` often has none: Windows then asks which app to open it with (Notepad will do). |
 | Display | `pcb-ui` needs OpenGL 2.0. A virtual machine without 3D acceleration or a remote desktop session may lack it: `pcb-ui` then says so and exits ([troubleshooting](troubleshooting.md#pcb-ui-needs-opengl-20)). |
 
 ## Edit the configuration
 
-Settings, "Open config.toml" opens the file; press "Restart bridge" afterwards. An error in the file stops the bridge:
+Settings, "Open config.toml" opens the file, made empty first when there is none (every setting then keeps its default); press "Restart bridge" afterwards. An error in the file stops the bridge:
 
 - the window says `bridge stopped: <error>`;
 - the tray shows attention;
