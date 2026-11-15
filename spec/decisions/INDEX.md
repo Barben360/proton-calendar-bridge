@@ -20,3 +20,4 @@
 | [0016](0016-mcp-adapter.md) | An MCP adapter for agents, over stdio and remote; amends 0007 (accepted, built in M8, live session pending) |
 | [0017](0017-release-process.md) | Tag-driven releases, attestations instead of minisign, a public image pushed on release; amends SPEC §3 and §13 (accepted, built, released as v0.1.0) |
 | [0018](0018-windows-port.md) | Windows port: `pcb-ui` started at login (no service), a private named pipe, DPAPI, a native `pcb-ui` build; amends SPEC §3, §13 and 0015 (accepted, built, live check pending) |
+| [0019](0019-update-check.md) | Tell that a newer stable release exists: pcb-ui, `pcb doctor`, `pcb version --check`, from GitHub's `releases/latest` redirect; amends SPEC §3, §13, §19 and 0015 (accepted, built) |

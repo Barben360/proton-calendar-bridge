@@ -78,6 +78,14 @@ type fakeSettings struct {
 	autostart bool
 	autoErr   error
 	level     slog.Level
+	updateOff bool
+}
+
+func (s *fakeSettings) UpdateCheck() bool { return !s.updateOff }
+func (s *fakeSettings) SetUpdateCheck(on bool) error {
+	s.calls = append(s.calls, "updatecheck")
+	s.updateOff = !on
+	return nil
 }
 
 func (s *fakeSettings) Autostart() bool { return s.autostart }

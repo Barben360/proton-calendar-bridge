@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,12 +28,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/logfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui/desktop"
+	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
 
 const appID = "io.github.barben360.pcb-ui"
@@ -99,7 +102,9 @@ func run(args []string) int {
 	// ended is closed at logoff or shutdown: the bridge's drain is then 2 s.
 	ended := make(chan struct{})
 	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended})
-	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: openPath(a.OpenURL), exe: executable}
+	updates := newUpdates(a, dirs.State)
+	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: openPath(a.OpenURL), exe: executable,
+		updates: updates, poke: make(chan struct{}, 1)}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
 	setWindowClass()
 
@@ -144,6 +149,7 @@ func run(args []string) int {
 		quit()
 	}()
 	go follow(ctx, bridge, win, tray, log)
+	go followUpdates(ctx, updates, set.poke, win, tray, log)
 
 	a.Run()
 	cancel()
@@ -193,6 +199,50 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 // printError writes err and its hint as the CLI does.
 func printError(w io.Writer, err error) {
 	fmt.Fprintf(w, "Error: %s\nHint: %s\n", err, exitcode.HintOf(err))
+}
+
+// updateEvery is how often pcb-ui looks again: the 24 h cache decides when
+// a request goes out, this when Later's 48 h are seen to end.
+const updateEvery = time.Hour
+
+// newUpdates is pcb-ui's update check: GitHub against this build's version,
+// update.json in the state directory, Later and the notified version in
+// Fyne's preferences, the install line on Linux only (the release page is
+// the hint on Windows).
+func newUpdates(a fyne.App, state string) *ui.Updates {
+	u := &ui.Updates{
+		Checker: update.Checker{Installed: buildinfo.Version},
+		Path:    update.StorePath(state), Env: os.Getenv, Prefs: a.Preferences(), Now: time.Now,
+	}
+	if runtime.GOOS == "linux" {
+		if exe, err := executable(); err == nil {
+			home, _ := os.UserHomeDir()
+			u.Hint = update.Hint(update.Install{GOOS: runtime.GOOS, Exe: exe, Home: home, Env: os.Getenv})
+		}
+	}
+	return u
+}
+
+// followUpdates draws each update notice in the window and the tray, and
+// sends its notification once per version; a click on it opens the
+// release page (Linux: Windows reports no click).
+func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
+	later := func() {
+		u.Later()
+		pokeLoop(poke)
+	}
+	u.Run(ctx, updateEvery, poke, func(n ui.UpdateNotice) {
+		fyne.Do(func() {
+			win.SetUpdate(n, later)
+			if tray != nil {
+				tray.SetUpdate(n)
+			}
+		})
+	}, func(note ui.Notification, page string) {
+		ui.Send(log, []ui.Notification{note}, func(note ui.Notification) error {
+			return desktop.Notify("", note, func(string) { fyne.Do(func() { win.OpenURL(page) }) })
+		})
+	})
 }
 
 // fatal shows err (message and hint) in a window, waits for it to close and

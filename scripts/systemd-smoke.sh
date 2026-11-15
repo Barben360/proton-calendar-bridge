@@ -44,7 +44,7 @@ step() { echo "--- $*"; }
 in_box() { docker exec "$container" "$@"; }
 as_tester() {
 	docker exec "$container" runuser -u tester -- \
-		env HOME=/home/tester XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+		env HOME=/home/tester XDG_RUNTIME_DIR="/run/user/$uid" PCB_UPDATE_CHECK=off "$@"
 }
 absent() { if in_box test -e "$1"; then fail "$1 exists: $2"; fi; }
 

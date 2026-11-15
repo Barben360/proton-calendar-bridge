@@ -25,6 +25,7 @@ type settingsPane struct {
 	w         *Window
 	root      fyne.CanvasObject
 	autostart *toggle
+	updates   *toggle
 	silent    bool // setting the level from the settings, not the person
 	level     *widget.Select
 	addr, tls *textLine
@@ -45,6 +46,7 @@ func newSettingsPane(w *Window) *settingsPane {
 	p.addr = newTextLine("", theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{Monospace: true})
 	p.tls = newTextLine("", theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
 	p.autostart = newToggle("Start at login", p.setAutostart)
+	p.updates = newToggle("Check for updates", p.setUpdates)
 	names := make([]string, len(levels))
 	for i, l := range levels {
 		names[i] = l.name
@@ -54,7 +56,7 @@ func newSettingsPane(w *Window) *settingsPane {
 	cfg := action("Open config.toml", theme.DocumentIcon(), func() { p.simple(func() error { return w.set.OpenConfig() }) })
 	restart := action("Restart bridge", theme.ViewRefreshIcon(), func() { p.simple(func() error { return w.act.Restart(context.Background()) }) })
 	doc := action("Doctor report", theme.InfoIcon(), p.doctor)
-	p.b = newBusy(p.autostart, logs, cfg, restart, doc)
+	p.b = newBusy(p.autostart, p.updates, logs, cfg, restart, doc)
 	hint := newTextLine("set [log] level in config.toml to keep it", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
 	hint.Truncate = true
 	p.tlsRow = divided(groupRow(key("TLS"), keyWidth, p.tls))
@@ -64,6 +66,7 @@ func newSettingsPane(w *Window) *settingsPane {
 		heading, p.b.label,
 		group("GENERAL",
 			groupRow(key("Start at login"), 0, nil, vcenter(p.autostart)),
+			divided(groupRow(key("Check for updates"), 0, nil, vcenter(p.updates))),
 			divided(groupRow(key("Log level"), keyWidth, pad(0, 0, 0, 8, hint), vcenter(p.level))),
 		),
 		group("BRIDGE",
@@ -82,6 +85,7 @@ func newSettingsPane(w *Window) *settingsPane {
 
 func (p *settingsPane) open(ln *ctl.Listener) {
 	p.autostart.SetOn(p.w.set.Autostart())
+	p.updates.SetOn(p.w.set.UpdateCheck())
 	p.silent = true
 	cur := p.w.set.Level()
 	p.level.SetSelected("")
@@ -115,6 +119,16 @@ func (p *settingsPane) setAutostart(on bool) {
 			p.w.showErr(err)
 			var cur bool
 			p.w.async(func() { cur = p.w.set.Autostart() }, func() { p.autostart.SetOn(cur) })
+		}
+	})
+}
+
+func (p *settingsPane) setUpdates(on bool) {
+	p.w.run(p.b, "Working…", func(context.Context) error { return p.w.set.SetUpdateCheck(on) }, func(err error) {
+		if err != nil {
+			p.w.showErr(err)
+			var cur bool
+			p.w.async(func() { cur = p.w.set.UpdateCheck() }, func() { p.updates.SetOn(cur) })
 		}
 	})
 }

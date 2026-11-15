@@ -89,21 +89,21 @@ func TestDoctorExitCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// The DPAPI key for the key file, and Windows' own checks, whose
 		// statuses depend on the machine (elevation, zone, Start at login).
-		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon"; got != want {
+		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon,update"; got != want {
 			t.Fatalf("names = %s, want %s", got, want)
 		}
 		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "ok,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
 			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
 		}
 		// No systemd on Windows: pcb-ui's Start at login is the service.
-		if got := env.Data.Results[len(env.Data.Results)-2]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+		if got := env.Data.Results[len(env.Data.Results)-3]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
 			t.Errorf("service = %+v", got)
 		}
-	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon"; got != want {
+	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon,update"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
-	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip"; got != want {
+	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -123,8 +123,11 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 12 { // 9 checks, the accounts warning with its fix line, the service, the daemon
-		t.Fatalf("stdout = %q, want 12 lines", out)
+	if len(lines) != 13 { // 9 checks, the accounts warning with its fix line, the service, the daemon, the update check
+		t.Fatalf("stdout = %q, want 13 lines", out)
+	}
+	if want := "–  update: dev build"; lines[12] != want {
+		t.Errorf("line 12 = %q, want %q", lines[12], want)
 	}
 	if want := "–  service: no systemd here"; lines[10] != want {
 		t.Errorf("line 10 = %q, want %q", lines[10], want)

@@ -35,7 +35,7 @@ Details: [security](security.md#log-in).
 |---|---|
 | `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, alerts). |
 | `pcb status --daemon` | Exits 20 when no daemon answers (the container's health check). |
-| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. |
+| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. Its last line, `update`, warns when a newer stable release exists (the fix: its page and how to update), and is skipped when switched off, on a dev build or when github.com does not answer: it never changes the exit code. |
 
 ### Calendars and events
 
@@ -81,7 +81,9 @@ On Windows there is no service: `pcb install` and every `pcb service` command ex
 
 | Command | What it does |
 |---|---|
-| `pcb version` | The build's version. |
+| `pcb version` | The build's version. No network call. |
+| `pcb version --check` | Also asks github.com whether a newer stable release exists: `update available: vX.Y.Z <release page>` with how to update this install (the `install.sh` line on Linux and macOS, pulling the image in the container), or `up to date`, `check skipped: dev build`, `check failed: …`. Exits 0 in every case; with `--json`, `data.update` holds `latest`, `url`, `available`, `hint`, `error`. |
+| `pcb update-check on\|off\|status` | The daily update check of `pcb doctor` and `pcb-ui` (kept in `update.json` in the state directory). `PCB_UPDATE_CHECK=off` turns it off for one process. ([security](security.md#the-update-check)) |
 
 ## Choose the account
 

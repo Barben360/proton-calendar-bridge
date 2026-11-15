@@ -53,7 +53,9 @@ type Tray struct {
 	// systray does not export, logging PropertyNotFound every 30 s).
 	icon    ui.TrayState
 	iconSet bool
-	menu    []string // per account line: its ID and label
+	menu    []string // per account line: its ID and label, then the update line
+	last    ui.View  // the view last drawn, for SetUpdate
+	upd     ui.UpdateNotice
 	menuSet bool
 }
 
@@ -85,13 +87,19 @@ func (t *Tray) Update(v ui.View) {
 		key = append(key, id+"\x00"+label)
 		items = append(items, fyne.NewMenuItem(label, func() { t.w.dispatch(func() { t.w.Show(id) }) }))
 	}
+	t.last = v
+	if len(items) > 0 {
+		items = append(items, fyne.NewMenuItemSeparator())
+	}
+	if u := t.upd; u.Available {
+		line := "Update available: " + u.Version
+		key = append(key, "update\x00"+line+"\x00"+u.URL)
+		items = append(items, fyne.NewMenuItem(line, func() { t.w.dispatch(func() { t.w.OpenURL(u.URL) }) }))
+	}
 	if t.menuSet && slices.Equal(key, t.menu) {
 		return
 	}
 	t.menu, t.menuSet = key, true
-	if len(items) > 0 {
-		items = append(items, fyne.NewMenuItemSeparator())
-	}
 	items = append(items,
 		fyne.NewMenuItem("Open pcb", func() { t.w.dispatch(func() { t.w.Show("") }) }),
 		fyne.NewMenuItem("Quit", func() { t.quit() }),
@@ -135,4 +143,13 @@ func Attach(ta TrayApp, w *Window, quit func(), background bool) *Tray {
 		w.Show("")
 	}
 	return t
+}
+
+// SetUpdate shows n's line in the menu, above Open pcb, while an update is
+// available (Later hides the window's panel, never this line). Main goroutine.
+func (t *Tray) SetUpdate(n ui.UpdateNotice) {
+	t.upd = n
+	if t.iconSet { // else the first Update draws it
+		t.Update(t.last)
+	}
 }

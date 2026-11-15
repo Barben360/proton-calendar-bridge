@@ -74,7 +74,7 @@ accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (
 (release archives, untested).
 
 Not planned (not designed here): REST API, `.ics` feeds, event
-commands in the CLI (Thunderbird is the client), auto-update, shared calendars, invitations, two-password mode,
+commands in the CLI (Thunderbird is the client), auto-update (pcb only tells that a newer stable release exists, decision 0019), shared calendars, invitations, two-password mode,
 FIDO2, CardDAV, macOS/Windows service management, a GUI on macOS (`pcb-ui` runs on Linux and, since decision 0018, Windows). The desktop app
 `pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
 `spec/designs/2026-11-12-multi-account-and-ui-design.md`. MCP is built (M8; "not planned"
@@ -1904,6 +1904,17 @@ publishes the Release with `checksums.txt` and `install.sh`. The files and the i
 SHA-256 (and the attestation when `gh` 2.49 or later is logged in), and places the files under `~/.local`; it does not run `pcb install`, and refuses Windows with a pointer to the zip.
 Install from source (`make install` in a clone, then `pcb install`) still works.
 
+Update check (decision 0019, `spec/designs/2026-11-15-update-check-design.md`): `internal/update` reads where
+`https://github.com/Barben360/proton-calendar-bridge/releases/latest` redirects (one request, `User-Agent: pcb`, no redirect
+followed, 10 s), accepts only this repository's `vX.Y.Z` tag page, and compares it with the build's version; a build that is not
+a release sends nothing [verified: `TestLatestRefusesOtherAnswers`, `TestLatestSendsNothingForADevBuild`]. The answer is kept a
+day in `<state>/update.json` with the switch (`pcb update-check`, `PCB_UPDATE_CHECK=off`), written under a file lock and never
+creating the state directory [verified: `TestEditWaitsForAnotherWriter`, `TestEditDoesNotCreateTheStateDirectory`]. `pcb doctor`
+adds an `update` line (warn or skip, never an error) and `pcb version --check` asks on demand; plain `pcb version` stays offline
+[verified: `TestDoctorUpdateLine`, `TestVersionSendsNoRequest`]. `pcb-ui` shows a panel (Later: 48 h, then again for the same
+version), a tray menu line and one notification per version [verified: `TestUpdatesLaterHidesThePanelFor48Hours`,
+`TestTrayUpdateLine`]. The daemon never checks.
+
 Container: `ghcr.io/barben360/proton-calendar-bridge`, a public package (amd64 and arm64), pushed on a release (`X.Y.Z`, `X.Y`,
 `latest`; a pre-release only its own tag) and by hand for a commit (`sha-<12 hex>`), never from main. Before 2026-11-14 CI pushed
 `:main` and `:sha-<12 hex>` from main to a private package (first success 2026-11-12; private confirmed by the author, `HUMAN-CHECKS.md` 7.8);
@@ -2328,7 +2339,8 @@ event that fails it is served marked, not dropped), writes only to calendars
 whose member passphrase signature verifies with our key, and only over
 content of ours that verifies, with pinned key packets (§5.3, its residual
 risks listed there), no
-secrets in argv or logs, state directory 0700. On a server, the daemon runs
+secrets in argv or logs, state directory 0700. One host besides Proton: github.com, once a day, for the update check, which
+sends nothing but the request and can be switched off (decision 0019). On a server, the daemon runs
 as a dedicated `pcb` user (system service) or in its container [call].
 M5 additions:
 - The control socket (§15) is 0600 in a 0700 directory and accepts the daemon's UID only (SO_PEERCRED, Linux; the

@@ -29,8 +29,11 @@ LABEL org.opencontainers.image.source="https://github.com/Barben360/proton-calen
       org.opencontainers.image.revision=$COMMIT
 COPY --from=build /out/pcb /usr/local/bin/pcb
 COPY --from=build --chown=65532:65532 /out/data /data
+# PCB_INSTALL=container: pcb doctor says to pull a new image, not to run
+# install.sh, when a newer release is out.
 ENV PCB_CONFIG_DIR=/data/config \
-    PCB_STATE_DIR=/data/state
+    PCB_STATE_DIR=/data/state \
+    PCB_INSTALL=container
 USER 65532
 VOLUME /data
 # Any non-loopback bind serves TLS: a self-signed certificate kept in

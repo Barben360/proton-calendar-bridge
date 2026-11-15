@@ -118,7 +118,8 @@ fi
 
 step "2. run $image with a fresh volume on 127.0.0.1:$port"
 docker volume create "$volume" >/dev/null
-docker run -d --name "$container" -v "$volume:/data" -p "127.0.0.1:$port:1080" "$image" >/dev/null
+# PCB_UPDATE_CHECK=off: pcb doctor (7c) never asks github.com from CI.
+docker run -d --name "$container" -e PCB_UPDATE_CHECK=off -v "$volume:/data" -p "127.0.0.1:$port:1080" "$image" >/dev/null
 
 step "3. healthy within 60 s"
 wait_healthy
