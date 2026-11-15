@@ -1,6 +1,6 @@
 # W1-live — Both binaries on a Windows 11 VM, as a standard user
 
-Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line passed; two parts are for the author to confirm** (12.6 Thunderbird's own window, CalDAV having passed with `curl`; 12.12 the web app's session list). Four findings, all fixed and their lines run again (table at the end). Two sittings: up to the login on the night of 2026-11-14/15, the rest on the morning of 2026-11-15 after the author solved a CAPTCHA. Windows is "supported" from this run on (`pcb doctor`'s `platform` line ok).
+Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line run passed; 12.12's session list confirmed by the author; Thunderbird for Windows' own window (12.6) not checked live, skipped by the author** (CalDAV passed with `curl`). Four findings, all fixed and their lines run again (table at the end). Two sittings: up to the login on the night of 2026-11-14/15, the rest on the morning of 2026-11-15 after the author solved a CAPTCHA. Windows is "supported" from this run on (`pcb doctor`'s `platform` line ok).
 
 ## Setup
 
@@ -8,7 +8,7 @@ Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line passed; tw
 - Contexts: **ssh** (key sign-in of `<user>`), **console** (an interactive scheduled task of `<user>` in its console session: task XML with `InteractiveToken` and no battery conditions, PowerShell run as `conhost.exe --headless powershell.exe …`), **admin** (the administrator over SSH). Screenshots (`Graphics.CopyFromScreen`) were copied to the workstation and stay there.
 - Build under test: branch `win-t16`, first `v0.1.0-53-g5cb9a93`, then, after the fixes, `v0.1.0-56-gfa1e8e2`. `pcb.exe` cross-compiled (`GOOS=windows make build`), `pcb-ui.exe` built on the VM (MSYS2 UCRT64, `make ui`), the zip made by `scripts/release/package.sh windows amd64` (zip SHA-256 `304250c0…162023`, then `99589264…071e3a`), copied to `Downloads`, its `Get-FileHash` equal to the workstation's, unzipped with `Expand-Archive` into `%LOCALAPPDATA%\Programs\pcb`.
 - Windows Update restarted the VM on its own at 23:35Z and 23:38Z, before the run (a servicing restart, then TrustedInstaller); the first sign-in after it showed the "almost done setting up your PC" screen, dismissed with "Remind me in 3 days".
-- **Logins: 3**, all for 12.4, all `pcb login` relayed to the running `pcb-ui` (`entry=cli` in `pcb-ui.log`): login 1 at 00:50:21Z, `needs-captcha`, left unsolved; login 2 at 10:00:47Z (a fresh challenge, the first being hours old), `needs-captcha`, solved by the author; login 3 at 10:01:36Z (`pcb login resume --captcha-token`), `ready` at 10:01:49Z (`last_login` 10:01:47Z). Logins 2 and 3 were run by the author from the workstation's terminal, with the same command and wrapper: the agent's runs of that command were refused by its tool's permission check. An attempt at 00:47:55Z stopped in pcb before any Proton call (F4) and is not a login. Last entry of any ledger before login 1: 2026-11-13T23:44:21Z. E02 rows 2 and 3.
+- **Logins: 3**, all for 12.4, all `pcb login` relayed to the running `pcb-ui` (`entry=cli` in `pcb-ui.log`): login 1 at 00:50:21Z, `needs-captcha`, left unsolved; login 2 at 10:00:47Z (a fresh challenge, the first being hours old), `needs-captcha`, solved by the author; login 3 at 10:01:36Z (`pcb login resume --captcha-token`; 49 s after login 2, under the 60 s rule between logins, the author's call), `ready` at 10:01:49Z (`last_login` 10:01:47Z). Logins 2 and 3 were run by the author from the workstation's terminal, with the same command and wrapper: the agent's runs of that command were refused by its tool's permission check. An attempt at 00:47:55Z stopped in pcb before any Proton call (F4) and is not a login. Last entry of any ledger before login 1: 2026-11-13T23:44:21Z. E02 rows 7 and 8.
 
 ## 12.1 The zip: PASS
 
@@ -41,11 +41,11 @@ Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line passed; tw
 
 - 10:02Z, ssh and console give the same view: `daemon: … kind ui`, the listener `http://localhost:1080`, the account `phase: ready`, `secrets: sealed`, `key_file: …\secrets.key.dpapi`, `unattended: false`, `serve: serving since …`, three calendars (one subscribed). `status --json`: `daemon.kind` `ui`, `login.phase` `ready`, `login.sealer` `dpapi`, `login.secrets` `sealed`, `last_login` 10:01:47Z. A key sign-in (ssh) reads it all through `pcb-ui`'s pipe.
 
-## 12.6 Thunderbird for Windows: CalDAV PASS with `curl`, Thunderbird author to confirm
+## 12.6 Thunderbird for Windows: CalDAV PASS with `curl`; Thunderbird not checked live (skipped by the author)
 
 - 10:04Z, console, a task reading `pcb client show --json --reveal` in-process (nothing printed or kept; the `Authorization` header in a scratch file deleted at once): `PROPFIND` Depth 1 on the account's home set (`<url>calendars/me/`) 207 with 3 calendars; `REPORT` `sync-collection` (empty token) on each: 207 with 209, 190 and 0 events; a wrong password: 401. `client show --json` leaves the password out without `--reveal`, as documented.
 - Observation: after four wrong-password requests in a row (the first runs of the check sent an empty password), the next requests got 503 with `Retry-After` for a few seconds, then 401 or 207 again: pcb's throttling of failed attempts, as designed.
-- Thunderbird itself was not installed or driven: **author to confirm** (steps in the section below).
+- Thunderbird itself was not installed or driven, and the author chose to skip it (2026-11-15): **not checked live** (how to run it later: the section below).
 
 ## 12.7 Tray and menu: PASS
 
@@ -78,20 +78,20 @@ Status: **HUMAN-CHECKS step 12 run on 2026-11-14/15 (UTC): every line passed; tw
 - 00:10Z, with `pcb-ui` running, console and ssh give the same lines, exit 0: `! platform: windows/amd64: runs, untested`, `✓ config dir … private`, `✓ state dir … private`, `✓ config file`, `✓ sealer: dpapi`, `– dpapi key: no key yet: the first login creates it`, `✓ caldav listener: 127.0.0.1:1080, plain HTTP (the running daemon; URL http://localhost:1080)`, `– tls certificate`, `! accounts: no account …`, `✓ elevated: not elevated`, `✓ time zone: Romance Standard Time → Europe/Paris`, `– start at login: Start at login is off` (`✓ … starts <install folder>\pcb-ui.exe` once on), `– service: no service on Windows: pcb-ui's Start at login runs it`, `✓ daemon: running … kind ui`, `! alert needs-login …`. Beyond `platform`, the warnings are the missing account's.
 - 10:07:36Z, with the account, console and ssh alike, exit 0, every line ok but `platform`: `✓ dpapi key: …secrets.key.dpapi: protected for this Windows user, 32 bytes`, `✓ <test account>: sealed secrets: …secrets.sealed private`, `✓ <test account>: secrets: secrets sealed with a key DPAPI protects for this Windows user`, `✓ <test account>: cache: …pcb.db private, schema 2, integrity ok`, `✓ <test account>: caldav clients: 1 client`, `✓ elevated: not elevated`, `✓ time zone`, `✓ start at login: starts <install folder>\pcb-ui.exe`, `– service: no service on Windows: pcb-ui's Start at login runs it`, `✓ daemon: … kind ui`.
 
-## 12.12 Uninstall: PASS (the web app's session list: author to confirm)
+## 12.12 Uninstall: PASS (the session list confirmed by the author)
 
 - 10:07:56Z, console, `pcb-ui` serving: `pcb.exe uninstall --delete-data --yes` exit 20, `pcb is already serving (pid N, kind ui)`, hint `quit pcb-ui (its tray menu, Quit), then try again`; nothing deleted (both directories and the Run value still there).
 - 10:08:55Z: tray `Quit`: `daemon stopped stop=10ms`, `pcb.exe status` offline.
 - `pcb.exe uninstall --delete-data --plan`: `run logout <state> — revoke the Proton session, best effort`, `remove dir %APPDATA%\pcb`, `remove dir %LOCALAPPDATA%\pcb`, `remove autostart HKCU\Software\Microsoft\Windows\CurrentVersion\Run\pcb-ui — pcb-ui's autostart entry`, `Plan only: nothing was changed.`; 10:09:15Z `--yes`: the same four lines, exit 0. Then (ssh) both directories gone (with `secrets.key.dpapi`) and the Run value gone.
-- Observation: a `pcb status` run right after (offline) made a new `%LOCALAPPDATA%\pcb` (`layout.json` with the sealer chosen, `accounts`, two locks); Linux does the same (pre-existing: an offline `pcb status` on no state creates one). Removed by hand.
-- Whether the logout ended the Proton session: **author to confirm** (the web app's session list).
+- Observation: a `pcb status` run right after (offline) made a new `%LOCALAPPDATA%\pcb` (`layout.json` with the sealer chosen, `accounts`, two locks); Linux does the same (pre-existing: an offline `pcb status` on no state creates one; `spec/OPEN.md`). Removed by hand.
+- The logout ended the Proton session: **confirmed by the author** (2026-11-15: the test account's web-app session list shows no session left).
 
-## Author to confirm
+## The author's part
 
-| Line | Steps for the author |
+| Line | Outcome |
 |---|---|
-| 12.6 Thunderbird for Windows | On a Windows machine with Thunderbird for Windows (on the VM: as the administrator, `winget install Mozilla.Thunderbird`): unzip a release, start `pcb-ui`, add the test account in its window, then in Thunderbird (a fresh profile) New Calendar, On the Network, CalDAV, the Server URL and the Username from the account's pane, the password with its Copy: the calendars appear with their events; one event edit reaches the web app. Then Quit and `pcb uninstall --delete-data --yes`. It costs one login. |
-| 12.12 session list | In the Proton web app of the test account, the session list (Settings, Security): no session left from pcb's login of 2026-11-15 10:01Z (the uninstall's logout at 10:09:15Z). |
+| 12.6 Thunderbird for Windows | **Not checked live: skipped by the author** (2026-11-15), CalDAV having passed with `curl`. To run it later (one login): on a Windows machine with Thunderbird for Windows (on the VM: as the administrator, `winget install Mozilla.Thunderbird`), unzip a release, start `pcb-ui`, add the test account in its window, then in Thunderbird (a fresh profile) New Calendar, On the Network, CalDAV, the Server URL and the Username from the account's pane, the password with its Copy: the calendars appear with their events; one event edit reaches the web app. Then Quit and `pcb uninstall --delete-data --yes`. |
+| 12.12 session list | **Confirmed by the author** (2026-11-15): the test account's web-app session list shows no session left after the uninstall's logout (10:09:15Z). |
 
 ## Findings and their fixes
 

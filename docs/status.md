@@ -95,11 +95,11 @@ What is built, how each part was tested, and which checks against a real Proton 
 |---|---|
 | Built | `pcb-ui.exe` and `pcb.exe` on Windows 10 and 11 (amd64): the tray, the window, "Start at login", the bridge inside `pcb-ui`, the CLI talking to it over a pipe only your Windows account can open, the sealing key protected by Windows (DPAPI), files only your account can open; a `pcb_windows_amd64.zip` in each release ([install](install.md#windows)) |
 | Tested | on a Windows runner in CI and on a Windows 11 virtual machine as a standard user, against the fake Proton; a release runs both binaries from the zip before publishing |
-| Live | the whole bridge on a Windows 11 virtual machine as a standard user, against the test account, on 2026-11-15: the zip, `pcb-ui` with its tray and notifications, an account added through it, CalDAV, `pcb status` through it, "Start at login" across a real restart, a second Windows user kept out of the files and of the bridge, `pcb uninstall --delete-data`. Thunderbird for Windows itself was not driven (CalDAV was checked with `curl`). |
+| Live | the whole bridge on a Windows 11 virtual machine as a standard user, against the test account, on 2026-11-15: the zip, `pcb-ui` with its tray and notifications, an account added through it, CalDAV, `pcb status` through it, "Start at login" across a real restart, a second Windows user kept out of the files and of the bridge, `pcb uninstall --delete-data`. Thunderbird for Windows itself was not checked (skipped by the author; CalDAV was checked with `curl`); the author confirmed the uninstall ended the Proton session. |
 | Design | [the Windows port](../spec/decisions/0018-windows-port.md) |
 
 ## Still to check live
 
-- **Windows:** Thunderbird for Windows on the bridge (CalDAV itself was checked with `curl`), and that `pcb uninstall --delete-data` ended the Proton session (the web app's session list).
+- **Windows:** Thunderbird for Windows on the bridge (skipped in the live check; CalDAV itself was checked with `curl`).
 - **Session lifetime:** a 14-day probe of one Proton session, running until 2026-11-26 (so far: the access token lasts 24 hours and both tokens change on every refresh).
 - **Write-ups** of the 2026-11-13 sessions other than step 7 (M1, M2, step 6).

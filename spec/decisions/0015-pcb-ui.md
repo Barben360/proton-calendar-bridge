@@ -19,6 +19,6 @@ Why:
 Consequences and limits:
 - Building `pcb-ui` needs the GL and X development headers (`README.md`, "Build"); it is not part of `make build`. CI installs them in the jobs that compile it.
 - GNOME shows no tray icon without the AppIndicator extension; `pcb-ui` then opens its window and says so once.
-- Linux first; macOS is not planned. Windows: built, decision 0018 (runs, untested until its live check). The UI logic keeps each system's code in `platform_<os>.go` and `cmd/pcb-ui/*_<os>.go`.
+- Linux first; macOS is not planned. Windows: built, decision 0018, supported since its live check (0018). The UI logic keeps each system's code in `platform_<os>.go` and `cmd/pcb-ui/*_<os>.go`.
 - Fyne and godbus are new dependencies, credited in `README.md` (SPEC §20); nothing was copied.
 - Cost if wrong: the Fyne layer is replaceable (`internal/ui` is toolkit-free); the daemon-in-process choice would cost a CTL client in the UI.

@@ -17,7 +17,7 @@ This is still an early version: do not point pcb at a Proton account you care ab
 
 **macOS** gets `pcb` only (amd64 and arm64), from the same install line: no `pcb-ui` (Linux and Windows only), no desktop entry, no service management. It is untested by the author: CI runs the installer, `pcb version` and `pcb doctor` on macOS for every pull request, and a release runs the installer and `pcb version` (which must print the tag) on the real macOS archive before it is published, but nobody has tried logging in or syncing. A binary you download with a browser is quarantined by Gatekeeper; clear it with `xattr -d com.apple.quarantine pcb` (the install line, which uses `curl`, needs no such step).
 
-**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from a zip on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, a release runs them from the zip before it is published, and the whole bridge was checked live on a Windows 11 desktop as a standard user. There is no service: `pcb-ui`, started at login, runs the bridge.
+**Windows** 10 (1809 or later) and 11, amd64, run both `pcb-ui` and `pcb`, from a zip on the releases page ([Windows](#windows)). This is supported: CI builds and tests both binaries on Windows, a release runs them from the zip before it is published, and the bridge was checked live on a Windows 11 desktop as a standard user (CalDAV with `curl`: Thunderbird for Windows' own window was not checked). There is no service: `pcb-ui`, started at login, runs the bridge.
 
 ## Install a release
 

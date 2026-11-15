@@ -20,7 +20,7 @@ Why:
 - Fyne's supported Windows path is a native cgo build; a cross-compiled `pcb-ui` would never run in CI.
 
 Consequences and limits:
-- Supported since the live check: CI builds both binaries on Windows and runs the suites there. The live check (`spec/HUMAN-CHECKS.md` step 12, on the author's VM as a standard user) flips the label: a real logoff and logon, toasts from a zip install, Thunderbird, a second Windows user locked out of the state and the pipe, `uninstall --delete-data` (Thunderbird itself was replaced by `curl` on CalDAV and is for the author to confirm).
+- Supported since the live check: CI builds both binaries on Windows and runs the suites there. The live check (`spec/HUMAN-CHECKS.md` step 12, on the author's VM as a standard user) flipped the label: a real end of session (a restart) and the next logon, toasts from a zip install, CalDAV, a second Windows user locked out of the state and the pipe, `uninstall --delete-data`. Not checked live: Thunderbird for Windows' own window (skipped by the author; CalDAV passed with `curl`), an elevated and a normal `pcb` of the same user against one `pcb-ui`, and Windows 10.
 - Toasts from a zip install are best effort: without a Start-menu shortcut carrying the app's ID some Windows builds show none. The tray's attention state carries the same news. A click on a toast is not reported.
 - A machine without OpenGL 2.0 (a VM without 3D acceleration, some remote desktops) cannot run `pcb-ui`; Mesa's software `opengl32.dll` beside `pcb-ui.exe` works around it and is not shipped.
 - Stale `.key-*` temporary files at the state root (a crash while a key is created) are now removed when the Hub opens, on every system: that clean-up also runs on Linux.
