@@ -284,6 +284,18 @@ func TestUnknownLogLevelIsRefused(t *testing.T) {
 	refused(t, "[log]\nlevel = \"\"\n")
 }
 
+// An empty config.toml, what pcb-ui's "Open config.toml" makes when there
+// is none, loads as the defaults.
+func TestLoadEmptyFileGivesDefaults(t *testing.T) {
+	got, err := config.Load(write(t, ""), dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := config.Defaults(dirs); !reflect.DeepEqual(got, want) {
+		t.Errorf("an empty file loads as %+v, want the defaults %+v", got, want)
+	}
+}
+
 func TestBackendDefaultsToAuto(t *testing.T) {
 	if got := config.Defaults(dirs).Secrets.Backend; got != "auto" {
 		t.Fatalf("default backend = %q", got)
