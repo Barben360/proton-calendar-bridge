@@ -23,7 +23,7 @@ func guard(path string, _ fs.FileInfo, _ fs.FileMode, dir bool) ([]string, error
 	var oe *acl.OpenError
 	switch err := acl.Check(path); {
 	case errors.As(err, &oe):
-		return nil, fmt.Errorf("%s: its access list lets %s in: pcb will not use it (run pcb doctor for the fix)", path, oe.Account)
+		return nil, fmt.Errorf("%s: its access list lets %s in: pcb will not use it (run pcb doctor for the fix)", path, oe.Who())
 	case err != nil:
 		return nil, err
 	}

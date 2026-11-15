@@ -364,10 +364,10 @@ func keyCause(err error) string {
 		return dp.Error()
 	case errors.As(err, &me) && me.Dir && me.Owner != "":
 		return "its directory belongs to " + me.Owner + ", and pcb refuses to make a key there"
-	case errors.As(err, &me) && me.Dir:
-		return "its directory's access list lets " + me.Grantee + " in, and pcb refuses to make a key there"
-	case errors.As(err, &me) && me.Grantee != "":
-		return "its access list lets " + me.Grantee + " in, and pcb refuses it"
+	case errors.As(err, &me) && me.Dir && me.Open != nil:
+		return "its directory's access list lets " + me.Open.Who() + " in, and pcb refuses to make a key there"
+	case errors.As(err, &me) && me.Open != nil:
+		return "its access list lets " + me.Open.Who() + " in, and pcb refuses it"
 	case errors.As(err, &me):
 		return fmt.Sprintf("mode %04o lets other users read it, and pcb refuses it", me.Mode)
 	case errors.As(err, &se):

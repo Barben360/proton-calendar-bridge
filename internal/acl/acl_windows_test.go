@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -149,10 +150,46 @@ func TestCheckRefusesAnEveryoneACE(t *testing.T) {
 			if !errors.As(err, &oe) {
 				t.Fatalf("Check = %v, want *OpenError", err)
 			}
-			if oe.SID != "S-1-1-0" || oe.Path != b || oe.Account == "" {
-				t.Errorf("Check = %+v, want SID S-1-1-0, Path %s, an account name", oe, b)
+			if len(oe.Grantees) != 1 || oe.Grantees[0].SID != "S-1-1-0" || oe.Path != b || oe.Grantees[0].Account == "" {
+				t.Errorf("Check = %+v, want SID S-1-1-0 alone, Path %s, an account name", oe, b)
 			}
 		})
+	}
+}
+
+// A directory made in Explorer lets several accounts in: Check names every
+// one, each once (two entries of one account, here one inherit-only), in the
+// list's order, the user, SYSTEM and Administrators left out.
+func TestCheckNamesEveryOtherAccount(t *testing.T) {
+	b := filepath.Join(t.TempDir(), "b")
+	if err := acl.MkdirAll(b); err != nil {
+		t.Fatal(err)
+	}
+	const users = "S-1-5-32-545"
+	// Allow puts its entry before the others: the last one added comes first.
+	acltest.Allow(t, b, acl.SIDAdministrators, windows.GENERIC_ALL, windows.NO_INHERITANCE)
+	acltest.Allow(t, b, users, windows.GENERIC_READ, windows.INHERIT_ONLY_ACE|windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	acltest.Allow(t, b, acltest.Everyone, windows.GENERIC_READ, windows.NO_INHERITANCE)
+	acltest.Allow(t, b, users, windows.GENERIC_READ, windows.NO_INHERITANCE)
+	list, _ := aces(t, b)
+	n := 0
+	for _, a := range list {
+		if a.sid == users {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("setup: %d entries for Users, want 2: %+v", n, list)
+	}
+	var oe *acl.OpenError
+	if err := acl.Check(b); !errors.As(err, &oe) {
+		t.Fatalf("Check = %v, want *OpenError (ACEs %+v)", err, list)
+	}
+	if got, want := oe.SIDs(), []string{users, acltest.Everyone}; !slices.Equal(got, want) {
+		t.Errorf("SIDs = %q, want %q (ACEs %+v)", got, want, list)
+	}
+	if want := acl.AccountName(users) + " (" + users + ") and " + acl.AccountName(acltest.Everyone) + " (" + acltest.Everyone + ")"; oe.Who() != want {
+		t.Errorf("Who = %q, want %q", oe.Who(), want)
 	}
 }
 
@@ -167,7 +204,7 @@ func TestCheckRefusesANullDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	var oe *acl.OpenError
-	if err := acl.Check(b); !errors.As(err, &oe) || oe.SID != "S-1-1-0" {
+	if err := acl.Check(b); !errors.As(err, &oe) || !slices.Equal(oe.SIDs(), []string{"S-1-1-0"}) {
 		t.Errorf("Check = %v, want *OpenError for S-1-1-0", err)
 	}
 }
@@ -260,7 +297,7 @@ func TestMkdirAllChecksADirectoryMadeMeanwhile(t *testing.T) {
 		acltest.OpenToOthers(t, parent) // inherited by what is made inside
 		defer acl.SetMkdir(madeBy(t))()
 		var oe *acl.OpenError
-		if err := acl.MkdirAll(filepath.Join(parent, "pcb")); !errors.As(err, &oe) || oe.SID != acltest.Everyone {
+		if err := acl.MkdirAll(filepath.Join(parent, "pcb")); !errors.As(err, &oe) || !slices.Equal(oe.SIDs(), []string{acltest.Everyone}) {
 			t.Errorf("MkdirAll = %v, want an *OpenError for Everyone", err)
 		}
 	})

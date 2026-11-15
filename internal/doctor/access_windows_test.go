@@ -39,6 +39,27 @@ func TestDirModeCheckReportsAnOpenACL(t *testing.T) {
 	}
 }
 
+// A directory made in Explorer lets several accounts in: one run names
+// every one, each with its SID, and gives one fix that removes them all.
+func TestDirModeCheckNamesEveryOpenACE(t *testing.T) {
+	d := filepath.Join(t.TempDir(), "made in Explorer")
+	if err := acl.MkdirAll(d); err != nil {
+		t.Fatal(err)
+	}
+	const users = "S-1-5-32-545" // BUILTIN\Users
+	// Allow puts its entry before the others: Everyone's comes first.
+	acltest.Allow(t, d, users, windows.GENERIC_READ, windows.INHERIT_ONLY_ACE|windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	acltest.Allow(t, d, acltest.Everyone, windows.GENERIC_READ, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	got := (doctor.DirModeCheck{Label: "state dir", Path: d, Want: 0o700}).Run(context.Background())
+	wantMsg := d + ": its access list lets " + acl.AccountName(acltest.Everyone) + " (" + acltest.Everyone + ") and " +
+		acl.AccountName(users) + " (" + users + ") in"
+	p := shellquote.PowerShell(d)
+	wantFix := "icacls " + p + " /inheritance:d; icacls " + p + " /remove:g '*" + acltest.Everyone + "' '*" + users + "'"
+	if got.Status != doctor.StatusError || got.Message != wantMsg || got.Fix != wantFix {
+		t.Errorf("two open ACEs: %+v\nwant message %q\nwant fix %q", got, wantMsg, wantFix)
+	}
+}
+
 // A directory owned by an account pcb does not accept is an error (an
 // elevated run's directories, Administrators', for a normal run); a file
 // is checked by its access list only.

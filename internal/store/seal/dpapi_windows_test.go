@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -267,7 +268,7 @@ func TestDPAPIRefusesAKeyOrDirectoryNotPrivate(t *testing.T) {
 			"open":  func() error { _, err := d.Open(sealed, nil); return err },
 		} {
 			var me *seal.KeyModeError
-			if err := run(); !errors.As(err, &me) || me.Grantee != acltest.Everyone || me.Path != path {
+			if err := run(); !errors.As(err, &me) || me.Open == nil || !slices.Equal(me.Open.SIDs(), []string{acltest.Everyone}) || me.Path != path {
 				t.Errorf("%s = %v, want a KeyModeError for Everyone", name, err)
 			}
 		}
@@ -280,7 +281,7 @@ func TestDPAPIRefusesAKeyOrDirectoryNotPrivate(t *testing.T) {
 		acltest.OpenToOthers(t, filepath.Dir(path))
 		_, err := (&seal.DPAPI{Path: path}).Seal([]byte("x"), nil)
 		var me *seal.KeyModeError
-		if !errors.As(err, &me) || !me.Dir || me.Grantee != acltest.Everyone {
+		if !errors.As(err, &me) || !me.Dir || me.Open == nil || !slices.Equal(me.Open.SIDs(), []string{acltest.Everyone}) {
 			t.Fatalf("Seal = %v, want a KeyModeError for the directory", err)
 		}
 		wantNoKey(t, path)

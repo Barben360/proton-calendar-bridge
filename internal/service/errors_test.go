@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
@@ -159,15 +160,19 @@ func TestCalendarErrorShowsTheUnverifiedNote(t *testing.T) {
 	}
 }
 
-// keyCause names what refused the key file: its mode on Unix, the SID its
-// access list lets in on Windows; either is a key fault (exit 10).
+// keyCause names what refused the key file: its mode on Unix, the accounts
+// its access list lets in on Windows, by name and SID (acl.OpenError.Who);
+// either is a key fault (exit 10).
 func TestKeyCauseNamesTheModeOrTheAccessList(t *testing.T) {
 	for _, tc := range []struct {
 		err  *seal.KeyModeError
 		want string
 	}{
 		{&seal.KeyModeError{Path: "k", Mode: 0o644}, "mode 0644 lets other users read it, and pcb refuses it"},
-		{&seal.KeyModeError{Path: "k", Grantee: "S-1-1-0"}, "its access list lets S-1-1-0 in, and pcb refuses it"},
+		{&seal.KeyModeError{Path: "k", Open: &acl.OpenError{Path: "k", Grantees: []acl.Grantee{{SID: "S-1-1-0", Account: "Everyone"}}}},
+			"its access list lets Everyone (S-1-1-0) in, and pcb refuses it"},
+		{&seal.KeyModeError{Path: "d", Dir: true, Open: &acl.OpenError{Path: "d", Grantees: []acl.Grantee{{SID: "S-1-1-0", Account: "Everyone"}, {SID: "S-1-5-21-9"}}}},
+			"its directory's access list lets Everyone (S-1-1-0) and S-1-5-21-9 in, and pcb refuses to make a key there"},
 	} {
 		err := fmt.Errorf("open: %w", tc.err)
 		if got := keyCause(err); got != tc.want {

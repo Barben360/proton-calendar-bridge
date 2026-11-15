@@ -13,6 +13,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
 
 func TestCheckStateOwnerAcceptsOurDirectory(t *testing.T) {
@@ -93,6 +94,29 @@ func TestCheckStateOwnerRefusesAnOpenRoot(t *testing.T) {
 	}
 	if hint := exitcode.HintOf(err); !strings.Contains(hint, "pcb doctor") || !strings.Contains(hint, acl.Fix(d, acltest.Everyone)) {
 		t.Errorf("hint %q, want pcb doctor and its fix", hint)
+	}
+}
+
+// Every account the state directory's access list lets in is named in one
+// refusal, and its hint's fix removes them all.
+func TestCheckStateOwnerNamesEveryOpenACE(t *testing.T) {
+	d := filepath.Join(t.TempDir(), "state")
+	if err := acl.MkdirAll(d); err != nil {
+		t.Fatal(err)
+	}
+	const users = "S-1-5-32-545" // BUILTIN\Users
+	// Allow puts its entry before the others: Everyone's comes first.
+	acltest.Allow(t, d, users, windows.GENERIC_READ, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	acltest.Allow(t, d, acltest.Everyone, windows.GENERIC_READ, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	err := CheckStateOwner(d, -1, nil)
+	want := "the state directory " + d + ": its access list (ACL) lets " + acl.AccountName(acltest.Everyone) + " (" + acltest.Everyone + ") and " +
+		acl.AccountName(users) + " (" + users + ") in, so the files pcb writes there would be readable by others"
+	if exitcode.From(err) != exitcode.MustAct || err.Error() != want {
+		t.Fatalf("err = %v (exit %d)\nwant %q (exit 10)", err, exitcode.From(err), want)
+	}
+	p := shellquote.PowerShell(d)
+	if hint, want := exitcode.HintOf(err), "run pcb doctor for the fix: icacls "+p+" /inheritance:d; icacls "+p+" /remove:g '*"+acltest.Everyone+"' '*"+users+"'"; hint != want {
+		t.Errorf("hint %q\nwant %q", hint, want)
 	}
 }
 
