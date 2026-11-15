@@ -2,6 +2,7 @@ package ui_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -88,8 +89,12 @@ func TestUpdatesShowsAnUpdateAndNotifiesOnce(t *testing.T) {
 	if note == nil || note.Title != "pcb" || note.Body != "pcb v0.2.0 is available (you have v0.1.0)." {
 		t.Errorf("notification = %+v", note)
 	}
+	if _, again := u.Refresh(context.Background()); again == nil {
+		t.Errorf("refresh before MarkNotified: no notification, want it offered again (not yet delivered)")
+	}
+	u.MarkNotified("v0.2.0")
 	if _, note := u.Refresh(context.Background()); note != nil {
-		t.Errorf("second refresh notified again: %+v", note)
+		t.Errorf("refresh after MarkNotified notified again: %+v", note)
 	}
 }
 
@@ -104,6 +109,7 @@ func TestUpdatesLaterHidesThePanelFor48Hours(t *testing.T) {
 	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	u.Refresh(context.Background())
+	u.MarkNotified("v0.2.0")
 	u.Later()
 	if n, _ := u.Refresh(context.Background()); n.Panel || !n.Available {
 		t.Errorf("right after Later: %+v, want available without the panel", n)
@@ -196,7 +202,7 @@ func TestUpdatesRunShowsAtStartAndOnPoke(t *testing.T) {
 	shown := make(chan ui.UpdateNotice, 4)
 	notes := make(chan string, 4)
 	poke := make(chan struct{})
-	go u.Run(ctx, time.Hour, poke, func(n ui.UpdateNotice) { shown <- n }, func(_ ui.Notification, url string) { notes <- url })
+	go u.Run(ctx, time.Hour, poke, func(n ui.UpdateNotice) { shown <- n }, func(_ ui.Notification, url string) error { notes <- url; return nil })
 	wait := func(what string) ui.UpdateNotice {
 		select {
 		case n := <-shown:
@@ -221,6 +227,62 @@ func TestUpdatesRunShowsAtStartAndOnPoke(t *testing.T) {
 	poke <- struct{}{}
 	if n := wait("after the poke"); n.Panel {
 		t.Errorf("after Later and a poke: %+v, want no panel", n)
+	}
+}
+
+// A notification that failed to send is not marked: it comes again at the
+// next refresh, and stops once one is delivered.
+func TestUpdatesRunRetriesAFailedNotificationUntilDelivered(t *testing.T) {
+	g, c := newGH(t), newClock()
+	u := newUpdates(t, g, "v0.1.0", c)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	shown := make(chan struct{}, 8)
+	attempts := make(chan error, 8)
+	failures := 1
+	poke := make(chan struct{})
+	go u.Run(ctx, time.Hour, poke, func(ui.UpdateNotice) { shown <- struct{}{} }, func(ui.Notification, string) error {
+		var err error
+		if failures > 0 {
+			failures--
+			err = errors.New("D-Bus: no notification server")
+		}
+		attempts <- err
+		return err
+	})
+	cycle := func(what string) {
+		t.Helper()
+		select {
+		case <-shown:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no refresh %s", what)
+		}
+	}
+	attempt := func(what string) error {
+		t.Helper()
+		select {
+		case err := <-attempts:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no notification %s", what)
+		}
+		return nil
+	}
+	cycle("at start")
+	if err := attempt("at start"); err == nil {
+		t.Fatal("first attempt should have failed")
+	}
+	poke <- struct{}{}
+	cycle("after the first poke")
+	if err := attempt("after the failed one"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	poke <- struct{}{}
+	cycle("after the second poke")
+	select {
+	case err := <-attempts:
+		t.Errorf("notified again after a delivered one (err %v)", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

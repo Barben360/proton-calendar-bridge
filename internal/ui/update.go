@@ -55,8 +55,12 @@ func (u *Updates) SetEnabled(ctx context.Context, on bool) error {
 // Later hides the panel for LaterFor.
 func (u *Updates) Later() { u.Prefs.SetString(prefLater, u.Now().Add(LaterFor).Format(time.RFC3339)) }
 
-// Refresh is the notice now, and a notification the first time a version
-// shows up. Switched off or a dev build: nothing. A failed check keeps
+// MarkNotified records that version's notification was delivered: Refresh
+// offers it again until then, so a failed send is retried.
+func (u *Updates) MarkNotified(version string) { u.Prefs.SetString(prefNotified, version) }
+
+// Refresh is the notice now, and a notification while the version's has not
+// been delivered (see MarkNotified). Switched off or a dev build: nothing. A failed check keeps
 // update.json's last answer, so the panel does not come and go with the
 // network.
 func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
@@ -83,7 +87,6 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 	}
 	var note *Notification
 	if u.Prefs.String(prefNotified) != n.Version {
-		u.Prefs.SetString(prefNotified, n.Version)
 		note = &Notification{Code: "update-available", Title: "pcb", Body: fmt.Sprintf("pcb %s is available (you have %s).", n.Version, n.Installed)}
 	}
 	return n, note
@@ -91,15 +94,18 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 
 // Run refreshes at start, every interval and at each poke (Later, the
 // switch), showing each notice and notifying with the release page, until
-// ctx ends.
-func (u *Updates) Run(ctx context.Context, every time.Duration, poke <-chan struct{}, show func(UpdateNotice), notify func(Notification, string)) {
+// ctx ends. A version is marked notified only once notify returned nil: a
+// failed one is sent again at the next refresh.
+func (u *Updates) Run(ctx context.Context, every time.Duration, poke <-chan struct{}, show func(UpdateNotice), notify func(Notification, string) error) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		n, note := u.Refresh(ctx)
 		show(n)
 		if note != nil {
-			notify(*note, n.URL)
+			if notify(*note, n.URL) == nil {
+				u.MarkNotified(n.Version)
+			}
 		}
 		select {
 		case <-ctx.Done():

@@ -224,7 +224,7 @@ func newUpdates(a fyne.App, state string) *ui.Updates {
 }
 
 // followUpdates draws each update notice in the window and the tray, and
-// sends its notification once per version; a click on it opens the
+// sends its notification once per version (a failed send is retried at the next check); a click on it opens the
 // release page (Linux: Windows reports no click).
 func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
 	later := func() {
@@ -238,10 +238,13 @@ func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *
 				tray.SetUpdate(n)
 			}
 		})
-	}, func(note ui.Notification, page string) {
+	}, func(note ui.Notification, page string) error {
+		var err error
 		ui.Send(log, []ui.Notification{note}, func(note ui.Notification) error {
-			return desktop.Notify("", note, func(string) { fyne.Do(func() { win.OpenURL(page) }) })
+			err = desktop.Notify("", note, func(string) { fyne.Do(func() { win.OpenURL(page) }) })
+			return err
 		})
+		return err
 	})
 }
 
