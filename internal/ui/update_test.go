@@ -36,6 +36,8 @@ type gh struct {
 	n    atomic.Int32
 	tag  atomic.Value
 	fail atomic.Bool
+	// gate, when set, holds each request until it is closed (a slow GitHub).
+	gate atomic.Pointer[chan struct{}]
 }
 
 func newGH(t *testing.T) *gh {
@@ -44,6 +46,9 @@ func newGH(t *testing.T) *gh {
 	g.tag.Store("v0.2.0")
 	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		g.n.Add(1)
+		if gate := g.gate.Load(); gate != nil {
+			<-*gate
+		}
 		if g.fail.Load() {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -283,6 +288,129 @@ func TestUpdatesRunRetriesAFailedNotificationUntilDelivered(t *testing.T) {
 	case err := <-attempts:
 		t.Errorf("notified again after a delivered one (err %v)", err)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// slowRun starts Run against a GitHub that holds its answer until release.
+// shown gets every show; notes every notification's URL; poke is buffered
+// as the settings pane's is (a poke never blocks).
+type slowRun struct {
+	g       *gh
+	u       *ui.Updates
+	shown   chan ui.UpdateNotice
+	notes   chan string
+	poke    chan struct{}
+	release func()
+}
+
+func startSlowRun(t *testing.T) *slowRun {
+	t.Helper()
+	g, c := newGH(t), newClock()
+	gate := make(chan struct{})
+	g.gate.Store(&gate)
+	var once sync.Once
+	r := &slowRun{g: g, u: newUpdates(t, g, "v0.1.0", c),
+		shown: make(chan ui.UpdateNotice, 16), notes: make(chan string, 16), poke: make(chan struct{}, 1),
+		release: func() { once.Do(func() { close(gate) }) }}
+	t.Cleanup(r.release) // a failed run must not leave the server blocked
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go r.u.Run(ctx, time.Hour, r.poke, func(n ui.UpdateNotice) { r.shown <- n }, func(_ ui.Notification, url string) error { r.notes <- url; return nil })
+	deadline := time.Now().Add(30 * time.Second)
+	for g.n.Load() == 0 { // the check is in flight, blocked on GitHub
+		if time.Now().After(deadline) {
+			t.Fatal("the check never reached GitHub")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return r
+}
+
+func (r *slowRun) nextShow(t *testing.T, what string) ui.UpdateNotice {
+	t.Helper()
+	select {
+	case n := <-r.shown:
+		return n
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no show %s", what)
+	}
+	return ui.UpdateNotice{}
+}
+
+func (r *slowRun) setEnabled(t *testing.T, on bool) {
+	t.Helper()
+	if err := r.u.SetEnabled(context.Background(), on); err != nil {
+		t.Fatal(err)
+	}
+	r.poke <- struct{}{}
+}
+
+// The switch is turned off while a check waits on GitHub: the notice is
+// cleared at once (not after the check), the late answer is neither shown
+// nor notified, and its version is not marked: switched on again, the
+// notification still comes.
+func TestUpdatesRunSwitchOffDuringACheckClearsAtOnceAndDropsTheResult(t *testing.T) {
+	r := startSlowRun(t)
+	r.setEnabled(t, false)
+	if n := r.nextShow(t, "while the check was in flight"); n != (ui.UpdateNotice{}) {
+		t.Fatalf("after the switch-off: %+v, want the empty notice", n)
+	}
+	r.release() // the late answer arrives: v0.2.0
+	// The shows that follow the release come from the dropped iteration and
+	// from the pass after it (the switch-off poke asked for one): once the
+	// second is seen, a notify in the first would have been sent.
+	for i := 0; i < 2; i++ {
+		if n := r.nextShow(t, "after the dropped check"); n != (ui.UpdateNotice{}) {
+			t.Fatalf("shown after the switch-off: %+v", n)
+		}
+	}
+	select {
+	case url := <-r.notes:
+		t.Fatalf("notified %q after the switch-off", url)
+	default:
+	}
+	if v := r.u.Prefs.String("updateNotified"); v != "" {
+		t.Fatalf("version %q marked notified by a dropped check", v)
+	}
+	r.setEnabled(t, true)
+	for n := r.nextShow(t, "after switching on"); !n.Panel; n = r.nextShow(t, "after switching on") {
+	}
+	select {
+	case url := <-r.notes:
+		if url != r.g.releasePage("v0.2.0") {
+			t.Errorf("notification URL = %q", url)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notification of the dropped version was lost")
+	}
+}
+
+// Off then on again during one check: the check's answer is still wanted.
+func TestUpdatesRunSwitchOffAndOnDuringACheckShowsTheResult(t *testing.T) {
+	r := startSlowRun(t)
+	r.setEnabled(t, false)
+	if n := r.nextShow(t, "after the switch-off"); n != (ui.UpdateNotice{}) {
+		t.Fatalf("after the switch-off: %+v", n)
+	}
+	r.setEnabled(t, true)
+	r.release()
+	if n := r.nextShow(t, "after the check"); !n.Panel {
+		t.Fatalf("after off and on: %+v, want the panel", n)
+	}
+	select {
+	case <-r.notes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification")
+	}
+	// The pass that follows the pokes ends with a show: once seen, the
+	// version was offered again and must not have been notified twice.
+	if n := r.nextShow(t, "after the follow-up pass"); !n.Panel {
+		t.Fatalf("follow-up pass: %+v", n)
+	}
+	select {
+	case url := <-r.notes:
+		t.Errorf("notified twice (%q)", url)
+	default:
 	}
 }
 

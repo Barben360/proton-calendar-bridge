@@ -96,16 +96,49 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 // switch), showing each notice and notifying with the release page, until
 // ctx ends. A version is marked notified only once notify returned nil: a
 // failed one is sent again at the next refresh.
+//
+// A check takes up to its HTTP timeout, so Run watches the pokes meanwhile:
+// once the switch is off, the notice is cleared at once and the result of
+// the check in flight is dropped (never shown, notified or marked). Only
+// Run's goroutine calls show, so a stale notice cannot follow the clearing.
 func (u *Updates) Run(ctx context.Context, every time.Duration, poke <-chan struct{}, show func(UpdateNotice), notify func(Notification, string) error) {
 	t := time.NewTicker(every)
 	defer t.Stop()
+	type result struct {
+		n    UpdateNotice
+		note *Notification
+	}
 	for {
-		n, note := u.Refresh(ctx)
-		show(n)
-		if note != nil {
-			if notify(*note, n.URL) == nil {
-				u.MarkNotified(n.Version)
+		done := make(chan result, 1)
+		go func() {
+			n, note := u.Refresh(ctx)
+			done <- result{n, note}
+		}()
+		again := false // a poke came in during the check: look again after it
+		var r result
+	wait:
+		for {
+			select {
+			case r = <-done:
+				break wait
+			case <-poke:
+				if !u.Enabled() {
+					show(UpdateNotice{})
+				}
+				again = true
+			case <-ctx.Done():
+				return
 			}
+		}
+		if !u.Enabled() { // switched off during the check
+			r = result{}
+		}
+		show(r.n)
+		if r.note != nil && notify(*r.note, r.n.URL) == nil {
+			u.MarkNotified(r.n.Version)
+		}
+		if again {
+			continue
 		}
 		select {
 		case <-ctx.Done():
