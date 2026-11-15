@@ -429,6 +429,10 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	case errors.Is(err, ctl.ErrUnsupported):
 		log.Debug("no control socket on this system")
 		return func() {}, nil
+	case err != nil && onWindows: // no pcb.sock: the pipe of the state directory, which Listen's error names
+		log.Error("the control pipe cannot start", "dir", filepath.Dir(d.Socket), "error", reasonOf(err))
+		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control pipe of %s: %w", filepath.Dir(d.Socket), err),
+			Hint: controlHint(err, d.Socket)}
 	case err != nil:
 		log.Error("the control socket cannot start", "path", d.Socket, "error", reasonOf(err))
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
@@ -442,11 +446,11 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			log.Warn("the control socket failed: pcb status shows the offline view", "error", err.Error())
 		}
 	}()
-	started := []any{"path", d.Socket}
-	if runtime.GOOS == "windows" {
-		started = append(started, "pipe", ln.Addr().String()) // the pipe's name, for the live check
+	what, started := "control socket", []any{"path", d.Socket}
+	if onWindows {
+		what, started = "control pipe", []any{"pipe", ln.Addr().String()} // the pipe's name, for the live check
 	}
-	log.Info("control socket started", started...)
+	log.Info(what+" started", started...)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -454,7 +458,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			defer cancel()
 			_ = srv.Shutdown(ctx)
 			<-done
-			log.Info("control socket stopped")
+			log.Info(what + " stopped")
 		})
 	}, nil
 }
@@ -505,9 +509,14 @@ func controlHint(err error, socket string) string {
 	case errors.Is(err, ctl.ErrPipeTaken):
 		return "stop the other pcb-ui or pcb serve of this state; if none runs, another user's process holds the name: set " +
 			paths.EnvStateDir + " to another directory"
+	case onWindows: // the pipe is named after dir, which holds no socket file
+		return "make sure " + dir + " exists and is this user's (pcb doctor checks it), then start pcb-ui or pcb serve again"
 	}
 	return "make sure " + dir + " is writable by this user"
 }
+
+// onWindows is set on Windows, where the control channel is a named pipe.
+const onWindows = runtime.GOOS == "windows"
 
 // certNotAfter is the end of the listener's certificate, nil without TLS.
 func certNotAfter(conf *tls.Config) *time.Time {

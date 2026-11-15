@@ -325,6 +325,22 @@ func TestLogPassInventsNoProtonAnswer(t *testing.T) {
 	}
 }
 
+// Any other failure to open the control channel: on Unix the socket's
+// directory must be writable; on Windows there is no socket file, the pipe
+// is named after the state directory, which must be this user's.
+func TestControlHintForAnyOtherFailure(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join("state")
+	got := controlHint(errors.New("boom"), filepath.Join(dir, "pcb.sock"))
+	want := "make sure " + dir + " is writable by this user"
+	if runtime.GOOS == "windows" {
+		want = "make sure " + dir + " exists and is this user's (pcb doctor checks it), then start pcb-ui or pcb serve again"
+	}
+	if got != want {
+		t.Errorf("controlHint = %q, want %q", got, want)
+	}
+}
+
 // A control pipe already served (Windows) names both causes and the way
 // out: another pcb of this state, or a squatter to step around.
 func TestControlHintForATakenPipe(t *testing.T) {
@@ -367,21 +383,32 @@ func TestControlStartLogNamesThePipeOnWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop()
-	var started map[string]any
+	// Windows has no pcb.sock: its lines name the pipe alone.
+	startMsg, stopMsg := "control socket started", "control socket stopped"
+	if runtime.GOOS == "windows" {
+		startMsg, stopMsg = "control pipe started", "control pipe stopped"
+	}
+	var started, stopped map[string]any
 	for line := range strings.Lines(logs.String()) {
 		var rec map[string]any
-		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "control socket started" {
-			started = rec
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			switch rec["msg"] {
+			case startMsg:
+				started = rec
+			case stopMsg:
+				stopped = rec
+			}
 		}
 	}
-	if started == nil || started["path"] != socket {
-		t.Fatalf("start line = %v, want one naming %s:\n%s", started, socket, logs.String())
+	if started == nil || stopped == nil {
+		t.Fatalf("want the lines %q and %q:\n%s", startMsg, stopMsg, logs.String())
 	}
-	pipe, has := started["pipe"].(string)
+	path, hasPath := started["path"]
+	pipe, hasPipe := started["pipe"].(string)
 	switch {
-	case runtime.GOOS == "windows" && !strings.HasPrefix(pipe, `\\.\pipe\pcb-`):
-		t.Errorf("start line pipe = %q, want the pipe's name", pipe)
-	case runtime.GOOS != "windows" && has:
-		t.Errorf("start line names a pipe off Windows: %v", started)
+	case runtime.GOOS == "windows" && (hasPath || !strings.HasPrefix(pipe, `\\.\pipe\pcb-`)):
+		t.Errorf("start line = %v, want the pipe's name and no pcb.sock", started)
+	case runtime.GOOS != "windows" && (path != socket || hasPipe):
+		t.Errorf("start line = %v, want the path %s and no pipe", started, socket)
 	}
 }

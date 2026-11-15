@@ -70,8 +70,7 @@ func dial(ctx context.Context, path string, peer func(net.Conn) (int, bool)) (*C
 		if errors.Is(err, ErrNoDaemon) || errors.As(err, &ee) {
 			return nil, err
 		}
-		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot reach the pcb daemon on %s: %w", path, err),
-			Hint: "check that you run pcb as the user that runs pcb serve"}
+		return nil, unreachable(path, err)
 	}
 	c := &Client{first: first, now: time.Now}
 	c.firstAt = c.now()
@@ -88,6 +87,13 @@ func dial(ctx context.Context, path string, peer func(net.Conn) (int, bool)) (*C
 	}
 	c.hc = &http.Client{Transport: tr}
 	return c, nil
+}
+
+// unreachable is a daemon at path that Dial cannot reach for err, neither
+// ErrNoDaemon nor a refusal: blocked (20), naming the control channel
+// (endpoint: the socket on Unix, the pipe on Windows).
+func unreachable(path string, err error) *exitcode.Error {
+	return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot reach the pcb daemon on %s: %w", endpoint(path), err), Hint: unreachableHint}
 }
 
 // takeFirst returns the connection Dial made, once, while it is fresh: a

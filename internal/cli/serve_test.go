@@ -1026,8 +1026,12 @@ func TestServeRemovesTheSocketWhenItFails(t *testing.T) {
 		if code := s.exit(); code != exitcode.Blocked {
 			t.Fatalf("exit %d, want 20\nstderr: %s", code, s.errb.String())
 		}
-		if !strings.Contains(s.errb.String(), "control socket started") {
-			t.Fatalf("the control socket never started:\n%s", s.errb.String())
+		started := "control socket started"
+		if runtime.GOOS == "windows" {
+			started = "control pipe started"
+		}
+		if !strings.Contains(s.errb.String(), started) {
+			t.Fatalf("the control channel never started (no %q):\n%s", started, s.errb.String())
 		}
 		if err := controlGone(t, r.dirs.Socket()); err != nil {
 			t.Errorf("after a listener failure: %v", err)
