@@ -149,7 +149,7 @@ func run(args []string) int {
 		quit()
 	}()
 	go follow(ctx, bridge, win, tray, log)
-	go followUpdates(ctx, updates, set.poke, win, tray, log)
+	go followUpdates(ctx, updates, set.poke, win, trayOrNil(tray), desktopNotifier{}, log)
 
 	a.Run()
 	cancel()
@@ -223,11 +223,40 @@ func newUpdates(a fyne.App, state string) *ui.Updates {
 	return u
 }
 
-// followUpdates draws each update notice in the window and the tray, and
-// sends its notification once per version (a failed send is retried at the
-// next check); a click on it opens the release page (Linux: Windows reports
-// no click).
-func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
+// updateWindow, updateTray and updateNotifier are what followUpdates asks of
+// the window, the tray and the desktop notification (a test passes fakes).
+type updateWindow interface {
+	SetUpdate(n ui.UpdateNotice, later func())
+	OpenURL(raw string)
+}
+
+type updateTray interface{ SetUpdate(n ui.UpdateNotice) }
+
+type updateNotifier interface {
+	Notify(note ui.Notification, onClick func(account string)) error
+}
+
+// trayOrNil is t as an updateTray, or a true nil when there is no tray: an
+// interface holding a nil *Tray is not nil, and followUpdates would call it.
+func trayOrNil(t *desktop.Tray) updateTray {
+	if t == nil {
+		return nil
+	}
+	return t
+}
+
+// desktopNotifier sends through the desktop's notification service.
+type desktopNotifier struct{}
+
+func (desktopNotifier) Notify(note ui.Notification, onClick func(string)) error {
+	return desktop.Notify("", note, onClick)
+}
+
+// followUpdates draws each update notice in the window and the tray (nil:
+// no tray), and sends its notification once per version (a failed send is
+// retried at the next check); a click on it opens the release page (Linux:
+// Windows reports no click).
+func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win updateWindow, tray updateTray, notifier updateNotifier, log *slog.Logger) {
 	later := func() {
 		u.Later()
 		pokeLoop(poke)
@@ -242,7 +271,7 @@ func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *
 	}, func(note ui.Notification, page string) error {
 		var err error
 		ui.Send(log, []ui.Notification{note}, func(note ui.Notification) error {
-			err = desktop.Notify("", note, func(string) { fyne.Do(func() { win.OpenURL(page) }) })
+			err = notifier.Notify(note, func(string) { fyne.Do(func() { win.OpenURL(page) }) })
 			return err
 		})
 		return err
