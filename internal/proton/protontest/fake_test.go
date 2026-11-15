@@ -278,6 +278,33 @@ func TestStallNextForHitsOnlyThatUser(t *testing.T) {
 	}
 }
 
+func TestHoldNextWaitsForReleaseAndSignalsArrival(t *testing.T) {
+	t.Parallel()
+	f := protontest.New(t, protontest.Options{})
+	a := login(t, f, f.Username, f.Password)
+	hold := f.HoldNext("GET", "/core/v4/users")
+	got := make(chan int, 1)
+	go func() { status, _, _ := getUser(t, f, a); got <- status }()
+	select {
+	case <-hold.Reached():
+	case <-time.After(time.Minute):
+		t.Fatal("the held request never arrived")
+	}
+	select {
+	case status := <-got:
+		t.Fatalf("held request answered %d before Release", status)
+	case <-time.After(300 * time.Millisecond):
+	}
+	hold.Release()
+	hold.Release() // twice is harmless
+	if status := <-got; status != 200 {
+		t.Fatalf("released request = %d, want 200", status)
+	}
+	if status, _, _ := getUser(t, f, a); status != 200 {
+		t.Fatalf("next request = %d, want 200 (one hold queued)", status)
+	}
+}
+
 func TestCaptchaForChallengesOnlyThatUser(t *testing.T) {
 	t.Parallel()
 	f := protontest.New(t, protontest.Options{})

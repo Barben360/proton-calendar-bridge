@@ -969,18 +969,20 @@ func TestSecondLoginWhileOneRunsIsRefused(t *testing.T) {
 	e := newHubEnv(t)
 	h := e.open(t)
 	e.skip(t, h)
-	e.f.StallNext("GET", "/core/v4/keys/salts", 2*time.Second)
+	// Hold the first login at its key call until the second was refused:
+	// no timer decides how long it runs, and no deadline how long it takes
+	// to get there, whatever the load.
+	hold := e.f.HoldNext("GET", "/core/v4/keys/salts")
+	t.Cleanup(hold.Release)
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.login(t, h, userA)
 		done <- err
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for e.f.Calls("GET", "/core/v4/keys/salts") == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the first login never reached its key calls")
-		}
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-hold.Reached():
+	case err := <-done:
+		t.Fatalf("the first login ended before its key call: %v", err)
 	}
 	if !h.LoginInProgress() {
 		t.Error("LoginInProgress is false while a login runs")
@@ -989,6 +991,7 @@ func TestSecondLoginWhileOneRunsIsRefused(t *testing.T) {
 	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "a login is already in progress" {
 		t.Errorf("second login: %q", ee.Error())
 	}
+	hold.Release()
 	if err := <-done; err != nil {
 		t.Fatalf("first login: %v", err)
 	}

@@ -101,22 +101,22 @@ type Fake struct {
 
 	mu        sync.Mutex
 	calls     []call
-	failures  map[userRoute][]failure       // user ("" = every user), "METHOD /path" → queued answers
-	stalls    map[userRoute][]time.Duration // user ("" = every user), "METHOD /path" → queued stalls, by their bound
-	perUser   bool                          // a per-user failure, stall, CAPTCHA or 2FA was set: serve resolves the user
-	issued    map[string]bool               // access tokens handed out, not yet expired
-	minted    []string                      // every access token handed out, in order
-	expired   map[string]bool               // access tokens that answer 401
-	unlocked  map[string]bool               // UIDs holding the locked scope
-	users     map[string]string             // username → user ID
-	passwords map[string]string             // username → password
-	captchas  map[string]string             // user ("" = every user) → CAPTCHA token; Options.Captcha, SetCaptcha*
-	twoFAs    map[string]userTwoFA          // user → 2FA set by SetTwoFA, overriding Options.TwoFA
-	codes     []string                      // 2FA codes received, in order
-	sessions  map[string]sessionRec         // access token minted by Session → session
-	logins    map[string]loginRec           // UID → session handed out by Login, not spent
-	rotated   map[string]string             // refresh token issued by a refresh → its pair's access token
-	refreshes []string                      // every refresh token handed out, in order
+	failures  map[userRoute][]failure // user ("" = every user), "METHOD /path" → queued answers
+	stalls    map[userRoute][]stall   // user ("" = every user), "METHOD /path" → queued stalls
+	perUser   bool                    // a per-user failure, stall, CAPTCHA or 2FA was set: serve resolves the user
+	issued    map[string]bool         // access tokens handed out, not yet expired
+	minted    []string                // every access token handed out, in order
+	expired   map[string]bool         // access tokens that answer 401
+	unlocked  map[string]bool         // UIDs holding the locked scope
+	users     map[string]string       // username → user ID
+	passwords map[string]string       // username → password
+	captchas  map[string]string       // user ("" = every user) → CAPTCHA token; Options.Captcha, SetCaptcha*
+	twoFAs    map[string]userTwoFA    // user → 2FA set by SetTwoFA, overriding Options.TwoFA
+	codes     []string                // 2FA codes received, in order
+	sessions  map[string]sessionRec   // access token minted by Session → session
+	logins    map[string]loginRec     // UID → session handed out by Login, not spent
+	rotated   map[string]string       // refresh token issued by a refresh → its pair's access token
+	refreshes []string                // every refresh token handed out, in order
 
 	cal calendars
 }
@@ -173,7 +173,7 @@ func New(t TB, o Options) *Fake {
 		proxy:     httputil.NewSingleHostReverseProxy(target),
 		http:      &http.Client{Timeout: 10 * time.Second},
 		failures:  map[userRoute][]failure{},
-		stalls:    map[userRoute][]time.Duration{},
+		stalls:    map[userRoute][]stall{},
 		captchas:  map[string]string{},
 		twoFAs:    map[string]userTwoFA{},
 		issued:    map[string]bool{},
@@ -298,7 +298,39 @@ func (f *Fake) StallNextFor(username, method, path string, bound time.Duration) 
 	defer f.mu.Unlock()
 	f.perUser = f.perUser || username != ""
 	key := userRoute{username, method + " " + path}
-	f.stalls[key] = append(f.stalls[key], bound)
+	f.stalls[key] = append(f.stalls[key], stall{bound: bound})
+}
+
+// Hold is a request held by HoldNext.
+type Hold struct {
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// Reached is closed once the held request has arrived and waits.
+func (h *Hold) Reached() <-chan struct{} { return h.reached }
+
+// Release lets the held request be answered as usual. Safe to call twice.
+func (h *Hold) Release() { h.once.Do(func() { close(h.release) }) }
+
+// HoldNext makes the next request to method and path (exact) wait until
+// Release is called, or until the client gives up. Unlike StallNext, no
+// timer decides when it ends, and Reached says when it has arrived, so a
+// test needs no deadline race.
+func (f *Fake) HoldNext(method, path string) *Hold {
+	h := &Hold{reached: make(chan struct{}), release: make(chan struct{})}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := userRoute{"", method + " " + path}
+	f.stalls[key] = append(f.stalls[key], stall{hold: h})
+	return h
+}
+
+// stall is one queued stall: a time bound, or a hold released by the test.
+type stall struct {
+	bound time.Duration
+	hold  *Hold
 }
 
 // SetCaptcha makes later logins answer the CAPTCHA challenge token, like
@@ -510,9 +542,9 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		user = f.requestUser(r)
 	}
 	f.mu.Lock()
-	stall := f.popStall(user, route)
+	stall, stalled := f.popStall(user, route)
 	f.mu.Unlock()
-	if stall > 0 {
+	if stalled && (stall.hold != nil || stall.bound > 0) {
 		// The server notices a client that gave up only once the body is
 		// read: read it now, and serve it again after the stall.
 		body, err := io.ReadAll(r.Body)
@@ -520,12 +552,21 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		t := time.NewTimer(stall)
+		var timer <-chan time.Time
+		var release <-chan struct{}
+		if h := stall.hold; h != nil {
+			close(h.reached)
+			release = h.release
+		} else {
+			t := time.NewTimer(stall.bound)
+			defer t.Stop()
+			timer = t.C
+		}
 		select {
 		case <-r.Context().Done(): // the client gave up: nothing to answer
-			t.Stop()
 			return
-		case <-t.C:
+		case <-timer:
+		case <-release:
 		}
 	}
 	f.mu.Lock()
@@ -617,15 +658,15 @@ func (f *Fake) popFailure(user, route string) (failure, bool) {
 	return failure{}, false
 }
 
-func (f *Fake) popStall(user, route string) time.Duration {
+func (f *Fake) popStall(user, route string) (stall, bool) {
 	for _, u := range []string{user, ""} {
 		key := userRoute{u, route}
 		if q := f.stalls[key]; len(q) > 0 {
 			f.stalls[key] = q[1:]
-			return q[0]
+			return q[0], true
 		}
 	}
-	return 0
+	return stall{}, false
 }
 
 func (f *Fake) captchaToken(user string) string {
