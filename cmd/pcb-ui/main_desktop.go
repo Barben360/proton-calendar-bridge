@@ -224,8 +224,9 @@ func newUpdates(a fyne.App, state string) *ui.Updates {
 }
 
 // followUpdates draws each update notice in the window and the tray, and
-// sends its notification once per version (a failed send is retried at the next check); a click on it opens the
-// release page (Linux: Windows reports no click).
+// sends its notification once per version (a failed send is retried at the
+// next check); a click on it opens the release page (Linux: Windows reports
+// no click).
 func followUpdates(ctx context.Context, u *ui.Updates, poke chan struct{}, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
 	later := func() {
 		u.Later()

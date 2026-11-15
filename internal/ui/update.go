@@ -60,9 +60,9 @@ func (u *Updates) Later() { u.Prefs.SetString(prefLater, u.Now().Add(LaterFor).F
 func (u *Updates) MarkNotified(version string) { u.Prefs.SetString(prefNotified, version) }
 
 // Refresh is the notice now, and a notification while the version's has not
-// been delivered (see MarkNotified). Switched off or a dev build: nothing. A failed check keeps
-// update.json's last answer, so the panel does not come and go with the
-// network.
+// been delivered (see MarkNotified). Switched off or a dev build: nothing. A
+// failed check keeps update.json's last answer, so the panel does not come
+// and go with the network.
 func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 	if !u.Enabled() {
 		return UpdateNotice{}, nil
