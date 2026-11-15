@@ -20,6 +20,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
 
 // fakeTerm answers prompts from queues and records them.
@@ -199,6 +200,10 @@ type rig struct {
 	// keyring, when set, is the desktop keyring the accounts and pcb
 	// doctor use (nil: none is reached, as TestMain unsets the session bus).
 	keyring *memKeyring
+	// upd, when set, is the update checker (IO.Update); exe, when set, the
+	// running binary's path (IO.Exe).
+	upd *update.Checker
+	exe string
 	// asRoot makes the host's effective UID 0; userName, when set, names
 	// the host's users.
 	asRoot   bool
@@ -345,6 +350,10 @@ func (r *rig) run(args ...string) exitcode.Code {
 	}
 	if r.userName != nil {
 		io.Host.UserName = r.userName
+	}
+	io.Update = r.upd
+	if r.exe != "" {
+		io.Exe = func() (string, error) { return r.exe, nil }
 	}
 	ctx, cancel := context.WithTimeout(r.t.Context(), 60*time.Second)
 	defer cancel()

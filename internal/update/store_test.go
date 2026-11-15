@@ -17,7 +17,17 @@ var t0 = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 func storePath(t *testing.T) string {
 	t.Helper()
-	return update.StorePath(filepath.Join(t.TempDir(), "state"))
+	return update.StorePath(t.TempDir())
+}
+
+func TestEditDoesNotCreateTheStateDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := update.Edit(context.Background(), update.StorePath(dir), func(s *update.State) { s.Off = true }); err == nil {
+		t.Error("Edit succeeded without the state directory")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("state directory: %v, want it still absent", err)
+	}
 }
 
 func TestStorePath(t *testing.T) {
@@ -30,9 +40,6 @@ func TestLoadMissingOrCorruptIsZero(t *testing.T) {
 	p := storePath(t)
 	if st := update.Load(p); st != (update.State{}) {
 		t.Errorf("missing: %+v", st)
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
@@ -23,6 +24,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/runkey"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
 
 // IO is what pcb touches outside its own process state, so tests can replace
@@ -66,6 +68,12 @@ type IO struct {
 	// RunKey is pcb-ui's Run value uninstall removes on Windows (nil:
 	// runkey.System()).
 	RunKey runkey.Store
+	// Update reads the newest stable release for pcb version --check and
+	// pcb doctor (nil: GitHub, compared with buildinfo.Version).
+	Update *update.Checker
+	// Exe is the running binary's path, symlinks resolved, for the update
+	// hint (nil: os.Executable).
+	Exe func() (string, error)
 }
 
 // osSignals is IO.Signals on the operating system's signals.
@@ -122,6 +130,12 @@ func (o IO) withDefaults() IO {
 	if o.Host.Run == nil {
 		o.Host = install.OSHost()
 		o.Host.Env = nil
+	}
+	if o.Update == nil {
+		o.Update = &update.Checker{Installed: buildinfo.Version}
+	}
+	if o.Exe == nil {
+		o.Exe = executable
 	}
 	if o.Host.Env == nil {
 		o.Host.Env = o.Env

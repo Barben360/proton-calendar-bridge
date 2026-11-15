@@ -45,7 +45,9 @@ version_json=$(env HOME="$work/home" "$pcb" version --json)
 # doctor exits 10 or 20 when a check errors (a fresh HOME may): the envelope
 # is still printed and still required below.
 doctor_rc=0
-doctor_json=$(env HOME="$work/home" "$pcb" doctor --json) || doctor_rc=$?
+# PCB_UPDATE_CHECK=off: a release run never asks github.com (the tag is a
+# clean version, which doctor would check).
+doctor_json=$(env HOME="$work/home" PCB_UPDATE_CHECK=off "$pcb" doctor --json) || doctor_rc=$?
 
 if command -v jq >/dev/null 2>&1; then
   got=$(jq -r '.data.version' <<<"$version_json")

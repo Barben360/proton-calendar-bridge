@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,11 +42,10 @@ func Load(path string) State {
 
 // Edit applies f to path's State and writes it back, under path+".lock" so
 // that two processes (pcb-ui, pcb doctor, the switch command) never erase
-// each other's change. Where locks are unsupported it writes unlocked.
+// each other's change. Where locks are unsupported it writes unlocked. The
+// directory must exist: a check never creates the state directory (pcb
+// creates it, with its owner and mode, when it first needs it).
 func Edit(ctx context.Context, path string, f func(*State)) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	unlock, err := filelock.Lock(ctx, path+".lock")
 	switch {
 	case errors.Is(err, filelock.ErrUnsupported):
