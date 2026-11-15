@@ -438,17 +438,21 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 		return nil, &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("cannot open the control socket %s: %w", d.Socket, err),
 			Hint: controlHint(err, d.Socket)}
 	}
+	what := "control socket"
+	if onWindows {
+		what = "control pipe"
+	}
 	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-			log.Warn("the control socket failed: pcb status shows the offline view", "error", err.Error())
+			log.Warn("the "+what+" failed: pcb status shows the offline view", "error", err.Error())
 		}
 	}()
-	what, started := "control socket", []any{"path", d.Socket}
+	started := []any{"path", d.Socket}
 	if onWindows {
-		what, started = "control pipe", []any{"pipe", ln.Addr().String()} // the pipe's name, for the live check
+		started = []any{"pipe", ln.Addr().String()} // the pipe's name, for the live check
 	}
 	log.Info(what+" started", started...)
 	var once sync.Once

@@ -12,8 +12,8 @@ import (
 // refusedPeerHint is the hint a refused peer gets.
 const refusedPeerHint = "run pcb as the user that runs pcb serve"
 
-// channel is what messages call the control channel: a Unix socket here.
-const channel = "control socket"
+// Channel is what messages call the control channel: a Unix socket here.
+const Channel = "control socket"
 
 // unreachableHint is the hint for a daemon that cannot be reached.
 const unreachableHint = "check that you run pcb as the user that runs pcb serve"
@@ -21,6 +21,10 @@ const unreachableHint = "check that you run pcb as the user that runs pcb serve"
 // endpoint names the control channel of the socket path in a message: the
 // path itself.
 func endpoint(path string) string { return path }
+
+// AddrAttr names the control channel of the socket path in a log line:
+// socket=<path>.
+func AddrAttr(path string) slog.Attr { return slog.String("socket", path) }
 
 // refusedPeer reports whether r's peer is of another UID than this
 // process's effective one (SO_PEERCRED reports the peer's effective UID);

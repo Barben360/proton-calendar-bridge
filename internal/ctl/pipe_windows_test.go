@@ -631,3 +631,26 @@ func TestListenClosesUnderClientChurn(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// The control channel's names in messages and logs, on Windows: the pipe,
+// never a pcb.sock that does not exist.
+func TestWindowsNamesThePipeInMessages(t *testing.T) {
+	if got := ctl.ErrRefused.Error(); got != "pcb refuses this control pipe" {
+		t.Errorf("ErrRefused = %q", got)
+	}
+	if ctl.Channel != "control pipe" {
+		t.Errorf("Channel = %q", ctl.Channel)
+	}
+	dir := t.TempDir()
+	pipe, err := ctl.PipeName(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := ctl.AddrAttr(filepath.Join(dir, "pcb.sock")); a.Key != "pipe" || a.Value.String() != pipe {
+		t.Errorf("AddrAttr = %v, want pipe=%s", a, pipe)
+	}
+	missing := filepath.Join(dir, "missing")
+	if a := ctl.AddrAttr(filepath.Join(missing, "pcb.sock")); a.Key != "pipe" || a.Value.String() != "the control pipe of "+missing {
+		t.Errorf("AddrAttr (missing dir) = %v", a)
+	}
+}

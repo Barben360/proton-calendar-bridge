@@ -543,8 +543,11 @@ func TestMCPStdioWritesNothingButProtocolOnStdout(t *testing.T) {
 				t.Errorf("stdout holds %d lines, want the session's answers:\n%s", lines, out)
 			}
 			want := "serving this agent session"
-			if mode == "relay" {
-				want = "relaying to the daemon"
+			switch {
+			case mode == "relay" && runtime.GOOS == "windows": // the pipe, not a pcb.sock
+				want = `msg="relaying to the daemon on the control pipe" pipe=` + `\\.\pipe\pcb-`
+			case mode == "relay":
+				want = `msg="relaying to the daemon on the control socket" socket=`
 			}
 			if !strings.Contains(m.errb.String(), want) {
 				t.Errorf("stderr lacks %q:\n%s", want, m.errb.String())

@@ -165,8 +165,8 @@ func (s *Server) Handler() http.Handler {
 		var out outcome
 		r = r.WithContext(context.WithValue(r.Context(), outcomeKey{}, &out))
 		if who, refused := s.refusedPeer(r); refused {
-			s.logger().Warn(channel+": refused a peer of another user", who)
-			out = transport(w, "ctl", http.StatusForbidden, "the "+channel+" answers only its own user", refusedPeerHint)
+			s.logger().Warn(Channel+": refused a peer of another user", who)
+			out = transport(w, "ctl", http.StatusForbidden, "the "+Channel+" answers only its own user", refusedPeerHint)
 		} else if path.Clean(r.URL.Path) != r.URL.Path {
 			// ServeMux would redirect (301, plain text); no path is unclean here.
 			out = transport(w, "ctl", http.StatusNotFound, "no such control endpoint: "+r.URL.Path, "use the pcb of the same version as the daemon")

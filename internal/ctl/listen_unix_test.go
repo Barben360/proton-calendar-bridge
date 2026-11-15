@@ -52,3 +52,17 @@ func TestUnreachableNamesTheSocket(t *testing.T) {
 		t.Errorf("unreachable = %q, hint %q, exit %d", err, exitcode.HintOf(err), exitcode.From(err))
 	}
 }
+
+// The control channel's names in messages and logs, on Unix: the socket
+// (Windows' twin: TestWindowsNamesThePipeInMessages).
+func TestUnixNamesTheSocketInMessages(t *testing.T) {
+	if got := ErrRefused.Error(); got != "pcb refuses this control socket" {
+		t.Errorf("ErrRefused = %q", got)
+	}
+	if Channel != "control socket" {
+		t.Errorf("Channel = %q", Channel)
+	}
+	if a := AddrAttr("/run/pcb/pcb.sock"); a.Key != "socket" || a.Value.String() != "/run/pcb/pcb.sock" {
+		t.Errorf("AddrAttr = %v, want socket=/run/pcb/pcb.sock", a)
+	}
+}

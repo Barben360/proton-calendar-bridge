@@ -149,9 +149,10 @@ var (
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 	// ErrRefused: Dial refuses the control socket: not a socket, another
-	// user's, or answered by another user's process. A person must act; no
-	// retry helps (the doctor's exit 10). The error's text says which.
-	ErrRefused = errors.New("pcb refuses this control socket")
+	// user's, or answered by another user's process (Windows: the pipe,
+	// another user's). A person must act; no retry helps (the doctor's exit
+	// 10). The error's text says which.
+	ErrRefused = errors.New("pcb refuses this " + Channel)
 )
 
 // refusal is a refused control socket: its text is msg, and

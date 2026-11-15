@@ -111,7 +111,7 @@ func (d doctorDaemon) results() []doctor.Result {
 	st := d.st
 	switch {
 	case d.unplaced:
-		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the control socket cannot be located: offline checks only"}}
+		return []doctor.Result{{Name: name, Status: doctor.StatusSkip, Message: "the " + ctl.Channel + " cannot be located: offline checks only"}}
 	case d.err != nil:
 		// A dial or status that failed may pass; a socket pcb refuses
 		// (ctl.ErrRefused) needs a person (ruling A11).

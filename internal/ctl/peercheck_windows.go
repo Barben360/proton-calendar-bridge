@@ -16,8 +16,8 @@ import (
 // normal process the token of an elevated one; not checked live.
 const refusedPeerHint = "run pcb as the user that runs pcb-ui or pcb serve; an elevated (administrator) pcb may be refused by one that is not elevated"
 
-// channel is what messages call the control channel: a named pipe here.
-const channel = "control pipe"
+// Channel is what messages call the control channel: a named pipe here.
+const Channel = "control pipe"
 
 // unreachableHint is the hint for a daemon that cannot be reached: pcb-ui
 // is the usual server on Windows.
@@ -27,11 +27,27 @@ const unreachableHint = "check that you run pcb as the user that runs pcb-ui or 
 // pipe of its directory (Windows has no pcb.sock file), or that directory
 // when it cannot be opened (another user's, say).
 func endpoint(path string) string {
-	dir := filepath.Dir(path)
-	if name, err := pipeName(dir); err == nil {
+	if name, ok := pipeOf(path); ok {
 		return "the control pipe " + name
 	}
-	return "the control pipe of " + dir
+	return "the control pipe of " + filepath.Dir(path)
+}
+
+// AddrAttr names the control channel of the socket path in a log line:
+// pipe=<its name>, or pipe=the control pipe of <dir> when that directory
+// cannot be opened.
+func AddrAttr(path string) slog.Attr {
+	if name, ok := pipeOf(path); ok {
+		return slog.String("pipe", name)
+	}
+	return slog.String("pipe", "the control pipe of "+filepath.Dir(path))
+}
+
+// pipeOf is the pipe of the socket path's directory; ok is false when that
+// directory cannot be opened.
+func pipeOf(path string) (string, bool) {
+	name, err := pipeName(filepath.Dir(path))
+	return name, err == nil
 }
 
 // refusedPeer reports whether r's pipe client runs as another user than
