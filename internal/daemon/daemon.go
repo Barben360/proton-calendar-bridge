@@ -456,7 +456,9 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 		once.Do(func() {
 			ctx, cancel := drained.context()
 			defer cancel()
-			_ = srv.Shutdown(ctx)
+			if err := srv.Shutdown(ctx); errors.Is(err, ctl.ErrCloseStuck) {
+				log.Warn("the control pipe's listener did not close in time: pcb stops without it", "error", err.Error())
+			}
 			<-done
 			log.Info(what + " stopped")
 		})

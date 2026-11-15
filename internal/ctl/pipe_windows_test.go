@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -562,5 +564,70 @@ func TestUnreachableNamesThePipe(t *testing.T) {
 		if err.Error() != want || exitcode.HintOf(err) != hint || exitcode.From(err) != exitcode.Blocked || !errors.Is(err, cause) {
 			t.Errorf("Unreachable(%s) = %q, hint %q, exit %d; want %q, hint %q, exit 20", path, err, exitcode.HintOf(err), exitcode.From(err), want, hint)
 		}
+	}
+}
+
+// go-winio's lost close (boundClose), on the real pipe: clients opening
+// and dropping the pipe while it closes made go-winio's Close wait forever
+// in about 1 run in 250 (8 of 2000 before the fix). Every Close of Listen's
+// listener returns, and the resent signal completes it. Slow (about 20 s):
+// it runs when PCB_PIPE_STRESS is set.
+func TestListenClosesUnderClientChurn(t *testing.T) {
+	if os.Getenv("PCB_PIPE_STRESS") == "" {
+		t.Skip("a 2000-run stress of the pipe's close (about 20 s): set PCB_PIPE_STRESS=1 to run it")
+	}
+	root := t.TempDir()
+	for i := range 2000 {
+		dir := filepath.Join(root, strconv.Itoa(i))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, err := ctl.PipeName(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					to := 20 * time.Millisecond
+					if c, err := winio.DialPipe(name, &to); err == nil {
+						_ = c.Close()
+					}
+				}
+			})
+		}
+		time.Sleep(time.Duration(i%5) * time.Millisecond)
+		errc := make(chan error, 1)
+		go func() { errc <- ln.Close() }()
+		select {
+		case err := <-errc:
+			if err != nil {
+				t.Errorf("run %d: Close = %v, want the resent signal to complete it", i, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("run %d: Close still waits after 3 s", i)
+		}
+		close(stop)
+		wg.Wait()
 	}
 }

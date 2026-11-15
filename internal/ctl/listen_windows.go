@@ -27,7 +27,9 @@ import (
 // served, by a second pcb of this state or another user's process
 // squatting it, is ErrPipeTaken at once: never shared. Closing the listener
 // removes the pipe once the server's end of every connection has closed
-// too (a client's end never holds the name).
+// too (a client's end never holds the name); its Close is bounded
+// (boundClose: go-winio's can lose its signal and wait forever) and
+// returns ErrCloseStuck when it gives up.
 //
 // A name nothing answers on may be the previous server of this state still
 // closing its end of a connection (a restart: go-winio's Close returns at
@@ -50,7 +52,7 @@ func Listen(path string) (net.Listener, error) {
 		ln, err := listenPipe(name, conf)
 		switch {
 		case err == nil:
-			return ln, nil
+			return boundClose(ln, closeRetry, closeBound), nil
 		case errors.Is(err, windows.ERROR_PIPE_BUSY):
 			return nil, fmt.Errorf("%w: %s", ErrPipeTaken, name)
 		case !errors.Is(err, windows.ERROR_ACCESS_DENIED):
