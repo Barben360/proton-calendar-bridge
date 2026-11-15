@@ -306,49 +306,41 @@ jobs:
           grep -q '^pcb-ui ' v.txt
           powershell -NoProfile -Command '(Get-Item bin/pcb-ui.exe).VersionInfo.ProductName' | tr -d '\r' | grep -qx 'pcb-ui'
       # WiX 7.0.1 exactly (decision 0019), a .NET tool from nuget.org: the
-      # runner image's .NET SDK installs it. Every wix command passes
-      # -acceptEula wix7: the author accepted WiX 7's OSMF EULA.
+      # runner image's .NET SDK installs it. The release's msi job runs the
+      # same script.
       - name: Install WiX 7.0.1 and its UI and Util extensions
         shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          dotnet --list-sdks
-          dotnet tool install --global wix --version 7.0.1
-          $tools = Join-Path $env:USERPROFILE '.dotnet\tools'
-          $env:PATH = "$tools;$env:PATH"
-          wix extension add -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1 -acceptEula wix7
-          wix --version -acceptEula wix7
-          Add-Content -LiteralPath $env:GITHUB_PATH -Value $tools
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\install-wix.ps1
       # Twice: the second build (another ProductCode, the same UpgradeCode)
-      # is the smoke's major upgrade. MSI_TAG empty: version 0.0.0.
+      # is the smoke's major upgrade. MSI_TAG v0.0.0-ci goes through
+      # check.sh msi-version's tag parsing, as a release's tag: 0.0.0.
       - name: Build the MSI (make msi, with the ICE checks)
         shell: msys2 {0}
         run: |
-          make msi MSI_TAG=
+          make msi MSI_TAG=v0.0.0-ci
           mkdir -p bin/upgrade
           mv bin/pcb_windows_amd64.msi bin/upgrade/
-          make msi MSI_TAG=
+          make msi MSI_TAG=v0.0.0-ci
           ls -l bin/pcb_windows_amd64.msi bin/upgrade/pcb_windows_amd64.msi
-      # An administrative install (msiexec /a) only unpacks the files; the
-      # release runs the same check against the zip's binaries.
+      # msiexec /a only unpacks the files; the release runs the same script
+      # against the zip's binaries.
       - name: The MSI holds exactly bin's pcb.exe and pcb-ui.exe
         shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-contents.ps1 -Msi bin\pcb_windows_amd64.msi -Dir bin
+      # pcb-ui.exe in the place of pcb.exe: the check must refuse it.
+      - name: The contents check fails on another pcb.exe
+        shell: pwsh
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'msi-files'
-          $log = Join-Path $env:RUNNER_TEMP 'msi-admin.log'
-          $msi = (Resolve-Path -LiteralPath bin\pcb_windows_amd64.msi).Path
-          $p = Start-Process -FilePath msiexec.exe -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$dir`"", '/l*v', "`"$log`"") -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content -LiteralPath $log -Tail 40; Write-Output "::error::msiexec /a exited $($p.ExitCode)"; exit 1 }
-          $files = @(Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object Extension -ne '.msi')
-          $files | ForEach-Object { Write-Output "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName).Hash)" }
-          $names = ($files | ForEach-Object Name | Sort-Object) -join ','
-          $wantNames = (@('pcb.exe', 'pcb-ui.exe') | Sort-Object) -join ','
-          if ($names -ne $wantNames) { Write-Output "::error::the MSI holds [$names], want [$wantNames]"; exit 1 }
-          foreach ($f in $files) {
-            $want = (Get-FileHash -LiteralPath (Join-Path bin $f.Name)).Hash
-            if ((Get-FileHash -LiteralPath $f.FullName).Hash -ne $want) { Write-Output "::error::the MSI's $($f.Name) is not bin's"; exit 1 }
-          }
-          Write-Output "the MSI holds bin's pcb.exe and pcb-ui.exe"
+          $wrong = Join-Path $env:RUNNER_TEMP 'wrong-bin'
+          New-Item -ItemType Directory -Path $wrong | Out-Null
+          Copy-Item -LiteralPath bin\pcb-ui.exe -Destination (Join-Path $wrong 'pcb-ui.exe')
+          Copy-Item -LiteralPath bin\pcb-ui.exe -Destination (Join-Path $wrong 'pcb.exe')
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-contents.ps1 -Msi bin\pcb_windows_amd64.msi -Dir $wrong
+          $code = $LASTEXITCODE
+          $out
+          if ($code -ne 1) { Write-Output "::error::msi-contents.ps1 exited $code on another pcb.exe, want 1"; exit 1 }
+          if (-not ($out -match '^msi-contents: FAIL the MSI''s pcb\.exe is not ')) { Write-Output '::error::msi-contents.ps1 did not name pcb.exe'; exit 1 }
+          exit 0
       # The runner's user is an elevated administrator and reaches the
       # Windows Installer service directly; the MSI still installs per user.
       - name: The MSI smoke fails on a wrong version

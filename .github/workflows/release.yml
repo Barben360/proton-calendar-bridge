@@ -349,17 +349,10 @@ jobs:
         with:
           name: pcb-ui-windows-amd64
           path: ${{ runner.temp }}/pcb-ui
+      # The script CI's windows job runs on every pull request.
       - name: Install WiX 7.0.1 and its UI and Util extensions
         shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          dotnet --list-sdks
-          dotnet tool install --global wix --version 7.0.1
-          $tools = Join-Path $env:USERPROFILE '.dotnet\tools'
-          $env:PATH = "$tools;$env:PATH"
-          wix extension add -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1 -acceptEula wix7
-          wix --version -acceptEula wix7
-          Add-Content -LiteralPath $env:GITHUB_PATH -Value $tools
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\install-wix.ps1
       - name: The MSI version is the tag's X.Y.Z
         id: version
         run: |
@@ -389,6 +382,7 @@ jobs:
           path: upgrade/pcb_windows_amd64.msi
           if-no-files-found: error
           overwrite: true
+          retention-days: 1
 
   package:
     needs: [pcb, pcb-arm64, ui, ui-windows, msi]
@@ -456,7 +450,7 @@ jobs:
           cp scripts/install.sh dist/install.sh
           msi=$RUNNER_TEMP/artifacts/pcb-msi-windows-amd64/pcb_windows_amd64.msi
           kind=$(file -b "$msi")
-          [[ $kind =~ ^Composite\ Document\ File\ V2\ Document ]] || { echo "::error::pcb_windows_amd64.msi is: $kind"; exit 1; }
+          [[ $kind =~ ^Composite\ Document\ File\ V2\ Document && $kind == *"MSI Installer"* ]] || { echo "::error::pcb_windows_amd64.msi is: $kind"; exit 1; }
           install -m 0644 "$msi" dist/pcb_windows_amd64.msi
           (cd dist && sha256sum "${assets[@]}" > checksums.txt)
           [ "$(wc -l < dist/checksums.txt)" -eq 7 ] || { echo "::error::checksums.txt does not have 7 lines"; exit 1; }
@@ -570,25 +564,10 @@ jobs:
           unpacked/pcb-ui.exe --version > v.txt
           cat v.txt
           [[ $(cat v.txt) == "pcb-ui $GITHUB_REF_NAME "* ]] || { echo "::error::pcb-ui.exe --version does not print $GITHUB_REF_NAME"; exit 1; }
-      # An administrative install (msiexec /a) only unpacks the files.
+      # msiexec /a only unpacks the files (the script CI runs against bin\).
       - name: The MSI holds exactly the zip's pcb.exe and pcb-ui.exe
         shell: pwsh
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'msi-files'
-          $log = Join-Path $env:RUNNER_TEMP 'msi-admin.log'
-          $msi = (Resolve-Path -LiteralPath dist\pcb_windows_amd64.msi).Path
-          $p = Start-Process -FilePath msiexec.exe -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$dir`"", '/l*v', "`"$log`"") -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content -LiteralPath $log -Tail 40; Write-Output "::error::msiexec /a exited $($p.ExitCode)"; exit 1 }
-          $files = @(Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object Extension -ne '.msi')
-          $files | ForEach-Object { Write-Output "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName).Hash)" }
-          $names = ($files | ForEach-Object Name | Sort-Object) -join ','
-          $wantNames = (@('pcb.exe', 'pcb-ui.exe') | Sort-Object) -join ','
-          if ($names -ne $wantNames) { Write-Output "::error::the MSI holds [$names], want [$wantNames]"; exit 1 }
-          foreach ($f in $files) {
-            $want = (Get-FileHash -LiteralPath (Join-Path unpacked $f.Name)).Hash
-            if ((Get-FileHash -LiteralPath $f.FullName).Hash -ne $want) { Write-Output "::error::the MSI's $($f.Name) is not the zip's"; exit 1 }
-          }
-          Write-Output "the MSI holds the zip's pcb.exe and pcb-ui.exe"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\msi-contents.ps1 -Msi dist\pcb_windows_amd64.msi -Dir unpacked
       - name: The MSI version is the tag's X.Y.Z
         id: version
         run: |
