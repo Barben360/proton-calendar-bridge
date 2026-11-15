@@ -12,7 +12,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver/software"
-	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
@@ -69,15 +68,14 @@ func TestScreenshots(t *testing.T) {
 		setup func(f *fixture)
 	}{
 		{"account", func(f *fixture) {
-			// Taller than the default window, so the calendars show, with
-			// the pointer on the read-only calendar's info icon.
+			// Taller than the default window, so the calendars show. The
+			// read-only calendar's info icon shows, but the pointer stays
+			// off it: its tooltip would cover the calendar above.
 			f.w.win.Resize(fyne.NewSize(880, 720))
 			f.w.selectAccount("1a2b3c4d")
-			tips := f.infoTips()
-			if len(tips) != 1 {
+			if tips := f.infoTips(); len(tips) != 1 {
 				t.Fatalf("%d info icons in the account picture, want 1", len(tips))
 			}
-			test.MoveMouse(f.w.win.Canvas(), fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0]).Add(fyne.NewPos(4, 4)))
 		}},
 		{"add-account", func(f *fixture) { f.w.openWizard("carol@proton.me") }},
 	}

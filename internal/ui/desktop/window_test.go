@@ -297,20 +297,6 @@ func (f *fixture) has(sub string) bool {
 	return false
 }
 
-func (f *fixture) check(text string) *widget.Check {
-	f.t.Helper()
-	var found *widget.Check
-	walk(f.roots(), func(o fyne.CanvasObject) {
-		if c, ok := o.(*widget.Check); ok && c.Text == text && found == nil {
-			found = c
-		}
-	})
-	if found == nil {
-		f.t.Fatalf("no visible check %q; visible: %v", text, f.texts())
-	}
-	return found
-}
-
 func (f *fixture) tap(text string) {
 	f.t.Helper()
 	test.Tap(f.button(text))

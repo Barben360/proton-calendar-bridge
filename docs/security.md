@@ -31,6 +31,8 @@ It seals the password and, with 2FA, `PCB_TOTP` as an `otpauth://` URI (a one-ti
 
 Without it, a login stores tokens only, and you log in again when Proton ends the session. `pcb login resume` takes the same flags.
 
+Only `pcb login` offers it. `pcb-ui` and the login page an AI agent opens never store your password: a login there turns unattended relogin off for that account, and `pcb login --unattended-relogin` turns it back on.
+
 ### Scripts: `--non-interactive`
 
 `--non-interactive` never prompts: it exits 10 naming what is missing, or the CAPTCHA URL and the `pcb login resume` command to run.

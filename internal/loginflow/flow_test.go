@@ -6,7 +6,6 @@ import (
 	"go/build"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -76,7 +75,7 @@ func TestFlowPlainLogin(t *testing.T) {
 	if f.Step() != loginflow.StepCredentials || f.Account() != "" {
 		t.Fatalf("first step %q, account %q", f.Step(), f.Account())
 	}
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	if f.Step() != loginflow.StepDone || f.Err() != nil {
@@ -97,7 +96,7 @@ func TestFlowCaptchaThenTOTP(t *testing.T) {
 	uri := l.f.SetTwoFA(l.f.Username, true)
 	l.f.SetCaptchaFor(l.f.Username, "captcha-token")
 	f := l.flow()
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepCaptcha {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepCaptcha {
 		t.Fatalf("Submit: %v, Step %q", err, f.Step())
 	}
 	if f.CaptchaURL() == "" {
@@ -120,7 +119,7 @@ func TestFlowCaptchaThenTOTP(t *testing.T) {
 func TestFlowRefusesWithoutAHub(t *testing.T) {
 	gone := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("the bridge is not running")}
 	f := loginflow.New(service.EntryWizard, func() (loginflow.Hub, error) { return nil, gone })
-	err := f.Submit(t.Context(), "a@example.org", []byte("pw"), false)
+	err := f.Submit(t.Context(), "a@example.org", []byte("pw"))
 	if !errors.Is(err, gone) || f.Err() == nil || f.Err().Code != exitcode.Blocked || f.Step() != loginflow.StepCredentials {
 		t.Errorf("Submit = %v, Err %v, Step %q", err, f.Err(), f.Step())
 	}
@@ -130,7 +129,7 @@ func TestFlowCancelRemovesThePendingAdd(t *testing.T) {
 	l := newLab(t)
 	l.f.SetTwoFA(l.f.Username, true)
 	f := l.flow()
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepTOTP {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepTOTP {
 		t.Fatalf("Submit: %v, Step %q", err, f.Step())
 	}
 	if len(l.hub.Accounts()) != 1 {
@@ -148,14 +147,14 @@ func TestFlowCancelRemovesThePendingAdd(t *testing.T) {
 func TestFlowCancelKeepsAnAccountThatWasReady(t *testing.T) {
 	l := newLab(t)
 	first := l.flow()
-	if err := first.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || first.Step() != loginflow.StepDone {
+	if err := first.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || first.Step() != loginflow.StepDone {
 		t.Fatalf("first login: %v, Step %q", err, first.Step())
 	}
 	id := first.Account()
 	l.f.SetTwoFA(l.f.Username, true)
 	l.forgetLastLogin(t)
 	f := l.flow()
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepTOTP {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepTOTP {
 		t.Fatalf("second login: %v, Step %q", err, f.Step())
 	}
 	f.Cancel()
@@ -232,7 +231,7 @@ func TestFlowTellsTheHubItsEntry(t *testing.T) {
 	r := &recHub{Hub: l.hub}
 	f := loginflow.New(service.EntryLoginPage, func() (loginflow.Hub, error) { return r, nil })
 	l.f.SetCaptchaFor(l.f.Username, "tok")
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepCaptcha {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepCaptcha {
 		t.Fatalf("Submit: %v, step %q", err, f.Step())
 	}
 	f.Cancel()
@@ -246,7 +245,7 @@ func TestFlowTellsTheHubItsEntry(t *testing.T) {
 	r.entries = nil
 	f = loginflow.New(service.EntryLoginPage, func() (loginflow.Hub, error) { return r, nil })
 	l.forgetLastLogin(t)
-	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password), false); err != nil || f.Step() != loginflow.StepCaptcha {
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepCaptcha {
 		t.Fatalf("Submit again: %v, step %q", err, f.Step())
 	}
 	l.forgetLastLogin(t)
@@ -258,33 +257,53 @@ func TestFlowTellsTheHubItsEntry(t *testing.T) {
 	}
 }
 
-// The line under the unattended-relogin box says what ticking it means,
-// true whether it is ticked or not, worded for the state's sealer (live
-// 2026-11-13, F5: doctor's "unattended relogin is on" showed with the box
-// unticked, and named the keyring on a key-file state).
-func TestUnattendedWarningFollowsTheSealer(t *testing.T) {
-	for _, tc := range []struct {
-		sealer       string
-		want, absent string
-	}{
-		{service.SealerSecretService, "If ticked: whoever can use this desktop session's keyring and read secrets.sealed owns the Proton account", "key file"},
-		{service.SealerKeyFile, "If ticked: whoever can read the key file and secrets.sealed owns the Proton account", "keyring"},
-		{service.SealerDPAPI, "If ticked: whoever can sign in as this Windows user and read secrets.sealed owns the Proton account", "key file"},
-		{"", "If ticked: whoever can read secrets.sealed and the key that seals it (the desktop keyring or the key file) owns the Proton account", "is on"},
-	} {
-		got := loginflow.UnattendedWarningFor(tc.sealer)
-		if got != tc.want || strings.Contains(got, tc.absent) || strings.Contains(got, "unattended relogin is on") {
-			t.Errorf("sealer %q: %q, want %q", tc.sealer, got, tc.want)
+// The flow offers no unattended relogin: a login through it (pcb-ui's
+// wizard, the MCP login page) turns it off for an account where pcb login
+// --unattended-relogin turned it on, directly or after a CAPTCHA, so the
+// stored password and 2FA secret are dropped.
+func TestFlowLoginTurnsUnattendedReloginOff(t *testing.T) {
+	for _, captcha := range []bool{false, true} {
+		l := newLab(t)
+		if _, err := l.hub.Login(t.Context(), service.LoginRequest{Username: l.f.Username, Password: l.f.Password, UnattendedRelogin: true}); err != nil {
+			t.Fatalf("captcha %t: CLI login: %v", captcha, err)
 		}
-	}
-	// A flow asks its Hub: this lab's state has no keyring, so the key file
-	// (DPAPI on Windows).
-	native := service.SealerKeyFile
-	if runtime.GOOS == "windows" {
-		native = service.SealerDPAPI
-	}
-	l := newLab(t)
-	if got, want := l.flow().UnattendedWarning(), loginflow.UnattendedWarningFor(native); got != want {
-		t.Errorf("flow on a %s state: %q, want %q", native, got, want)
+		unattended := func() bool {
+			t.Helper()
+			api, _, err := l.hub.Account(l.f.Username)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, err := api.Status(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return st.Unattended
+		}
+		if !unattended() {
+			t.Fatalf("captcha %t: the CLI login did not turn unattended relogin on: the test would pass vacuously", captcha)
+		}
+		if captcha {
+			l.f.SetCaptchaFor(l.f.Username, "captcha-token")
+		}
+		l.forgetLastLogin(t)
+		f := l.flow()
+		if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
+			t.Fatalf("captcha %t: Submit: %v", captcha, err)
+		}
+		if captcha {
+			if f.Step() != loginflow.StepCaptcha {
+				t.Fatalf("Step %q, want captcha", f.Step())
+			}
+			l.forgetLastLogin(t)
+			if err := f.CaptchaSolved(t.Context()); err != nil {
+				t.Fatalf("CaptchaSolved: %v", err)
+			}
+		}
+		if f.Step() != loginflow.StepDone {
+			t.Fatalf("captcha %t: Step %q, Err %v", captcha, f.Step(), f.Err())
+		}
+		if unattended() {
+			t.Errorf("captcha %t: unattended relogin still on after a login through the flow", captcha)
+		}
 	}
 }

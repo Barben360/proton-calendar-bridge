@@ -272,8 +272,8 @@ func TestLoginToolRefusesWhatIsNoUsername(t *testing.T) {
 			names = append(names, k)
 		}
 		slices.Sort(names)
-		if !slices.Equal(names, []string{"unattended_relogin", "username"}) {
-			t.Errorf("login's arguments %v, want username and unattended_relogin only", names)
+		if !slices.Equal(names, []string{"username"}) {
+			t.Errorf("login's arguments %v, want username only (unattended relogin is pcb login --unattended-relogin only)", names)
 		}
 	}
 }

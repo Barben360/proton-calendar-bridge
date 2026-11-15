@@ -47,13 +47,10 @@ type WizardModel interface {
 	Step() ui.Step
 	Err() *exitcode.Error
 	CaptchaURL() string
-	// UnattendedWarning is the line under the unattended-relogin box, for
-	// the state's sealer (loginflow.UnattendedWarningFor).
-	UnattendedWarning() string
 	// Account is the local ID of the account the flow logs in (empty before
 	// Submit).
 	Account() string
-	Submit(ctx context.Context, address string, password []byte, unattended bool) error
+	Submit(ctx context.Context, address string, password []byte) error
 	SubmitTOTP(ctx context.Context, code string) error
 	CaptchaSolved(ctx context.Context) error
 	Done() (ui.AccountView, string)
