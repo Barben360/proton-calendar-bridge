@@ -260,7 +260,7 @@ jobs:
   # skip themselves when acl.Elevated() reports true.
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -305,6 +305,13 @@ jobs:
           cat v.txt
           grep -q '^pcb-ui ' v.txt
           powershell -NoProfile -Command '(Get-Item bin/pcb-ui.exe).VersionInfo.ProductName' | tr -d '\r' | grep -qx 'pcb-ui'
+      # release.yml's msi and windows-smoke jobs run check.sh directly under
+      # their default shell, bash: Git for Windows' bash, not MSYS2's.
+      - name: check.sh msi-version runs under Git Bash, as in the release
+        shell: bash
+        run: |
+          v=$(scripts/release/check.sh msi-version v0.2.0-rc.1)
+          [ "$v" = 0.2.0 ] || { echo "::error::check.sh msi-version v0.2.0-rc.1 printed '$v' under Git Bash, want 0.2.0"; exit 1; }
       # WiX 7.0.1 exactly (decision 0020), a .NET tool from nuget.org: the
       # runner image's .NET SDK installs it. The release's msi job runs the
       # same script.
