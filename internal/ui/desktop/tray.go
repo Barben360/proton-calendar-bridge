@@ -149,7 +149,5 @@ func Attach(ta TrayApp, w *Window, quit func(), background bool) *Tray {
 // available (Later hides the window's panel, never this line). Main goroutine.
 func (t *Tray) SetUpdate(n ui.UpdateNotice) {
 	t.upd = n
-	if t.iconSet { // else the first Update draws it
-		t.Update(t.last)
-	}
+	t.Update(t.last) // NewTray has drawn once: last is a real view
 }
