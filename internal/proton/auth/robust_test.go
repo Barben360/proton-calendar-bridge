@@ -24,7 +24,7 @@ func hold(t *testing.T, f *protontest.Fake, method, path string) {
 // TestLoginCallsHaveADeadline: a Proton that accepts the connection and
 // never answers does not hold a login call past its own deadline, even when
 // the caller's context has none (ruling A1). Without the deadline the call
-// would wait for the API client's own 5 s timeout, a different error. Not parallel: it shortens the
+// would never return. Not parallel: it shortens the
 // package's deadline.
 func TestLoginCallsHaveADeadline(t *testing.T) {
 	cases := []struct {
@@ -71,7 +71,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := tc.call(t) // the setup logs in with the normal deadline
 			setCallTimeout(t, time.Second)
-			err := run()
+			err := within(t, run)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("%s %s stalled: error = %v, want the call's deadline exceeded", tc.method, tc.path, err)
 			}
@@ -132,4 +132,18 @@ func setCallTimeout(t *testing.T, d time.Duration) {
 	old := auth.CallTimeout
 	auth.CallTimeout = d
 	t.Cleanup(func() { auth.CallTimeout = old })
+}
+
+// within runs f and fails, instead of hanging, if it has not returned in 30 s.
+func within(t *testing.T, f func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
+		t.Fatal("the call has no deadline: it is still waiting for the held request")
+		return nil
+	}
 }
