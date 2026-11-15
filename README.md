@@ -17,7 +17,10 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 
 - **What**: `pcb`, one Go binary that logs into Proton, decrypts your calendars on your machine and serves them over **CalDAV** (read and write) and **MCP** (for AI agents). `pcb-ui` is the same bridge as a desktop app for Linux and Windows.
 - **Why**: Proton Calendar is end-to-end encrypted with no public API, so standard calendar apps and agents cannot reach it. pcb does the decryption locally and speaks the standard protocols.
-- **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container; on Windows 10 and 11 as `pcb-ui`.
+- **Where it runs**:
+  - **Desktop**, Linux or Windows 10 and 11: `pcb-ui`, with a tray icon.
+  - **Headless**, Linux only: a systemd service or a container.
+  - **macOS**: the `pcb` command line only, untested.
 
 ## What it does for you
 
@@ -54,11 +57,10 @@ One process serves every account: the desktop app, the `pcb serve` daemon (syste
 
 | You want | Run | Guide |
 |---|---|---|
-| The bridge on your Linux desktop, with a tray icon | `pcb-ui` | [desktop](docs/desktop.md) |
+| The bridge on your desktop (Linux, Windows 10 or 11), with a tray icon | `pcb-ui` | [desktop](docs/desktop.md) |
 | An always-on bridge on a server or a home lab | `pcb install` (systemd) | [service](docs/service.md) |
 | The same, in Docker | the container image | [container](docs/container.md) |
 | Only an AI agent on this machine, no daemon | `pcb mcp`, started by the agent | [agents](docs/agents.md) |
-| The bridge on Windows 10 or 11 | `pcb-ui.exe` from the release zip | [Windows](docs/install.md#windows) |
 
 Install a release (Linux and macOS, amd64 and arm64; no sudo):
 
@@ -66,9 +68,11 @@ Install a release (Linux and macOS, amd64 and arm64; no sudo):
 curl -fsSL https://github.com/Barben360/proton-calendar-bridge/releases/latest/download/install.sh | sh
 ```
 
-It puts `pcb` and `pcb-ui` in `~/.local/bin`, plus the desktop entry on Linux. Flags, checks and macOS: [docs/install.md](docs/install.md). Or build from a clone with Go (version in [go.mod](go.mod)); the "On a desktop" and "Headless" steps below do.
+It puts `pcb` and `pcb-ui` in `~/.local/bin`, plus the desktop entry on Linux. Flags, checks and macOS: [docs/install.md](docs/install.md). Or build from a clone with Go (version in [go.mod](go.mod)); the "On a Linux desktop" and "Headless" steps below do.
 
-### On a desktop
+On Windows, unzip `pcb_windows_amd64.zip` from the [releases page](https://github.com/Barben360/proton-calendar-bridge/releases) and start `pcb-ui.exe`: no installer, no administrator rights ([Windows](docs/install.md#windows)).
+
+### On a Linux desktop
 
 ```sh
 git clone https://github.com/Barben360/proton-calendar-bridge && cd proton-calendar-bridge
