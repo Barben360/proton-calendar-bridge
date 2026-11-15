@@ -293,7 +293,7 @@ jobs:
           bin/pcb.exe version --json | jq -e '.data.os == "windows"'
           rc=0; bin/pcb.exe doctor --json > doctor.json || rc=$?
           [ "$rc" -eq 0 ] || [ "$rc" -eq 10 ] || { echo "::error::pcb doctor exited $rc"; cat doctor.json; exit 1; }
-          jq -e '.data.results[] | select(.name == "platform") | .message == "windows/amd64: runs, untested"' doctor.json
+          jq -e '.data.results[] | select(.name == "platform") | .status == "ok" and .message == "windows/amd64"' doctor.json
       - name: pcb-ui prints its version and carries its resources
         shell: msys2 {0}
         run: |
