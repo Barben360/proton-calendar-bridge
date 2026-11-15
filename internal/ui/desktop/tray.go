@@ -94,7 +94,7 @@ func (t *Tray) Update(v ui.View) {
 	if u := t.upd; u.Available {
 		line := "Update available: " + u.Version
 		key = append(key, "update\x00"+line+"\x00"+u.URL)
-		items = append(items, fyne.NewMenuItem(line, func() { t.w.dispatch(func() { t.w.openURL(u.URL) }) }))
+		items = append(items, fyne.NewMenuItem(line, func() { t.w.dispatch(func() { t.w.OpenURL(u.URL) }) }))
 	}
 	if t.menuSet && slices.Equal(key, t.menu) {
 		return

@@ -15,6 +15,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/ui"
+	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -251,4 +253,27 @@ func TestOpenLogMakesPrivateDirectories(t *testing.T) {
 	}
 	acltest.WantPrivate(t, state, 0o700)
 	acltest.WantPrivate(t, filepath.Join(state, "logs"), 0o700)
+}
+
+// The Settings switch writes update.json and wakes the update loop, so the
+// panel and the tray line go at once.
+func TestSettingsUpdateCheckWritesTheSwitchAndPokes(t *testing.T) {
+	s, _ := newSettings(t)
+	path := update.StorePath(t.TempDir())
+	s.updates = &ui.Updates{Path: path, Env: func(string) string { return "" }}
+	s.poke = make(chan struct{}, 1)
+	if !s.UpdateCheck() {
+		t.Fatal("UpdateCheck() = false on a fresh state")
+	}
+	if err := s.SetUpdateCheck(false); err != nil {
+		t.Fatal(err)
+	}
+	if !update.Load(path).Off || s.UpdateCheck() {
+		t.Errorf("after SetUpdateCheck(false): %+v, UpdateCheck=%v", update.Load(path), s.UpdateCheck())
+	}
+	select {
+	case <-s.poke:
+	default:
+		t.Error("no poke after the switch")
+	}
 }

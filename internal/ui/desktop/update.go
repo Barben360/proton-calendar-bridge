@@ -30,7 +30,7 @@ func newUpdatePanel(w *Window) *updatePanel {
 	p.text = widget.NewLabel("")
 	p.text.Wrapping = fyne.TextWrapWord
 	p.text.TextStyle = fyne.TextStyle{Bold: true}
-	open := widget.NewButtonWithIcon("Open release page", theme.ComputerIcon(), func() { w.openURL(p.n.URL) })
+	open := widget.NewButtonWithIcon("Open release page", theme.ComputerIcon(), func() { w.OpenURL(p.n.URL) })
 	open.Importance = widget.HighImportance
 	p.copy = widget.NewButtonWithIcon("Copy update command", theme.ContentCopyIcon(), func() { w.app.Clipboard().SetContent(p.n.Hint) })
 	later := widget.NewButton("Later", func() { p.later() })
@@ -60,8 +60,8 @@ func (w *Window) SetUpdate(n ui.UpdateNotice, later func()) {
 	p.box.Show()
 }
 
-// openURL opens raw in the browser, an error in a dialog.
-func (w *Window) openURL(raw string) {
+// OpenURL opens raw in the browser, an error in a dialog.
+func (w *Window) OpenURL(raw string) {
 	u, err := url.Parse(raw)
 	if err == nil {
 		err = w.open(u)

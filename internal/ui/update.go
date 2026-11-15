@@ -82,7 +82,7 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 	var note *Notification
 	if u.Prefs.String(prefNotified) != n.Version {
 		u.Prefs.SetString(prefNotified, n.Version)
-		note = &Notification{Title: "pcb", Body: fmt.Sprintf("pcb %s is available (you have %s).", n.Version, n.Installed)}
+		note = &Notification{Code: "update-available", Title: "pcb", Body: fmt.Sprintf("pcb %s is available (you have %s).", n.Version, n.Installed)}
 	}
 	return n, note
 }

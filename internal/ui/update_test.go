@@ -37,10 +37,10 @@ type gh struct {
 	fail atomic.Bool
 }
 
-func newGH(t *testing.T, tag string) *gh {
+func newGH(t *testing.T) *gh {
 	t.Helper()
 	g := &gh{}
-	g.tag.Store(tag)
+	g.tag.Store("v0.2.0")
 	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		g.n.Add(1)
 		if g.fail.Load() {
@@ -78,7 +78,7 @@ func newUpdates(t *testing.T, g *gh, installed string, c *clock) *ui.Updates {
 }
 
 func TestUpdatesShowsAnUpdateAndNotifiesOnce(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	n, note := u.Refresh(context.Background())
 	want := ui.UpdateNotice{Available: true, Panel: true, Version: "v0.2.0", Installed: "v0.1.0", URL: g.releasePage("v0.2.0"), Hint: "the hint"}
@@ -94,14 +94,14 @@ func TestUpdatesShowsAnUpdateAndNotifiesOnce(t *testing.T) {
 }
 
 func TestUpdatesUpToDate(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	if n, note := newUpdates(t, g, "v0.2.0", c).Refresh(context.Background()); n != (ui.UpdateNotice{}) || note != nil {
 		t.Errorf("up to date: %+v, %+v", n, note)
 	}
 }
 
 func TestUpdatesLaterHidesThePanelFor48Hours(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	u.Refresh(context.Background())
 	u.Later()
@@ -124,7 +124,7 @@ func TestUpdatesLaterHidesThePanelFor48Hours(t *testing.T) {
 
 // Later survives a restart: it is in the preferences, not in memory.
 func TestUpdatesLaterSurvivesARestart(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	u.Refresh(context.Background())
 	u.Later()
@@ -135,7 +135,7 @@ func TestUpdatesLaterSurvivesARestart(t *testing.T) {
 }
 
 func TestUpdatesNewerVersionDuringLater(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	u.Refresh(context.Background())
 	u.Later()
@@ -151,7 +151,7 @@ func TestUpdatesNewerVersionDuringLater(t *testing.T) {
 }
 
 func TestUpdatesSwitchedOff(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	if n, _ := u.Refresh(context.Background()); !n.Panel {
 		t.Fatalf("on: %+v", n)
@@ -182,14 +182,14 @@ func TestUpdatesSwitchedOff(t *testing.T) {
 }
 
 func TestUpdatesDevBuildSendsNothing(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	if n, note := newUpdates(t, g, "dev", c).Refresh(context.Background()); n != (ui.UpdateNotice{}) || note != nil || g.n.Load() != 0 {
 		t.Errorf("dev: %+v, %+v, %d requests", n, note, g.n.Load())
 	}
 }
 
 func TestUpdatesRunShowsAtStartAndOnPoke(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -227,7 +227,7 @@ func TestUpdatesRunShowsAtStartAndOnPoke(t *testing.T) {
 // Offline after the cache expired: the last answer stays on screen rather
 // than the panel coming and going with the network.
 func TestUpdatesKeepsTheLastAnswerWhenACheckFails(t *testing.T) {
-	g, c := newGH(t, "v0.2.0"), newClock()
+	g, c := newGH(t), newClock()
 	u := newUpdates(t, g, "v0.1.0", c)
 	u.Refresh(context.Background())
 	g.fail.Store(true)

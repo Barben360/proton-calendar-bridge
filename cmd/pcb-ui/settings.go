@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui/desktop"
 )
 
@@ -20,6 +22,8 @@ type settings struct {
 	configPath string
 	open       func(path string) error // openPath
 	exe        func() (string, error)
+	updates    *ui.Updates   // the update check's switch
+	poke       chan struct{} // wakes the update loop (buffered, 1)
 }
 
 var _ desktop.Settings = (*settings)(nil)
@@ -42,6 +46,27 @@ func (s *settings) SetAutostart(on bool) error {
 		return err
 	}
 	return desktop.SetAutostart(on, exe)
+}
+
+func (s *settings) UpdateCheck() bool { return s.updates.Enabled() }
+
+// SetUpdateCheck flips the switch in update.json, then wakes the update
+// loop so that the panel and the tray line follow at once.
+func (s *settings) SetUpdateCheck(on bool) error {
+	if err := s.updates.SetEnabled(context.Background(), on); err != nil {
+		return err
+	}
+	pokeLoop(s.poke)
+	return nil
+}
+
+// pokeLoop wakes the update loop without blocking (one wake is pending at
+// most).
+func pokeLoop(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
 }
 
 func (s *settings) Level() slog.Level     { return s.level.Level() }
