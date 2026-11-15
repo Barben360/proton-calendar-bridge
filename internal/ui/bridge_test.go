@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,9 +177,38 @@ func TestQuitDrainsAndReleases(t *testing.T) {
 	unlock()
 }
 
+// closeSeen is a listener that records its Close: whether the old one is shut
+// is asked of it, not of its port, which another listener of a parallel test
+// may be handed once it is free.
+type closeSeen struct {
+	net.Listener
+	closed atomic.Bool
+}
+
+func (c *closeSeen) Close() error {
+	c.closed.Store(true)
+	return c.Listener.Close()
+}
+
 func TestRestartReadsTheConfig(t *testing.T) {
 	l := newLab(t)
-	b := l.start(t)
+	var mu sync.Mutex
+	var opened []*closeSeen
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Listen: func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		c := &closeSeen{Listener: ln}
+		mu.Lock()
+		opened = append(opened, c)
+		mu.Unlock()
+		return c, nil
+	}})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	first := b.Info().Addr
 	// A free port the new config names.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -199,8 +229,16 @@ func TestRestartReadsTheConfig(t *testing.T) {
 		t.Fatalf("nothing listens on %s after Restart: %v", want, err)
 	}
 	_ = conn.Close()
-	if _, err := net.DialTimeout("tcp", first, time.Second); err == nil {
-		t.Errorf("the old address %s still answers", first)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(opened) != 2 {
+		t.Fatalf("%d listeners opened, want 2 (the first and the restarted one)", len(opened))
+	}
+	if !opened[0].closed.Load() {
+		t.Errorf("Restart returned while the old listener on %s is still open", first)
+	}
+	if opened[1].closed.Load() {
+		t.Errorf("the new listener on %s is closed after Restart", want)
 	}
 }
 
