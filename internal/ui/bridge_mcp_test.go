@@ -131,21 +131,18 @@ func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	if err := b.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	l.f.StallNext("GET", "/core/v4/keys/salts", 2*time.Second)
+	// Held until the agent was refused: no timer can end the login early.
+	hold := l.f.HoldNext("GET", "/core/v4/keys/salts")
+	t.Cleanup(hold.Release)
 	done := make(chan error, 1)
 	go func() {
 		_, err := b.Hub().Login(context.Background(), service.LoginRequest{Username: l.f.Username, Password: l.f.Password, Entry: service.EntryWizard})
 		done <- err
 	}()
-	// Only a guard against a login that never comes: under -race the SRP
-	// login takes about a second on one fast core, and CI runs it on shared
-	// vCPUs beside three other test binaries (5 s failed there, 2026-11-14).
-	deadline := time.Now().Add(30 * time.Second)
-	for l.f.Calls("GET", "/core/v4/keys/salts") == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("control: the login never reached its key calls")
-		}
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-hold.Reached():
+	case err := <-done:
+		t.Fatalf("control: the login ended before its key calls: %v", err)
 	}
 	socket := l.dirs.Socket()
 	hc := &http.Client{Transport: grantHeader{grant: `{"Caps":["freebusy","login"]}`, base: &http.Transport{
@@ -172,6 +169,7 @@ func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	if !res.IsError || !strings.Contains(text.String(), "a login is in progress in pcb-ui") {
 		t.Errorf("login during the person's login = %v %q, want the refusal", res.IsError, text.String())
 	}
+	hold.Release()
 	if err := <-done; err != nil {
 		t.Fatalf("control: the person's login: %v", err)
 	}

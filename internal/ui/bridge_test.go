@@ -151,14 +151,13 @@ func TestQuitDrainsAndReleases(t *testing.T) {
 	l := newLab(t)
 	b := l.start(t)
 	// The first sync pass of the new account stalls on Proton.
-	l.f.StallNext("GET", "/calendar/v1", 30*time.Second)
+	hold := l.f.HoldNext("GET", "/calendar/v1")
+	t.Cleanup(hold.Release)
 	l.login(t, b)
-	deadline := time.Now().Add(10 * time.Second)
-	for l.f.Calls("GET", "/calendar/v1") == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the sync pass never reached Proton")
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-hold.Reached():
+	case <-time.After(time.Minute): // only a guard against a hang
+		t.Fatal("the sync pass never reached Proton")
 	}
 	start := time.Now()
 	if err := b.Stop(); err != nil {
