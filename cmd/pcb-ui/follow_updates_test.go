@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -83,12 +84,18 @@ type fakeNotifier struct {
 	mu     sync.Mutex
 	notes  []ui.Notification
 	clicks []func(string)
+	// failures is how many of the next Notify calls return an error.
+	failures int
 }
 
 func (f *fakeNotifier) Notify(note ui.Notification, onClick func(string)) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.notes, f.clicks = append(f.notes, note), append(f.clicks, onClick)
+	if f.failures > 0 {
+		f.failures--
+		return errors.New("no notification service")
+	}
 	return nil
 }
 
@@ -119,7 +126,7 @@ type followRig struct {
 	page  string
 }
 
-func startFollow(t *testing.T, tray updateTray) *followRig {
+func startFollow(t *testing.T, tray updateTray, failures int) *followRig {
 	t.Helper()
 	test.NewApp() // fyne.Do needs a current app; the test driver runs it inline
 	var srv *httptest.Server
@@ -128,7 +135,7 @@ func startFollow(t *testing.T, tray updateTray) *followRig {
 		w.WriteHeader(http.StatusFound)
 	}))
 	t.Cleanup(srv.Close)
-	r := &followRig{win: &fakeWindow{}, notif: &fakeNotifier{}, poke: make(chan struct{}, 1),
+	r := &followRig{win: &fakeWindow{}, notif: &fakeNotifier{failures: failures}, poke: make(chan struct{}, 1),
 		page: srv.URL + "/Barben360/proton-calendar-bridge/releases/tag/v0.2.0"}
 	u := &ui.Updates{
 		Checker: update.Checker{URL: srv.URL + "/latest", Installed: "v0.1.0"},
@@ -147,7 +154,7 @@ func startFollow(t *testing.T, tray updateTray) *followRig {
 
 func TestFollowUpdatesDrawsTheNoticeEverywhereAndNotifiesOnce(t *testing.T) {
 	tray := &fakeTray{}
-	r := startFollow(t, tray)
+	r := startFollow(t, tray, 0)
 
 	waitFor(t, "the notice in the window and the tray", func() bool { return len(r.win.seen()) >= 1 && len(tray.seen()) >= 1 })
 	for name, n := range map[string]ui.UpdateNotice{"window": r.win.seen()[0], "tray": tray.seen()[0]} {
@@ -194,12 +201,35 @@ func TestFollowUpdatesDrawsTheNoticeEverywhereAndNotifiesOnce(t *testing.T) {
 }
 
 func TestFollowUpdatesWithoutATray(t *testing.T) {
-	r := startFollow(t, nil) // no tray host: an untyped nil, as main passes it
+	r := startFollow(t, nil, 0) // no tray host: an untyped nil, as main passes it
 	waitFor(t, "the notice in the window", func() bool { return len(r.win.seen()) >= 1 })
 	if n := r.win.seen()[0]; !n.Panel || n.Version != "v0.2.0" {
 		t.Errorf("window notice = %+v", n)
 	}
 	waitFor(t, "the notification", func() bool { n, _ := r.notif.sent(); return len(n) == 1 })
+}
+
+// A notification that failed is sent again at the next refresh, and once it
+// went through, never again: followUpdates must hand the notifier's error
+// back to Run, which marks the version notified only on success.
+func TestFollowUpdatesResendsAFailedNotificationOnce(t *testing.T) {
+	r := startFollow(t, &fakeTray{}, 1)
+	waitFor(t, "the failed notification", func() bool { n, _ := r.notif.sent(); return len(n) >= 1 })
+	// Each poke forces a pass; wait for the notice it draws, so the
+	// pass before it has finished notifying.
+	seen := len(r.win.seen())
+	pokeLoop(r.poke)
+	waitFor(t, "a second refresh", func() bool { return len(r.win.seen()) > seen })
+	waitFor(t, "the resent notification", func() bool { n, _ := r.notif.sent(); return len(n) >= 2 })
+	seen = len(r.win.seen())
+	pokeLoop(r.poke)
+	waitFor(t, "a third refresh", func() bool { return len(r.win.seen()) > seen })
+	seen = len(r.win.seen())
+	pokeLoop(r.poke)
+	waitFor(t, "a fourth refresh", func() bool { return len(r.win.seen()) > seen })
+	if n, _ := r.notif.sent(); len(n) != 2 {
+		t.Errorf("%d notifications, want 2 (one failed, one resent, none after)", len(n))
+	}
 }
 
 func TestTrayOrNil(t *testing.T) {
