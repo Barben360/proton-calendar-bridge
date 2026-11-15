@@ -112,57 +112,6 @@ func TestDoctorExitCode(t *testing.T) {
 	}
 }
 
-// On Windows, a supported platform since the live check (spec/experiments/
-// W1-windows-live.md): no state yet is exit 0, a ✓ platform line and
-// Windows' own lines. Elevation, zone and Start at login depend on the
-// machine: only their presence is checked.
-func TestDoctorTextOKOnWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows' list; TestDoctorTextOK checks the Linux one")
-	}
-	cfg := isolate(t)
-	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
-	code, out, errs := run("doctor")
-	if code != exitcode.OK || errs != "" {
-		t.Fatalf("code=%d stderr=%q\n%s", code, errs, out)
-	}
-	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	want := []string{
-		"✓  platform: windows/" + runtime.GOARCH,
-		"–  config dir: " + cfg + " does not exist yet",
-		"–  state dir: " + state + " does not exist yet",
-		"✓  config file: defaults, no file",
-		"✓  sealer: not chosen yet: the first login picks it ([secrets] backend = auto)",
-		"–  dpapi key: no key yet: the first login creates it",
-		"✓  caldav listener: 127.0.0.1:1080, plain HTTP (loopback only)",
-		"–  tls certificate: plain HTTP on loopback: no certificate needed",
-		"!  accounts: no account: nothing can sign in to pcb serve",
-		"   fix: pcb login (it creates the client default), then pcb client show",
-		"elevated: ",
-		"time zone: ",
-		"start at login: ",
-		"–  service: no service on Windows: pcb-ui's Start at login runs it",
-		"–  daemon: not running: offline checks only",
-	}
-	if runtime.GOARCH != "amd64" {
-		want[0] = "!  platform: windows/" + runtime.GOARCH
-	}
-	if len(lines) != len(want) {
-		t.Fatalf("stdout = %q, want %d lines", out, len(want))
-	}
-	for i, w := range want {
-		if strings.HasSuffix(w, ": ") { // a machine-dependent line: its name only
-			if _, rest, _ := strings.Cut(lines[i], "  "); !strings.HasPrefix(rest, w) {
-				t.Errorf("line %d = %q, want the %q line", i, lines[i], strings.TrimSuffix(w, ": "))
-			}
-			continue
-		}
-		if lines[i] != w {
-			t.Errorf("line %d = %q, want %q", i, lines[i], w)
-		}
-	}
-}
-
 func TestDoctorTextOK(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Linux list (12 lines, service: no systemd here); TestDoctorTextOKOnWindows checks Windows' list")

@@ -143,12 +143,16 @@ var (
 	// this state still closing it, or a process that holds it without
 	// serving.
 	ErrPipeHeld error = pipeHeld{}
+	// ErrCloseStuck: the control pipe's listener did not close within its
+	// bound (Windows, boundClose): the daemon logs it and stops anyway.
+	ErrCloseStuck = errors.New("the control pipe's listener did not close in time")
 	// ErrNoDaemon: no pcb serve answers on the socket.
 	ErrNoDaemon = errors.New("no pcb daemon answers")
 	// ErrRefused: Dial refuses the control socket: not a socket, another
-	// user's, or answered by another user's process. A person must act; no
-	// retry helps (the doctor's exit 10). The error's text says which.
-	ErrRefused = errors.New("pcb refuses this control socket")
+	// user's, or answered by another user's process (Windows: the pipe,
+	// another user's). A person must act; no retry helps (the doctor's exit
+	// 10). The error's text says which.
+	ErrRefused = errors.New("pcb refuses this " + Channel)
 )
 
 // refusal is a refused control socket: its text is msg, and

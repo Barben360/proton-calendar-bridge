@@ -16,7 +16,7 @@ func private(path string, _ fs.FileInfo) (hint string, err error) {
 	var open *acl.OpenError
 	switch {
 	case errors.As(err, &open):
-		return acl.Fix(path, open.SID), fmt.Errorf("account file %s: others can read it (its access list lets %s in)", path, open.Account)
+		return acl.Fix(path, open.SIDs()...), fmt.Errorf("account file %s: others can read it (its access list lets %s in)", path, open.Who())
 	case err != nil:
 		return "make it readable by this user", fmt.Errorf("account file: %w", err)
 	}

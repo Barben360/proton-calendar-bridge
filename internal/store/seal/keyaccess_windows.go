@@ -16,7 +16,7 @@ func checkKeyAccess(path string, _ fs.FileInfo) error {
 	var oe *acl.OpenError
 	switch err := acl.Check(path); {
 	case errors.As(err, &oe):
-		return &KeyModeError{Path: path, Grantee: oe.SID}
+		return &KeyModeError{Path: path, Open: oe}
 	case err != nil:
 		return err
 	}
@@ -41,7 +41,7 @@ func checkKeyDir(dir string) error {
 	var oe *acl.OpenError
 	switch err := acl.Check(dir); {
 	case errors.As(err, &oe):
-		return &KeyModeError{Path: dir, Dir: true, Grantee: oe.SID}
+		return &KeyModeError{Path: dir, Dir: true, Open: oe}
 	case err != nil:
 		return err
 	}

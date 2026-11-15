@@ -22,11 +22,7 @@ func aclProblem(path string, dir bool) (message, fix string, checked bool) {
 	var oe *acl.OpenError
 	switch err := acl.Check(path); {
 	case errors.As(err, &oe):
-		who := oe.SID
-		if oe.Account != "" && oe.Account != oe.SID {
-			who = oe.Account + " (" + oe.SID + ")"
-		}
-		return path + ": its access list lets " + who + " in", acl.Fix(path, oe.SID), true
+		return path + ": its access list lets " + oe.Who() + " in", acl.Fix(path, oe.SIDs()...), true
 	case err != nil:
 		return err.Error(), "", true
 	}

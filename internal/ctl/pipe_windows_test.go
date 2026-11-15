@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -364,15 +366,17 @@ func TestServerRefusesAClientOfAnotherSID(t *testing.T) {
 			}
 			defer func() { _ = c.Close() }()
 			st, err := c.Status(t.Context())
-			if exitcode.From(err) != exitcode.Blocked || !strings.Contains(err.Error(), "the control socket answers only its own user") {
+			if exitcode.From(err) != exitcode.Blocked || !strings.Contains(err.Error(), "the control pipe answers only its own user") {
 				t.Fatalf("Status from %s: %+v, %v (exit %d); want blocked", tc.name, st, err, exitcode.From(err))
 			}
 			if logs := s.logs.String(); !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, tc.log) {
 				t.Errorf("logs lack the warning naming %q:\n%s", tc.log, logs)
 			}
 			var ee *exitcode.Error
-			if !errors.As(err, &ee) || !strings.Contains(ee.Hint, "elevated pcb of another login session") {
-				t.Errorf("hint = %q, want one naming an elevated pcb of another login session", ee.Hint)
+			// Any elevated client of a normal daemon, whatever its login
+			// session: its token is what the daemon may not read.
+			if want := "run pcb as the user that runs pcb-ui or pcb serve; an elevated (administrator) pcb may be refused by one that is not elevated"; !errors.As(err, &ee) || ee.Hint != want {
+				t.Errorf("error %v, want the hint %q", err, want)
 			}
 		})
 	}
@@ -536,5 +540,117 @@ func TestPipePeerSIDs(t *testing.T) {
 	}
 	if sid, err := ctl.ServerSIDOf(a); err == nil {
 		t.Errorf("ServerSIDOf(net.Pipe) = %q, want an error", sid)
+	}
+}
+
+// A daemon that cannot be reached is named by its control pipe, not the
+// pcb.sock Windows has no file for, or by the state directory when that
+// cannot be opened (W1 12.10: another Windows user); the hint names pcb-ui,
+// the usual server there.
+func TestUnreachableNamesThePipe(t *testing.T) {
+	dir := t.TempDir()
+	pipe, err := ctl.PipeName(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+	cause := errors.New("boom")
+	const hint = "check that you run pcb as the user that runs pcb-ui or pcb serve"
+	for path, want := range map[string]string{
+		filepath.Join(dir, "pcb.sock"):     "cannot reach the pcb daemon on the control pipe " + pipe + ": boom",
+		filepath.Join(missing, "pcb.sock"): "cannot reach the pcb daemon on the control pipe of " + missing + ": boom",
+	} {
+		err := ctl.Unreachable(path, cause)
+		if err.Error() != want || exitcode.HintOf(err) != hint || exitcode.From(err) != exitcode.Blocked || !errors.Is(err, cause) {
+			t.Errorf("Unreachable(%s) = %q, hint %q, exit %d; want %q, hint %q, exit 20", path, err, exitcode.HintOf(err), exitcode.From(err), want, hint)
+		}
+	}
+}
+
+// go-winio's lost close (boundClose), on the real pipe: clients opening
+// and dropping the pipe while it closes made go-winio's Close wait forever
+// in about 1 run in 250 (8 of 2000 before the fix). Every Close of Listen's
+// listener returns, and the resent signal completes it. Slow (about 20 s):
+// it runs when PCB_PIPE_STRESS is set.
+func TestListenClosesUnderClientChurn(t *testing.T) {
+	if os.Getenv("PCB_PIPE_STRESS") == "" {
+		t.Skip("a 2000-run stress of the pipe's close (about 20 s): set PCB_PIPE_STRESS=1 to run it")
+	}
+	root := t.TempDir()
+	for i := range 2000 {
+		dir := filepath.Join(root, strconv.Itoa(i))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, err := ctl.PipeName(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					to := 20 * time.Millisecond
+					if c, err := winio.DialPipe(name, &to); err == nil {
+						_ = c.Close()
+					}
+				}
+			})
+		}
+		time.Sleep(time.Duration(i%5) * time.Millisecond)
+		errc := make(chan error, 1)
+		go func() { errc <- ln.Close() }()
+		select {
+		case err := <-errc:
+			if err != nil {
+				t.Errorf("run %d: Close = %v, want the resent signal to complete it", i, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("run %d: Close still waits after 3 s", i)
+		}
+		close(stop)
+		wg.Wait()
+	}
+}
+
+// The control channel's names in messages and logs, on Windows: the pipe,
+// never a pcb.sock that does not exist.
+func TestWindowsNamesThePipeInMessages(t *testing.T) {
+	if got := ctl.ErrRefused.Error(); got != "pcb refuses this control pipe" {
+		t.Errorf("ErrRefused = %q", got)
+	}
+	if ctl.Channel != "control pipe" {
+		t.Errorf("Channel = %q", ctl.Channel)
+	}
+	dir := t.TempDir()
+	pipe, err := ctl.PipeName(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := ctl.AddrAttr(filepath.Join(dir, "pcb.sock")); a.Key != "pipe" || a.Value.String() != pipe {
+		t.Errorf("AddrAttr = %v, want pipe=%s", a, pipe)
+	}
+	missing := filepath.Join(dir, "missing")
+	if a := ctl.AddrAttr(filepath.Join(missing, "pcb.sock")); a.Key != "pipe" || a.Value.String() != "the control pipe of "+missing {
+		t.Errorf("AddrAttr (missing dir) = %v", a)
 	}
 }

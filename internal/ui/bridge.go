@@ -406,7 +406,7 @@ func Probe(ctx context.Context, env func(string) string, account string) error {
 		return err
 	}
 	if st.Daemon == nil {
-		return errors.New("the daemon on the control socket did not say who it is")
+		return errors.New("the daemon on the " + ctl.Channel + " did not say who it is")
 	}
 	if st.Daemon.Kind == kind {
 		if err := c.ShowUI(ctx, account); err != nil {

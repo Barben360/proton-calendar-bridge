@@ -50,12 +50,8 @@ func checkStateRoot(dir string) error {
 	var oe *acl.OpenError
 	switch err := acl.Check(dir); {
 	case errors.As(err, &oe):
-		who := oe.SID
-		if oe.Account != "" && oe.Account != oe.SID {
-			who = oe.Account + " (" + oe.SID + ")"
-		}
-		return mustAct("the state directory "+dir+": its access list (ACL) lets "+who+" in, so the files pcb writes there would be readable by others",
-			"run pcb doctor for the fix: "+acl.Fix(dir, oe.SID))
+		return mustAct("the state directory "+dir+": its access list (ACL) lets "+oe.Who()+" in, so the files pcb writes there would be readable by others",
+			"run pcb doctor for the fix: "+acl.Fix(dir, oe.SIDs()...))
 	case errors.As(err, &pe):
 		return mustAct("the access list of the state directory "+dir+" cannot be read: "+pe.Err.Error(), "run pcb doctor")
 	case err != nil:

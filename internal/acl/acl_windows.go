@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -110,10 +111,12 @@ func Mkdir(path string) error {
 }
 
 // Check returns nil when path's DACL lets in only the user, SYSTEM and
-// Administrators, else an *OpenError naming the first other account with an
-// allow entry (an inherit-only one too: it opens what is created inside). A
-// null DACL lets everyone in. Failing to read the DACL is an *fs.PathError
-// (fs.ErrNotExist for a missing path).
+// Administrators, else an *OpenError naming every other account with an
+// allow entry (an inherit-only one too: it opens what is created inside),
+// each once, in the list's order. A null DACL lets everyone in. Failing to
+// read the DACL is an *fs.PathError (fs.ErrNotExist for a missing path).
+// It is the one access-list check of pcb's private files and directories:
+// callers add their own wording around OpenError.Who and Fix.
 func Check(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -125,11 +128,12 @@ func Check(path string) error {
 	}
 	dacl, _, err := sd.DACL()
 	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || (err == nil && dacl == nil) {
-		return openError(path, everyone)
+		return openError(path, []string{everyone})
 	}
 	if err != nil {
 		return &fs.PathError{Op: "GetSecurityDescriptorDacl", Path: path, Err: err}
 	}
+	var others []string
 	for i := range uint32(dacl.AceCount) {
 		var a *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &a); err != nil {
@@ -142,14 +146,24 @@ func Check(path string) error {
 		switch sid := (*windows.SID)(unsafe.Pointer(&a.SidStart)).String(); sid {
 		case user, SIDSystem, SIDAdministrators:
 		default:
-			return openError(path, sid)
+			if !slices.Contains(others, sid) {
+				others = append(others, sid)
+			}
 		}
+	}
+	if len(others) > 0 {
+		return openError(path, others)
 	}
 	return nil
 }
 
-func openError(path, sid string) *OpenError {
-	return &OpenError{Path: path, SID: sid, Account: AccountName(sid)}
+// openError is the *OpenError of path for sids, each named (AccountName).
+func openError(path string, sids []string) *OpenError {
+	e := &OpenError{Path: path}
+	for _, sid := range sids {
+		e.Grantees = append(e.Grantees, Grantee{SID: sid, Account: AccountName(sid)})
+	}
+	return e
 }
 
 // Owner returns the SID of path's owner.

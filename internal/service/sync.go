@@ -44,7 +44,7 @@ func (l *Local) lockSync() (func(), error) {
 	unlock, ok, err := filelock.TryLock(filepath.Join(l.o.Dirs.State, syncLockName))
 	switch {
 	case errors.Is(err, filelock.ErrUnsupported):
-		return nil, final("sync locking needs a Unix system", "run pcb on Linux or macOS")
+		return nil, unsupportedLock("sync")
 	case err != nil:
 		return nil, blocked("cannot take the sync lock", "make sure "+l.o.Dirs.State+" is writable by this user")
 	case !ok:

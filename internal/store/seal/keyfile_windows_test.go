@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,11 +40,11 @@ func TestKeyFileWithAnEveryoneACEIsRefused(t *testing.T) {
 	} {
 		err := run()
 		var me *seal.KeyModeError
-		if !errors.Is(err, seal.ErrKeyMode) || !errors.As(err, &me) || me.Grantee != "S-1-1-0" || me.Path != path {
+		if !errors.Is(err, seal.ErrKeyMode) || !errors.As(err, &me) || me.Open == nil || !slices.Equal(me.Open.SIDs(), []string{"S-1-1-0"}) || me.Path != path {
 			t.Fatalf("%s: err = %v, want a KeyModeError for S-1-1-0", name, err)
 		}
-		if msg := err.Error(); !strings.Contains(msg, "access list") || !strings.Contains(msg, "pcb doctor") || !strings.Contains(msg, path) {
-			t.Errorf("%s: message %q lacks the path, the access list or pcb doctor", name, msg)
+		if msg, want := err.Error(), "key file "+path+": its access list lets "+acl.AccountName("S-1-1-0")+" (S-1-1-0) in: pcb refuses it. Fix: run pcb doctor"; msg != want {
+			t.Errorf("%s: message %q, want %q", name, msg, want)
 		}
 	}
 }
@@ -60,7 +61,7 @@ func TestKeyFileRefusesADirectoryNotPrivate(t *testing.T) {
 		acltest.OpenToOthers(t, filepath.Dir(path))
 		_, err := (&seal.KeyFile{Path: path}).Seal([]byte("x"), nil)
 		var me *seal.KeyModeError
-		if !errors.As(err, &me) || !me.Dir || me.Grantee != acltest.Everyone || !strings.Contains(err.Error(), "pcb doctor") {
+		if !errors.As(err, &me) || !me.Dir || me.Open == nil || !slices.Equal(me.Open.SIDs(), []string{acltest.Everyone}) || !strings.Contains(err.Error(), "pcb doctor") {
 			t.Fatalf("Seal = %v, want a KeyModeError for the directory and Everyone", err)
 		}
 		wantNoKey(t, path)

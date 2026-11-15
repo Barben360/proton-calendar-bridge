@@ -89,7 +89,7 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 			return err
 		}
 		if up {
-			log.Info("relaying to the daemon on the control socket", "socket", socket)
+			log.Info("relaying to the daemon on the "+ctl.Channel, ctl.AddrAttr(socket))
 			err := st.RelayDial(ctx, func(ctx context.Context) (net.Conn, error) { return ctl.DialConn(ctx, socket) }, g)
 			switch {
 			case errors.Is(err, mcp.ErrDaemonGone):

@@ -729,7 +729,7 @@ func TestAddClientNamesWhyTheKeyCannotBeUsed(t *testing.T) {
 		}
 	}
 	if runtime.GOOS == "windows" {
-		denied, open = "Access is denied", "its access list lets S-1-1-0 in"
+		denied, open = "Access is denied", " (S-1-1-0) in, and pcb refuses it" // Everyone's name is localised
 		openKey = func() { acltest.OpenToOthers(t, key) }
 	}
 	for _, c := range []struct {
