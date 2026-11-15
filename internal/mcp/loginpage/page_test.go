@@ -476,36 +476,42 @@ func TestLoginPageArch(t *testing.T) {
 	}
 }
 
-// Review C M1: the unattended-relogin box is never ticked for the person,
-// as in pcb login and pcb-ui; an agent's suggestion is a note, and the box
-// carries pcb-ui's keyring warning. A person with 2FA who leaves it
-// unticked finishes with a 6-digit code.
-func TestLoginPageNeverTicksUnattended(t *testing.T) {
-	box := regexp.MustCompile(`<input type="checkbox" name="unattended"[^>]*>`)
-	for _, suggested := range []bool{true, false} {
-		l := newLab(t)
-		uri := l.f.SetTwoFA(l.f.Username, true)
-		o := l.options(nil)
-		o.Unattended = suggested
-		p := start(t, o)
-		_, body := p.get(false)
-		m := box.FindString(body)
-		if m == "" || strings.Contains(m, "checked") {
-			t.Errorf("suggested %t: box %q, want it present and unticked", suggested, m)
+// The page offers no unattended relogin (pcb login --unattended-relogin
+// only): no box, no word of it, and a form that still sends unattended=1
+// (an old page, a forged post) logs in with it off, so a person with 2FA
+// finishes with a 6-digit code.
+func TestLoginPageOffersNoUnattendedRelogin(t *testing.T) {
+	l := newLab(t)
+	uri := l.f.SetTwoFA(l.f.Username, true)
+	p := start(t, l.options(nil))
+	_, body := p.get(false)
+	absent := func(step, body string) {
+		t.Helper()
+		for _, w := range []string{`type="checkbox"`, "unattended", "Repair the session", "If ticked", "otpauth"} {
+			if strings.Contains(body, w) {
+				t.Errorf("%s step shows %q:\n%s", step, w, body)
+			}
 		}
-		if got := strings.Contains(body, "The agent suggests unattended relogin"); got != suggested {
-			t.Errorf("suggested %t: the page shows the agent's suggestion: %t\n%s", suggested, got, body)
-		}
-		// The lab's state seals with a key file (no bus): the line says so,
-		// and says what ticking means (live 2026-11-13, F5).
-		if !strings.Contains(body, html.EscapeString(loginflow.UnattendedWarningFor(service.SealerKeyFile))) || strings.Contains(body, "unattended relogin is on") {
-			t.Errorf("suggested %t: no key-file warning next to the box, or doctor's \"is on\":\n%s", suggested, body)
-		}
-		p.post("credentials", "password", l.f.Password)
-		_, body = p.post("totp", "code", totpCode(t, uri))
-		if !strings.Contains(body, "added") {
-			t.Fatalf("suggested %t: a 6-digit code did not finish the login:\n%s", suggested, body)
-		}
+	}
+	if !strings.Contains(body, `name="password"`) {
+		t.Fatalf("not the credentials step:\n%s", body)
+	}
+	absent("credentials", body)
+	_, body = p.post("credentials", "password", l.f.Password, "unattended", "1")
+	if !strings.Contains(body, `name="code"`) {
+		t.Fatalf("not the 2FA step:\n%s", body)
+	}
+	absent("totp", body)
+	_, body = p.post("totp", "code", totpCode(t, uri))
+	if !strings.Contains(body, "added") {
+		t.Fatalf("a 6-digit code did not finish the login:\n%s", body)
+	}
+	api, _, err := l.hub.Account(l.f.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := api.Status(t.Context()); err != nil || st.Unattended {
+		t.Errorf("status %+v, %v: unattended relogin on after a login page login", st, err)
 	}
 }
 
@@ -612,24 +618,4 @@ func TestLoginPageStateFollowsItsLogin(t *testing.T) {
 			t.Errorf("after Stop: %+v, want ended stopped", st)
 		}
 	})
-}
-
-// The note under the unattended box says "If ticked:" once (the warning
-// from loginflow already starts with it) and ends its sentence with one
-// period before the 2FA sentence.
-func TestLoginPageNoteSaysIfTickedOnce(t *testing.T) {
-	l := newLab(t)
-	p := start(t, l.options(nil))
-	_, body := p.get(false)
-	want := html.EscapeString(loginflow.UnattendedWarningFor(service.SealerKeyFile)) +
-		". With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code."
-	if got := strings.Count(body, "If ticked:"); got != 1 {
-		t.Errorf("\"If ticked:\" appears %d times, want 1:\n%s", got, body)
-	}
-	if !strings.Contains(body, want) {
-		t.Errorf("note sentence %q missing:\n%s", want, body)
-	}
-	if strings.Contains(body, "..") {
-		t.Errorf("double period in the page:\n%s", body)
-	}
 }

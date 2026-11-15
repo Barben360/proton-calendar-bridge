@@ -124,25 +124,22 @@ func (p *wizardPane) credentials() {
 	addr.SetText(p.address)
 	pw := widget.NewPasswordEntry()
 	pw.PlaceHolder = "Proton password"
-	un := widget.NewCheck("Repair the session without me", nil)
-	warn := wrapped(p.model().UnattendedWarning())
-	warn.Importance = widget.LowImportance
 	cancel := p.cancelBtn()
 	var b *busy
 	sign := widget.NewButton("Sign in", func() {
 		p.address = strings.TrimSpace(addr.Text)
 		secret := []byte(pw.Text)
 		pw.SetText("") // the entry never holds it past the tap
-		address, unattended := p.address, un.Checked
+		address := p.address
 		p.call(b, "Working…", func(ctx context.Context, m WizardModel) error {
 			defer clear(secret)
-			return m.Submit(ctx, address, secret, unattended)
+			return m.Submit(ctx, address, secret)
 		})
 	})
 	sign.Importance = widget.HighImportance
-	b = newBusy(addr, pw, un, sign, cancel)
+	b = newBusy(addr, pw, sign, cancel)
 	p.cur = b
-	p.set(container.NewVBox(title("Add an account"), p.errLabel(), addr, pw, un, warn, buttons(cancel, sign), b.label))
+	p.set(container.NewVBox(title("Add an account"), p.errLabel(), addr, pw, buttons(cancel, sign), b.label))
 }
 
 func (p *wizardPane) totp() {

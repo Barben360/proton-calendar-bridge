@@ -49,16 +49,13 @@ const (
 )
 
 // Options configure a page. Username and Hub are required; TTL defaults to
-// DefaultTTL, Now to time.Now. Unattended is the agent's suggestion of
-// unattended relogin: shown as a note, never as a ticked box (the person
-// decides, as in pcb login and pcb-ui, and a ticked box would refuse a
-// 2FA person's one-time code).
+// DefaultTTL, Now to time.Now. The page offers no unattended relogin
+// (pcb login --unattended-relogin only).
 type Options struct {
-	Username   string
-	Unattended bool
-	Hub        loginflow.Hub
-	TTL        time.Duration
-	Now        func() time.Time
+	Username string
+	Hub      loginflow.Hub
+	TTL      time.Duration
+	Now      func() time.Time
 }
 
 type page struct {
@@ -325,7 +322,7 @@ func (p *page) post(w http.ResponseWriter, r *http.Request) {
 			pw := []byte(form.Get("password"))
 			delete(form, "password") // best effort: the request's strings stay until collected
 			delete(r.Form, "password")
-			_ = p.flow.Submit(ctx, p.o.Username, pw, form.Get("unattended") != "")
+			_ = p.flow.Submit(ctx, p.o.Username, pw)
 			clear(pw)
 		case loginflow.StepTOTP:
 			_ = p.flow.SubmitTOTP(ctx, strings.TrimSpace(form.Get("code")))
@@ -366,12 +363,10 @@ type view struct {
 	Err        string
 	Hint       string
 	CaptchaURL string
-	Suggested  bool   // the agent suggested unattended relogin
-	Warning    string // what ticking the box means, for the state's sealer
 }
 
 func (p *page) render(w http.ResponseWriter, step loginflow.Step) {
-	v := view{Username: p.o.Username, Step: string(step), Suggested: p.o.Unattended, Warning: p.flow.UnattendedWarning()}
+	v := view{Username: p.o.Username, Step: string(step)}
 	if step != loginflow.StepDone && step != stepCancelled {
 		if e := p.flow.Err(); e != nil {
 			v.Err, v.Hint = e.Error(), e.Hint
@@ -397,15 +392,11 @@ label{display:block;margin:.8rem 0}input[type=password],input[type=text]{width:1
 {{if eq .Step "credentials"}}<form method="post">
 <input type="hidden" name="step" value="credentials">
 <label>Proton password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
-<label><input type="checkbox" name="unattended" value="1"> Repair the session without me (unattended relogin: pcb keeps the password, sealed)</label>
-<p class="note">{{.Warning}}. With 2FA it then needs the otpauth:// URI of your authenticator, not a 6-digit code.</p>
-{{if .Suggested}}<p class="note">The agent suggests unattended relogin. Tick the box only if you want it.</p>{{end}}
 <button type="submit">Sign in</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
 </form>
 {{else if eq .Step "totp"}}<form method="post">
 <input type="hidden" name="step" value="totp">
 <label>Two-factor code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
-<p class="note">With unattended relogin, paste the otpauth:// URI instead of a code.</p>
 <button type="submit">Verify</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
 </form>
 {{else if eq .Step "captcha"}}<p>Proton asks for a human verification. <a href="{{.CaptchaURL}}" target="_blank" rel="noopener noreferrer">Open the verification</a>, solve it, then come back here and press I solved it.</p>

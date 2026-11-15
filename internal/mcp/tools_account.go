@@ -122,8 +122,7 @@ func (l *logins) answered(session *sdkmcp.ServerSession, username string, accept
 }
 
 type loginIn struct {
-	Username          string `json:"username" jsonschema:"the Proton address (or username) of the account to log in"`
-	UnattendedRelogin bool   `json:"unattended_relogin,omitempty" jsonschema:"suggest unattended relogin (pcb keeps the password sealed to repair the session alone); the person decides"`
+	Username string `json:"username" jsonschema:"the Proton address (or username) of the account to log in"`
 }
 
 type loginOut struct {
@@ -213,7 +212,7 @@ func (ss *session) login(ctx context.Context, req *sdkmcp.CallToolRequest, in lo
 		return out, "pcb-ui shows its add-account wizard for " + in.Username + ": the person types the password (and any 2FA code or CAPTCHA) there, never here. " +
 			"Call status to follow the account. Without pcb-ui at hand, they run: " + cli, nil, nil
 	}
-	pg, err := loginpage.Open(ctx, loginpage.Options{Username: in.Username, Unattended: in.UnattendedRelogin, Hub: ss.srv.o.Hub, Now: ss.srv.o.Now})
+	pg, err := loginpage.Open(ctx, loginpage.Options{Username: in.Username, Hub: ss.srv.o.Hub, Now: ss.srv.o.Now})
 	if err != nil {
 		return loginOut{}, "", nil, &toolError{Class: classRetry, Message: "the login page could not open", Hint: "the person runs: " + cli}
 	}
