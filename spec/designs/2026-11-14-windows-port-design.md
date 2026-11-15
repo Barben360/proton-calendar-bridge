@@ -1,7 +1,7 @@
 # Windows port — design
 
 - **Date**: 2026-11-14
-- **Status**: approved by the author on 2026-11-14; built (decision 0018), live check pending. Where the build differs from this design, the text says so in a "Built:" line.
+- **Status**: approved by the author on 2026-11-14; built (decision 0018), live check passed on 2026-11-15 (`spec/HUMAN-CHECKS.md` step 12, `spec/experiments/W1-windows-live.md`). Where the build differs from this design, the text says so in a "Built:" line.
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call].
 - **Amends**: SPEC §3 (Windows leaves "only builds"; "a GUI on Windows" leaves "not planned"), SPEC §13 "Platforms", decision 0015 ("Windows is next"), via a new decision 0018; `docs/install.md`, `docs/desktop.md`, `docs/status.md`, the README.
 

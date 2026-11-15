@@ -1888,7 +1888,7 @@ Windows behaviour of `pcb-ui` (decision 0018; `cmd/pcb-ui`, `internal/wingui`, `
   [verified: `TestNeedsConsole`, `TestReopenOnlyMissingHandles`, `TestVersionGoesToTheInheritedHandle`].
 - Tray: Fyne's (always present on Windows). Notifications: Windows toasts, best effort from a zip install (no Start-menu shortcut carrying the app's ID yet); a click is not reported, so the text says where to look, and the tray's attention state carries the same news.
 - "Start at login" writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `pcb-ui`, data `"<absolute exe>" --background`; switching it off deletes the value [verified: `TestSetAutostartWritesTheRunValue`, `TestRunKeyIsTheUsersRunKey`].
-- Logoff and shutdown: a hidden top-level window answers `WM_QUERYENDSESSION` and, on `WM_ENDSESSION`, ends the bridge with the 2 s session-end drain (§4) before it returns [verified: `TestSessionEndRunsEndBeforeAnswering`, `TestCancelledSessionEndDoesNotEnd`, `TestSessionEndCutsTheBridgesDrain`; a real logoff: `[assumed → spec/HUMAN-CHECKS.md step 12]`].
+- Logoff and shutdown: a hidden top-level window answers `WM_QUERYENDSESSION` and, on `WM_ENDSESSION`, ends the bridge with the 2 s session-end drain (§4) before it returns [verified: `TestSessionEndRunsEndBeforeAnswering`, `TestCancelledSessionEndDoesNotEnd`, `TestSessionEndCutsTheBridgesDrain`; a real logoff: verified: live 2026-11-15, spec/HUMAN-CHECKS.md step 12.8 (a restart, not a sign-out)].
 
 Releases (decision 0017, `spec/designs/2026-11-14-release-process-design.md`): the repository is public. A protected tag `vX.Y.Z`
 runs `.github/workflows/release.yml`, which refuses a tag off main, a tag whose `ci` run did not succeed and a tag already released,
@@ -2379,7 +2379,7 @@ Windows port additions (decision 0018, §13 "Platforms"):
 - Another Windows user is the adversary the port adds. The state and config directories carry a protected DACL (the user and SYSTEM, owner the user), and every check of a mode or an owner on Unix
   checks the access list on Windows, with the same exit codes [verified: `TestMkdirAllIsPrivate`, `TestCheckRefusesAnEveryoneACE`, `TestOpenHubRefusesAnOpenStateDirectory`].
 - The control pipe lets only the user's SID in, refuses remote clients, and is checked from both ends: the server reads the client's SID, the client the pipe's owner before it sends a login or a 2FA code
-  [verified: `TestPipeDACLIsTheUserOnly`, `TestServerRefusesAClientOfAnotherSID`, `TestDialRefusesAServerOfAnotherSID`]; a second Windows user reaching neither: `[assumed → spec/HUMAN-CHECKS.md step 12]`.
+  [verified: `TestPipeDACLIsTheUserOnly`, `TestServerRefusesAClientOfAnotherSID`, `TestDialRefusesAServerOfAnotherSID`]; a second Windows user reaching neither: [verified: live 2026-11-15, spec/HUMAN-CHECKS.md step 12.10].
 - DPAPI binds the sealing key to the Windows account: a copied state or disk opens nowhere else, a machine-scope blob is refused; a process of the same user can still use it, as with the key file.
 - Residual: an elevated pcb is not refused (`pcb doctor` warns). A directory's owner must be the user, or Administrators when pcb itself runs elevated; a file's owner is not checked (an elevated run's files are Administrators'), only its access list.
 Residual risk, stated in the docs: the bridge holds the decrypted calendar
