@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -54,6 +56,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 		}},
 		{"unlock auth info", http.MethodPost, "/auth/v4/info", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
+			s.C = patientClient(f, s.C.Tokens())
 			return func() error {
 				hold(t, f, http.MethodPost, "/auth/v4/info")
 				return s.Unlock(context.Background())
@@ -61,6 +64,7 @@ func TestLoginCallsHaveADeadline(t *testing.T) {
 		}},
 		{"unlock proof", http.MethodPut, "/core/v4/users/unlock", func(t *testing.T) func() error {
 			f, s := lockedScope(t, protontest.Options{})
+			s.C = patientClient(f, s.C.Tokens())
 			return func() error {
 				hold(t, f, http.MethodPut, "/core/v4/users/unlock")
 				return s.Unlock(context.Background())
@@ -123,6 +127,19 @@ func TestBeginKeepsRetryAfter(t *testing.T) {
 	if got := api.ParseRetryAfter(h, now); got != 300*time.Second {
 		t.Errorf("ParseRetryAfter(date 300 s ahead) = %v, want 5m0s", got)
 	}
+}
+
+// patientClient is client(f, tok) without its 5 s HTTP timeout. The unlock
+// proof goes through an api.Client, whose HTTP timeout would otherwise end a
+// held request with the same DeadlineExceeded as auth.CallTimeout, and so
+// hide a missing CallTimeout. The login calls through the gpa.Manager have
+// no HTTP timeout at all.
+func patientClient(f *protontest.Fake, tok api.Tokens) *api.Client {
+	return api.New(tok, api.Options{
+		BaseURL: f.URL,
+		Limiter: rate.NewLimiter(rate.Inf, 1),
+		HTTP:    &http.Client{Timeout: time.Hour},
+	})
 }
 
 // setCallTimeout shortens auth.CallTimeout for t. t must not run in
