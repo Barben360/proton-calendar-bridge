@@ -9,7 +9,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 - **Core** (Go): accounts and login (as unattended as Proton allows), a sync engine on Proton's change feed, an encrypted local cache, an access policy, and an iCalendar-native event model ([decision 0012](../spec/decisions/0012-icalendar-native-model.md); JSCalendar deferred).
 - **Adapters:** CalDAV (Thunderbird first; read and write), MCP for AI agents (`pcb mcp` over stdio, or `/mcp` with a bearer token; [decision 0016](../spec/decisions/0016-mcp-adapter.md)) and a CLI. A REST adapter is out of scope ([decision 0007](../spec/decisions/0007-scope-caldav-only.md)).
 - **Runs** headless (systemd, Docker), one process for any number of Proton accounts. On a Linux or Windows desktop the same daemon runs inside `pcb-ui`, a tray icon and a window.
-- **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested; Windows 10 and 11 (amd64) are supported, `pcb-ui` and `pcb`: built and tested in CI on Windows and checked live on a Windows 11 desktop ([install](install.md#macos-and-windows)).
+- **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested; Windows 10 and 11 (amd64) are supported, `pcb-ui` and `pcb`: built and tested in CI on Windows and checked live on a Windows 11 desktop from the zip; an installer comes with the next release, not checked live yet ([install](install.md#macos-and-windows)).
 
 ## How things are checked
 
@@ -98,8 +98,17 @@ What is built, how each part was tested, and which checks against a real Proton 
 | Live | the whole bridge on a Windows 11 virtual machine as a standard user, against the test account, on 2026-11-15: the zip, `pcb-ui` with its tray and notifications, an account added through it, CalDAV, `pcb status` through it, "Start at login" across a real restart, a second Windows user kept out of the files and of the bridge, `pcb uninstall --delete-data`. Thunderbird for Windows itself was not checked (skipped by the author; CalDAV was checked with `curl`); the author confirmed the uninstall ended the Proton session. |
 | Design | [the Windows port](../spec/decisions/0018-windows-port.md) |
 
+### The Windows installer
+
+| | |
+|---|---|
+| Built | `pcb_windows_amd64.msi`, in each release from the next one: a per-user install with no administrator prompt, `pcb-ui` (required) and `pcb` on your `PATH` (optional), a Start-menu shortcut that names `pcb-ui` to Windows, "Start at login" ticked by default, an uninstall that keeps your accounts ([install](install.md#the-installer)) |
+| Tested | `scripts/win/msi-smoke.ps1` on a Windows 11 virtual machine as a standard user: a silent install, the files, the shortcut and its app ID, "Start at login", the `PATH` entry seen by a new process, repairs that leave "Start at login" off, `pcb` removed and added back, upgrades, the uninstall keeping the data; CI runs the same script on every pull request, and a release on its own installer before publishing |
+| Live | not yet: the double-click install and its screens, SmartScreen, a notification showing `pcb-ui`'s name, "Start at login" across a restart, an upgrade and the uninstall |
+| Design | [the Windows installer](../spec/decisions/0019-windows-msi.md) |
+
 ## Still to check live
 
-- **Windows:** Thunderbird for Windows on the bridge (skipped in the live check; CalDAV itself was checked with `curl`).
+- **Windows:** Thunderbird for Windows on the bridge (skipped in the live check; CalDAV itself was checked with `curl`); the installer ([above](#the-windows-installer)).
 - **Session lifetime:** a 14-day probe of one Proton session, running until 2026-11-26 (so far: the access token lasts 24 hours and both tokens change on every refresh).
 - **Write-ups** of the 2026-11-13 sessions other than step 7 (M1, M2, step 6).

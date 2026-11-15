@@ -226,7 +226,13 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 
 ## Parked by the Windows port
 
-Next projects (decision 0018): the MSI (WiX; `pcb-ui` required, `pcb` optional on the user's `PATH`, the same Run value, per-user) with a Start-menu shortcut carrying the app's ID, without which toasts from a zip install are best effort; Authenticode signing (SignPath Foundation or Azure Trusted Signing), until which SmartScreen warns about an unknown publisher; Windows on arm64.
+Next projects (decisions 0018 and 0019; the MSI itself is built, decision 0019): Authenticode signing (SignPath Foundation or Azure Trusted Signing) of the binaries and the MSI, until which SmartScreen warns about an unknown publisher; winget, Chocolatey or Scoop packages; Windows on arm64. Toasts from a zip install stay best effort (no Start-menu shortcut carrying the app's ID; the MSI has one).
+
+Limits of the MSI (decision 0019), parked:
+- A silent upgrade closes `pcb-ui` (Restart Manager) and nothing starts it again until the next sign-in or a start from the Start menu: registering `pcb-ui` with `RegisterApplicationRestart` would let Restart Manager restart it.
+- The Run value's write has no rollback action: an install that fails after it leaves the value.
+- The `PATH` entry is matched as text: a hand-made entry with a trailing `\` or a `%VARIABLE%` is doubled, and the uninstall removes a hand-made entry identical to the installer's.
+- An MSI installed over a zip unzipped into the same folder: only the Run value is checked (the smoke script); replacing the zip's files is for the live check, and the docs say to remove the zip first.
 
 Minors deferred by the reviews (the ledger, kept out of the repository; only the real limits, in the order of the code):
 - `scripts/win/vmtest.sh`: its stderr filter is asynchronous and may print after the exit; an argument ending in a backslash is mangled by the Windows C runtime's `\"` rule; `vmtest_test.sh` lacks `-ui` with `-race`, `run`'s arity and a failed-ssh probe case. `shellquote.PowerShell` leaves `--%` unquoted (in the safe set).
