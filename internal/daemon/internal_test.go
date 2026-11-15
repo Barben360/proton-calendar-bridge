@@ -330,7 +330,7 @@ func TestLogPassInventsNoProtonAnswer(t *testing.T) {
 // is named after the state directory, which must be this user's.
 func TestControlHintForAnyOtherFailure(t *testing.T) {
 	t.Parallel()
-	dir := filepath.Join("state")
+	dir := "state"
 	got := controlHint(errors.New("boom"), filepath.Join(dir, "pcb.sock"))
 	want := "make sure " + dir + " is writable by this user"
 	if runtime.GOOS == "windows" {
