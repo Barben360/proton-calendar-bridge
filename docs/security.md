@@ -166,6 +166,18 @@ Check the fingerprint: `pcb serve`, `pcb doctor` and `pcb client show` print its
 
 Full rules (renewal, hostnames, your own certificate): [Thunderbird](thunderbird.md#tls-and-the-certificate). For agents: [agents](agents.md#tls-or-an-ssh-tunnel).
 
+## The update check
+
+`pcb-ui` and `pcb doctor` ask github.com once a day whether a newer stable release exists; `pcb version --check` asks when you run it. pcb never downloads nor installs anything.
+
+| | |
+|---|---|
+| What is sent | One request to `https://github.com/Barben360/proton-calendar-bridge/releases/latest`, with `User-Agent: pcb`: no version, no system, no cookie. GitHub sees your IP address, as for any visit. |
+| What is read | Only where that page redirects (the newest stable release's tag). Pre-releases are never offered. |
+| When | At most once a day: the answer is kept in `update.json` in the state directory. A build that is not a release (`dev`, a git describe) never asks. |
+| Turn it off | `pcb update-check off`, or Settings, "Check for updates" in `pcb-ui`; `PCB_UPDATE_CHECK=off` in the environment for one process. `pcb version --check` still asks: it is an explicit request. |
+| A failed check | Says nothing: no alert, no change to the tray or to an exit code. |
+
 ## What never leaves pcb
 
 - Secrets never go in argv, logs or errors.

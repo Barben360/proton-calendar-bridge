@@ -38,8 +38,9 @@ After `make install-ui` it is also in your applications menu.
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
 | Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account, with the Claude Code command to copy under it), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
 | Add-account wizard | Password, 2FA code, CAPTCHA. |
-| Notifications | A desktop notification when an account needs you. |
-| Settings | "Start at login", "Open config.toml", "Restart bridge", the log level. |
+| Notifications | A desktop notification when an account needs you, and one when a newer release is out. |
+| Update available | A panel at the top of the window when a newer stable release exists: "Open release page", "Copy update command" (the `install.sh` line, with the flags of this install), and "Later", which hides it for 48 hours. It comes back after, for the same version too: a fix only protects those who install it. The tray menu shows "Update available: vX.Y.Z" above "Open pcb" as long as one exists. The tray icon does not change. ([security](security.md#the-update-check)) |
+| Settings | "Start at login", "Check for updates", "Open config.toml", "Restart bridge", the log level. |
 
 Closing the window hides it; Quit in the tray menu stops the bridge. Without a tray, closing the window quits (the same drain as Quit).
 
@@ -96,6 +97,7 @@ Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CO
 |---|---|
 | Tray | Always there, in the notification area (it may sit under the arrow of hidden icons). Its menu has Quit. |
 | Start at login | Settings, "Start at login" writes the value `pcb-ui` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the absolute path of `pcb-ui.exe` and `--background`. Switching it off deletes the value. Moving the folder breaks it: switch it off and on again from the new place. |
+| Update available | The same panel and tray line, without "Copy update command": the release page has the zip. The notification of a new release only informs (Windows reports no click). |
 | Notifications | Windows notifications, best effort: started from the zip, without a Start-menu shortcut, some Windows builds may not show them. The tray icon's attention state carries the same news. Each one's title names the account and its text says what happened and the fix. A click on it is not reported: open the window from the tray. |
 | Sign out, shutdown | `pcb-ui` gets up to 2 seconds to stop cleanly; what is cut short is recovered at the next start. |
 | `pcb-ui.exe --version`, `--help` | Print to the terminal they are typed in, or to a redirected file. Started from Explorer, `pcb-ui` has no console window. |
