@@ -547,6 +547,9 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	if stalled && (stall.hold != nil || stall.bound > 0) {
 		// The server notices a client that gave up only once the body is
 		// read: read it now, and serve it again after the stall.
+		if stall.hold != nil {
+			close(stall.hold.reached) // arrived, whether or not the body reads
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return
@@ -555,7 +558,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		var timer <-chan time.Time
 		var release <-chan struct{}
 		if h := stall.hold; h != nil {
-			close(h.reached)
 			release = h.release
 		} else {
 			t := time.NewTimer(stall.bound)
