@@ -66,11 +66,11 @@ func (u *Updates) Refresh(ctx context.Context) (UpdateNotice, *Notification) {
 	now := u.Now()
 	res := u.Checker.Cached(ctx, u.Path, now)
 	if res.Err != nil {
-		st := update.Load(u.Path)
-		if st.Latest == "" || !update.Newer(u.Checker.Installed, st.Latest) {
+		rel, ok := u.Checker.Last(u.Path)
+		if !ok || !update.Newer(u.Checker.Installed, rel.Version) {
 			return UpdateNotice{}, nil
 		}
-		res = update.Result{Latest: update.Release{Version: st.Latest, URL: st.URL}, Available: true}
+		res = update.Result{Latest: rel, Available: true}
 	}
 	if !res.Available {
 		return UpdateNotice{}, nil

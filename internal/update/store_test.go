@@ -193,3 +193,19 @@ func TestCachedWithAnUnwritableStateStillAnswers(t *testing.T) {
 		t.Errorf("unwritable state: %+v", res)
 	}
 }
+
+// update.json is data from disk: a cached page on another host is not
+// opened, the release is asked again (review finding 2).
+func TestCachedDoesNotTrustAnotherHostOnDisk(t *testing.T) {
+	r := newReleases(t, http.StatusFound, tagPath+"v0.2.0")
+	c, p := r.checker("v0.1.0"), storePath(t)
+	if err := update.Edit(context.Background(), p, func(s *update.State) {
+		s.CheckedAt, s.Latest, s.URL = t0, "v0.2.0", "https://evil.example"+tagPath+"v0.2.0"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := c.Cached(context.Background(), p, t0.Add(time.Minute))
+	if res.Latest.URL != r.srv.URL+tagPath+"v0.2.0" || r.n.Load() != 1 {
+		t.Errorf("Cached = %+v after %d requests, want GitHub asked again", res, r.n.Load())
+	}
+}

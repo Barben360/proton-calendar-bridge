@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,7 +33,10 @@ func newReleases(t *testing.T, status int, location string) *releases {
 		r.n.Add(1)
 		r.ua.Store(req.Header.Get("User-Agent"))
 		r.cookie.Store(req.Header.Get("Cookie") != "")
-		if r.location != "" {
+		switch {
+		case strings.Contains(r.location, "://"):
+			w.Header().Set("Location", r.location)
+		case r.location != "":
 			w.Header().Set("Location", r.srv.URL+r.location)
 		}
 		w.WriteHeader(r.status)
@@ -74,6 +78,8 @@ func TestLatestRefusesOtherAnswers(t *testing.T) {
 		"no location":      {http.StatusFound, ""},
 		"followed (200)":   {http.StatusOK, tagPath + "v1.0.0"},
 		"not found":        {http.StatusNotFound, ""},
+		"another host":     {http.StatusFound, "https://evil.example" + tagPath + "v1.0.0"},
+		"another scheme":   {http.StatusFound, "file://" + tagPath + "v1.0.0"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newReleases(t, c.status, c.location)
@@ -81,6 +87,17 @@ func TestLatestRefusesOtherAnswers(t *testing.T) {
 				t.Errorf("Latest = %+v, want an error", rel)
 			}
 		})
+	}
+}
+
+// GitHub could move from 302 to another redirect code: any of them names
+// the release the same way.
+func TestLatestAcceptsEveryRedirectCode(t *testing.T) {
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		r := newReleases(t, code, tagPath+"v0.2.0")
+		if rel, err := r.checker("v0.1.0").Latest(context.Background()); err != nil || rel.Version != "v0.2.0" {
+			t.Errorf("%d: %+v, %v", code, rel, err)
+		}
 	}
 }
 

@@ -236,3 +236,19 @@ func TestUpdatesKeepsTheLastAnswerWhenACheckFails(t *testing.T) {
 		t.Errorf("failed re-check: %+v, want the last answer", n)
 	}
 }
+
+// The offline fallback reads update.json too: a page on another host there
+// is never shown.
+func TestUpdatesFallbackDoesNotTrustAnotherHost(t *testing.T) {
+	g, c := newGH(t), newClock()
+	u := newUpdates(t, g, "v0.1.0", c)
+	if err := update.Edit(context.Background(), u.Path, func(s *update.State) {
+		s.CheckedAt, s.Latest, s.URL = c.now().Add(-25*time.Hour), "v0.2.0", "https://evil.example/Barben360/proton-calendar-bridge/releases/tag/v0.2.0"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g.fail.Store(true)
+	if n, note := u.Refresh(context.Background()); n != (ui.UpdateNotice{}) || note != nil {
+		t.Errorf("tampered cache while offline: %+v, %+v, want nothing", n, note)
+	}
+}

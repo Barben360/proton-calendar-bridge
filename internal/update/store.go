@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,8 +88,10 @@ func (c Checker) Cached(ctx context.Context, path string, now time.Time) Result 
 		return Result{Err: ErrDevBuild}
 	}
 	st := Load(path)
-	if age := now.Sub(st.CheckedAt); !st.CheckedAt.IsZero() && age >= 0 && age < CacheFor && stable.MatchString(st.Latest) {
-		return c.result(Release{Version: st.Latest, URL: st.URL}, st.CheckedAt)
+	if age := now.Sub(st.CheckedAt); !st.CheckedAt.IsZero() && age >= 0 && age < CacheFor {
+		if rel, ok := c.cachedRelease(st); ok {
+			return c.result(rel, st.CheckedAt)
+		}
 	}
 	return c.Fresh(ctx, path, now)
 }
@@ -101,6 +104,21 @@ func (c Checker) Fresh(ctx context.Context, path string, now time.Time) Result {
 	}
 	_ = Edit(ctx, path, func(s *State) { s.CheckedAt, s.Latest, s.URL = now, rel.Version, rel.URL })
 	return c.result(rel, now)
+}
+
+// Last is path's last answer, whatever its age, when it passes the
+// redirect's own checks: what pcb-ui keeps showing while a check fails.
+func (c Checker) Last(path string) (Release, bool) { return c.cachedRelease(Load(path)) }
+
+// cachedRelease is st's answer when it passes the redirect's own checks
+// (update.json is data from disk).
+func (c Checker) cachedRelease(st State) (Release, bool) {
+	u, err := url.Parse(st.URL)
+	if err != nil {
+		return Release{}, false
+	}
+	rel, err := c.release(u)
+	return rel, err == nil && rel.Version == st.Latest
 }
 
 func (c Checker) result(rel Release, at time.Time) Result {
