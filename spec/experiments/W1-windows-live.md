@@ -1,6 +1,6 @@
 # W1-live — Both binaries on a Windows 11 VM, as a standard user
 
-Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped before the login (12.4).** Every line that needs no account ran: 12.1, 12.2, 12.3, 12.7, 12.9, and 12.8, 12.10 and 12.11 without an account. The login could not run: the workstation's password manager CLI (`pass-cli`) had no session, and logging it in needs the author. 12.4, 12.5, 12.6, 12.12 and the account parts of 12.8, 12.10 and 12.11 wait for it (last section). Three findings, all fixed (table at the end); Windows stays "runs, untested" until the rest passes.
+Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped at the login (12.4): Proton answered with a CAPTCHA.** Every line that needs no account ran: 12.1, 12.2, 12.3, 12.7, 12.9, and 12.8, 12.10 and 12.11 without an account. The one login reached Proton through the running `pcb-ui` and got a CAPTCHA, the stop condition of this step; solving it means a second login, the author's call. 12.5, 12.6, 12.12 and the account parts of 12.7, 12.8, 12.10 and 12.11 wait for it (last section). Four findings, all fixed (table at the end); Windows stays "runs, untested" until the rest passes.
 
 ## Setup
 
@@ -8,7 +8,7 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped befo
 - Contexts: **ssh** (key sign-in of `<user>`), **console** (an interactive scheduled task of `<user>` in its console session: task XML with `InteractiveToken` and no battery conditions, PowerShell run as `conhost.exe --headless powershell.exe …`), **admin** (the administrator over SSH). Screenshots (`Graphics.CopyFromScreen`) were copied to the workstation and stay there.
 - Build under test: branch `win-t16`, first `v0.1.0-53-g5cb9a93`, then, after the fixes, `v0.1.0-56-gfa1e8e2`. `pcb.exe` cross-compiled (`GOOS=windows make build`), `pcb-ui.exe` built on the VM (MSYS2 UCRT64, `make ui`), the zip made by `scripts/release/package.sh windows amd64` (zip SHA-256 `304250c0…162023`, then `99589264…071e3a`), copied to `Downloads`, its `Get-FileHash` equal to the workstation's, unzipped with `Expand-Archive` into `%LOCALAPPDATA%\Programs\pcb`.
 - Windows Update restarted the VM on its own at 23:35Z and 23:38Z, before the run (a servicing restart, then TrustedInstaller); the first sign-in after it showed the "almost done setting up your PC" screen, dismissed with "Remind me in 3 days".
-- **Logins: 0.** The login of 12.4 did not run (see the status line).
+- **Logins: 1** (12.4, 00:50:21Z, outcome `needs-captcha`). An earlier attempt at 00:47:55Z stopped in pcb before any Proton call (F4) and is not a login. Last entry of any ledger before it: 2026-11-13T23:44:21Z.
 
 ## 12.1 The zip: PASS
 
@@ -28,6 +28,12 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped befo
 - `layout.json` is `{"version":2,"sealer":"dpapi"}` from that first start (`sealer chosen sealer=dpapi backend=auto`); no `secrets.key.dpapi` before a login.
 - `icacls`: `%LOCALAPPDATA%\pcb` and `…\logs`: `<user>:(OI)(CI)(F)` and `SYSTEM:(OI)(CI)(F)` only, protected (no inherited entry), owner `<user>`; `layout.json` and `pcb-ui.log` inherit those two only.
 - The toast: 23:51Z, a Windows toast titled `pcb`, under the header `io.github.barben360.pcb-ui` (the raw app ID: a zip install registers no display name), body `not logged in to Proton\nrun pcb login` with a **literal** `\n` (**F2**); `notification sent alert=needs-login` in `pcb-ui.log`. After the fix, 00:09Z: body `not logged in to Proton — run pcb login` (screenshot).
+
+## 12.4 The login through the running `pcb-ui`: STOPPED (CAPTCHA; F4)
+
+- Method: from the workstation, `pass-cli run --env-file ~/.config/pcb-live/pcb.env -- sh -c 'printf … | ssh <user>@<VM> powershell -File <scratch>\login.ps1'`; `login.ps1` read the username, the TOTP URI and the password from stdin, gave the first two to `pcb.exe` in its environment only and the password on its stdin, and replaced the address by `<test account>` in what it printed. A dry run first printed only the lengths (`uri=True`). Nothing was written on the VM; no secret appeared in any output kept.
+- 00:47:55Z, ssh, `pcb-ui` running in the console: `pcb.exe login --password-fd 0 --non-interactive --json` exit 2, `cannot read the password from descriptor 0`, before any Proton call (**F4**: on Windows a descriptor number is not a handle). Fixed, `pcb.exe` (`v0.1.0-59-gbb07ca2`) copied into the install folder over the zip's.
+- 00:50:21Z, the login: `pcb login` found `pcb-ui` on its pipe and the login ran there (`pcb-ui.log`: `login started entry=cli account=<id> add=true`, then `login ended entry=cli account=<id> outcome=needs-captcha`, no address). Exit 10, `needs-captcha`, with the verification link and `pcb login resume --captcha-token …` as the hint. `pcb status`: the account `pending`, phase `needs-captcha`, `secrets: none`, `key_file: …\secrets.key.dpapi (absent)`; no toast for the pending add (as designed). Stopped there: no second login.
 
 ## 12.7 Tray and menu: PASS without an account (the account's line waits for 12.4)
 
@@ -60,7 +66,7 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped befo
 
 | Line | What remains |
 |---|---|
-| 12.4 | the one login, through the running `pcb-ui`, from the workstation's password manager over SSH's stdin; then `secrets.key.dpapi`, `layout.json`, the login lines of `pcb-ui.log`, no address in it |
+| 12.4 | the CAPTCHA solved by the author, then the second login (`pcb login resume --captcha-token T` with the password on stdin again, at least 60 s after 00:50:21Z); then `secrets.key.dpapi`, the `ready` lines of `pcb-ui.log` |
 | 12.5 | `pcb status` (ssh and console) with the account, `pcb client show` |
 | 12.6 | Thunderbird for Windows (or `curl.exe` PROPFIND/REPORT and Thunderbird left to the author) |
 | 12.7 | the account's line in the tray menu |
@@ -76,6 +82,7 @@ Status: **HUMAN-CHECKS step 12, run in part on 2026-11-14/15 (UTC); stopped befo
 | F1 | The OpenGL workaround in `docs/troubleshooting.md` did not work as written: the `msvc` archive of mesa-dist-win 26.2.6 has no `opengl32.dll`, and with the `mingw` archive's DLLs Mesa chose its Direct3D 12 driver and `pcb-ui` ended silently (exit `0x80070057`) when its window showed. A defect of the VM's setup and of the docs, not of pcb | the page names the `mingw` archive's two DLLs and `setx GALLIUM_DRIVER llvmpipe`, and what happens without it | "Say which Mesa files pcb-ui needs, and to make Mesa use llvmpipe" |
 | F2 | A toast showed `\n` literally: Fyne writes the title and body, quoted by Go's `%q`, into a PowerShell double-quoted string, where Go's escapes are text, and where a `"` (or `“ ” „`), a `$` or a backtick would end or expand the string | `Notify` passes both through `toastText`: a line break becomes ` — `, quotes and backticks `'`, `$` and `\` their fullwidth forms, anything `%q` escapes a space (`TestToastText`, `TestToastTextIsInertInFynesTemplate`) | "Keep line breaks and quotes from breaking a Windows toast" |
 | F3 | `Open config.toml` with no `config.toml` (the usual case) failed: `The system cannot find the file specified.` | it makes an empty `config.toml` in a private config directory first, and leaves an existing one alone (`TestSettingsOpenConfigMakesAMissingFile`, `TestSettingsOpenConfigFailsWithoutOpening`); `docs/desktop.md` says so, and that Windows asks for an app for `.toml` | "Make config.toml before Open config.toml opens it" |
+| F4 | `pcb login --password-fd 0` failed on Windows (`cannot read the password from descriptor 0`): `os.NewFile(0)` is no file there, a descriptor number not being a handle | 0, 1, 2 are the standard handles on Windows, another N a handle inherited from the parent (`TestPasswordFDZeroIsStandardInput`, Windows); `docs/commands.md` shows `Get-Content pwfile \| pcb login --password-fd 0` | "Read --password-fd 0 from standard input on Windows" |
 | — | HUMAN-CHECKS step 12's method (battery conditions of the tasks, the headless console, Mesa's variable, the second user's sign-in, the tray's left click) | corrected | "Correct HUMAN-CHECKS step 12 after its first run" |
 
 Observations, not defects: the toast's header is the raw app ID `io.github.barben360.pcb-ui` (no Start-menu shortcut gives it a name; docs/desktop.md already calls zip toasts best effort); the OpenGL message box's hint names `docs/troubleshooting.md`, which the zip does not hold (only `README.md`); a second user can tell whether a name exists in the state directory (12.10); the second user's `pcb status` hint names `pcb serve` where the server is `pcb-ui`.
