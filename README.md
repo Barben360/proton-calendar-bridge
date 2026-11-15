@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/github/license/Barben360/proton-calendar-bridge)](LICENSE)
 [![Go](https://img.shields.io/github/go-mod/go-version/Barben360/proton-calendar-bridge)](go.mod)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-blue)](docs/install.md#requirements)
-[![Status: early](https://img.shields.io/badge/status-early%2C%20test%20accounts%20only-orange)](docs/status.md)
+[![Status: early](https://img.shields.io/badge/status-early-yellow)](docs/status.md)
 
 > [!IMPORTANT]
 > proton-calendar-bridge is an independent project. It is not affiliated with, endorsed by or supported by Proton AG. Proton and Proton Calendar are trademarks of Proton AG.
@@ -20,7 +20,7 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 - **Where it runs**: on your Linux desktop with a tray icon, or headless as a systemd service or a container.
 
 > [!WARNING]
-> pcb is early software, built and tested against a fake Proton and checked live on a test account. Do not point it at an account you care about yet ([status](docs/status.md)).
+> pcb is early software, built and tested against a fake Proton, checked live on a test account, and used by its author on Linux with their own Proton account, where every feature works. Other platforms and setups have seen less use ([status](docs/status.md)).
 
 ## What it does for you
 
