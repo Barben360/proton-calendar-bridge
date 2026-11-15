@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  pcb_windows_amd64.msi (spec/designs/2026-11-15-windows-msi-design.md), built
+  by scripts/release/mkmsi.ps1 with WiX 7.0.1, its UI and Util extensions:
+  a per-user install (no administrator) in %LOCALAPPDATA%\Programs\pcb.
+
+  Preprocessor variables (wix build -d): Version (X.Y.Z), PcbExe and PcbUiExe
+  (the two binaries).
+
+  Start at login is not a component: Windows Installer rewrites a
+  component's registry values at a repair, and would turn it back on after
+  pcb-ui's own switch turned it off. The Run value is written by reg.exe at
+  an install or upgrade when STARTATLOGIN=1, and deleted at uninstall when
+  it still starts this install's pcb-ui.exe; a repair or a feature change
+  does neither.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- The UpgradeCode is pcb's for good: a new one makes a second,
+       side-by-side product instead of an upgrade. -->
+  <Package Name="pcb"
+           Manufacturer="proton-calendar-bridge"
+           Version="$(var.Version)"
+           UpgradeCode="6DBB5FA8-C216-4CE9-B535-E35923F221DC"
+           Scope="perUser"
+           Language="1033">
+    <SummaryInformation Description="pcb, the Proton Calendar CalDAV bridge" />
+
+    <!-- An MSI version has three fields: v0.2.0-rc.1 and v0.2.0 are both
+         0.2.0, and the final must replace the candidate. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of pcb is already installed. Uninstall it first to install this one." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Barben360/proton-calendar-bridge" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Barben360/proton-calendar-bridge/blob/main/docs/troubleshooting.md" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="pcb" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Per-user components: each has an HKCU value as its KeyPath (ICE38),
+         removed with it. A file and a registry KeyPath cannot have a
+         generated GUID: theirs are fixed, never reused for another set of
+         resources. -->
+    <Feature Id="App" Title="pcb-ui" Description="The desktop app: the bridge, its tray icon and its window, and a Start-menu shortcut." Level="1" AllowAbsent="no">
+      <Component Id="PcbUi" Directory="INSTALLFOLDER" Guid="68A631BF-DE5A-4174-A227-03AC9F764310">
+        <File Id="PcbUiExe" Name="pcb-ui.exe" Source="$(var.PcbUiExe)" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\proton-calendar-bridge\installer" Name="App" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+        <!-- Not advertised: starting it never runs a repair. Its app ID is
+             pcb-ui's (Fyne's app ID, cmd/pcb-ui/main_desktop.go), the one
+             Windows names its notifications after. -->
+        <Shortcut Id="PcbUiShortcut" Directory="ProgramMenuFolder" Name="pcb-ui" Description="pcb, the Proton Calendar CalDAV bridge" Target="[#PcbUiExe]" WorkingDirectory="INSTALLFOLDER">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.barben360.pcb-ui" />
+        </Shortcut>
+      </Component>
+    </Feature>
+    <Feature Id="Cli" Title="pcb (command line)" Description="pcb.exe, on your PATH: new terminals find it." Level="1">
+      <Component Id="Pcb" Directory="INSTALLFOLDER" Guid="1EE5F733-C52F-401C-80C5-0FFFC9D31CAC">
+        <File Id="PcbExe" Name="pcb.exe" Source="$(var.PcbExe)" KeyPath="no" />
+        <!-- Windows Installer adds no entry that PATH already holds (the
+             same text, any case) and removes it at uninstall: without the
+             trailing backslash of [INSTALLFOLDER], as a hand-made entry
+             is written, so a zip user's own entry is not doubled. -->
+        <Environment Id="UserPath" Name="PATH" Value="[LocalAppDataFolder]Programs\pcb" Action="set" Part="last" System="no" Permanent="no" />
+        <RegistryValue Root="HKCU" Key="Software\proton-calendar-bridge\installer" Name="Cli" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+
+    <!-- The PATH entry names the default folder: another INSTALLFOLDER
+         (msiexec INSTALLFOLDER=...) is refused. -->
+    <SetProperty Id="PCBDEFAULTFOLDER" Value="[LocalAppDataFolder]Programs\pcb\" After="CostFinalize" Sequence="both" />
+    <CustomAction Id="RefuseInstallFolder" Error="pcb installs in %LOCALAPPDATA%\Programs\pcb only: leave INSTALLFOLDER unset." />
+    <InstallUISequence>
+      <Custom Action="RefuseInstallFolder" After="SetPCBDEFAULTFOLDER" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; PCBDEFAULTFOLDER" />
+    </InstallUISequence>
+
+    <!-- Start at login. PCBRUNVALUE is the Run value as found, PCBRUNEXE
+         this install's pcb-ui.exe quoted as internal/runkey quotes it. -->
+    <Property Id="STARTATLOGIN" Secure="yes" />
+    <Property Id="PCBRUNVALUE" Secure="yes">
+      <RegistrySearch Id="RunValueSearch" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="pcb-ui" Type="raw" />
+    </Property>
+    <SetProperty Id="PCBRUNEXE" Value="&quot;[INSTALLFOLDER]pcb-ui.exe&quot;" After="CostFinalize" Sequence="both" />
+    <!-- Ticked by default, unless set on the command line; an upgrade
+         keeps what pcb-ui's switch left: ticked only when the Run value
+         starts this install's pcb-ui.exe. Once only (the UI's choice
+         reaches the execute sequence unchanged). -->
+    <SetProperty Id="STARTATLOGIN" Value="1" After="SetPCBRUNEXE" Sequence="first"
+                 Condition="NOT STARTATLOGIN AND NOT Installed AND (NOT WIX_UPGRADE_DETECTED OR PCBRUNVALUE ~&gt;&lt; PCBRUNEXE)" />
+
+    <SetProperty Id="PcbRunWrite" Before="PcbRunWrite" Sequence="execute"
+                 Value="&quot;[System64Folder]reg.exe&quot; add &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v pcb-ui /t REG_SZ /d &quot;\&quot;[INSTALLFOLDER]pcb-ui.exe\&quot; --background&quot; /f" />
+    <CustomAction Id="PcbRunWrite" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="check" />
+    <SetProperty Id="PcbRunDelete" Before="PcbRunDelete" Sequence="execute"
+                 Value="&quot;[System64Folder]reg.exe&quot; delete &quot;HKCU\Software\Microsoft\Windows\CurrentVersion\Run&quot; /v pcb-ui /f" />
+    <CustomAction Id="PcbRunDelete" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RefuseInstallFolder" After="SetPCBDEFAULTFOLDER" Condition="NOT Installed AND INSTALLFOLDER ~&lt;&gt; PCBDEFAULTFOLDER" />
+      <!-- An install or upgrade (a new ProductCode: not Installed). -->
+      <Custom Action="PcbRunWrite" Before="InstallFinalize" Condition="NOT Installed AND NOT REMOVE AND STARTATLOGIN = &quot;1&quot;" />
+      <!-- The uninstall (not the one an upgrade runs on the old product),
+           or an install with Start at login unticked; only this install's. -->
+      <Custom Action="PcbRunDelete" Before="PcbRunWrite"
+              Condition="PCBRUNVALUE ~&gt;&lt; PCBRUNEXE AND ((REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE) OR (NOT Installed AND NOT REMOVE AND STARTATLOGIN &lt;&gt; &quot;1&quot;))" />
+    </InstallExecuteSequence>
+
+    <!-- The screens: welcome, licence, features, Start at login, install,
+         finish with "Launch pcb-ui". -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)license.rtf" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch pcb-ui" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#PcbUiExe]" />
+    <CustomAction Id="LaunchPcbUi" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+    <UI>
+      <ui:WixUI Id="WixUI_FeatureTree" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchPcbUi" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+
+      <Dialog Id="StartAtLoginDlg" Width="370" Height="270" Title="!(loc.CustomizeDlg_Title)">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.CustomizeDlgBannerBitmap)" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="210" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Start at login" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Whether pcb-ui starts, in the tray, when you sign in to Windows." />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="StartAtLogin" Type="CheckBox" X="20" Y="60" Width="330" Height="18" Property="STARTATLOGIN" CheckBoxValue="1" Text="&amp;Start pcb-ui when I sign in" />
+        <Control Id="Hint" Type="Text" X="20" Y="86" Width="330" Height="30" NoPrefix="yes" Text="pcb-ui's Settings, Start at login, changes it later." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="CustomizeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <!-- Between the features and the ready screen, at a first install or
+           an upgrade only: the later NewDialog of a button wins. -->
+      <Publish Dialog="CustomizeDlg" Control="Next" Event="NewDialog" Value="StartAtLoginDlg" Order="10" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="StartAtLoginDlg" Order="10" Condition="NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

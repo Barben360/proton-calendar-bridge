@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Release tag rules (spec/designs/2026-11-14-release-process-design.md §5.1-5.2),
 # called by .github/workflows/release.yml, image-build.yml and image.yml.
-# Linux runners only.
+# Linux runners only (msi-version also in Git for Windows' or MSYS2's bash).
 #
 #   check.sh tag-kind TAG                       stable | prerelease
 #   check.sh is-latest TAG                      existing tags on stdin; 0 when TAG is the newest stable
@@ -12,6 +12,8 @@
 #                                               publish job repeats the grammar inline)
 #   check.sh on-main SHA [BASE]                 0 when SHA is an ancestor of BASE (default origin/main)
 #   check.sh reachable SHA                      0 when a remote-tracking branch or a tag of the clone holds SHA
+#   check.sh msi-version TAG                    the MSI's ProductVersion: vX.Y.Z[-…] is X.Y.Z, an empty TAG
+#                                               (not a tag build) 0.0.0 (scripts/release/mkmsi.ps1, make msi)
 set -eu
 
 tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
@@ -103,7 +105,19 @@ case $cmd in
     # An unknown object fails for-each-ref: no output, refused.
     [[ -n $(git for-each-ref --contains "$1" --format='%(refname)' refs/remotes refs/tags 2>/dev/null) ]]
     ;;
+  msi-version)
+    # An MSI version has three fields, at most 255.255.65535: the
+    # pre-release suffix is dropped (v0.2.0-rc.1 and v0.2.0 are both 0.2.0).
+    [[ $# -eq 1 ]] || die "usage: msi-version TAG"
+    if [[ -z $1 ]]; then echo 0.0.0; exit 0; fi
+    valid "$1" || die "$1 is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+    v=${1#v}
+    v=${v%%-*}
+    IFS=. read -r major minor patch <<<"$v"
+    ((major <= 255 && minor <= 255 && patch <= 65535)) || die "$1: an MSI version is at most 255.255.65535"
+    echo "$v"
+    ;;
   *)
-    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|on-main|reachable ..."
+    die "usage: check.sh tag-kind|is-latest|is-latest-minor|image-tags|image-tag-list|on-main|reachable|msi-version ..."
     ;;
 esac
