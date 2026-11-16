@@ -435,15 +435,15 @@ func TestCaptchaResumeWaitsOutGuard(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, protontest.Options{Captcha: "chal-123"})
 	res := e.login(t, e.req())
-	e.clk.advance(10 * time.Second)
+	e.clk.advance(3 * time.Second)
 	r := e.req()
 	r.CaptchaToken = res.CaptchaToken
 	res = e.login(t, r)
 	if res.State != service.StateReady {
 		t.Fatalf("state = %q, want ready", res.State)
 	}
-	if len(e.clk.slept) != 1 || e.clk.slept[0] != 50*time.Second {
-		t.Errorf("Sleep calls = %v, want [50s]", e.clk.slept)
+	if len(e.clk.slept) != 1 || e.clk.slept[0] != 7*time.Second {
+		t.Errorf("Sleep calls = %v, want [7s]: the CAPTCHA retry's 10 s floor", e.clk.slept)
 	}
 	if st := e.loadState(t); st.Phase != store.PhaseReady || st.Captcha != nil {
 		t.Errorf("state = %+v, want ready without captcha", st)
@@ -451,6 +451,76 @@ func TestCaptchaResumeWaitsOutGuard(t *testing.T) {
 	st, _ := e.svc.Status(t.Context())
 	if st.CaptchaURL != "" {
 		t.Errorf("Status.CaptchaURL = %q after the CAPTCHA was solved", st.CaptchaURL)
+	}
+}
+
+// A CAPTCHA solved in 30 s is retried at once: the retry is spaced by
+// loginguard.CaptchaRetryInterval, not the minute every other login waits.
+// The retry still stamps the guard, so a plain login right after it waits
+// the full minute.
+func TestCaptchaRetryIsNotHeldForAMinute(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{Captcha: "chal-123"})
+	t0 := e.clk.Now()
+	res := e.login(t, e.req())
+	if want := t0.Add(10 * time.Second); !res.CaptchaRetryAt.Equal(want) {
+		t.Errorf("CaptchaRetryAt = %v, want %v (the attempt's stamp + 10 s)", res.CaptchaRetryAt, want)
+	}
+	e.clk.advance(30 * time.Second)
+	r := e.req()
+	r.CaptchaToken = res.CaptchaToken
+	if res = e.login(t, r); res.State != service.StateReady {
+		t.Fatalf("state = %q, want ready", res.State)
+	}
+	if len(e.clk.slept) != 0 {
+		t.Errorf("Sleep calls = %v, want none 30 s after the CAPTCHA", e.clk.slept)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 2 {
+		t.Errorf("%d POST /auth/v4, want 2", n)
+	}
+
+	e.clk.advance(10 * time.Second)
+	_, err := e.svc.Login(t.Context(), e.req())
+	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint != "retry in 50s" {
+		t.Errorf("plain login 10 s after the CAPTCHA retry: hint %q, want %q", ee.Hint, "retry in 50s")
+	}
+}
+
+// Only the token of the CAPTCHA Proton asked for earns the short spacing: a
+// made-up one waits out the full minute (it cannot get around the guard).
+func TestUnknownCaptchaTokenWaitsTheMinute(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(10 * time.Second)
+	r := e.req()
+	r.CaptchaToken = "made-up"
+	_, _ = e.svc.Login(t.Context(), r)
+	if len(e.clk.slept) != 1 || e.clk.slept[0] != 50*time.Second {
+		t.Errorf("Sleep calls = %v, want [50s]: an unknown token is spaced by the minute", e.clk.slept)
+	}
+}
+
+// A CAPTCHA met while the stored login is ready leaves state.json as it was;
+// the token is still known in memory, so its retry is spaced by 10 s.
+func TestCaptchaWhileReadyRetriesSoon(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.login(t, e.req())
+	e.clk.advance(time.Minute)
+	e.f.SetCaptchaFor(e.f.Username, "chal-ready")
+	res := e.login(t, e.req())
+	if res.State != service.StateNeedsCaptcha || e.loadState(t).Phase != store.PhaseReady {
+		t.Fatalf("state %q, stored phase %q; want a CAPTCHA over a ready state", res.State, e.loadState(t).Phase)
+	}
+	e.clk.advance(30 * time.Second)
+	r := e.req()
+	r.CaptchaToken = res.CaptchaToken
+	if res = e.login(t, r); res.State != service.StateReady {
+		t.Fatalf("retry: state %q, want ready", res.State)
+	}
+	if len(e.clk.slept) != 0 {
+		t.Errorf("Sleep calls = %v, want none 30 s after the CAPTCHA", e.clk.slept)
 	}
 }
 

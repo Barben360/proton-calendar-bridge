@@ -188,6 +188,10 @@ type LoginResult struct {
 	CaptchaURL   string     `json:"captcha_url,omitempty"`
 	CaptchaToken string     `json:"captcha_token,omitempty"`
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
+	// CaptchaRetryAt, with a CAPTCHA, is when the retry with its token may
+	// reach Proton: the login guard holds it until then (zero: no such
+	// promise, as from an older pcb).
+	CaptchaRetryAt time.Time `json:"captcha_retry_at,omitzero"`
 	// DefaultClientCreated: this login created the CalDAV client named
 	// default, the list being empty (decision 0013; pcb client show).
 	DefaultClientCreated bool `json:"default_client_created,omitempty"`

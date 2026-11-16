@@ -354,6 +354,18 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   - The login guard's stamp more than 5 min in the future (a clock set back) is stale: logged once at
     warning level, rewritten with now, never blocks; a stamp less than 5 min ahead still counts [verified:
     `TestFutureStampIsStale`, `TestStampSkewBoundary`].
+  - A login attempt that carries the token of the CAPTCHA Proton last asked the account for (kept in
+    memory, and in `state.json` while the login is `needs-captcha`) is spaced from the previous attempt
+    by 10 s (`loginguard.CaptchaRetryInterval`), not the 60 s of every other attempt: the person solved
+    the challenge in between, and the floor still bounds a script replaying the token. Any other token
+    gets the 60 s, so a made-up one buys nothing. A token's attempt waits the spacing out instead of
+    being refused. The retry stamps the guard, so a plain login after it waits the full 60 s
+    [verified: `TestCaptchaRetryIsNotHeldForAMinute`, `TestCaptchaResumeWaitsOutGuard`,
+    `TestUnknownCaptchaTokenWaitsTheMinute`, `TestCaptchaWhileReadyRetriesSoon`]. A CAPTCHA result
+    carries `captcha_retry_at`, its attempt's stamp plus 10 s; interactive `pcb login` waits until then
+    after Enter, saying so (`Retrying in N s: pcb spaces its login attempts to Proton.`; Ctrl-C there
+    exits 20 with the resume command), and a result without it (an older daemon) is retried at once
+    [verified: `TestCaptchaRetryWaitIsAnnounced`, `TestCaptchaRetryWaitCancelledKeepsTheResumeHint`].
   - An interactive login that meets a CAPTCHA while the stored login is `ready` leaves the
     stored state as it was [verified: `TestLoginCaptchaWhileReadyKeepsState`]; the key passphrase is
     zeroed once the login completes [verified: `TestLoginZeroesTheKeyPassphrase`].
@@ -1816,8 +1828,8 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   [verified: `TestWizardPlainLogin`, `TestWizardTOTP`, `TestWizardKeepsPasswordForCaptchaThenZeroes`, `TestWizardZeroesOnError`, `TestWizardZeroesTheBufferWhenTheCaptchaRetryFails`, `TestWizardCopiesThePassword`,
   `TestWizardCancelDuringTOTPLeavesNoAccount`, `TestWizardCancelDuringCaptchaLeavesNoAccountAndZeroes`, `TestWizardCancelKeepsAnExistingAccount`, `TestWizardErrorIsTheCLIText`, `TestWizardRefusesWhileTheBridgeIsNotRunning`,
   `TestWizardCancelAfterTheBridgeRestarted`, `TestShownPasswordHidesOnAccountChange`, `TestShownPasswordHidesOnHide`, `TestPasswordArrivingAfterPaneChangeStaysHidden`, `TestWizardClearsPasswordEntryOnSubmit`,
-  `TestNotificationCarriesNoSecret`]. The wizard is the CLI's login (`Hub.Login`, `SubmitTOTP`; its errors are the CLI's message and hint); a CAPTCHA retry logs in again with the token Proton returned (ruling P4) and may wait up to 60 s on the login guard, which the window shows
-  [verified: `TestWizardShowsWaitingAfterCaptcha`]. Account changes go through the Hub's own methods and are refused (`the bridge is not running`) once the daemon has ended [verified: `TestAccountActionsGoThroughTheHub`,
+  `TestNotificationCarriesNoSecret`]. The wizard is the CLI's login (`Hub.Login`, `SubmitTOTP`; its errors are the CLI's message and hint); a CAPTCHA retry logs in again with the token Proton returned (ruling P4) and may wait up to 10 s on the login guard (the CAPTCHA retry's spacing, above), which the window shows
+  (`Retrying in N s, then waiting for Proton…`, else `Waiting for Proton…`) [verified: `TestWizardShowsWaitingAfterCaptcha`, `TestFlowCaptchaWait`]. Account changes go through the Hub's own methods and are refused (`the bridge is not running`) once the daemon has ended [verified: `TestAccountActionsGoThroughTheHub`,
   `TestActionsRefuseWhenTheBridgeIsNotRunning`, `TestActionsRefuseAfterTheDaemonEnded`, `TestPasswordCreatesDefaultWhenMissing`, `TestNewPasswordStopsTheOldOne`].
 - Notifications (the desktop's `org.freedesktop.Notifications`, over the session bus; Windows toasts, decision 0018): one per occurrence of `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `keyring-locked`, `keyring-unavailable` (R15) and `key-unavailable` (Windows), whatever the alert's severity (ruling R9: `sync-stalled` is a warning, the code list is
   the contract); an alert that clears and comes back notifies again; the title is the account's address, the body the alert's message and fix. A pending add (a first login waiting for its 2FA code or CAPTCHA) is not notified: the wizard, or the `pcb login` that started it, is on that step. A click opens the window on that account (on Linux: Fyne reports no click of a Windows toast); only the notification server's own signals count (the bus owner is checked, a forged click opens nothing).

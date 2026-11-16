@@ -87,7 +87,11 @@ type Local struct {
 	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
 	who     atomic.Pointer[loginWho]  // pending's username and user ID while pending != nil, readable without mu
 	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
-	closed  atomic.Bool
+	// challenge is the token of the last CAPTCHA Proton asked this account
+	// for in this process (state.json keeps it only when the login was not
+	// ready); guarded by mu.
+	challenge string
+	closed    atomic.Bool
 
 	cmu    sync.Mutex // guards cached; never held across a network call
 	cached *cachedClient

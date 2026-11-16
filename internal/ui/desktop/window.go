@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -56,6 +57,9 @@ type WizardModel interface {
 	Submit(ctx context.Context, address string, password []byte) error
 	SubmitTOTP(ctx context.Context, code string) error
 	CaptchaSolved(ctx context.Context) error
+	// CaptchaWait is how long the CAPTCHA retry waits before it reaches
+	// Proton (0: none).
+	CaptchaWait() time.Duration
 	Done() (ui.AccountView, string)
 	Cancel()
 }

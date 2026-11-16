@@ -74,6 +74,10 @@ type IO struct {
 	// Exe is the running binary's path, symlinks resolved, for the update
 	// hint (nil: os.Executable).
 	Exe func() (string, error)
+	// Now is the clock of the command's own waits (nil: time.Now).
+	Now func() time.Time
+	// Sleep waits d, or until ctx ends with its error (nil: a timer).
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // osSignals is IO.Signals on the operating system's signals.
@@ -140,7 +144,25 @@ func (o IO) withDefaults() IO {
 	if o.Host.Env == nil {
 		o.Host.Env = o.Env
 	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.Sleep == nil {
+		o.Sleep = sleep
+	}
 	return o
+}
+
+// sleep is IO.Sleep on a timer.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func resolveDirs(env func(string) string) (paths.Dirs, error) { return daemon.ResolveDirs(env) }
