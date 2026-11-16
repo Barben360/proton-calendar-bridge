@@ -1,6 +1,8 @@
 package service_test
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,6 +16,7 @@ func mailboxHubEnv(t *testing.T) *hubEnv {
 	t.Helper()
 	e := newHubEnv(t)
 	e.f = protontest.New(t, protontest.Options{Now: e.clk.Now, Username: userA, TwoPassword: true})
+	e.f.AddUser(userB, passwordB)
 	e.cfg.Proton.BaseURL = e.f.URL
 	return e
 }
@@ -64,4 +67,62 @@ func TestHubMailboxPasswordWithoutLogin(t *testing.T) {
 	}
 	lb.want(t, `msg="login mailbox password"`, "outcome=refused")
 	lb.wantNoSecret(t, "some-mailbox-pw-77")
+}
+
+// A selector naming an account held at its 2FA step is refused: nothing waits
+// for a mailbox password there, and the account stays held for its code.
+func TestHubMailboxPasswordRefusedAtTheTOTPStep(t *testing.T) {
+	t.Parallel()
+	e := mailboxHubEnv(t)
+	h := e.open(t)
+	uri := e.f.SetTwoFA(userA, true)
+	r, err := e.login(t, h, userA)
+	if err != nil || r.State != service.StateNeedsTOTP {
+		t.Fatalf("Login = %+v, %v; want needs-totp", r, err)
+	}
+	_, err = h.SubmitMailboxPassword(t.Context(), r.Account, e.f.MailboxPassword)
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "no login is waiting for a mailbox password" {
+		t.Errorf("error = %q, want no login is waiting for a mailbox password", ee.Error())
+	}
+	if info := find(h.Accounts(), r.Account); info == nil || !info.Pending || info.Phase != string(service.StateNeedsTOTP) {
+		t.Fatalf("account after the refusal = %+v, want still pending at needs-totp", info)
+	}
+	res, err := h.SubmitTOTP(t.Context(), r.Account, code(t, uri, e.clk.Now()))
+	if err != nil || res.State != service.StateNeedsMailboxPassword {
+		t.Fatalf("SubmitTOTP = %+v, %v; want its code still accepted, then needs-mailbox-password", res, err)
+	}
+}
+
+// With two logins held and no selector, the mailbox password is not guessed
+// onto one: the several-accounts refusal names both.
+func TestHubMailboxPasswordSeveralHeldNeedsSelector(t *testing.T) {
+	t.Parallel()
+	e := mailboxHubEnv(t)
+	h := e.open(t)
+	e.f.SetTwoFA(userA, true)
+	ra, err := e.login(t, h, userA)
+	if err != nil || ra.State != service.StateNeedsTOTP {
+		t.Fatalf("Login(a) = %+v, %v; want needs-totp", ra, err)
+	}
+	rb, err := e.login(t, h, userB)
+	if err != nil || rb.State != service.StateNeedsMailboxPassword {
+		t.Fatalf("Login(b) = %+v, %v; want needs-mailbox-password", rb, err)
+	}
+	_, err = h.SubmitMailboxPassword(t.Context(), "", e.f.MailboxPassword)
+	ee := wantExit(t, err, exitcode.Usage)
+	var several *service.SeveralAccountsError
+	if !errors.As(ee, &several) || len(several.Accounts) != 2 {
+		t.Fatalf("error = %#v, want a SeveralAccountsError of 2 accounts", ee)
+	}
+	got := []string{several.Accounts[0].ID, several.Accounts[1].ID}
+	want := []string{ra.Account, rb.Account}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("error names %v, want %v", got, want)
+	}
+	if info := find(h.Accounts(), rb.Account); info == nil || !info.Pending || info.Phase != string(service.StateNeedsMailboxPassword) {
+		t.Errorf("b after the refusal = %+v, want still held", info)
+	}
 }

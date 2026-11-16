@@ -99,7 +99,7 @@ func (h *stubHub) Login(_ context.Context, req service.LoginRequest) (service.Lo
 }
 
 func (h *stubHub) SubmitMailboxPassword(context.Context, string, string) (service.LoginResult, error) {
-	return service.LoginResult{}, nil
+	return service.LoginResult{}, errors.New("not in this test")
 }
 
 func (h *stubHub) SubmitTOTP(context.Context, string, string) (service.LoginResult, error) {
