@@ -497,6 +497,11 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 		if err := l.fetchKeys(ctx, pl); err != nil {
 			return LoginResult{}, err
 		}
+		if pl.p.TwoPassword && !pl.unattended {
+			// The key passphrase comes from the mailbox password and nothing
+			// seals the login password: do not hold it through the wait.
+			clear(pl.password)
+		}
 	}
 	keyPass, err := l.deriveKeyPass(pl)
 	if err != nil {
