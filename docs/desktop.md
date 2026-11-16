@@ -9,7 +9,7 @@ An account, with its adapters, the CalDAV connection to copy into Thunderbird, a
 <img alt="pcb-ui showing an account: its adapters, its CalDAV connection and its calendars" src="assets/ui/account-dark.png#gh-dark-mode-only" width="720">
 </p>
 
-Adding an account: the address and password first, then a 2FA code or a CAPTCHA when Proton asks for one:
+Adding an account: the address and password first, then a 2FA code, the mailbox password of a two-password account, or a CAPTCHA when Proton asks for one:
 
 <p align="center">
 <img alt="pcb-ui's add-account wizard: address and Proton password" src="assets/ui/add-account-light.png#gh-light-mode-only" width="720">
@@ -37,7 +37,7 @@ After `make install-ui` it is also in your applications menu. On Windows the ins
 |---|---|
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
 | Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account, with the Claude Code command to copy under it), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
-| Add-account wizard | Password, 2FA code, CAPTCHA. |
+| Add-account wizard | Password, 2FA code, mailbox password, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you, and one when a newer release is out. |
 | Update available | A panel at the top of the window when a newer stable release exists: "Open release page", "Copy update command" (the `install.sh` line, with the flags of this install), and "Later", which hides it for 48 hours. It comes back after, for the same version too: a fix only protects those who install it. The tray menu shows "Update available: vX.Y.Z" above "Open pcb" as long as one exists. The tray icon does not change. ([security](security.md#the-update-check)) |
 | Settings | "Start at login", "Check for updates", "Open config.toml", "Restart bridge", the log level. |
@@ -46,7 +46,7 @@ Closing the window hides it; Quit in the tray menu stops the bridge. Without a t
 
 ## Add an account
 
-Open the add-account wizard from the window and type the address, the password, then the 2FA code, and solve the CAPTCHA when Proton asks for one. An AI agent that starts a login opens the same wizard with the address filled in ([agents](agents.md#log-in-from-an-agent)).
+Open the add-account wizard from the window and type the address, the password, then the 2FA code, and solve the CAPTCHA when Proton asks for one. An account in Proton's two-password mode gets one more screen after the 2FA code, "Mailbox password": type the second password (the one that decrypts your data) and press Unlock or Enter. A wrong one shows an error with the tries left and stays on that screen, with no new Proton login; the third wrong one cancels the login. The field is labelled and has the focus; every field of the wizard is labelled, the first one has the focus and Enter submits. The account list shows `needs mailbox password` while the login waits. An AI agent that starts a login opens the same wizard with the address filled in ([agents](agents.md#log-in-from-an-agent)).
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
 

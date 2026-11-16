@@ -22,3 +22,4 @@
 | [0018](0018-windows-port.md) | Windows port: `pcb-ui` started at login (no service), a private named pipe, DPAPI, a native `pcb-ui` build; amends SPEC §3, §13 and 0015 (accepted, built, live check passed; its "Next" 1 by 0020) |
 | [0019](0019-update-check.md) | Tell that a newer stable release exists: pcb-ui, `pcb doctor`, `pcb version --check`, from GitHub's `releases/latest` redirect; amends SPEC §3, §13, §19 and 0015 (accepted, built) |
 | [0020](0020-windows-msi.md) | Windows installer: a per-user WiX MSI (`pcb-ui` required, `pcb` optional on the user's `PATH`, a Start-menu shortcut, Start at login); amends 0018 and SPEC §13 (accepted, built, live check passed) |
+| [0021](0021-two-password-mode.md) | Two-password mode supported: the mailbox password asked after the 2FA code, never stored; unattended relogin reuses the sealed key passphrase; amends 0010 and SPEC §3, §5.2 (accepted, built) |

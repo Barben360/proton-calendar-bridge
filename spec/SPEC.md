@@ -67,14 +67,14 @@ Success means:
 ## 3. Goals, non-goals, anti-goals
 
 Goals: CalDAV read/write for owned calendars; read-only for subscribed and
-holidays calendars; login with password, or password + TOTP [decided
-0010]; a CLI for everything about the bridge itself (install, service,
+holidays calendars; login with password, password + TOTP, or two-password mode (a mailbox
+password after the 2FA code, never stored) [decided 0010, 0021]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); several Proton
 accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); an MCP adapter for agents (M8, decision 0016: stdio and remote, grants per agent, login finished by the person, §12); a container image; Linux amd64 and arm64, and Windows amd64: both binaries, `pcb-ui` started at login and `pcb` through it or on the files (decision 0018, live check `spec/HUMAN-CHECKS.md` step 12), from a zip or a per-user MSI (decision 0020). Those are the supported platforms; macOS gets `pcb` only
 (release archives, untested).
 
 Not planned (not designed here): REST API, `.ics` feeds, event
-commands in the CLI (Thunderbird is the client), auto-update (pcb only tells that a newer stable release exists, decision 0019), shared calendars, invitations, two-password mode,
+commands in the CLI (Thunderbird is the client), auto-update (pcb only tells that a newer stable release exists, decision 0019), shared calendars, invitations,
 FIDO2, CardDAV, macOS/Windows service management, a GUI on macOS (`pcb-ui` runs on Linux and, since decision 0018, Windows). The desktop app
 `pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
 `spec/designs/2026-11-12-multi-account-and-ui-design.md`. MCP is built (M8; "not planned"
@@ -301,8 +301,19 @@ ready ──refresh fails (auth)──▶ relogin (unattended, if allowed) ─�
 needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locked
 ```
 
-- SRP via go-srp; password only, or password + TOTP [decided 0010];
-  two-password mode and FIDO2 refused with a clear message for now.
+- SRP via go-srp; password only, or password + TOTP [decided 0010]; two-password
+  mode supported [decided 0021]; FIDO2 refused with a clear message for now.
+- Two-password mode: Proton answers `PasswordMode: 2` before the 2FA step. The login password drives SRP and the scope
+  unlock (the key salts); the mailbox password drives only the key passphrase (`keys.DeriveKeyPass`), whose check is local
+  (the address keys open, else `keys.ErrKeysLocked`). Order: CAPTCHA, 2FA, mailbox password (state `needs-mailbox-password`,
+  step `mailbox-password`, `POST /v2/accounts/{id}/login/mailbox-password`). A wrong one makes no Proton call and keeps the
+  login held (3 tries, own counter; the third revokes the session); one 5-minute deadline from `Login` covers the whole held
+  login. The mailbox password is never stored: it is zeroed after the derivation, redacted in every request type, and absent
+  from logs, errors, `--json`, argv, `state.json` and the sealed store. An unattended relogin of a two-password account
+  runs SRP and 2FA with the sealed credentials and checks that the sealed `KeyPass` still opens the keys (else
+  needs-login, "the mailbox password or the account keys changed"); a mailbox password changed at Proton therefore needs a
+  person's `pcb login`. An upfront mailbox password (`--mailbox-password-fd`, `PCB_MAILBOX_PASSWORD`) on a single-password
+  account is ignored.
 - Human verification (CAPTCHA): the challenge token can be solved on any
   device at `https://verify.proton.me/?methods=captcha&token=<token>` and the
   login retried with it [verified: interactive login 2026-11-10]. A solved token

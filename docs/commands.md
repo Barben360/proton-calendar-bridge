@@ -8,13 +8,15 @@ Every `pcb` command, how to pick the account a command acts on, the `--json` out
 
 | Command | What it does |
 |---|---|
-| `pcb login` | Prompts for what is missing; or set `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`. The username decides: a known address is a relogin, a new one adds an account. |
+| `pcb login` | Prompts for what is missing; or set `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`, `PCB_MAILBOX_PASSWORD`. A two-password account is asked for its mailbox password after the 2FA code (no echo, 3 tries). The username decides: a known address is a relogin, a new one adds an account. |
 | `pcb login --username alice` | The username may be a flag (default: `$PCB_USERNAME`, else asked). |
 | `pcb login --password-fd 3 3<pwfile` | Reads the password from a file descriptor: the password never goes in a flag. On Windows only `0`, `1` or `2` (the standard handles; another number is refused): `cmd /c "pcb login --password-fd 0 < pwfile"` hands the file's bytes as they are. Not `Get-Content pwfile \| pcb …` in Windows PowerShell 5.1: its pipe re-encodes as ASCII (`$OutputEncoding`) and mangles a non-ASCII password (PowerShell 7 sends UTF-8). |
+| `pcb login --mailbox-password-fd 4 4<mbfile` | Reads the mailbox password of a two-password account (the second password, which decrypts your data) from a file descriptor, ahead of the prompt. Wins over `PCB_MAILBOX_PASSWORD`; not the same descriptor as `--password-fd` (exit 2). An account in single-password mode ignores it. On Windows a non-interactive login pipes the login password on descriptor `0` and gives the mailbox password through `PCB_MAILBOX_PASSWORD`. |
 | `pcb login --unattended-relogin` | Stores the credentials so pcb can log in again without you. |
 | `pcb login --non-interactive` | Never prompts: exits 10 naming what is missing. `--non-interactive` is accepted by every command. |
 | `pcb login resume --captcha-token T` | Finishes a login after you solved the CAPTCHA Proton asked for. |
 | `PCB_TOTP=<code> pcb login resume --totp` | Finishes a login that waits in the daemon for its 2FA code (from `$PCB_TOTP`, else asked; never an argument). |
+| `PCB_MAILBOX_PASSWORD=<password> pcb login resume --mailbox-password` | Finishes a login that waits in the daemon for its mailbox password (from `--mailbox-password-fd`, else `$PCB_MAILBOX_PASSWORD`, else asked; never an argument). A wrong password keeps the login waiting, with no new Proton login; after 3 wrong ones the login is cancelled. |
 | `pcb logout [--yes]` | Revokes the session, through the daemon when it runs; `--yes` discards a store this pcb cannot read. |
 
 Details: [security](security.md#log-in).

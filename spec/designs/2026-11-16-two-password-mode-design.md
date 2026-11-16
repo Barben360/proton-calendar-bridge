@@ -1,7 +1,7 @@
 # Two-password mode — design
 
 - **Date**: 2026-11-16
-- **Status**: approved 2026-11-16 (author), reviewed by a builder check (issue https://github.com/Barben360/proton-calendar-bridge/issues/41)
+- **Status**: built 2026-11-16 (approved 2026-11-16 by the author, reviewed by a builder check (issue https://github.com/Barben360/proton-calendar-bridge/issues/41); decision 0021)
 - **Decided by**: author (choices marked "author"); the rest is the agent's call, marked [call]
 - **Amends**: decision 0010 (two-password mode "comes later" becomes supported), SPEC §3 (removed from "Not planned"), SPEC §5.2 (the `[mailbox-password]` step is built); recorded as decision 0021 once built
 

@@ -19,6 +19,9 @@ pcb doctor
 | A command exits 2 with `several accounts: name one with --account` | Several accounts and none named | Add `--account ADDRESS` or set `PCB_ACCOUNT`. [Choose the account](commands.md#choose-the-account) |
 | `pcb status` shows `needs-login`; Thunderbird gets 503 | Proton ended the session | `pcb login` (or `pcb-ui`'s wizard). [Thunderbird](thunderbird.md#keep-serving-while-logged-out---wait-for-login) |
 | `needs-captcha` | Proton asks for a CAPTCHA | Solve it, then `pcb login resume --captcha-token T`. [Security](security.md#captcha-timeouts-and-rate-limits) |
+| `needs-mailbox-password` (exit 10 `the account needs its mailbox password`) | The account is in Proton's two-password mode and a login waits for its second password | `PCB_MAILBOX_PASSWORD=<password> pcb login resume --mailbox-password` within 5 minutes, or the wizard. [Commands](commands.md#log-in-and-out) |
+| Exit 10 `the mailbox password does not unlock the account keys` | The mailbox password is wrong (not the login password) | Enter it again; 3 wrong ones cancel the login, then `pcb login`. [Security](security.md#login-through-the-daemon) |
+| `needs-login` with `the mailbox password or the account keys changed` | The mailbox password changed in Proton, so the stored key passphrase no longer opens the keys | `pcb login` with the new mailbox password. [Security](security.md#unattended-relogin) |
 | `human-verification`; Thunderbird gets 503 | Proton asks for a human verification | Open the Proton web app from the same network and complete it. [Thunderbird](thunderbird.md#503-and-412-answers) |
 | `account-stopped`; that account answers 503 | The account stopped on an error | `pcb account restart`, or a login. [Several accounts](thunderbird.md#several-accounts) |
 | `keyring-locked` | The desktop keyring is locked (a service started before you logged in) | Unlock it (Seahorse); pcb retries every 30 s. [Keyring](security.md#when-the-keyring-is-locked) |
