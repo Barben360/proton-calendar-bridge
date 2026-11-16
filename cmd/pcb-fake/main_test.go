@@ -137,6 +137,28 @@ func TestAccountFileIsRefusedUnlessPrivateAndComplete(t *testing.T) {
 	}
 }
 
+// TestAccountFileWithAMailboxPasswordIsTwoPassword: mailbox_password makes
+// the fake's account two-password with it, its absence keeps one password,
+// and the unknown-key hint names it.
+func TestAccountFileWithAMailboxPasswordIsTwoPassword(t *testing.T) {
+	t.Parallel()
+	a, err := readAccount(accountFile(t, "password = \"p\"\nmailbox_password = \"m\"\n", 0o600))
+	if err != nil || a.Password != "p" || a.MailboxPassword != "m" {
+		t.Fatalf("readAccount = %+v, %v; want password p, mailbox_password m", a, err)
+	}
+	if o := fakeOptions(a, nil); !o.TwoPassword || o.MailboxPassword != "m" || o.Password != "p" {
+		t.Fatalf("fakeOptions = TwoPassword %v, MailboxPassword %q, Password %q; want true, m, p", o.TwoPassword, o.MailboxPassword, o.Password)
+	}
+	a.MailboxPassword = ""
+	if o := fakeOptions(a, nil); o.TwoPassword || o.MailboxPassword != "" {
+		t.Fatalf("no mailbox_password: TwoPassword %v, MailboxPassword %q; want false, empty", o.TwoPassword, o.MailboxPassword)
+	}
+	code, _, errb := run(t, "serve", "--account", accountFile(t, "password = \"p\"\nmailbox_pasword = \"m\"\n", 0o600))
+	if code != exitcode.MustAct || !strings.Contains(errb, "mailbox_password") {
+		t.Fatalf("unknown key: exit %d, stderr %q; want %d and a hint naming mailbox_password", code, errb, exitcode.MustAct)
+	}
+}
+
 // lineWriter hands serve's output to the test through a pipe.
 type lineWriter struct{ w *io.PipeWriter }
 
