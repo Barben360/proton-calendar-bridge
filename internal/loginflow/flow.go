@@ -1,8 +1,9 @@
 // Package loginflow is the add-account flow as a state machine with no
 // widget and no listener: credentials, then the 2FA code or a CAPTCHA, then
 // the mailbox password (two-password accounts), then done. pcb-ui's wizard
-// (internal/ui) and the MCP login page (internal/mcp/loginpage) both drive it. It reaches the accounts through
-// Hub only, and imports neither of its users, nor the daemon or the CLI
+// (internal/ui) and the MCP login page (internal/mcp/loginpage) both drive
+// it. It reaches the accounts through Hub only, and imports neither of its
+// users, nor the daemon or the CLI
 // (ruling R18: ui → daemon → mcp must not lead back to ui).
 package loginflow
 
