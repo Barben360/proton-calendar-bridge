@@ -130,7 +130,7 @@ type loginOut struct {
 	Where       string `json:"where" jsonschema:"pcb-ui: its add-account wizard is shown; page: a login page on this machine's 127.0.0.1"`
 	URL         string `json:"url,omitempty" jsonschema:"the page to give the person, when it was not offered to them already"`
 	State       string `json:"state,omitempty" jsonschema:"once the person answered the page's offer: ready (logged in, nothing more to do) or waiting (the page is still open, on step: calling login again would close it)"`
-	Step        string `json:"step,omitempty" jsonschema:"waiting: the page's step, credentials, totp or captcha"`
+	Step        string `json:"step,omitempty" jsonschema:"waiting: the page's step, credentials, totp, mailbox-password or captcha"`
 	Failure     string `json:"failure,omitempty" jsonschema:"waiting: why the page's last step failed, as the page shows it"`
 	ExpiresInS  int    `json:"expires_in_s,omitempty" jsonschema:"seconds the page stays open"`
 	CLIFallback string `json:"cli_fallback" jsonschema:"what the person runs in a terminal instead"`

@@ -71,8 +71,10 @@ func TestHelpOffersOnlyWhatTheCommandTakes(t *testing.T) {
 	}
 	_, out, _ := run("login", "--help")
 	for _, want := range []string{
-		"      --password-fd N        read the password from file descriptor N until end of input (without it: $PCB_PASSWORD, else a prompt)\n",
-		"      --username NAME        log in as the Proton user NAME (without it: $PCB_USERNAME, else a prompt)\n",
+		"      --password-fd N           read the password from file descriptor N until end of input (without it: $PCB_PASSWORD, else a prompt)\n",
+		"      --username NAME           log in as the Proton user NAME (without it: $PCB_USERNAME, else a prompt)\n",
+		"      --mailbox-password-fd N   read the mailbox password of a two-password account from file descriptor N until end of input " +
+			"(without it: $PCB_MAILBOX_PASSWORD, else a prompt when Proton asks)\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pcb login --help lacks %q:\n%s", want, out)

@@ -84,9 +84,9 @@ type Local struct {
 
 	mu      sync.Mutex // serialises Login, SubmitTOTP, Logout, Close and relogins
 	pending *pendingLogin
-	waiting atomic.Pointer[time.Time] // pending's expiry while pending != nil, readable without mu
-	who     atomic.Pointer[loginWho]  // pending's username and user ID while pending != nil, readable without mu
-	expired bool                      // the last pending login expired (SubmitTOTP says so); guarded by mu
+	waiting atomic.Pointer[waitingFor] // pending's step and expiry while pending != nil, readable without mu
+	who     atomic.Pointer[loginWho]   // pending's username and user ID while pending != nil, readable without mu
+	expired LoginState                 // the step the last pending login expired at ("" if none; the submits say so); guarded by mu
 	// challenge is the token of the last CAPTCHA Proton asked this account
 	// for in this process (state.json keeps it only when the login was not
 	// ready); guarded by mu.
@@ -362,7 +362,7 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 			"end the session in "+SessionsPage+", then run pcb logout --yes")
 	}
 	l.dropPending(ctx)
-	l.expired = false
+	l.expired = ""
 	if errors.Is(err, store.ErrRolledBack) {
 		l.revokeHeld()
 	}
@@ -522,9 +522,9 @@ func (l *Local) Status(context.Context) (Status, error) {
 	} else if st.Phase == store.PhaseReady {
 		s.Phase, s.Reason = string(store.PhaseNeedsLogin), "no stored session"
 	}
-	if exp := l.waiting.Load(); exp != nil {
-		s.Phase, s.Reason = string(StateNeedsTOTP), "a login is waiting for its 2FA code"
-		t := *exp
+	if w := l.waiting.Load(); w != nil {
+		s.Phase, s.Reason = string(w.step), "a login is waiting for its "+stepNoun(w.step)
+		t := w.expires
 		s.LoginExpires = &t
 	}
 	s.Sync = l.syncStatus()

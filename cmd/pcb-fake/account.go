@@ -18,6 +18,9 @@ type account struct {
 	Username   string `toml:"username"`    // default "pcbfake"
 	Password   string `toml:"password"`    // required
 	TOTPSecret string `toml:"totp_secret"` // base32; set: the account has 2FA
+	// MailboxPassword, set, makes the account two-password: the keys open
+	// with it, the login (SRP) still takes Password.
+	MailboxPassword string `toml:"mailbox_password"`
 }
 
 const defaultUsername = "pcbfake"
@@ -48,7 +51,7 @@ func readAccount(path string) (account, error) {
 	if err := dec.Decode(&a); err != nil {
 		var strict *toml.StrictMissingError
 		if errors.As(err, &strict) {
-			return account{}, fix(fmt.Errorf("account file %s: unknown key", path), "keep username, password and totp_secret only")
+			return account{}, fix(fmt.Errorf("account file %s: unknown key", path), "keep username, password, totp_secret and mailbox_password only")
 		}
 		return account{}, fix(fmt.Errorf("account file %s is not valid TOML", path), `write lines such as password = "..."`)
 	}

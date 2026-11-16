@@ -1,8 +1,9 @@
 // Package loginflow is the add-account flow as a state machine with no
 // widget and no listener: credentials, then the 2FA code or a CAPTCHA, then
-// done. pcb-ui's wizard (internal/ui) and the MCP login page
-// (internal/mcp/loginpage) both drive it. It reaches the accounts through
-// Hub only, and imports neither of its users, nor the daemon or the CLI
+// the mailbox password (two-password accounts), then done. pcb-ui's wizard
+// (internal/ui) and the MCP login page (internal/mcp/loginpage) both drive
+// it. It reaches the accounts through Hub only, and imports neither of its
+// users, nor the daemon or the CLI
 // (ruling R18: ui → daemon → mcp must not lead back to ui).
 package loginflow
 
@@ -19,7 +20,8 @@ import (
 
 // Hub is what the flow calls on the accounts (service.Hub has them all):
 // Accounts (which accounts existed before, and whether a login still waits
-// for its 2FA code), Login (credentials, and the CAPTCHA retry), SubmitTOTP,
+// for its 2FA code or its mailbox password), Login (credentials, and the
+// CAPTCHA retry), SubmitTOTP, SubmitMailboxPassword,
 // and, when the flow is cancelled mid-way, Remove (an account this flow
 // added), AbandonLogin (one that was ready before) or SignOut (another one
 // that existed before).
@@ -27,6 +29,7 @@ type Hub interface {
 	Accounts() []service.AccountInfo
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
 	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
+	SubmitMailboxPassword(ctx context.Context, selector, password string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	AbandonLogin(ctx context.Context, selector string) error
@@ -42,7 +45,10 @@ const (
 	StepCredentials Step = "credentials"
 	StepTOTP        Step = "totp"
 	StepCaptcha     Step = "captcha"
-	StepDone        Step = "done"
+	// StepMailboxPassword is a two-password account waiting for its second
+	// (mailbox) password, after the login password and any 2FA code.
+	StepMailboxPassword Step = "mailbox-password"
+	StepDone            Step = "done"
 )
 
 // cancelTimeout bounds what Cancel does with the Hub.
@@ -189,8 +195,8 @@ func wrongStep(want Step, got Step) error {
 // Submit logs in (or adds) the account address, with the password (the
 // flow keeps its own copy: wipe the argument when it returns). It never asks
 // for unattended relogin (pcb login --unattended-relogin only), so it turns
-// it off for an account that had it. It goes to StepDone, StepTOTP or
-// StepCaptcha, or stays on the credentials with Err set.
+// it off for an account that had it. It goes to StepDone, StepTOTP,
+// StepMailboxPassword or StepCaptcha, or stays on the credentials with Err set.
 func (f *Flow) Submit(ctx context.Context, address string, password []byte) error {
 	f.op.Lock()
 	defer f.op.Unlock()
@@ -267,6 +273,10 @@ func (f *Flow) settle(created bool, res service.LoginResult, err error) error {
 		// The Hub holds the login: the password is not needed again.
 		f.wipe()
 		f.step, f.captchaURL, f.captchaTok = StepTOTP, "", ""
+	case service.StateNeedsMailboxPassword:
+		// The Hub holds the login too: the login password is not needed again.
+		f.wipe()
+		f.step, f.captchaURL, f.captchaTok = StepMailboxPassword, "", ""
 	case service.StateNeedsCaptcha:
 		// The retry needs the password: it stays until that login ends.
 		f.step, f.captchaURL, f.captchaTok, f.retryAt = StepCaptcha, res.CaptchaURL, res.CaptchaToken, res.CaptchaRetryAt
@@ -297,23 +307,65 @@ func (f *Flow) SubmitTOTP(ctx context.Context, code string) error {
 	f.mu.Unlock()
 
 	res, err := h.SubmitTOTP(ctx, id, code)
-	if err != nil && heldForCode(h, id) {
+	if held, ok := heldStep(h, id); err != nil && ok {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		f.err = asExitError(err)
+		f.step, f.err = held, asExitError(err)
 		return f.err
 	}
 	return f.settle(created, res, err)
 }
 
-// heldForCode reports whether the Hub still waits for the 2FA code of id.
-func heldForCode(h Hub, id string) bool {
+// SubmitMailboxPassword sends the mailbox password of a two-password account.
+// The flow keeps no copy of it: it goes to the Hub as a string (a copy Go
+// cannot zero, as for Submit's password) and the caller wipes its own slice
+// when this returns. A wrong one keeps StepMailboxPassword while the Hub still
+// holds the login (it allows a few tries), else the flow is back on the
+// credentials.
+func (f *Flow) SubmitMailboxPassword(ctx context.Context, password []byte) error {
+	f.op.Lock()
+	defer f.op.Unlock()
+	h, err := f.hub()
+	if err != nil {
+		return f.refuse(err)
+	}
+	f.mu.Lock()
+	if f.step != StepMailboxPassword {
+		got := f.step
+		f.mu.Unlock()
+		return wrongStep(StepMailboxPassword, got)
+	}
+	id, created := f.account, f.created
+	f.err = nil
+	f.mu.Unlock()
+
+	res, err := h.SubmitMailboxPassword(ctx, id, string(password))
+	if held, ok := heldStep(h, id); err != nil && ok {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.step, f.err = held, asExitError(err)
+		return f.err
+	}
+	return f.settle(created, res, err)
+}
+
+// heldStep reports the step the Hub still holds the login of id at: the 2FA
+// code or the mailbox password (a 2FA code accepted can be followed by a wrong
+// upfront mailbox password, which keeps the login held at the mailbox step).
+// ok is false when the Hub holds no login for id.
+func heldStep(h Hub, id string) (step Step, ok bool) {
 	for _, a := range h.Accounts() {
 		if a.ID == id {
-			return a.Phase == string(service.StateNeedsTOTP)
+			switch a.Phase {
+			case string(service.StateNeedsTOTP):
+				return StepTOTP, true
+			case string(service.StateNeedsMailboxPassword):
+				return StepMailboxPassword, true
+			}
+			return "", false
 		}
 	}
-	return false
+	return "", false
 }
 
 // Cancel abandons the flow: the password is zeroed, and an account this
@@ -332,7 +384,7 @@ func (f *Flow) Cancel() {
 	f.wipe()
 	f.step, f.err, f.captchaURL, f.captchaTok, f.account, f.created, f.wasReady = StepCredentials, nil, "", "", "", false, false
 	f.mu.Unlock()
-	if id == "" || (step != StepTOTP && step != StepCaptcha) {
+	if id == "" || (step != StepTOTP && step != StepMailboxPassword && step != StepCaptcha) {
 		return
 	}
 	h, err := f.hub()

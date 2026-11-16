@@ -35,6 +35,15 @@ func (x accountAPI) SubmitTOTP(ctx context.Context, code string) (LoginResult, e
 	return x.a.local.SubmitTOTP(ctx, code)
 }
 
+func (x accountAPI) SubmitMailboxPassword(ctx context.Context, password string) (LoginResult, error) {
+	leave, err := x.a.enter()
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer leave()
+	return x.a.local.SubmitMailboxPassword(ctx, password)
+}
+
 func (x accountAPI) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, error) {
 	leave, err := x.a.enter()
 	if err != nil {

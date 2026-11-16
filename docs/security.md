@@ -12,13 +12,14 @@ Secrets never come from a flag. They come from:
 |---|---|
 | a terminal prompt | `pcb login` asks for what is missing |
 | a file descriptor | `pcb login --password-fd 3 3<pwfile` |
-| the environment | `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP` (a code or an `otpauth://` URI); a template is `scripts/pcb.env.example` |
+| a file descriptor | `pcb login --mailbox-password-fd 4 4<mbfile`, the mailbox password of a two-password account |
+| the environment | `PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP` (a code or an `otpauth://` URI), `PCB_MAILBOX_PASSWORD` (two-password accounts only); a template is `scripts/pcb.env.example` |
 
 ### Login through the daemon
 
 When `pcb serve` runs (or the service, or `pcb-ui`), `pcb login` goes through it, over a control socket only its own user can open (a named pipe on Windows, [below](#on-windows-files-and-the-pipe)).
 
-- A login that waits for its 2FA code stays in the daemon for 5 minutes. `PCB_TOTP=<code> pcb login resume --totp` finishes it; the code is never an argument.
+- A login that waits for its 2FA code, or for the mailbox password of a two-password account, stays in the daemon for 5 minutes in all. `PCB_TOTP=<code> pcb login resume --totp` or `PCB_MAILBOX_PASSWORD=<password> pcb login resume --mailbox-password` finishes it; neither is ever an argument. A wrong mailbox password is checked on your machine and costs no new Proton login; the third wrong one cancels the login.
 - With no daemon, `pcb login` says so and logs in on its own.
 
 ### Unattended relogin
@@ -28,6 +29,8 @@ pcb login --unattended-relogin
 ```
 
 It seals the password and, with 2FA, `PCB_TOTP` as an `otpauth://` URI (a one-time code is refused). A session Proton ends is then repaired by one automatic login, at most one per 60 s.
+
+A two-password account works too, and the mailbox password is never stored: pcb keeps the key passphrase derived from it, sealed like the password, and a relogin checks that it still opens the account's keys. If you change the mailbox password in Proton, the relogin stops with "the mailbox password or the account keys changed" and `pcb login` (you, with the new mailbox password) repairs it.
 
 Without it, a login stores tokens only, and you log in again when Proton ends the session. `pcb login resume` takes the same flags.
 

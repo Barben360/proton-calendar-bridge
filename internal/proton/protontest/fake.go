@@ -49,7 +49,7 @@ const appVersion = "Other" // for the fake's own calls to the backend
 type Options struct {
 	TwoFA            bool // 2FA.Enabled = 1; /auth/v4/2fa checks codes of Fake.TOTPURI
 	FIDO2Only        bool // 2FA.Enabled = 2
-	TwoPassword      bool // PasswordMode = 2
+	TwoPassword      bool // PasswordMode = 2; the keys open with MailboxPassword
 	LockedSalts      bool // GET /core/v4/keys/salts answers 403/9101 until unlocked
 	BadUnlockProof   bool // PUT /core/v4/users/unlock returns a wrong ServerProof
 	EmptyUnlockProof bool // PUT /core/v4/users/unlock returns no ServerProof
@@ -62,6 +62,12 @@ type Options struct {
 	Now            func() time.Time // clock for TOTP; default time.Now
 	// Username and Password name the first account; empty: throwaway values.
 	Username, Password string
+	// MailboxPassword, with TwoPassword, is the password the keys of every
+	// account of the fake open with: GET /core/v4/users serves the user keys
+	// locked with the passphrase salted from it, while SRP and the scope
+	// unlock still take the account's login password. Empty with TwoPassword:
+	// a throwaway value other than Password. Ignored without TwoPassword.
+	MailboxPassword string
 	// BadPassphraseSignature serves our member passphrases signed by an
 	// unrelated key, so the signature does not verify with ours (research G).
 	BadPassphraseSignature bool
@@ -86,10 +92,11 @@ type Options struct {
 	UIDMatch func(rowUID, query string) bool
 }
 
-// Fake is a running fake Proton. URL, Username, Password and TOTPURI are the
-// fake's own throwaway values.
+// Fake is a running fake Proton. URL, Username, Password, MailboxPassword and
+// TOTPURI are the fake's own throwaway values; MailboxPassword is empty
+// without Options.TwoPassword.
 type Fake struct {
-	URL, Username, Password, TOTPURI string
+	URL, Username, Password, MailboxPassword, TOTPURI string
 
 	t       TB
 	o       Options
@@ -117,6 +124,7 @@ type Fake struct {
 	logins    map[string]loginRec     // UID → session handed out by Login, not spent
 	rotated   map[string]string       // refresh token issued by a refresh → its pair's access token
 	refreshes []string                // every refresh token handed out, in order
+	relockers map[string]*relocker    // username → its user keys' relocker (TwoPassword)
 
 	cal calendars
 }
@@ -159,32 +167,40 @@ func New(t TB, o Options) *Fake {
 	if o.Password == "" {
 		o.Password = defaultPassword()
 	}
+	switch {
+	case !o.TwoPassword:
+		o.MailboxPassword = ""
+	case o.MailboxPassword == "":
+		o.MailboxPassword = defaultMailboxPassword()
+	}
 	if o.TOTPSecret == "" {
 		o.TOTPSecret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random(t, 20))
 	}
 	f := &Fake{
-		Username:  o.Username,
-		Password:  o.Password,
-		TOTPURI:   "otpauth://totp/pcbfake?secret=" + o.TOTPSecret,
-		t:         t,
-		o:         o,
-		backend:   p.srv,
-		pool:      p,
-		proxy:     httputil.NewSingleHostReverseProxy(target),
-		http:      &http.Client{Timeout: 10 * time.Second},
-		failures:  map[userRoute][]failure{},
-		stalls:    map[userRoute][]stall{},
-		captchas:  map[string]string{},
-		twoFAs:    map[string]userTwoFA{},
-		issued:    map[string]bool{},
-		expired:   map[string]bool{},
-		unlocked:  map[string]bool{},
-		users:     map[string]string{},
-		passwords: map[string]string{},
-		sessions:  map[string]sessionRec{},
-		logins:    map[string]loginRec{},
-		rotated:   map[string]string{},
-		cal:       calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
+		Username:        o.Username,
+		Password:        o.Password,
+		MailboxPassword: o.MailboxPassword,
+		TOTPURI:         "otpauth://totp/pcbfake?secret=" + o.TOTPSecret,
+		t:               t,
+		o:               o,
+		backend:         p.srv,
+		pool:            p,
+		proxy:           httputil.NewSingleHostReverseProxy(target),
+		http:            &http.Client{Timeout: 10 * time.Second},
+		failures:        map[userRoute][]failure{},
+		stalls:          map[userRoute][]stall{},
+		captchas:        map[string]string{},
+		twoFAs:          map[string]userTwoFA{},
+		issued:          map[string]bool{},
+		expired:         map[string]bool{},
+		unlocked:        map[string]bool{},
+		users:           map[string]string{},
+		passwords:       map[string]string{},
+		sessions:        map[string]sessionRec{},
+		logins:          map[string]loginRec{},
+		rotated:         map[string]string{},
+		relockers:       map[string]*relocker{},
+		cal:             calendars{byUser: map[string]*userCalendars{}, byID: map[string]*calendarRec{}},
 	}
 	if f.totp, err = otp.Parse(f.TOTPURI); err != nil {
 		t.Fatal(err)
@@ -215,18 +231,46 @@ func random(t TB, n int) []byte {
 
 // AddUser creates another account and returns its user ID. An account an
 // earlier fake left on the pooled backend under that username is reused if
-// its password matches, replaced otherwise.
+// its password matches, replaced otherwise. On a two-password fake
+// (Options.TwoPassword) its keys open with Fake.MailboxPassword, not password.
 func (f *Fake) AddUser(username, password string) (userID string) {
 	f.t.Helper()
 	id, err := f.pool.user(username, password)
 	if err != nil {
 		f.t.Fatalf("protontest: create user: %v", err)
 	}
+	var r *relocker
+	if f.o.TwoPassword {
+		if r, err = f.pool.relocker(username, f.MailboxPassword); err != nil {
+			f.t.Fatalf("protontest: mailbox password of %q: %v", username, err)
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.users[username] = id
 	f.passwords[username] = password
+	if r != nil {
+		f.relockers[username] = r
+	}
 	return id
+}
+
+// SetMailboxPassword re-keys username's account of a two-password fake
+// (Options.TwoPassword): its keys are then served locked with mailbox, no
+// longer with the mailbox password they had. Fake.MailboxPassword, what
+// AddUser gives a new account, is left as it is.
+func (f *Fake) SetMailboxPassword(username, mailbox string) {
+	f.t.Helper()
+	if !f.o.TwoPassword {
+		f.t.Fatal("protontest: SetMailboxPassword needs Options.TwoPassword")
+	}
+	r, err := f.pool.relocker(username, mailbox)
+	if err != nil {
+		f.t.Fatalf("protontest: mailbox password of %q: %v", username, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.relockers[username] = r
 }
 
 // UserID returns the user ID of username, "" if unknown.
@@ -828,6 +872,11 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 		if route == "POST /auth/v4" {
 			f.shapeAuth(body)
 		}
+		if route == "GET /core/v4/users" {
+			if err := f.relockUserKeys(body); err != nil {
+				return fmt.Errorf("protontest: re-locking the user keys: %w", err)
+			}
+		}
 		if tok, ok := body["AccessToken"].(string); ok && (route == "POST /auth/v4" || route == "POST /auth/v4/refresh") {
 			f.mu.Lock()
 			f.issued[tok] = true
@@ -865,6 +914,34 @@ func (f *Fake) shapeAuth(body map[string]any) {
 	if proof, ok := body["ServerProof"].(string); ok && f.o.BadLoginProof {
 		body["ServerProof"] = corrupt(proof)
 	}
+}
+
+// relockUserKeys serves the user keys of a GET /core/v4/users answer locked
+// with the mailbox password's passphrase, on a two-password fake: the backend
+// locks them with the login password's.
+func (f *Fake) relockUserKeys(body map[string]any) error {
+	user, _ := body["User"].(map[string]any)
+	name, _ := user["Name"].(string)
+	f.mu.Lock()
+	r := f.relockers[name]
+	f.mu.Unlock()
+	if r == nil {
+		return nil
+	}
+	keys, _ := user["Keys"].([]any)
+	for _, k := range keys {
+		key, _ := k.(map[string]any)
+		armored, ok := key["PrivateKey"].(string)
+		if !ok {
+			continue
+		}
+		relocked, err := r.relock(armored)
+		if err != nil {
+			return err
+		}
+		key["PrivateKey"] = relocked
+	}
+	return nil
 }
 
 // twoFAOn tells whether 2FA is on for the user whose ID is userID.

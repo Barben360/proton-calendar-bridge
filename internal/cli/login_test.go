@@ -27,6 +27,10 @@ func TestNoFlagTakesASecret(t *testing.T) {
 		{"login", "--password=x"},
 		{"login", "resume", "--captcha-token", "T", "--password", "x"},
 		{"login", "resume", "--captcha-token", "T", "--totp", "1"},
+		{"login", "--mailbox-password", "x"},
+		{"login", "--mailbox-password=x"},
+		{"login", "resume", "--mailbox-password", "x"},
+		{"login", "resume", "--mailbox-password=x"},
 	} {
 		s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
 		r := stubRig(t, s)
@@ -706,8 +710,8 @@ func TestNonInteractiveTOTPIsHeldByTheDaemon(t *testing.T) {
 	}
 	var held service.LoginResult
 	mustUnmarshal(t, e.Data, &held)
-	if held.State != service.StateNeedsTOTP || held.LoginExpires == nil {
-		t.Errorf("data = %s; want needs-totp with login_expires", e.Data)
+	if held.State != service.StateNeedsTOTP || held.LoginExpires == nil || held.Username != r.f.Username {
+		t.Errorf("data = %s; want needs-totp with login_expires and the username", e.Data)
 	}
 	if n := r.f.Calls("DELETE", "/auth/v4"); n != 0 {
 		t.Errorf("%d DELETE /auth/v4: the held login was cancelled", n)
@@ -899,5 +903,491 @@ func createState(t *testing.T, r *rig) {
 	}
 	if want := "Warning: sealer chosen (sealer: keyfile, backend: auto, reason: no Secret Service answered on the session bus)"; !strings.Contains(r.errb.String(), want) {
 		t.Fatalf("the first command's stderr %q lacks %q", r.errb.String(), want)
+	}
+}
+
+// mailboxPrompt is the prompt of the mailbox password; totpPrompt the 2FA
+// code's.
+const (
+	mailboxPrompt = "Mailbox password: "
+	totpPrompt    = "2FA code (or otpauth:// URI): "
+)
+
+// heldUntil is the hint's "before HH:MM:SS" of a login held from t0.
+func heldUntil() string { return " before " + t0.Add(5*time.Minute).Local().Format(time.TimeOnly) }
+
+// Interactive: a two-password account is asked for its mailbox password
+// (no echo), again after a wrong one while the login stays held, at most
+// three times in all (an upfront PCB_MAILBOX_PASSWORD counts), and only
+// one SRP whatever happens.
+func TestLoginPromptsForMailboxPassword(t *testing.T) {
+	t.Parallel()
+	const wrongOne = "not-the-mailbox-password"
+	for _, tc := range []struct {
+		name    string
+		twoFA   bool
+		upfront string   // PCB_MAILBOX_PASSWORD
+		typed   []string // "" is replaced with the right mailbox password
+		code    exitcode.Code
+		prompts []string
+		stderr  []string
+	}{
+		{name: "asked", typed: []string{""}, prompts: []string{mailboxPrompt}},
+		{name: "wrong then right", typed: []string{wrongOne, ""}, prompts: []string{mailboxPrompt, mailboxPrompt},
+			stderr: []string{"Error: the mailbox password does not unlock the account keys", "Hint: enter the mailbox password again (2 tries left)"}},
+		{name: "after the 2FA code", twoFA: true, typed: []string{"", ""}, prompts: []string{totpPrompt, mailboxPrompt}},
+		{name: "wrong upfront", upfront: wrongOne, typed: []string{""}, prompts: []string{mailboxPrompt},
+			stderr: []string{"Error: the mailbox password does not unlock the account keys", "(2 tries left)"}},
+		{name: "wrong upfront after the 2FA code", twoFA: true, upfront: wrongOne, typed: []string{"", ""},
+			prompts: []string{totpPrompt, mailboxPrompt},
+			stderr:  []string{"Error: the mailbox password does not unlock the account keys", "(2 tries left)"}},
+		{name: "three at most", typed: []string{"w1", "w2", "w3", ""}, code: exitcode.MustAct,
+			prompts: []string{mailboxPrompt, mailboxPrompt, mailboxPrompt}, stderr: []string{"did not unlock the account keys 3 times"}},
+		{name: "upfront counts", upfront: wrongOne, typed: []string{"w1", "w2", ""}, code: exitcode.MustAct,
+			prompts: []string{mailboxPrompt, mailboxPrompt}, stderr: []string{"did not unlock the account keys 3 times"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{TwoFA: tc.twoFA, TwoPassword: true})
+			if tc.upfront != "" {
+				r.env["PCB_MAILBOX_PASSWORD"] = tc.upfront
+			}
+			var typed []string
+			for i, s := range tc.typed {
+				switch {
+				case s != "":
+				case tc.twoFA && i == 0:
+					s = r.totpCode()
+				default:
+					s = r.f.MailboxPassword
+				}
+				typed = append(typed, s)
+			}
+			r.term = &fakeTerm{interactive: true, secrets: typed}
+			r.want(tc.code, "login")
+			if !slices.Equal(r.term.secretPrompts, tc.prompts) {
+				t.Errorf("secret prompts = %q, want %q", r.term.secretPrompts, tc.prompts)
+			}
+			for _, w := range tc.stderr {
+				if !strings.Contains(r.errb.String(), w) {
+					t.Errorf("stderr %q does not say %q", r.errb.String(), w)
+				}
+			}
+			if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
+				t.Errorf("%d POST /auth/v4, want 1 (a retry makes no second SRP)", n)
+			}
+			if out := r.out.String() + r.errb.String(); strings.Contains(out, r.f.MailboxPassword) || strings.Contains(out, wrongOne) {
+				t.Error("the output carries a mailbox password")
+			}
+		})
+	}
+}
+
+// PCB_MAILBOX_PASSWORD logs a two-password account in without a prompt.
+func TestMailboxPasswordFromEnv(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoPassword: true})
+	r.env["PCB_MAILBOX_PASSWORD"] = r.f.MailboxPassword
+	r.want(exitcode.OK, "login", "--non-interactive", "--json")
+	var res service.LoginResult
+	mustUnmarshal(t, r.envelope().Data, &res)
+	if res.State != service.StateReady {
+		t.Errorf("login = %+v, want ready", res)
+	}
+	if strings.Contains(r.out.String()+r.errb.String(), r.f.MailboxPassword) {
+		t.Error("the output carries the mailbox password")
+	}
+}
+
+// One descriptor cannot hold both passwords: refused before anything is
+// read or sent.
+func TestSameFDForBothPasswordsIsUsage(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"login", "--non-interactive", "--password-fd", "0", "--mailbox-password-fd", "0"},
+		{"login", "resume", "--captcha-token", "T1", "--non-interactive", "--password-fd", "3", "--mailbox-password-fd", "3"},
+	} {
+		s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+		r := stubRig(t, s)
+		r.want(exitcode.Usage, append(args, "--json")...)
+		if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, "--password-fd") || !strings.Contains(e.Message, "--mailbox-password-fd") {
+			t.Errorf("pcb %s: error = %+v; want it to name both flags", strings.Join(args, " "), e)
+		}
+		if len(s.logins) != 0 {
+			t.Errorf("pcb %s reached the service", strings.Join(args, " "))
+		}
+	}
+}
+
+// Without a terminal, the daemon holds a two-password login for its
+// mailbox password; the exit 10 names the resume and until when, the
+// --json data says so, and pcb login resume --mailbox-password finishes it
+// (a wrong one first) without a second SRP.
+func TestNonInteractiveHeldByDaemonNamesResume(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoPassword: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+	e := r.envelope()
+	wantHint := "pcb login resume --mailbox-password" + heldUntil() + " (the daemon holds the login)"
+	if e.Error == nil || e.Error.Message != "the account needs its mailbox password" || e.Error.Hint != wantHint {
+		t.Fatalf("error = %+v; want the mailbox password asked for with the hint %q", e.Error, wantHint)
+	}
+	var held service.LoginResult
+	mustUnmarshal(t, e.Data, &held)
+	if held.State != service.StateNeedsMailboxPassword || held.LoginExpires == nil || held.Username != r.f.Username {
+		t.Errorf("data = %s; want needs-mailbox-password with login_expires and the username", e.Data)
+	}
+	if n := r.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d DELETE /auth/v4: the held login was cancelled", n)
+	}
+
+	delete(r.env, "PCB_USERNAME")
+	delete(r.env, "PCB_PASSWORD")
+	r.env["PCB_MAILBOX_PASSWORD"] = "not-the-mailbox-password"
+	r.want(exitcode.MustAct, "login", "resume", "--mailbox-password", "--non-interactive", "--json")
+	e = r.envelope()
+	if e.Error == nil || e.Error.Message != "the mailbox password does not unlock the account keys" ||
+		!strings.Contains(e.Error.Hint, "2 tries left") || !strings.Contains(e.Error.Hint, wantHint) {
+		t.Fatalf("error = %+v; want the wrong password with the tries left and %q", e.Error, wantHint)
+	}
+	var again service.LoginResult
+	mustUnmarshal(t, e.Data, &again)
+	if again.State != service.StateNeedsMailboxPassword || again.Username != held.Username ||
+		again.Account != held.Account || again.LoginExpires == nil || !again.LoginExpires.Equal(*held.LoginExpires) {
+		t.Errorf("data after the wrong one = %s; want the held login %+v", e.Data, held)
+	}
+
+	r.env["PCB_MAILBOX_PASSWORD"] = r.f.MailboxPassword
+	r.want(exitcode.OK, "login", "resume", "--mailbox-password", "--non-interactive", "--json")
+	var res service.LoginResult
+	mustUnmarshal(t, r.envelope().Data, &res)
+	if res.State != service.StateReady {
+		t.Fatalf("resume --mailbox-password = %+v, want ready", res)
+	}
+	if n := r.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1 (none for the resume)", n)
+	}
+	if strings.Contains(r.out.String()+r.errb.String(), r.f.MailboxPassword) {
+		t.Error("the output carries the mailbox password")
+	}
+}
+
+// Without a terminal nor a daemon, a two-password login without its
+// mailbox password is an exit 10 naming where to put it, and is cancelled;
+// so is one with a wrong mailbox password.
+func TestNonInteractiveNoDaemonNeedsMailboxPassword(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, upfront, msg string }{
+		{"none", "", "the account uses two-password mode: set PCB_MAILBOX_PASSWORD or pass --mailbox-password-fd"},
+		{"wrong", "not-the-mailbox-password", "the mailbox password does not unlock the account keys"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{TwoPassword: true})
+			if tc.upfront != "" {
+				r.env["PCB_MAILBOX_PASSWORD"] = tc.upfront
+			}
+			r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+			e := r.envelope()
+			if e.Error == nil || e.Error.Message != tc.msg || !strings.Contains(e.Error.Hint, "the login was cancelled") ||
+				!strings.Contains(e.Error.Hint, "PCB_MAILBOX_PASSWORD") || strings.Contains(e.Error.Hint, "resume") {
+				t.Fatalf("error = %+v; want %q, the login cancelled, no resume", e.Error, tc.msg)
+			}
+			if n := r.f.Calls("DELETE", "/auth/v4"); n != 1 {
+				t.Errorf("%d DELETE /auth/v4, want 1 (the session revoked)", n)
+			}
+		})
+	}
+}
+
+// pcb login resume --mailbox-password: exactly one mode, no credentials'
+// flags, a daemon, and the password from --mailbox-password-fd, else
+// PCB_MAILBOX_PASSWORD, else the prompt; never from argv.
+func TestResumeMailboxPassword(t *testing.T) {
+	t.Parallel()
+	t.Run("one mode", func(t *testing.T) {
+		t.Parallel()
+		for _, args := range [][]string{
+			{"login", "resume", "--totp", "--mailbox-password"},
+			{"login", "resume", "--captcha-token", "T1", "--mailbox-password"},
+		} {
+			s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) { return ready() }}
+			r := stubRig(t, s)
+			r.env["PCB_TOTP"], r.env["PCB_MAILBOX_PASSWORD"] = "123456", "mb"
+			r.want(exitcode.Usage, append(args, "--json")...)
+			if len(s.logins)+len(s.totps)+len(s.mailboxes) != 0 {
+				t.Errorf("pcb %s reached the service", strings.Join(args, " "))
+			}
+		}
+	})
+	for _, tc := range []struct {
+		flag string
+		args []string
+	}{
+		{"--username", []string{"--username", "alice"}},
+		{"--password-fd", []string{"--password-fd", "3"}},
+		{"--unattended-relogin", []string{"--unattended-relogin"}},
+	} {
+		t.Run("refuses "+tc.flag, func(t *testing.T) {
+			t.Parallel()
+			s := &stubAPI{statusPhase: string(service.StateNeedsMailboxPassword)}
+			r := stubRig(t, s)
+			startDaemon(t, r, newStubHub(s), nil)
+			r.env["PCB_MAILBOX_PASSWORD"] = "mb"
+			r.want(exitcode.Usage, append([]string{"login", "resume", "--mailbox-password", "--json"}, tc.args...)...)
+			if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, tc.flag) || !strings.Contains(e.Message, "--mailbox-password") {
+				t.Errorf("error = %+v; want it to name %s and --mailbox-password", e, tc.flag)
+			}
+			if len(s.mailboxes)+len(s.logins) != 0 {
+				t.Error("the command reached the service")
+			}
+		})
+	}
+	t.Run("needs a daemon", func(t *testing.T) {
+		t.Parallel()
+		s := &stubAPI{}
+		r := stubRig(t, s)
+		r.env["PCB_MAILBOX_PASSWORD"] = "mb"
+		r.want(exitcode.MustAct, "login", "resume", "--mailbox-password", "--json")
+		e := r.envelope()
+		if e.Error == nil || e.Error.Message != "no pcb daemon holds a login waiting for its mailbox password" ||
+			e.Error.Hint != "run pcb login with PCB_MAILBOX_PASSWORD set" {
+			t.Errorf("error = %+v", e.Error)
+		}
+		if len(s.mailboxes)+len(s.logins) != 0 {
+			t.Error("the in-process service got the password")
+		}
+	})
+	for _, tc := range []struct {
+		name        string
+		env         string
+		interactive bool
+		typed       []string
+		want        string
+		prompts     int
+	}{
+		{name: "from the variable", env: "from-env", want: "from-env"},
+		{name: "from the prompt", interactive: true, typed: []string{"typed"}, want: "typed", prompts: 1},
+		{name: "the variable beats the prompt", env: "from-env", interactive: true, typed: []string{"typed"}, want: "from-env"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &stubAPI{statusPhase: string(service.StateNeedsMailboxPassword)}
+			r := stubRig(t, s)
+			startDaemon(t, r, newStubHub(s), nil)
+			if tc.env != "" {
+				r.env["PCB_MAILBOX_PASSWORD"] = tc.env
+			}
+			r.term = &fakeTerm{interactive: tc.interactive, secrets: tc.typed}
+			r.want(exitcode.OK, "login", "resume", "--mailbox-password")
+			if !slices.Equal(s.mailboxes, []string{tc.want}) || len(r.term.secretPrompts) != tc.prompts {
+				t.Errorf("sent %q after %d prompts; want %q after %d", s.mailboxes, len(r.term.secretPrompts), tc.want, tc.prompts)
+			}
+		})
+	}
+	t.Run("none, not interactive", func(t *testing.T) {
+		t.Parallel()
+		s := &stubAPI{statusPhase: string(service.StateNeedsMailboxPassword)}
+		r := stubRig(t, s)
+		startDaemon(t, r, newStubHub(s), nil)
+		r.want(exitcode.MustAct, "login", "resume", "--mailbox-password", "--json")
+		if e := r.envelope().Error; e == nil || !strings.Contains(e.Message, "PCB_MAILBOX_PASSWORD") || !strings.Contains(e.Message, "--mailbox-password-fd") {
+			t.Errorf("error = %+v; want it to name PCB_MAILBOX_PASSWORD and --mailbox-password-fd", e)
+		}
+		if len(s.mailboxes) != 0 {
+			t.Error("an empty mailbox password reached the service")
+		}
+	})
+}
+
+// A resume for the wrong step is refused before any prompt, with a hint
+// naming the resume of the step the login waits at.
+func TestResumeWrongStepNamesTheRightOne(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		twoFA bool
+		args  []string
+		hint  string
+	}{
+		{"totp while the mailbox password is awaited", false, []string{"--totp"}, "pcb login resume --mailbox-password"},
+		{"mailbox password while the 2FA code is awaited", true, []string{"--mailbox-password"}, "pcb login resume --totp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{TwoFA: tc.twoFA, TwoPassword: true})
+			startDaemon(t, r, realHub(t, r), nil)
+			noInProcess(t, r)
+			r.want(exitcode.MustAct, "login", "--non-interactive")
+			user := r.f.Username
+			delete(r.env, "PCB_USERNAME")
+			delete(r.env, "PCB_PASSWORD")
+			r.env["PCB_TOTP"], r.env["PCB_MAILBOX_PASSWORD"] = r.totpCode(), r.f.MailboxPassword
+			for _, sel := range [][]string{nil, {"--account", user}} {
+				for _, interactive := range []bool{false, true} {
+					r.term = &fakeTerm{interactive: interactive, secrets: []string{"typed"}}
+					args := append(append([]string{"login", "resume", "--json"}, tc.args...), sel...)
+					r.want(exitcode.MustAct, args...)
+					if e := r.envelope().Error; e == nil || !strings.Contains(e.Hint, tc.hint) {
+						t.Errorf("pcb %s: error = %+v; want a hint naming %q", strings.Join(args, " "), e, tc.hint)
+					}
+					if len(r.term.secretPrompts) != 0 {
+						t.Errorf("pcb %s asked %q", strings.Join(args, " "), r.term.secretPrompts)
+					}
+				}
+			}
+			if n := r.f.Calls("DELETE", "/auth/v4"); n != 0 {
+				t.Errorf("%d DELETE /auth/v4: a wrong-step resume cancelled the login", n)
+			}
+		})
+	}
+}
+
+// pcb login resume --totp of a two-password login goes on to the mailbox
+// password: held again for it without one, else sent from the variable.
+func TestResumeTOTPThenMailboxPassword(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true, TwoPassword: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.want(exitcode.MustAct, "login", "--non-interactive")
+	delete(r.env, "PCB_USERNAME")
+	delete(r.env, "PCB_PASSWORD")
+	r.env["PCB_TOTP"] = r.totpCode()
+	r.want(exitcode.MustAct, "login", "resume", "--totp", "--non-interactive", "--json")
+	e := r.envelope()
+	wantHint := "pcb login resume --mailbox-password" + heldUntil() + " (the daemon holds the login)"
+	if e.Error == nil || e.Error.Hint != wantHint {
+		t.Fatalf("error = %+v; want the hint %q", e.Error, wantHint)
+	}
+	r.env["PCB_MAILBOX_PASSWORD"] = r.f.MailboxPassword
+	r.want(exitcode.OK, "login", "resume", "--mailbox-password", "--non-interactive")
+
+	// Both at once: the code, then the mailbox password from the variable.
+	r2 := newRig(t, &protontest.Options{TwoFA: true, TwoPassword: true})
+	startDaemon(t, r2, realHub(t, r2), nil)
+	noInProcess(t, r2)
+	r2.want(exitcode.MustAct, "login", "--non-interactive")
+	r2.env["PCB_TOTP"], r2.env["PCB_MAILBOX_PASSWORD"] = r2.totpCode(), r2.f.MailboxPassword
+	r2.want(exitcode.OK, "login", "resume", "--totp", "--non-interactive")
+	if n := r2.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+}
+
+// The CLI asks at most three mailbox passwords even if a service kept the
+// login waiting after them.
+func TestMailboxPromptsStopAtThree(t *testing.T) {
+	t.Parallel()
+	s := &stubAPI{
+		login: func(service.LoginRequest) (service.LoginResult, error) {
+			return service.LoginResult{State: service.StateNeedsMailboxPassword}, nil
+		},
+		submitMailbox: func(string) (service.LoginResult, error) {
+			return service.LoginResult{}, &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the mailbox password does not unlock the account keys")}
+		},
+		statusPhase: string(service.StateNeedsMailboxPassword),
+	}
+	r := stubRig(t, s)
+	r.term = &fakeTerm{interactive: true, secrets: []string{"w1", "w2", "w3", "w4"}}
+	r.want(exitcode.MustAct, "login")
+	if len(s.mailboxes) != 3 || len(r.term.secretPrompts) != 3 {
+		t.Errorf("%d prompts, %d sent; want 3 of each", len(r.term.secretPrompts), len(s.mailboxes))
+	}
+}
+
+// A wrong mailbox password given ahead to a login the daemon holds: the
+// exit 10's data is the held login, for whom it is.
+func TestWrongUpfrontMailboxPasswordHeldByTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoPassword: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.env["PCB_MAILBOX_PASSWORD"] = "not-the-mailbox-password"
+	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Message != "the mailbox password does not unlock the account keys" ||
+		!strings.Contains(e.Error.Hint, "pcb login resume --mailbox-password"+heldUntil()) {
+		t.Fatalf("error = %+v; want the wrong password with the resume", e.Error)
+	}
+	var held service.LoginResult
+	mustUnmarshal(t, e.Data, &held)
+	if held.State != service.StateNeedsMailboxPassword || held.Username != r.f.Username || held.Account == "" || held.LoginExpires == nil {
+		t.Errorf("data = %s; want the held login with its username and account", e.Data)
+	}
+}
+
+// A prompt of a held step left without an answer (end of input) names how
+// to give it: with a daemon, the resume of the login it keeps; without
+// one, the variable (the login ends).
+func TestEndOfInputAtAHeldStepNamesTheWayBack(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		twoFA  bool
+		daemon bool
+		msg    string
+		hint   []string
+	}{
+		{"mailbox password, no daemon", false, false, "no mailbox password was entered (end of input)",
+			[]string{"PCB_MAILBOX_PASSWORD", "--mailbox-password-fd", "the login was cancelled"}},
+		{"mailbox password, daemon", false, true, "no mailbox password was entered (end of input)",
+			[]string{"pcb login resume --mailbox-password" + heldUntil() + " (the daemon holds the login)"}},
+		{"2FA code, daemon", true, true, "no 2FA code was entered (end of input)",
+			[]string{"PCB_TOTP=<code> pcb login resume --totp" + heldUntil() + " (the daemon holds the login)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{TwoFA: tc.twoFA, TwoPassword: true})
+			if tc.daemon {
+				startDaemon(t, r, realHub(t, r), nil)
+				noInProcess(t, r)
+			}
+			r.term = &fakeTerm{interactive: true} // every read answers EOF
+			r.want(exitcode.MustAct, "login", "--json")
+			e := r.envelope()
+			if e.Error == nil || e.Error.Message != tc.msg {
+				t.Fatalf("error = %+v; want %q", e.Error, tc.msg)
+			}
+			for _, w := range tc.hint {
+				if !strings.Contains(e.Error.Hint, w) {
+					t.Errorf("hint %q does not say %q", e.Error.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+// An error other than an exit 10 keeps its code and hint, even while an
+// earlier login is held: no prompt, no resume hint, no held data.
+func TestNonMustActFailureIsNotAHeldStep(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.want(exitcode.MustAct, "login", "--non-interactive") // held for its 2FA code
+	r.env["PCB_TOTP"] = "not-a-code"
+	r.term = &fakeTerm{interactive: true, secrets: []string{r.totpCode()}}
+	r.want(exitcode.Usage, "login", "resume", "--totp", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Hint != "pass the code from your authenticator" || string(e.Data) != "null" && len(e.Data) != 0 {
+		t.Errorf("envelope = %+v, data %s; want the service's usage error as it is, without data", e.Error, e.Data)
+	}
+	if len(r.term.secretPrompts) != 0 {
+		t.Errorf("asked %q", r.term.secretPrompts)
+	}
+}
+
+// A malformed code typed at the prompt is asked again, as before
+// two-password mode: only a secret from elsewhere keeps its usage error.
+func TestTypoAtThe2FAPromptIsAskedAgain(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	r.term = &fakeTerm{interactive: true, secrets: []string{"not-a-code", r.totpCode()}}
+	r.want(exitcode.OK, "login")
+	if len(r.term.secretPrompts) != 2 || !strings.Contains(r.errb.String(), "neither a 6-8 digit code") {
+		t.Errorf("%d prompts, stderr %q; want two, the typo reported", len(r.term.secretPrompts), r.errb.String())
 	}
 }

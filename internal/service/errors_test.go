@@ -39,7 +39,6 @@ func TestMapError(t *testing.T) {
 		{"totp rejected", fmt.Errorf("x: %w", auth.ErrTOTPRejected), exitcode.MustAct, "code", "2FA"},
 		{"captcha rejected", auth.ErrCaptchaRejected, exitcode.MustAct, "CAPTCHA", "CAPTCHA"},
 		{"captcha required", &auth.CaptchaError{Token: "t", URL: "https://verify.proton.me/?token=t"}, exitcode.MustAct, "verify.proton.me", "CAPTCHA"},
-		{"two password", auth.ErrTwoPassword, exitcode.MustAct, "single-password", "not supported"},
 		{"fido2", auth.ErrFIDO2, exitcode.MustAct, "authenticator", "not supported"},
 		{"keys locked", keys.ErrKeysLocked, exitcode.MustAct, "password", ""},
 		{"session ended", fmt.Errorf("x: %w", api.ErrSessionEnded), exitcode.MustAct, "login", ""},
@@ -90,6 +89,17 @@ func TestMapError(t *testing.T) {
 	}
 	if mapError(nil, keyFile) != nil {
 		t.Error("mapError(nil) != nil")
+	}
+}
+
+func TestKeysLockedHintDoesNotRefuseTwoPasswordMode(t *testing.T) {
+	t.Parallel()
+	var ee *exitcode.Error
+	if !errors.As(mapError(keys.ErrKeysLocked, "/k/secrets.key"), &ee) {
+		t.Fatal("mapError(ErrKeysLocked) is not an *exitcode.Error")
+	}
+	if strings.Contains(ee.Hint, "two-password") || strings.Contains(ee.Error(), "two-password") {
+		t.Errorf("message %q, hint %q still refuse two-password mode", ee.Error(), ee.Hint)
 	}
 }
 

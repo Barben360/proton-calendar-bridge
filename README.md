@@ -114,7 +114,7 @@ You type passwords and 2FA codes yourself, in the desktop app or on a one-time l
 
 ## Scripts and automation
 
-Every command takes `--json` and prints one envelope, `{schema_version, command, ok, data | error}`, with stable exit codes: `0` done, `2` bad invocation, `10` you must act, `20` blocked or transient, `30` failed and rolled back, `40` partly done and resumable. Secrets come from a prompt, a file descriptor (`--password-fd`) or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`). Every command: [docs/commands.md](docs/commands.md).
+Every command takes `--json` and prints one envelope, `{schema_version, command, ok, data | error}`, with stable exit codes: `0` done, `2` bad invocation, `10` you must act, `20` blocked or transient, `30` failed and rolled back, `40` partly done and resumable. Secrets come from a prompt, a file descriptor (`--password-fd`) or the environment (`PCB_USERNAME`, `PCB_PASSWORD`, `PCB_TOTP`, and `PCB_MAILBOX_PASSWORD` for a two-password account). Every command: [docs/commands.md](docs/commands.md).
 
 ## Documentation
 

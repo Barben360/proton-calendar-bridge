@@ -267,14 +267,11 @@ func mapError(err error, keyFile string) error {
 		return mustAct("the CAPTCHA was not accepted by Proton", "run pcb login again to get a new CAPTCHA, solve it and pass its token")
 	case errors.As(err, &ce):
 		return mustAct("Proton asks for a CAPTCHA", "solve it at "+ce.URL+", then run pcb login again with its token")
-	case errors.Is(err, auth.ErrTwoPassword):
-		return mustAct("the Proton account uses two-password mode, which is not supported",
-			"switch the account to single-password mode in the Proton account settings, then run pcb login")
 	case errors.Is(err, auth.ErrFIDO2):
 		return mustAct("the account's only second factor is a security key (FIDO2), which is not supported",
 			"add an authenticator app (TOTP) as a second factor in the Proton account settings, then run pcb login")
 	case errors.Is(err, keys.ErrKeysLocked):
-		return mustAct("the password does not unlock the account keys", "check the password; accounts in two-password mode are not supported")
+		return mustAct("the password does not unlock the account keys", "check the password, then run pcb login again")
 	case errors.Is(err, api.ErrSessionEnded):
 		return asLoginNeeded(sessionEndedBy(err, "run pcb login"))
 	case errors.As(err, &uve):

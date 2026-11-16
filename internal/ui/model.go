@@ -194,6 +194,8 @@ func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) strin
 		return "needs login"
 	case "needs-totp":
 		return "needs 2FA code"
+	case "needs-mailbox-password":
+		return "needs mailbox password"
 	case "needs-captcha":
 		return "needs CAPTCHA"
 	}

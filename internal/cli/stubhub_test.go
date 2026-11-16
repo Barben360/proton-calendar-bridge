@@ -172,6 +172,17 @@ func (h *stubHub) SubmitTOTP(ctx context.Context, sel, code string) (service.Log
 	return res, err
 }
 
+func (h *stubHub) SubmitMailboxPassword(ctx context.Context, sel, password string) (service.LoginResult, error) {
+	a, err := h.pick(sel)
+	if err != nil {
+		return service.LoginResult{}, err
+	}
+	h.record("mailbox-password " + a.id)
+	res, err := a.api.SubmitMailboxPassword(ctx, password)
+	res.Account = a.id
+	return res, err
+}
+
 func (h *stubHub) SignOut(ctx context.Context, sel string, r service.LogoutRequest) (service.LogoutResult, error) {
 	a, err := h.pick(sel)
 	if err != nil {

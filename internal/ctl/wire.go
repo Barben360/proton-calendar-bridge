@@ -84,6 +84,24 @@ func (TOTPRequest) GoString() string { return redactedTOTP }
 // LogValue hides the code from slog.
 func (TOTPRequest) LogValue() slog.Value { return slog.StringValue(redactedTOTP) }
 
+// MailboxPasswordRequest is the body of
+// POST /v2/accounts/{id}/login/mailbox-password: the mailbox password of the
+// login the daemon holds for the account.
+type MailboxPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+const redactedMailbox = "ctl.MailboxPasswordRequest(redacted)"
+
+// String hides the password from fmt.
+func (MailboxPasswordRequest) String() string { return redactedMailbox }
+
+// GoString hides the password from %#v.
+func (MailboxPasswordRequest) GoString() string { return redactedMailbox }
+
+// LogValue hides the password from slog.
+func (MailboxPasswordRequest) LogValue() slog.Value { return slog.StringValue(redactedMailbox) }
+
 // Daemon is the pcb serve process that answers on the socket.
 type Daemon struct {
 	// Kind is "serve" (pcb serve), "ui" (the desktop app pcb-ui) or "mcp"

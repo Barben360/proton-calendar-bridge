@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -24,7 +25,9 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Serve the fake Proton on a loopback address until SIGINT or SIGTERM",
 		Long: "Serve the fake Proton over plain HTTP on a loopback address, with one account read from --account " +
-			"(a 0600 TOML file: username, password, totp_secret; 2FA when totp_secret is set) and, with --seed, the " +
+			"(a 0600 TOML file: username, password, totp_secret, mailbox_password; 2FA when totp_secret is set, " +
+			"two-password mode when mailbox_password is set: the login takes password, the keys open with " +
+			"mailbox_password) and, with --seed, the " +
 			"calendars and events of the data set file (testdata/seed/dataset.yaml), plus an event with attendees " +
 			"and a calendar shared read-only. It prints the base URL (pcb's [proton] base_url), the username and the " +
 			"control URL, whose POST /revoke-sessions ends every session (as a revoke in the web app does) and POST " +
@@ -40,7 +43,7 @@ func serveCmd() *cobra.Command {
 	c.Flags().StringVar(&listen, "listen", "127.0.0.1:0", "loopback IP:PORT of the fake Proton API (port 0: any free one)")
 	c.Flags().StringVar(&control, "control", "127.0.0.1:0", "loopback IP:PORT of the control endpoint (port 0: any free one)")
 	c.Flags().StringVar(&seedFile, "seed", "", "data set file to seed the account with (testdata/seed/dataset.yaml); empty: no events")
-	c.Flags().StringVar(&accountFile, "account", "", "the account's TOML file, mode 0600: username, password, totp_secret (required)")
+	c.Flags().StringVar(&accountFile, "account", "", "the account's TOML file, mode 0600: username, password, totp_secret, mailbox_password (required)")
 	return cli.NoJSON(c)
 }
 
@@ -71,10 +74,7 @@ func serve(cmd *cobra.Command, listen, control, seedFile, accountFile string) (e
 	defer p.Close()
 	p.Cleanup(func() { _ = ctl.Close() })
 	defer protontest.Recover(&err)
-	f := protontest.New(&p, protontest.Options{
-		Username: acct.Username, Password: acct.Password,
-		TwoFA: acct.TOTPSecret != "", TOTPSecret: acct.TOTPSecret, Listener: api,
-	})
+	f := protontest.New(&p, fakeOptions(acct, api))
 	var n seeded
 	if seedFile != "" {
 		if n, err = seedDataset(f, f.Username, ds); err != nil {
@@ -104,6 +104,17 @@ func serve(cmd *cobra.Command, listen, control, seedFile, accountFile string) (e
 		return nil
 	case err := <-served:
 		return &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("control endpoint: %w", err)}
+	}
+}
+
+// fakeOptions is the fake's shape for acct, served on l: 2FA when it has a
+// TOTP secret, two-password when it has a mailbox password.
+func fakeOptions(acct account, l net.Listener) protontest.Options {
+	return protontest.Options{
+		Username: acct.Username, Password: acct.Password,
+		TwoFA: acct.TOTPSecret != "", TOTPSecret: acct.TOTPSecret,
+		TwoPassword: acct.MailboxPassword != "", MailboxPassword: acct.MailboxPassword,
+		Listener: l,
 	}
 }
 

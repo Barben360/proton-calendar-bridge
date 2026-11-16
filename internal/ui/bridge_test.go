@@ -37,7 +37,13 @@ type lab struct {
 
 func newLab(t *testing.T) *lab {
 	t.Helper()
-	f := protontest.New(t, protontest.Options{})
+	return newLabWith(t, protontest.Options{})
+}
+
+// newLabWith is newLab over a fake Proton with these options.
+func newLabWith(t *testing.T, o protontest.Options) *lab {
+	t.Helper()
+	f := protontest.New(t, o)
 	root, err := os.MkdirTemp("", "pcbu") // short: the control socket's path must fit sun_path
 	if err != nil {
 		t.Fatal(err)

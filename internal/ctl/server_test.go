@@ -51,17 +51,19 @@ type stubHub struct {
 
 	entered, release chan struct{}
 
-	mu        sync.Mutex
-	logins    []service.LoginRequest
-	codes     []string
-	codeFor   []string // the selector of each code
-	logouts   int
-	discard   []bool // each logout's Discard
-	logoutFor []string
-	removed   []string
-	restarted []string
-	caldav    []string // "selector=on|off"
-	mcp       []string // "selector=on|off"
+	mu         sync.Mutex
+	logins     []service.LoginRequest
+	codes      []string
+	codeFor    []string // the selector of each code
+	mailboxes  []string // the mailbox passwords
+	mailboxFor []string // the selector of each
+	logouts    int
+	discard    []bool // each logout's Discard
+	logoutFor  []string
+	removed    []string
+	restarted  []string
+	caldav     []string // "selector=on|off"
+	mcp        []string // "selector=on|off"
 }
 
 // newHub is a hub of one account, idA, whose login is st.
@@ -123,6 +125,20 @@ func (h *stubHub) SubmitTOTP(_ context.Context, selector, code string) (service.
 	h.mu.Lock()
 	h.codes = append(h.codes, code)
 	h.codeFor = append(h.codeFor, selector)
+	h.mu.Unlock()
+	return service.LoginResult{State: service.StateReady, Username: "alice", AccountID: "id1", Account: idA}, nil
+}
+
+func (h *stubHub) SubmitMailboxPassword(_ context.Context, selector, password string) (service.LoginResult, error) {
+	if _, err := h.find(selector); err != nil {
+		return service.LoginResult{}, err
+	}
+	if password == "wrong" {
+		return service.LoginResult{}, &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the mailbox password does not unlock the account keys"), Hint: "2 tries left"}
+	}
+	h.mu.Lock()
+	h.mailboxes = append(h.mailboxes, password)
+	h.mailboxFor = append(h.mailboxFor, selector)
 	h.mu.Unlock()
 	return service.LoginResult{State: service.StateReady, Username: "alice", AccountID: "id1", Account: idA}, nil
 }

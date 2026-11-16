@@ -116,6 +116,9 @@ func TestShortTexts(t *testing.T) {
 		{"logged out", with(ready("a", 0, 300), func(a *ctl.AccountStatus) { a.Phase, a.Login.Phase = "logged-out", "logged-out" }), "needs login"},
 		{"needs totp", with(ready("a", 0, 300), func(a *ctl.AccountStatus) { a.Phase, a.Login.Phase = "needs-totp", "needs-totp" }), "needs 2FA code"},
 		{"needs captcha", with(ready("a", 0, 300), func(a *ctl.AccountStatus) { a.Phase, a.Login.Phase = "needs-captcha", "needs-captcha" }), "needs CAPTCHA"},
+		{"needs mailbox password", with(ready("a", 0, 300), func(a *ctl.AccountStatus) {
+			a.Phase, a.Login.Phase = "needs-mailbox-password", "needs-mailbox-password"
+		}), "needs mailbox password"},
 		{"caldav off", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.CalDAV = false }), "CalDAV off"},
 		// MCP off alone leaves the sync running: its state is what matters.
 		{"mcp off", with(ready("a", time.Minute, 300), func(a *ctl.AccountStatus) { a.MCP = false }), "synced 1 min ago"},

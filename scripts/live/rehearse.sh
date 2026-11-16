@@ -6,7 +6,10 @@
 # makes any other HTTP request fail. Every pcb directory (and HOME) is in a
 # temporary run root, removed at the end. Steps 19 and 22 drive pcb mcp
 # as an agent would, over stdin and stdout (spec/HUMAN-CHECKS.md step 10):
-# relayed to pcb serve, then serving the session itself.
+# relayed to pcb serve, then serving the session itself. Step 23 logs in a
+# two-password account (a second pcb-fake, its own pcb directories): held for
+# its mailbox password, one wrong password, then the right one
+# (spec/HUMAN-CHECKS.md step 14).
 #
 # Each step prints "--- step N: ..." and stops the run at its first
 # mismatch (exit 1); the last line is PASS. A red rehearsal stops the live
@@ -58,7 +61,7 @@ cleanup() {
 	stop_pid "$SERVE_PID"
 	stop_pid "$FAKE_PID"
 	if [ "$rc" -ne 0 ]; then
-		for f in serve.log fake.err mcp.err; do
+		for f in serve.log fake.err fake2.err mcp.err; do
 			if [ -s "$RUN/$f" ]; then
 				printf '\n=== last lines of %s ===\n' "$f" >&2
 				tail -n 25 "$RUN/$f" >&2
@@ -206,7 +209,7 @@ step 2 "isolate every directory in the run root and fence the network"
 # No credential or directory of the caller's reaches pcb: everything below
 # is the run root's, and HTTP to anything but loopback goes to a closed
 # port (Go and curl never proxy 127.0.0.1 or localhost).
-unset PCB_USERNAME PCB_PASSWORD PCB_TOTP PCB_LAB_USERNAME PCB_LAB_PASSWORD PCB_LAB_TOTP XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+unset PCB_USERNAME PCB_PASSWORD PCB_TOTP PCB_MAILBOX_PASSWORD PCB_LAB_USERNAME PCB_LAB_PASSWORD PCB_LAB_TOTP XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 export HOME=$RUN/home
 export XDG_CONFIG_HOME=$RUN/home/.config XDG_STATE_HOME=$RUN/home/.local/state
 export PCB_CONFIG_DIR=$RUN/config PCB_STATE_DIR=$RUN/state
@@ -694,5 +697,65 @@ equal "$(jq -c .accounts "$RUN/tool.json")" '[]' "status tool after the logout"
 mcp_close
 lacks "$RUN/mcp.err" "level=ERROR" "pcb mcp's log"
 lacks "$RUN/mcp.err" "$FAKE_PASS" "pcb mcp's log never holds the account password"
+
+# --------------------------------------------------------------------------
+step 23 "a two-password account: held for its mailbox password, a wrong one, then the right one"
+# A second fake whose account has a mailbox_password, and fresh pcb
+# directories (no login guard from the steps above). The mailbox password
+# is checked locally: the wrong one must cost no Proton call.
+stop_pid "$FAKE_PID"
+FAKE_PID=
+MB_USER=rehearsal2
+MB_PASS=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+MB_RIGHT=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+MB_WRONG=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+(
+	umask 077
+	printf 'username = "%s"\npassword = "%s"\nmailbox_password = "%s"\n' "$MB_USER" "$MB_PASS" "$MB_RIGHT" >"$RUN/account2.toml"
+)
+"$FAKE" serve --seed "$REPO/testdata/seed/dataset.yaml" --account "$RUN/account2.toml" >"$RUN/fake2.out" 2>"$RUN/fake2.err" &
+FAKE_PID=$!
+until_true 60 "the second pcb-fake ready" grep -qx 'Serving until SIGINT or SIGTERM' "$RUN/fake2.out"
+BASE=$(sed -n 's/^Base URL: //p' "$RUN/fake2.out")
+CTL=$(sed -n 's/^Control URL: //p' "$RUN/fake2.out")
+case $BASE in http://127.0.0.1:*) ;; *) fail "base URL $BASE is not loopback" ;; esac
+case $CTL in http://127.0.0.1:*) ;; *) fail "control URL $CTL is not loopback" ;; esac
+export PCB_CONFIG_DIR=$RUN/config2 PCB_STATE_DIR=$RUN/state2
+(umask 077 && mkdir -p "$PCB_CONFIG_DIR" "$PCB_STATE_DIR")
+PORT2=$(free_port)
+(
+	umask 077
+	printf '[proton]\nbase_url = "%s"\n\n[caldav]\nlisten = "127.0.0.1:%s"\n\n[secrets]\nbackend = "keyfile"\n' "$BASE" "$PORT2" >"$PCB_CONFIG_DIR/config.toml"
+)
+"$PCB" serve --wait-for-login >"$RUN/serve2.out" 2>"$RUN/serve2.log" &
+SERVE_PID=$!
+until_true 30 "serve waiting for a login" grep -qF 'Waiting for a login: run pcb login' "$RUN/serve2.out"
+run 10 env PCB_USERNAME="$MB_USER" PCB_PASSWORD="$MB_PASS" "$PCB" login --non-interactive
+has "$RUN/err" "the account needs its mailbox password" "held login"
+has "$RUN/err" "pcb login resume --mailbox-password before " "held login hint"
+has "$RUN/err" "(the daemon holds the login)" "held login hint"
+run 0 "$PCB" status --json
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/out")" needs-mailbox-password "phase while the daemon holds the login"
+run 10 env PCB_MAILBOX_PASSWORD="$MB_WRONG" "$PCB" login resume --mailbox-password
+has "$RUN/err" "the mailbox password does not unlock the account keys" "a wrong mailbox password"
+run 0 "$PCB" status --json
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/out")" needs-mailbox-password "the login stays held after a wrong mailbox password"
+run 0 env PCB_MAILBOX_PASSWORD="$MB_RIGHT" "$PCB" login resume --mailbox-password
+has "$RUN/out" "Logged in as $MB_USER" "the right mailbox password"
+equal "$(fake_calls POST /auth/v4)" 1 "SRP logins the fake received (the retry made no Proton call)"
+until_true 60 "serving with 4 synced calendars" synced
+equal "$(jq -r '.data.accounts[0].login.phase' "$RUN/st.json")" ready "phase after the mailbox password"
+for secret in "$MB_RIGHT" "$MB_WRONG" "$MB_PASS"; do
+	lacks "$RUN/serve2.log" "$secret" "serve2.log never holds a password"
+	lacks "$RUN/serve2.out" "$secret" "serve2.out never holds a password"
+done
+for secret in "$MB_RIGHT" "$MB_WRONG" "$MB_PASS"; do
+	if grep -rqF -- "$secret" "$PCB_STATE_DIR" "$PCB_CONFIG_DIR"; then fail "a password is stored in the pcb directories"; fi
+done
+kill -TERM "$SERVE_PID"
+rc=0
+wait "$SERVE_PID" || rc=$?
+SERVE_PID=
+equal "$rc" 0 "pcb serve exit code"
 
 printf 'PASS: the live session rehearsed against pcb-fake (%s steps)\n' "$STEP"

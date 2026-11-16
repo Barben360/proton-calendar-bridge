@@ -1,12 +1,18 @@
 package protontest
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/go-proton-api/server"
 	"github.com/ProtonMail/go-proton-api/server/backend"
+	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 )
@@ -31,6 +37,10 @@ var pool struct {
 // account can be reused.
 var defaultPassword = sync.OnceValue(func() string { return "fake-" + rand.Text() })
 
+// defaultMailboxPassword is a two-password fake's default mailbox password,
+// the same for every fake so the keys it locks are re-locked once per account.
+var defaultMailboxPassword = sync.OnceValue(func() string { return "fake-mailbox-" + rand.Text() })
+
 // pooled is a backend and the accounts created on it.
 type pooled struct {
 	srv      *server.Server
@@ -40,7 +50,10 @@ type pooled struct {
 	dirty    bool                    // an account was changed: never reused
 }
 
-type account struct{ id, password string }
+type account struct {
+	id, password string
+	relockers    map[string]*relocker // mailbox password → its relocker (two-password fakes)
+}
 
 // fastKeys makes the backend reuse precomputed keys instead of generating
 // one per user and address (seconds per test). Insecure; test use only.
@@ -119,8 +132,99 @@ func (p *pooled) user(username, password string) (string, error) {
 	if _, err := p.srv.CreateAddress(id, secondAddress(username, p.srv.GetDomain()), []byte(password), true); err != nil {
 		return "", err
 	}
-	p.accounts[username] = account{id, password}
+	p.accounts[username] = account{id: id, password: password}
 	return id, nil
+}
+
+// relocker returns what re-locks the user keys of username's account for a
+// two-password fake whose mailbox password is mailbox. The backend derives
+// SRP and the key passphrase from one password and one salt; the fake keeps
+// its SRP and swaps the key passphrase in what it serves (Options.TwoPassword).
+// The two salted passphrases cost a bcrypt each, so a relocker is made once
+// per account and mailbox password, and kept with the account.
+func (p *pooled) relocker(username, mailbox string) (*relocker, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a, ok := p.accounts[username]
+	if !ok {
+		return nil, fmt.Errorf("unknown user %q", username)
+	}
+	if r, ok := a.relockers[mailbox]; ok {
+		return r, nil
+	}
+	m := gpa.New(gpa.WithHostURL(p.srv.GetHostURL()), gpa.WithAppVersion(appVersion), gpa.WithRetryCount(0))
+	defer m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	// The backend salts the keys with the account's SRP salt, which
+	// /auth/v4/info hands out without a session.
+	info, err := m.AuthInfo(ctx, gpa.AuthInfoReq{Username: username})
+	if err != nil {
+		return nil, fmt.Errorf("fetching the salt: %w", err)
+	}
+	salts := gpa.Salts{{ID: "user", KeySalt: info.Salt}}
+	salted := func(password string) ([]byte, error) {
+		pass, err := salts.SaltForKey([]byte(password), "user")
+		if err == nil && len(pass) == 0 { // SaltForKey drops a hashing error
+			err = errors.New("empty result")
+		}
+		return pass, err
+	}
+	from, err := salted(a.password)
+	if err != nil {
+		return nil, fmt.Errorf("salting the login password: %w", err)
+	}
+	to, err := salted(mailbox)
+	if err != nil {
+		return nil, fmt.Errorf("salting the mailbox password: %w", err)
+	}
+	r := &relocker{from: from, to: to, done: map[string]string{}}
+	if a.relockers == nil {
+		a.relockers = map[string]*relocker{}
+	}
+	a.relockers[mailbox] = r
+	p.accounts[username] = a
+	return r, nil
+}
+
+// relocker re-locks the user keys of one account, which the backend locks
+// with the passphrase salted from the login password, with the passphrase
+// salted from a mailbox password. Address keys need nothing: their tokens are
+// encrypted to the user key, whatever locks it.
+type relocker struct {
+	from, to []byte // the salted passphrases of the login and the mailbox password
+
+	mu   sync.Mutex
+	done map[string]string // armored key as the backend serves it → re-locked, so it is served the same each time
+}
+
+// relock returns armored, a locked private key, locked with the mailbox
+// password's passphrase instead.
+func (r *relocker) relock(armored string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if out, ok := r.done[armored]; ok {
+		return out, nil
+	}
+	key, err := crypto.NewKeyFromArmored(armored)
+	if err != nil {
+		return "", err
+	}
+	open, err := key.Unlock(r.from)
+	if err != nil {
+		return "", err
+	}
+	defer open.ClearPrivateParams()
+	locked, err := open.Lock(r.to)
+	if err != nil {
+		return "", err
+	}
+	out, err := locked.Armor()
+	if err != nil {
+		return "", err
+	}
+	r.done[armored] = out
+	return out, nil
 }
 
 // takeSession takes an idle live session of username's account.

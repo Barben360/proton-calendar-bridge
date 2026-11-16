@@ -155,7 +155,7 @@ On a non-loopback bind pcb serves TLS, with its own certificate unless you set y
 
 ## Log in from an agent
 
-The `login` tool takes a username and nothing else: you type the password, 2FA code or CAPTCHA, never the agent.
+The `login` tool takes a username and nothing else: you type the password, 2FA code, mailbox password (two-password accounts) or CAPTCHA, never the agent.
 
 - **In `pcb-ui`** it opens the add-account wizard with the address filled in.
 - **Otherwise** pcb opens a one-time page on `http://127.0.0.1:<port>/login/...` for that username (5 minutes; the first browser to use it keeps it). The agent shows you the link, or your client offers to open it. Claude Code 2.1.325 shows `Open in browser`, then `I'm done, continue`; the agent's answer then says whether the login ended there.

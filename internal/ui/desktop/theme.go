@@ -55,7 +55,7 @@ var paper = map[fyne.ThemeVariant]map[fyne.ThemeColorName]color.Color{
 		theme.ColorNameButton:              hex(0xEBEDF0),
 		theme.ColorNameDisabledButton:      hex(0xE4E6EA),
 		theme.ColorNameInputBackground:     hex(0xF7F8FA),
-		theme.ColorNameInputBorder:         hex(0xD5D8DE),
+		theme.ColorNameInputBorder:         hex(0x868B95), // 3:1 on the card, the ground and the field (theme_test.go)
 		theme.ColorNameSeparator:           hex(0xE4E6EA),
 		theme.ColorNameHover:               alpha(hex(0x000000), 0x0F),
 		theme.ColorNamePressed:             alpha(hex(0x000000), 0x1A),
@@ -88,7 +88,7 @@ var paper = map[fyne.ThemeVariant]map[fyne.ThemeColorName]color.Color{
 		theme.ColorNameButton:              hex(0x2A2E36),
 		theme.ColorNameDisabledButton:      hex(0x24272E),
 		theme.ColorNameInputBackground:     hex(0x16181C),
-		theme.ColorNameInputBorder:         hex(0x3A3F4A),
+		theme.ColorNameInputBorder:         hex(0x6B7280),
 		theme.ColorNameSeparator:           hex(0x2C3038),
 		theme.ColorNameHover:               alpha(hex(0xFFFFFF), 0x0F),
 		theme.ColorNamePressed:             alpha(hex(0xFFFFFF), 0x1A),

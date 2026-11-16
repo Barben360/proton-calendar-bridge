@@ -10,7 +10,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 )
 
-const keysChanged = "account keys no longer unlock (password changed?)"
+const keysChanged = "account keys no longer unlock (password or mailbox password changed?)"
 
 // Calendars implements API. Each calendar's keys are unlocked to report
 // whether they work; a calendar whose keys fail is listed with Keys "error".

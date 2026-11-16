@@ -327,6 +327,12 @@ func (p *page) post(w http.ResponseWriter, r *http.Request) {
 			clear(pw)
 		case loginflow.StepTOTP:
 			_ = p.flow.SubmitTOTP(ctx, strings.TrimSpace(form.Get("code")))
+		case loginflow.StepMailboxPassword:
+			mb := []byte(form.Get("mailbox_password"))
+			delete(form, "mailbox_password") // best effort, as for the password
+			delete(r.Form, "mailbox_password")
+			_ = p.flow.SubmitMailboxPassword(ctx, mb)
+			clear(mb)
 		case loginflow.StepCaptcha:
 			_ = p.flow.CaptchaSolved(ctx)
 		}
@@ -399,6 +405,13 @@ label{display:block;margin:.8rem 0}input[type=password],input[type=text]{width:1
 <input type="hidden" name="step" value="totp">
 <label>Two-factor code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
 <button type="submit">Verify</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
+</form>
+{{else if eq .Step "mailbox-password"}}<p>This account uses two-password mode: enter its mailbox password (the second password, which decrypts your data).</p>
+<form method="post">
+<input type="hidden" name="step" value="mailbox-password">
+<label for="mailbox-password">Mailbox password</label>
+<input id="mailbox-password" type="password" name="mailbox_password" autocomplete="current-password" required autofocus>
+<button type="submit">Unlock</button><button type="submit" name="cancel" value="1" formnovalidate>Cancel</button>
 </form>
 {{else if eq .Step "captcha"}}<p>Proton asks for a human verification. <a href="{{.CaptchaURL}}" target="_blank" rel="noopener noreferrer">Open the verification</a>, solve it, then come back here and press I solved it.</p>
 <form method="post">

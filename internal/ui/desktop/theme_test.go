@@ -60,6 +60,21 @@ func TestThemeContrast(t *testing.T) {
 	}
 }
 
+// A field's boundary stands out (WCAG 2.2 AA non-text contrast, 3:1) from
+// what is around it, the card and the window's ground, and from the field's
+// own fill, in the light and the dark variant. The focused border is the
+// accent, which TestThemeContrast already holds to 4.5:1 on the card.
+func TestThemeInputBorderContrast(t *testing.T) {
+	th := Theme()
+	for _, v := range []fyne.ThemeVariant{theme.VariantLight, theme.VariantDark} {
+		for _, on := range []fyne.ThemeColorName{colorCard, theme.ColorNameBackground, theme.ColorNameInputBackground} {
+			if c := contrast(th.Color(theme.ColorNameInputBorder, v), th.Color(on, v)); c < 3 {
+				t.Errorf("variant %d: %s on %s has contrast %.2f, want >= 3", v, theme.ColorNameInputBorder, on, c)
+			}
+		}
+	}
+}
+
 // The light variant is light and the dark one dark: the theme follows the
 // desktop's choice instead of forcing one.
 func TestThemeVariants(t *testing.T) {
