@@ -42,7 +42,8 @@ const (
 	maxBody     = 16 << 10
 	claimCookie = "pcb_login"
 	// callTimeout bounds one step's call to the Hub: a CAPTCHA retry may
-	// wait for the one-login-a-minute guard.
+	// wait on the login guard (10 s with the token Proton gave, a minute
+	// with any other) before Proton's own 30 s calls.
 	callTimeout = 2 * time.Minute
 	// shutdownGrace lets an answer in flight finish when the page closes.
 	shutdownGrace = 2 * time.Second

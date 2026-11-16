@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -301,6 +302,70 @@ func TestCaptchaSaysItIsCheckedAfterEnter(t *testing.T) {
 	}
 	if strings.Contains(n.errb.String()+n.out.String(), "Checking") {
 		t.Errorf("--non-interactive: stderr %q, stdout %q; want no checking line", n.errb.String(), n.out.String())
+	}
+}
+
+// A CAPTCHA solved before the service's CaptchaRetryAt: after Enter, one
+// line says how long pcb waits before the retry, the command waits that
+// long, then checks. One solved after it, or a result without it (an older
+// daemon), retries at once with no such line.
+func TestCaptchaRetryWaitIsAnnounced(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		retryIn time.Duration // CaptchaRetryAt from the attempt; 0: none
+		solve   time.Duration
+		slept   []time.Duration
+		line    string
+	}{
+		{"solved fast", 10 * time.Second, 4 * time.Second, []time.Duration{6 * time.Second}, "Retrying in 6 s: pcb spaces its login attempts to Proton.\n"},
+		{"solved slowly", 10 * time.Second, 30 * time.Second, nil, ""},
+		{"older daemon", 0, 4 * time.Second, nil, ""},
+	} {
+		var r *rig
+		var atLogin []string
+		r = stubRig(t, &stubAPI{login: func(req service.LoginRequest) (service.LoginResult, error) {
+			atLogin = append(atLogin, r.errb.String())
+			if req.CaptchaToken == "" {
+				res := service.LoginResult{State: service.StateNeedsCaptcha, CaptchaURL: "https://verify.proton.me/?t=T1", CaptchaToken: "T1"}
+				if tc.retryIn > 0 {
+					res.CaptchaRetryAt = r.now().Add(tc.retryIn)
+				}
+				return res, nil
+			}
+			return ready()
+		}})
+		r.term = &fakeTerm{interactive: true, lines: []string{""}, onLine: func() { r.advance(tc.solve) }}
+		r.want(exitcode.OK, "login")
+		if !slices.Equal(r.slept, tc.slept) {
+			t.Errorf("%s: slept %v, want %v", tc.name, r.slept, tc.slept)
+		}
+		const checking = "Checking the CAPTCHA with Proton…\n"
+		if len(atLogin) != 2 || !strings.HasSuffix(atLogin[1], "\n  https://verify.proton.me/?t=T1\n"+tc.line+checking) {
+			t.Errorf("%s: stderr at each login %q, want the retry's to end with %q", tc.name, atLogin, tc.line+checking)
+		}
+	}
+}
+
+// Ctrl-C during the wait before the retry: no retry, exit 20, and the
+// resume command so the solved CAPTCHA is not lost.
+func TestCaptchaRetryWaitCancelledKeepsTheResumeHint(t *testing.T) {
+	t.Parallel()
+	var r *rig
+	s := &stubAPI{login: func(service.LoginRequest) (service.LoginResult, error) {
+		return service.LoginResult{State: service.StateNeedsCaptcha, CaptchaURL: "https://verify.proton.me/?t=T1", CaptchaToken: "T1",
+			CaptchaRetryAt: r.now().Add(10 * time.Second)}, nil
+	}}
+	r = stubRig(t, s)
+	r.term = &fakeTerm{interactive: true, lines: []string{""}}
+	r.sleepErr = context.Canceled
+	r.want(exitcode.Blocked, "login", "--json")
+	e := r.envelope()
+	if len(s.logins) != 1 {
+		t.Errorf("%d login attempts, want 1: no retry after a cancelled wait", len(s.logins))
+	}
+	if e.Error == nil || e.Error.Hint != "pcb login resume --captcha-token T1" {
+		t.Errorf("error = %+v, want the resume hint", e.Error)
 	}
 }
 

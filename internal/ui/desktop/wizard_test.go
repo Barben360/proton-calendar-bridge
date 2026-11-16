@@ -30,7 +30,8 @@ type fakeWizard struct {
 	block    chan struct{}
 	doneErr  *exitcode.Error
 	canceled chan struct{}
-	account  string // what Account returns: the add's local ID
+	account  string        // what Account returns: the add's local ID
+	wait     time.Duration // what CaptchaWait returns
 }
 
 func (f *fakeWizard) enter(call string) {
@@ -92,6 +93,7 @@ func (f *fakeWizard) SubmitMailboxPassword(_ context.Context, password []byte) e
 	return nil
 }
 func (f *fakeWizard) CaptchaSolved(context.Context) error { f.enter("captcha solved"); return nil }
+func (f *fakeWizard) CaptchaWait() time.Duration          { return f.wait }
 func (f *fakeWizard) Done() (ui.AccountView, string) {
 	return ui.AccountView{ID: "new1", Address: "carol@example.org", URL: "http://127.0.0.1:8080/", Username: "carol@example.org"}, "wizard-pw"
 }
@@ -219,22 +221,34 @@ func TestWizardClearsPasswordEntryOnSubmit(t *testing.T) {
 	}
 }
 
+// After I solved it, the window says what it waits for: the rest of the
+// CAPTCHA retry's spacing when the CAPTCHA was solved fast (rounded up to
+// whole seconds), then Proton.
 func TestWizardShowsWaitingAfterCaptcha(t *testing.T) {
-	f := newFixture(t)
-	f.wiz.step = ui.StepCaptcha
-	f.w.Update(twoAccounts())
-	f.w.Show("")
-	f.tapAdd()
-	f.wiz.block = make(chan struct{})
-	test.Tap(f.button("I solved it"))
-	if !f.has("Waiting for Proton (up to a minute)…") {
-		t.Errorf("no waiting text: %v", f.texts())
+	for _, tc := range []struct {
+		wait time.Duration
+		text string
+	}{
+		{0, "Waiting for Proton…"},
+		{5*time.Second + 200*time.Millisecond, "Retrying in 6 s, then waiting for Proton…"},
+	} {
+		f := newFixture(t)
+		f.wiz.step = ui.StepCaptcha
+		f.wiz.wait = tc.wait
+		f.w.Update(twoAccounts())
+		f.w.Show("")
+		f.tapAdd()
+		f.wiz.block = make(chan struct{})
+		test.Tap(f.button("I solved it"))
+		if !f.has(tc.text) {
+			t.Errorf("wait %v: no %q: %v", tc.wait, tc.text, f.texts())
+		}
+		if !f.button("I solved it").Disabled() {
+			t.Errorf("wait %v: button enabled while waiting", tc.wait)
+		}
+		close(f.wiz.block)
+		f.wait()
 	}
-	if !f.button("I solved it").Disabled() {
-		t.Error("button enabled while waiting")
-	}
-	close(f.wiz.block)
-	f.wait()
 }
 
 func TestWizardShowsError(t *testing.T) {

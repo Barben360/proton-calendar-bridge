@@ -95,6 +95,49 @@ func TestFlowPlainLogin(t *testing.T) {
 	}
 }
 
+// CaptchaWait is the time left until the CaptchaRetryAt the Hub returned
+// with the CAPTCHA (10 s after the guard's stamp of that attempt), for the
+// window to announce; nothing once the CAPTCHA step is left.
+func TestFlowCaptchaWait(t *testing.T) {
+	l := newLab(t)
+	l.f.SetTwoFA(l.f.Username, true) // the retry lands on the 2FA step
+	l.f.SetCaptchaFor(l.f.Username, "captcha-token")
+	f := l.flow()
+	var now time.Time
+	f.SetNow(func() time.Time { return now })
+	if d := f.CaptchaWait(); d != 0 {
+		t.Errorf("before any login: CaptchaWait %v, want 0", d)
+	}
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepCaptcha {
+		t.Fatalf("Submit: %v, Step %q", err, f.Step())
+	}
+	b, err := os.ReadFile(filepath.Join(l.dirs.State, "last-login"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = stamp.Add(4 * time.Second)
+	if d := f.CaptchaWait(); d != 6*time.Second {
+		t.Errorf("solved 4 s after the attempt: CaptchaWait %v, want 6s", d)
+	}
+	now = stamp.Add(30 * time.Second)
+	if d := f.CaptchaWait(); d != 0 {
+		t.Errorf("solved 30 s after the attempt: CaptchaWait %v, want 0", d)
+	}
+	// Back within the 10 s: off the CAPTCHA step nothing is announced.
+	now = stamp.Add(5 * time.Second)
+	l.forgetLastLogin(t)
+	if err := f.CaptchaSolved(t.Context()); err != nil || f.Step() != loginflow.StepTOTP {
+		t.Fatalf("CaptchaSolved: %v, Step %q", err, f.Step())
+	}
+	if d := f.CaptchaWait(); d != 0 {
+		t.Errorf("on the 2FA step: CaptchaWait %v, want 0", d)
+	}
+}
+
 // A CAPTCHA, then the 2FA code: the flow walks both steps against the Hub.
 func TestFlowCaptchaThenTOTP(t *testing.T) {
 	l := newLab(t)

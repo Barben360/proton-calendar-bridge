@@ -2,8 +2,11 @@ package desktop
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"net/url"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -217,6 +220,15 @@ func (p *wizardPane) mailboxPassword() {
 	p.focus(pw)
 }
 
+// captchaWaitText is the busy line of the CAPTCHA retry: the wait before
+// it reaches Proton, in whole seconds rounded up, when there is one.
+func captchaWaitText(wait time.Duration) string {
+	if wait <= 0 {
+		return "Waiting for Proton…"
+	}
+	return fmt.Sprintf("Retrying in %d s, then waiting for Proton…", int(math.Ceil(wait.Seconds())))
+}
+
 func (p *wizardPane) captcha() {
 	cancel := p.cancelBtn()
 	var b *busy
@@ -230,7 +242,7 @@ func (p *wizardPane) captcha() {
 		}
 	})
 	solved := widget.NewButton("I solved it", func() {
-		p.call(b, "Waiting for Proton (up to a minute)…", func(ctx context.Context, m WizardModel) error { return m.CaptchaSolved(ctx) })
+		p.call(b, captchaWaitText(p.model().CaptchaWait()), func(ctx context.Context, m WizardModel) error { return m.CaptchaSolved(ctx) })
 	})
 	solved.Importance = widget.HighImportance
 	b = newBusy(openBtn, solved, cancel)

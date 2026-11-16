@@ -202,7 +202,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{}, stateError(err)
 	}
 	now := l.o.Now()
-	release, now, err := l.acquire(ctx, req.CaptchaToken != "", now)
+	release, now, err := l.acquire(ctx, req.CaptchaToken != "", l.loginInterval(req.CaptchaToken, last), now)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -211,12 +211,15 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 	p, err := l.begin(ctx, req)
 	if err != nil {
 		var ce *auth.CaptchaError
+		if errors.As(err, &ce) {
+			l.challenge = ce.Token
+		}
 		switch {
-		case errors.As(err, &ce) && last.Phase == store.PhaseReady:
+		case ce != nil && last.Phase == store.PhaseReady:
 			// The stored session still works: the person gets the CAPTCHA
 			// and its token, and state.json stays as it was (state-I4).
-			return captchaResult(ce, req.Username), nil
-		case errors.As(err, &ce):
+			return captchaResult(ce, req.Username, now), nil
+		case ce != nil:
 			return l.needsCaptcha(ctx, ce, last, now, req.Username, false)
 		}
 		return LoginResult{}, l.fail(err)
@@ -335,20 +338,32 @@ func (l *Local) dropPending(ctx context.Context) {
 	l.unhold()
 }
 
-// acquire takes the login guard. With a CAPTCHA token the user already
-// waited for Proton's challenge, so a TooSoon is waited out instead of
-// refused; the returned time is the one the attempt is stamped with.
-func (l *Local) acquire(ctx context.Context, wait bool, now time.Time) (func(), time.Time, error) {
+// loginInterval is the login guard's spacing for a login with token:
+// loginguard.CaptchaRetryInterval for the token of the CAPTCHA Proton last
+// asked this account for (a person solved it since that attempt), else
+// loginguard.MinInterval, so a made-up token buys nothing. Callers hold mu.
+func (l *Local) loginInterval(token string, last store.State) time.Duration {
+	if token != "" && (token == l.challenge || last.Captcha != nil && token == last.Captcha.Token) {
+		return loginguard.CaptchaRetryInterval
+	}
+	return loginguard.MinInterval
+}
+
+// acquire takes the login guard, spaced by interval from the last attempt.
+// With wait (a CAPTCHA token: the user already waited for Proton's
+// challenge) a TooSoon is waited out instead of refused. The returned time
+// is the one the attempt is stamped with.
+func (l *Local) acquire(ctx context.Context, wait bool, interval time.Duration, now time.Time) (func(), time.Time, error) {
 	if err := acl.MkdirAll(l.o.GuardDir); err != nil {
 		return nil, now, acquireError(err, l.o.GuardDir)
 	}
-	release, err := loginguard.Acquire(l.o.GuardDir, loginguard.MinInterval, now, l.log())
+	release, err := loginguard.Acquire(l.o.GuardDir, interval, now, l.log())
 	if d, ok := loginguard.WaitFor(err); ok && wait {
 		if err := l.o.Sleep(ctx, d); err != nil {
 			return nil, now, l.fail(err)
 		}
 		now = now.Add(d)
-		release, err = loginguard.Acquire(l.o.GuardDir, loginguard.MinInterval, now, l.log())
+		release, err = loginguard.Acquire(l.o.GuardDir, interval, now, l.log())
 	}
 	if err != nil {
 		return nil, now, acquireError(err, l.o.GuardDir)
@@ -378,7 +393,7 @@ func (l *Local) needsCaptcha(ctx context.Context, ce *auth.CaptchaError, last st
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return captchaResult(ce, username), nil
+	return captchaResult(ce, username, now), nil
 }
 
 // writeLogin writes the state.json a login ends with, built by next from
@@ -425,8 +440,11 @@ func createdOr(last store.State, now time.Time) time.Time {
 	return last.Created
 }
 
-func captchaResult(ce *auth.CaptchaError, username string) LoginResult {
-	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}
+// captchaResult is a CAPTCHA met by the attempt stamped at attempt: its
+// retry may reach Proton loginguard.CaptchaRetryInterval later.
+func captchaResult(ce *auth.CaptchaError, username string, attempt time.Time) LoginResult {
+	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token,
+		CaptchaRetryAt: attempt.Add(loginguard.CaptchaRetryInterval)}
 }
 
 // finish runs what follows SRP: the 2FA code, the keys, the mailbox

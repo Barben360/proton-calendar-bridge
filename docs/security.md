@@ -42,7 +42,8 @@ Only `pcb login` offers it. `pcb-ui` and the login page an AI agent opens never 
 
 ### CAPTCHA, timeouts and rate limits
 
-- **CAPTCHA.** Solve it, then `pcb login resume --captcha-token T`. With `--json` the envelope carries `captcha_token` and `captcha_url` in `data`. A login that hits a CAPTCHA while the stored session is still working leaves that session as it was.
+- **CAPTCHA.** Solve it, then press Enter at the `pcb login` prompt, or run `pcb login resume --captcha-token T`. With `--json` the envelope carries `captcha_token` and `captcha_url` in `data`. A login that hits a CAPTCHA while the stored session is still working leaves that session as it was.
+- **Spacing.** pcb starts at most one login attempt per 60 s. A retry with the token of the CAPTCHA Proton just asked for comes sooner: 10 s after the previous attempt, and `pcb login` and the desktop window say how long they wait when you solved it faster. Any other token waits the full 60 s.
 - **Timeouts.** Each Proton call of a login has a 30 s deadline: exit 20, run the command again.
 - **Rate limits.** A Proton 429 names the wait (`Retry-After`).
 
