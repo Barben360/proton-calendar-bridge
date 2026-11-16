@@ -619,3 +619,67 @@ func TestLoginPageStateFollowsItsLogin(t *testing.T) {
 		}
 	})
 }
+
+// A two-password account: after the login password the page asks for the
+// mailbox password, in a labelled password field. A wrong one shows the step
+// again with the error, a stale form only re-renders, the right one ends the
+// login, and no password reaches an HTML answer.
+func TestLoginPageRunsTheMailboxPasswordStep(t *testing.T) {
+	const wrong = "wrong-mailbox-pw"
+	f := protontest.New(t, protontest.Options{TwoPassword: true})
+	root := t.TempDir()
+	dirs := paths.Dirs{Config: filepath.Join(root, "cfg"), State: filepath.Join(root, "state")}
+	cfg := config.Defaults(dirs)
+	cfg.Proton.BaseURL = f.URL
+	hub, err := service.OpenHub(service.HubOptions{Options: service.Options{Dirs: dirs, Config: cfg}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	p := start(t, loginpage.Options{Username: f.Username, Hub: hub})
+
+	_, body := p.post("credentials", "password", f.Password)
+	for _, w := range []string{
+		`name="step" value="mailbox-password"`,
+		`type="password"`,
+		`name="mailbox_password"`,
+		`autocomplete="current-password"`,
+		"This account uses two-password mode: enter its mailbox password (the second password, which decrypts your data).",
+	} {
+		if !strings.Contains(body, w) {
+			t.Fatalf("mailbox step lacks %q:\n%s", w, body)
+		}
+	}
+	m := regexp.MustCompile(`<label for="([^"]+)"`).FindStringSubmatch(body)
+	if m == nil || !strings.Contains(body, `id="`+m[1]+`"`) {
+		t.Errorf("the mailbox field has no <label for> matching an id:\n%s", body)
+	}
+
+	_, body = p.post("credentials", "password", f.Password) // a stale form
+	if !strings.Contains(body, `name="mailbox_password"`) || strings.Contains(body, `class="error"`) {
+		t.Errorf("a stale credentials form: want the mailbox step, untouched:\n%s", body)
+	}
+	_, body = p.post("totp", "code", "123456")
+	if !strings.Contains(body, `name="mailbox_password"`) {
+		t.Errorf("a stale 2FA form: want the mailbox step:\n%s", body)
+	}
+
+	_, body = p.post("mailbox-password", "mailbox_password", wrong)
+	if !strings.Contains(body, `name="mailbox_password"`) || !strings.Contains(body, `class="error"`) {
+		t.Errorf("a wrong mailbox password: want the step again with the error:\n%s", body)
+	}
+	_, body = p.post("mailbox-password", "mailbox_password", f.MailboxPassword)
+	if !strings.Contains(body, "added") {
+		t.Fatalf("the right mailbox password: want the end:\n%s", body)
+	}
+	if a := hub.Accounts(); len(a) != 1 || a[0].Phase != "ready" {
+		t.Errorf("accounts %+v, want one ready", a)
+	}
+	for i, b := range p.bodies {
+		for what, s := range map[string]string{"the login password": f.Password, "the mailbox password": f.MailboxPassword, "the wrong one": wrong} {
+			if strings.Contains(b, s) || strings.Contains(b, html.EscapeString(s)) {
+				t.Errorf("answer %d contains %s:\n%s", i, what, b)
+			}
+		}
+	}
+}
