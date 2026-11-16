@@ -873,6 +873,9 @@ func TestLoginPromptsForMailboxPassword(t *testing.T) {
 		{name: "after the 2FA code", twoFA: true, typed: []string{"", ""}, prompts: []string{totpPrompt, mailboxPrompt}},
 		{name: "wrong upfront", upfront: wrongOne, typed: []string{""}, prompts: []string{mailboxPrompt},
 			stderr: []string{"Error: the mailbox password does not unlock the account keys", "(2 tries left)"}},
+		{name: "wrong upfront after the 2FA code", twoFA: true, upfront: wrongOne, typed: []string{"", ""},
+			prompts: []string{totpPrompt, mailboxPrompt},
+			stderr:  []string{"Error: the mailbox password does not unlock the account keys", "(2 tries left)"}},
 		{name: "three at most", typed: []string{"w1", "w2", "w3", ""}, code: exitcode.MustAct,
 			prompts: []string{mailboxPrompt, mailboxPrompt, mailboxPrompt}, stderr: []string{"did not unlock the account keys 3 times"}},
 		{name: "upfront counts", upfront: wrongOne, typed: []string{"w1", "w2", ""}, code: exitcode.MustAct,
@@ -983,6 +986,12 @@ func TestNonInteractiveHeldByDaemonNamesResume(t *testing.T) {
 	if e.Error == nil || e.Error.Message != "the mailbox password does not unlock the account keys" ||
 		!strings.Contains(e.Error.Hint, "2 tries left") || !strings.Contains(e.Error.Hint, wantHint) {
 		t.Fatalf("error = %+v; want the wrong password with the tries left and %q", e.Error, wantHint)
+	}
+	var again service.LoginResult
+	mustUnmarshal(t, e.Data, &again)
+	if again.State != service.StateNeedsMailboxPassword || again.Username != held.Username ||
+		again.Account != held.Account || again.LoginExpires == nil || !again.LoginExpires.Equal(*held.LoginExpires) {
+		t.Errorf("data after the wrong one = %s; want the held login %+v", e.Data, held)
 	}
 
 	r.env["PCB_MAILBOX_PASSWORD"] = r.f.MailboxPassword
@@ -1221,5 +1230,99 @@ func TestMailboxPromptsStopAtThree(t *testing.T) {
 	r.want(exitcode.MustAct, "login")
 	if len(s.mailboxes) != 3 || len(r.term.secretPrompts) != 3 {
 		t.Errorf("%d prompts, %d sent; want 3 of each", len(r.term.secretPrompts), len(s.mailboxes))
+	}
+}
+
+// A wrong mailbox password given ahead to a login the daemon holds: the
+// exit 10's data is the held login, for whom it is.
+func TestWrongUpfrontMailboxPasswordHeldByTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoPassword: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.env["PCB_MAILBOX_PASSWORD"] = "not-the-mailbox-password"
+	r.want(exitcode.MustAct, "login", "--non-interactive", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Message != "the mailbox password does not unlock the account keys" ||
+		!strings.Contains(e.Error.Hint, "pcb login resume --mailbox-password"+heldUntil()) {
+		t.Fatalf("error = %+v; want the wrong password with the resume", e.Error)
+	}
+	var held service.LoginResult
+	mustUnmarshal(t, e.Data, &held)
+	if held.State != service.StateNeedsMailboxPassword || held.Username != r.f.Username || held.Account == "" || held.LoginExpires == nil {
+		t.Errorf("data = %s; want the held login with its username and account", e.Data)
+	}
+}
+
+// A prompt of a held step left without an answer (end of input) names how
+// to give it: with a daemon, the resume of the login it keeps; without
+// one, the variable (the login ends).
+func TestEndOfInputAtAHeldStepNamesTheWayBack(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		twoFA  bool
+		daemon bool
+		msg    string
+		hint   []string
+	}{
+		{"mailbox password, no daemon", false, false, "no mailbox password was entered (end of input)",
+			[]string{"PCB_MAILBOX_PASSWORD", "--mailbox-password-fd", "the login was cancelled"}},
+		{"mailbox password, daemon", false, true, "no mailbox password was entered (end of input)",
+			[]string{"pcb login resume --mailbox-password" + heldUntil() + " (the daemon holds the login)"}},
+		{"2FA code, daemon", true, true, "no 2FA code was entered (end of input)",
+			[]string{"PCB_TOTP=<code> pcb login resume --totp" + heldUntil() + " (the daemon holds the login)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, &protontest.Options{TwoFA: tc.twoFA, TwoPassword: true})
+			if tc.daemon {
+				startDaemon(t, r, realHub(t, r), nil)
+				noInProcess(t, r)
+			}
+			r.term = &fakeTerm{interactive: true} // every read answers EOF
+			r.want(exitcode.MustAct, "login", "--json")
+			e := r.envelope()
+			if e.Error == nil || e.Error.Message != tc.msg {
+				t.Fatalf("error = %+v; want %q", e.Error, tc.msg)
+			}
+			for _, w := range tc.hint {
+				if !strings.Contains(e.Error.Hint, w) {
+					t.Errorf("hint %q does not say %q", e.Error.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+// An error other than an exit 10 keeps its code and hint, even while an
+// earlier login is held: no prompt, no resume hint, no held data.
+func TestNonMustActFailureIsNotAHeldStep(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	startDaemon(t, r, realHub(t, r), nil)
+	noInProcess(t, r)
+	r.want(exitcode.MustAct, "login", "--non-interactive") // held for its 2FA code
+	r.env["PCB_TOTP"] = "not-a-code"
+	r.term = &fakeTerm{interactive: true, secrets: []string{r.totpCode()}}
+	r.want(exitcode.Usage, "login", "resume", "--totp", "--json")
+	e := r.envelope()
+	if e.Error == nil || e.Error.Hint != "pass the code from your authenticator" || string(e.Data) != "null" && len(e.Data) != 0 {
+		t.Errorf("envelope = %+v, data %s; want the service's usage error as it is, without data", e.Error, e.Data)
+	}
+	if len(r.term.secretPrompts) != 0 {
+		t.Errorf("asked %q", r.term.secretPrompts)
+	}
+}
+
+// A malformed code typed at the prompt is asked again, as before
+// two-password mode: only a secret from elsewhere keeps its usage error.
+func TestTypoAtThe2FAPromptIsAskedAgain(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, &protontest.Options{TwoFA: true})
+	r.term = &fakeTerm{interactive: true, secrets: []string{"not-a-code", r.totpCode()}}
+	r.want(exitcode.OK, "login")
+	if len(r.term.secretPrompts) != 2 || !strings.Contains(r.errb.String(), "neither a 6-8 digit code") {
+		t.Errorf("%d prompts, stderr %q; want two, the typo reported", len(r.term.secretPrompts), r.errb.String())
 	}
 }

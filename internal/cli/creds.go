@@ -107,16 +107,21 @@ func (a *app) mailboxPassword(fd int, set bool) (string, error) {
 	return a.Env("PCB_MAILBOX_PASSWORD"), nil
 }
 
-// noAnswer is what a prompt that failed becomes: a cancelled command when
-// ctx ended (Ctrl-C), else an exit 10 naming what was expected (end of input,
-// such as Ctrl-D).
+// noAnswer is what a prompt of the credentials that failed becomes: a
+// cancelled command when ctx ended (Ctrl-C), else an exit 10 naming what
+// was expected (end of input, such as Ctrl-D).
 func noAnswer(ctx context.Context, what string, err error) error {
+	_ = err // the terminal's own error carries nothing the person can act on
+	return noAnswerHint(ctx, what, "answer the prompt, or set PCB_USERNAME, PCB_PASSWORD and PCB_TOTP and use --non-interactive")
+}
+
+// noAnswerHint is noAnswer with the hint of the prompt's step (where the
+// held login stands: unansweredHint).
+func noAnswerHint(ctx context.Context, what, hint string) error {
 	if ctx.Err() != nil {
 		return cancelled()
 	}
-	_ = err // the terminal's own error carries nothing the person can act on
-	return mustAct("no "+what+" was entered (end of input)",
-		"answer the prompt, or set PCB_USERNAME, PCB_PASSWORD and PCB_TOTP and use --non-interactive")
+	return mustAct("no "+what+" was entered (end of input)", hint)
 }
 
 func cancelled() error {

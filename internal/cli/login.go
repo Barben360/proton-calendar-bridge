@@ -123,7 +123,8 @@ type loginAPI interface {
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
 	SubmitTOTP(ctx context.Context, code string) (service.LoginResult, error)
 	SubmitMailboxPassword(ctx context.Context, password string) (service.LoginResult, error)
-	Status(ctx context.Context) (service.Status, error)
+	// Status is the login's status, and the account it is for.
+	Status(ctx context.Context) (service.Status, service.AccountInfo, error)
 	Accounts(ctx context.Context) ([]service.AccountInfo, error)
 }
 
@@ -150,12 +151,13 @@ func (l *hubLogin) SubmitMailboxPassword(ctx context.Context, password string) (
 	return l.h.SubmitMailboxPassword(ctx, l.sel, password)
 }
 
-func (l *hubLogin) Status(ctx context.Context) (service.Status, error) {
-	api, _, err := l.h.Account(l.sel)
+func (l *hubLogin) Status(ctx context.Context) (service.Status, service.AccountInfo, error) {
+	api, info, err := l.h.Account(l.sel)
 	if err != nil {
-		return service.Status{}, err
+		return service.Status{}, service.AccountInfo{}, err
 	}
-	return api.Status(ctx)
+	st, err := api.Status(ctx)
+	return st, info, err
 }
 
 func (l *hubLogin) Accounts(context.Context) ([]service.AccountInfo, error) {
@@ -205,10 +207,10 @@ func (d *daemonLogin) pick(ctx context.Context, step heldStep) error {
 	return nil
 }
 
-func (d *daemonLogin) Status(ctx context.Context) (service.Status, error) {
+func (d *daemonLogin) Status(ctx context.Context) (service.Status, service.AccountInfo, error) {
 	st, err := d.c.Status(ctx)
 	if err != nil {
-		return service.Status{}, err
+		return service.Status{}, service.AccountInfo{}, err
 	}
 	infos := make([]service.AccountInfo, 0, len(st.Accounts))
 	for _, a := range st.Accounts {
@@ -216,14 +218,14 @@ func (d *daemonLogin) Status(ctx context.Context) (service.Status, error) {
 	}
 	info, err := service.SelectAccount(infos, d.sel)
 	if err != nil {
-		return service.Status{}, err
+		return service.Status{}, service.AccountInfo{}, err
 	}
 	for _, a := range st.Accounts {
 		if a.ID == info.ID {
-			return a.Login, nil
+			return a.Login, info, nil
 		}
 	}
-	return service.Status{}, nil
+	return service.Status{}, info, nil
 }
 
 func (d *daemonLogin) Accounts(ctx context.Context) ([]service.AccountInfo, error) {
@@ -356,7 +358,7 @@ func (a *app) login(cmd *cobra.Command, f loginFlags, captchaToken string) error
 	}
 	// An upfront mailbox password went with the request: the service keeps
 	// it across the 2FA step.
-	return a.finishLogin(cmd, svc, heldOptions{interactive: interactive, daemon: c != nil}, res, err)
+	return a.finishLogin(cmd, svc, heldOptions{interactive: interactive, daemon: c != nil, username: req.Username}, res, err)
 }
 
 // finishLogin takes the login through the steps it is held at, then
@@ -378,6 +380,7 @@ type heldOptions struct {
 	interactive bool   // it may prompt
 	daemon      bool   // the daemon holds the login: a resume can finish it
 	mailbox     string // a mailbox password given ahead, not yet sent
+	username    string // whom the login is for, when the command knows it
 }
 
 // finishHeld carries a login through the steps it is held at, from res and
@@ -390,8 +393,11 @@ type heldOptions struct {
 func (a *app) finishHeld(cmd *cobra.Command, svc loginAPI, o heldOptions, res service.LoginResult, err error) (service.LoginResult, error) {
 	ctx := cmd.Context()
 	asked := map[service.LoginState]int{}
+	known := service.LoginResult{Username: o.username} // whom the login is for, as the calls tell
+	typed := false                                     // the last secret sent was typed at the prompt
 	for {
-		h, ok := heldAt(cmd, svc, res, err)
+		known = remember(known, res)
+		h, ok := heldAt(ctx, svc, res, err, typed, known)
 		if !ok {
 			return res, err
 		}
@@ -399,7 +405,7 @@ func (a *app) finishHeld(cmd *cobra.Command, svc loginAPI, o heldOptions, res se
 		switch {
 		case step == mailboxStep && failure == nil && o.mailbox != "":
 			pw := o.mailbox
-			o.mailbox = ""
+			o.mailbox, typed = "", false
 			res, err = svc.SubmitMailboxPassword(ctx, pw)
 			continue
 		case !o.interactive:
@@ -415,10 +421,41 @@ func (a *app) finishHeld(cmd *cobra.Command, svc loginAPI, o heldOptions, res se
 		asked[step.state]++
 		secret, perr := a.Term.ReadSecret(ctx, step.prompt)
 		if perr != nil {
-			return service.LoginResult{}, noAnswer(ctx, step.noun, perr)
+			return service.LoginResult{}, noAnswerHint(ctx, step.noun, unansweredHint(h, o.daemon))
 		}
+		typed = true
 		res, err = step.submit(ctx, svc, secret)
 	}
+}
+
+// remember is known with what res tells of whom the login is for.
+func remember(known, res service.LoginResult) service.LoginResult {
+	if res.Username != "" {
+		known.Username = res.Username
+	}
+	if res.AccountID != "" {
+		known.AccountID = res.AccountID
+	}
+	if res.Account != "" {
+		known.Account = res.Account
+	}
+	return known
+}
+
+// unansweredHint is the hint of a step's prompt left without an answer:
+// with a daemon, the login stays held and the resume finishes it; without
+// one, it ends with the command.
+func unansweredHint(h heldLogin, daemon bool) string {
+	switch {
+	case daemon && h.step == totpStep:
+		return heldHint("PCB_TOTP=<code> pcb login resume --totp", h.result.LoginExpires)
+	case daemon:
+		return heldHint(mailboxStep.resume, h.result.LoginExpires)
+	case h.step == totpStep:
+		return "answer the prompt, or set PCB_TOTP (a code, or the otpauth:// URI) and run pcb login again; the login was cancelled"
+	}
+	return "answer the prompt, or set PCB_MAILBOX_PASSWORD (or pass --mailbox-password-fd) and run pcb login again; " +
+		"the login was cancelled"
 }
 
 // heldLogin is a login held at step: its result, and failure, what
@@ -430,20 +467,33 @@ type heldLogin struct {
 }
 
 // heldAt is the login held after res and err: at the state of res, or,
-// after a failure (a rejected 2FA code, a mailbox password that does not
+// after an exit 10 (a rejected 2FA code, a mailbox password that does not
 // unlock the keys), at the phase the service keeps it in, until when it
-// ends. false when it waits for nothing more.
-func heldAt(cmd *cobra.Command, svc loginAPI, res service.LoginResult, err error) (heldLogin, bool) {
+// ends, for whom known and the status say. A usage error is a held step's
+// failure only for a typed secret (a typo is asked again); any other error
+// keeps its own code and hint. false when it waits for nothing more.
+func heldAt(ctx context.Context, svc loginAPI, res service.LoginResult, err error, typed bool, known service.LoginResult) (heldLogin, bool) {
 	if err == nil {
 		step, ok := stepAt(string(res.State))
 		return heldLogin{step: step, result: res}, ok
 	}
-	st, serr := svc.Status(cmd.Context())
+	switch code := exitcode.From(err); {
+	case code == exitcode.MustAct:
+	case code == exitcode.Usage && typed:
+	default:
+		return heldLogin{}, false
+	}
+	st, info, serr := svc.Status(ctx)
 	if serr != nil {
 		return heldLogin{}, false
 	}
 	step, ok := stepAt(st.Phase)
-	return heldLogin{step: step, failure: err, result: service.LoginResult{State: step.state, LoginExpires: st.LoginExpires}}, ok
+	held := remember(service.LoginResult{Username: info.Address, AccountID: st.AccountID, Account: info.ID}, known)
+	if held.Username == "" {
+		held.Username = st.Username
+	}
+	held.State, held.LoginExpires = step.state, st.LoginExpires
+	return heldLogin{step: step, failure: err, result: held}, ok
 }
 
 // notAsked is the exit 10 of the held login h that cannot prompt: with a
@@ -601,7 +651,7 @@ func resumable(ctx context.Context, svc *daemonLogin, step heldStep) error {
 	if svc.sel == "" {
 		return svc.pick(ctx, step)
 	}
-	st, err := svc.Status(ctx)
+	st, _, err := svc.Status(ctx)
 	if err != nil {
 		return err
 	}
