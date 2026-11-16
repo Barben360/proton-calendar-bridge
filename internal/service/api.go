@@ -13,11 +13,16 @@ import (
 
 // API is what the CLI calls. Local implements it in process.
 type API interface {
-	// Login runs the login state machine: ready, needs-totp or needs-captcha.
+	// Login runs the login state machine: ready, needs-totp,
+	// needs-mailbox-password or needs-captcha.
 	Login(ctx context.Context, req LoginRequest) (LoginResult, error)
 	// SubmitTOTP finishes a login that answered needs-totp, within 5
 	// minutes of it: then the login is revoked and forgotten.
 	SubmitTOTP(ctx context.Context, code string) (LoginResult, error)
+	// SubmitMailboxPassword finishes a login that answered
+	// needs-mailbox-password (a two-password account), within the same 5
+	// minutes of Login, without any Proton call.
+	SubmitMailboxPassword(ctx context.Context, password string) (LoginResult, error)
 	// Logout revokes the session and forgets the account. During Serve it
 	// first stops the sync loop and closes its cache handle (ruling M5-P10).
 	// A stored session this pcb cannot read (Status.Secrets "unsupported")
@@ -137,9 +142,13 @@ type API interface {
 // URI; CaptchaToken is the token of a CAPTCHA the user solved;
 // UnattendedRelogin stores the credentials for relogin without a person
 // (it needs the TOTP as an otpauth:// URI when the account has 2FA).
+// MailboxPassword is the second password of an account in two-password
+// mode, given up front; a single-password account ignores it, and it is
+// never stored.
 type LoginRequest struct {
 	Username          string `json:"username"`
 	Password          string `json:"password"`
+	MailboxPassword   string `json:"mailbox_password,omitempty"`
 	TOTP              string `json:"totp,omitempty"`
 	CaptchaToken      string `json:"captcha_token,omitempty"`
 	UnattendedRelogin bool   `json:"unattended_relogin,omitempty"`
@@ -173,14 +182,16 @@ type LoginState string
 
 // The login states.
 const (
-	StateReady        LoginState = "ready"
-	StateNeedsTOTP    LoginState = "needs-totp"
-	StateNeedsCaptcha LoginState = "needs-captcha"
+	StateReady                LoginState = "ready"
+	StateNeedsTOTP            LoginState = "needs-totp"
+	StateNeedsMailboxPassword LoginState = "needs-mailbox-password"
+	StateNeedsCaptcha         LoginState = "needs-captcha"
 )
 
-// LoginResult is the outcome of Login or SubmitTOTP. CaptchaURL and
-// CaptchaToken are set with needs-captcha; LoginExpires with needs-totp:
-// when the login waiting for its code ends (Login's time + 5 minutes).
+// LoginResult is the outcome of Login, SubmitTOTP or SubmitMailboxPassword.
+// CaptchaURL and CaptchaToken are set with needs-captcha; LoginExpires with
+// needs-totp and needs-mailbox-password: when the login waiting for its code
+// or its mailbox password ends (Login's time + 5 minutes).
 type LoginResult struct {
 	State        LoginState `json:"state"`
 	Username     string     `json:"username,omitempty"`
@@ -296,8 +307,9 @@ type LogoutResult struct {
 }
 
 // Status is the login as the files describe it. Phase is the store's phase
-// (logged-out, ready, needs-captcha, needs-login) or needs-totp while a login
-// waits for its code. Secrets is "sealed", "none", "unreadable", "locked" (the desktop keyring is locked),
+// (logged-out, ready, needs-captcha, needs-login), or needs-totp or
+// needs-mailbox-password while a login waits for its code or its mailbox
+// password. Secrets is "sealed", "none", "unreadable", "locked" (the desktop keyring is locked),
 // "keyring-unavailable" (no desktop keyring answers: SecretsKeyringUnavailable),
 // "key-unavailable" (Windows cannot unprotect the DPAPI key in this session:
 // SecretsKeyUnavailable),
@@ -326,8 +338,8 @@ type Status struct {
 	CaptchaURL  string     `json:"captcha_url,omitempty"`
 	LastLogin   *time.Time `json:"last_login,omitempty"`
 	LastRelogin *time.Time `json:"last_relogin,omitempty"`
-	// LoginExpires is set with needs-totp: when the login waiting for its
-	// code ends.
+	// LoginExpires is set with needs-totp and needs-mailbox-password: when
+	// the login waiting for its code or its mailbox password ends.
 	LoginExpires *time.Time `json:"login_expires,omitempty"`
 	// Sync is the event cache's state; nil while there is no cache.
 	Sync *SyncStatus `json:"sync,omitempty"`

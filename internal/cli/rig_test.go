@@ -97,6 +97,11 @@ func (s *stubAPI) SubmitTOTP(_ context.Context, c string) (service.LoginResult, 
 	return s.submit(c)
 }
 
+// SubmitMailboxPassword is not used by the CLI yet.
+func (*stubAPI) SubmitMailboxPassword(context.Context, string) (service.LoginResult, error) {
+	return service.LoginResult{}, nil
+}
+
 func (s *stubAPI) Logout(context.Context, service.LogoutRequest) (service.LogoutResult, error) {
 	return service.LogoutResult{}, nil
 }

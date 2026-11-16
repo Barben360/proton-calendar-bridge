@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	gpa "github.com/ProtonMail/go-proton-api"
+
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
@@ -18,8 +20,9 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
 )
 
-// pendingLogin is a login that passed SRP and waits for its 2FA code. It
-// lives in memory only: a second SRP is never needed.
+// pendingLogin is a login that passed SRP and waits for its 2FA code or,
+// for an account in two-password mode, its mailbox password. It lives in
+// memory only: a second SRP is never needed.
 type pendingLogin struct {
 	p          *auth.Pending
 	username   string
@@ -31,37 +34,76 @@ type pendingLogin struct {
 	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
 	last       store.State // state.json when the login began
 	live       *api.Client // the client of the key calls; its tokens outlive p.Tokens after a refresh
-	expires    time.Time   // when it stops waiting for its code (pendingTTL after Login)
+	expires    time.Time   // when it stops waiting (pendingTTL after Login), whatever the step
 	stop       func() bool // stops its expiry timer; nil until it waits
+
+	// step is what the held login waits for: StateNeedsTOTP or
+	// StateNeedsMailboxPassword. Once it is the latter, the 2FA step is done
+	// and salts, user and addrs are fetched: a mailbox password is tried
+	// against them without any Proton call.
+	step         LoginState
+	mailbox      []byte // the mailbox password, from its arrival to the derivation
+	mailboxTries int    // mailbox passwords that did not unlock the keys so far
+	salts        gpa.Salts
+	user         gpa.User
+	addrs        []gpa.Address
 }
 
-// pendingTTL is how long a login waits for its 2FA code (ruling M5-Rpre4):
-// then expire revokes its session and zeroes its password.
+// pendingTTL is how long a login waits for its 2FA code and its mailbox
+// password, in all (ruling M5-Rpre4): then expire revokes its session and
+// zeroes its passwords.
 const pendingTTL = 5 * time.Minute
 
 // release ends pl for good: its expiry timer stopped, so a stale timer
-// never touches a newer login, and its password zeroed.
+// never touches a newer login, and its passwords zeroed.
 func (pl *pendingLogin) release() {
 	if pl.stop != nil {
 		pl.stop()
 	}
 	clear(pl.password)
+	clear(pl.mailbox)
 }
+
+// keysFetched reports whether pl passed the 2FA step and fetched what the
+// key passphrase is derived from.
+func (pl *pendingLogin) keysFetched() bool { return pl.step == StateNeedsMailboxPassword }
 
 // loginWho is whom a login waiting for its code is for: the username it
 // was given and the Proton user ID SRP answered.
 type loginWho struct{ username, userID string }
 
-// hold makes pl the login waiting for its code. It holds mu. The first time,
-// it arms the expiry timer; a rejected code keeps the first deadline.
-func (l *Local) hold(pl *pendingLogin) {
+// waitingFor is what the held login waits for and until when (Status).
+type waitingFor struct {
+	step    LoginState
+	expires time.Time
+}
+
+// stepNoun names what a login waiting at step waits for.
+func stepNoun(step LoginState) string {
+	if step == StateNeedsMailboxPassword {
+		return "mailbox password"
+	}
+	return "2FA code"
+}
+
+// hold makes pl the login waiting at step (StateNeedsTOTP or
+// StateNeedsMailboxPassword). It holds mu. The first time, it arms the
+// expiry timer for what is left until pl.expires; a later hold (a rejected
+// code or password, the 2FA step passed) keeps the first deadline.
+func (l *Local) hold(pl *pendingLogin, step LoginState) {
+	pl.step = step
 	l.pending = pl
-	exp := pl.expires
-	l.waiting.Store(&exp)
+	l.waiting.Store(&waitingFor{step: step, expires: pl.expires})
 	l.who.Store(&loginWho{username: pl.username, userID: pl.p.UserID})
 	if pl.stop == nil {
-		pl.stop = l.o.AfterFunc(pendingTTL, func() { l.expire(pl) })
+		pl.stop = l.o.AfterFunc(pl.expires.Sub(l.o.Now()), func() { l.expire(pl) })
 	}
+}
+
+// heldResult is the result of a login held at its step.
+func heldResult(pl *pendingLogin) LoginResult {
+	exp := pl.expires
+	return LoginResult{State: pl.step, Username: pl.username, AccountID: pl.p.UserID, LoginExpires: &exp}
 }
 
 // unhold forgets the login waiting for its code. It holds mu.
@@ -71,12 +113,12 @@ func (l *Local) unhold() {
 	l.who.Store(nil)
 }
 
-// waitingLogin is whom the login waiting for its code is for, nil if none.
+// waitingLogin is whom the held login is for, nil if none.
 func (l *Local) waitingLogin() *loginWho { return l.who.Load() }
 
 // expire ends pl once pendingTTL has passed: its half session revoked
-// (best effort, within revokeTimeout), its password zeroed, and SubmitTOTP
-// then says it expired. A timer whose login completed, failed or was
+// (best effort, within revokeTimeout), its passwords zeroed, and the submits
+// then say it expired. A timer whose login completed, failed or was
 // replaced meanwhile finds another pending login, or none, and does nothing.
 func (l *Local) expire(pl *pendingLogin) {
 	l.mu.Lock()
@@ -85,7 +127,22 @@ func (l *Local) expire(pl *pendingLogin) {
 		return
 	}
 	l.dropPending(context.Background())
-	l.expired = true
+	l.expired = pl.step
+}
+
+// waitsFor checks that a login is held at step, for its submit: an expired
+// one or none, or one held at the other step, is a MustAct naming the step.
+// It holds mu.
+func (l *Local) waitsFor(step LoginState) error {
+	switch {
+	case l.pending == nil && l.expired != "":
+		return mustAct("the login waiting for its "+stepNoun(l.expired)+" expired after 5 minutes", "run pcb login again")
+	case l.pending == nil:
+		return mustAct("no login is waiting for a "+stepNoun(step), "run pcb login first")
+	case l.pending.step != step:
+		return mustAct("no login is waiting for a "+stepNoun(step), "the login is waiting for its "+stepNoun(l.pending.step))
+	}
+	return nil
 }
 
 // abort revokes the login's session and closes it. After a refresh during
@@ -133,7 +190,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{}, err
 	}
 	l.dropPending(ctx)
-	l.expired = false
+	l.expired = ""
 
 	accounts, err := l.secrets.Load()
 	if err != nil {
@@ -167,15 +224,17 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		p.Abort(ctx)
 		return LoginResult{}, mustAct("another Proton account is already logged in; pcb handles one account", "run pcb logout first, then log in again")
 	}
-	pl := &pendingLogin{p: p, username: req.Username, password: []byte(req.Password), unattended: req.UnattendedRelogin, last: last}
+	pl := &pendingLogin{p: p, username: req.Username, password: []byte(req.Password), unattended: req.UnattendedRelogin, last: last,
+		expires: l.o.Now().Add(pendingTTL)}
+	if p.TwoPassword && req.MailboxPassword != "" {
+		pl.mailbox = []byte(req.MailboxPassword) // kept across a 2FA hold, zeroed once derived
+	}
 	if isURI(req.TOTP) {
 		pl.totpURI = strings.TrimSpace(req.TOTP)
 	}
 	if p.NeedsTOTP && totp == nil {
-		pl.expires = l.o.Now().Add(pendingTTL)
-		l.hold(pl)
-		exp := pl.expires
-		return LoginResult{State: StateNeedsTOTP, Username: req.Username, AccountID: p.UserID, LoginExpires: &exp}, nil
+		l.hold(pl, StateNeedsTOTP)
+		return heldResult(pl), nil
 	}
 	return l.finish(ctx, pl, totp, now)
 }
@@ -214,11 +273,8 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	if l.closed.Load() {
 		return LoginResult{}, errClosed()
 	}
-	if l.pending == nil && l.expired {
-		return LoginResult{}, mustAct("the login waiting for its 2FA code expired after 5 minutes", "run pcb login again")
-	}
-	if l.pending == nil {
-		return LoginResult{}, mustAct("no login is waiting for a 2FA code", "run pcb login first")
+	if err := l.waitsFor(StateNeedsTOTP); err != nil {
+		return LoginResult{}, err
 	}
 	totp, err := otp.Parse(code)
 	if err != nil {
@@ -235,9 +291,29 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	return l.finish(ctx, pl, totp, l.o.Now())
 }
 
-// AbandonLogin drops the login waiting for the 2FA code (its half session
-// revoked) and changes nothing else: a stored session stays and serves.
-// Nothing waiting, nothing happens.
+// SubmitMailboxPassword implements API. The password is tried against the
+// salts and keys the login fetched after its 2FA step: no Proton call.
+func (l *Local) SubmitMailboxPassword(ctx context.Context, password string) (LoginResult, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed.Load() {
+		return LoginResult{}, errClosed()
+	}
+	if err := l.waitsFor(StateNeedsMailboxPassword); err != nil {
+		return LoginResult{}, err
+	}
+	if password == "" {
+		return LoginResult{}, usage("the mailbox password is empty", "enter the mailbox password of the account")
+	}
+	pl := l.pending
+	pl.mailbox = []byte(password)
+	l.unhold()
+	return l.finish(ctx, pl, nil, l.o.Now())
+}
+
+// AbandonLogin drops the login waiting for its 2FA code or its mailbox
+// password (its half session revoked) and changes nothing else: a stored
+// session stays and serves. Nothing waiting, nothing happens.
 func (l *Local) AbandonLogin(ctx context.Context) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -245,7 +321,7 @@ func (l *Local) AbandonLogin(ctx context.Context) {
 		return
 	}
 	l.dropPending(ctx)
-	l.expired = false
+	l.expired = ""
 }
 
 // dropPending aborts a login waiting for its code. It holds mu.
@@ -352,9 +428,12 @@ func captchaResult(ce *auth.CaptchaError, username string) LoginResult {
 	return LoginResult{State: StateNeedsCaptcha, Username: username, CaptchaURL: ce.URL, CaptchaToken: ce.Token}
 }
 
-// finish runs what follows SRP: the 2FA code, the keys, the sealing. A failure
-// aborts the session it opened and saves nothing, except a rejected 2FA code:
-// the login then stays pending for up to maxTOTPTries codes in all.
+// finish runs what follows SRP: the 2FA code, the keys, the mailbox
+// password of a two-password account, the sealing. A failure aborts the
+// session it opened and saves nothing, except a rejected 2FA code or a
+// mailbox password that does not unlock the keys: the login then stays held
+// for up to maxTOTPTries codes and maxMailboxTries passwords in all. A
+// two-password account without its mailbox password is held for it.
 func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (LoginResult, error) {
 	res, err := l.complete(ctx, pl, totp, now)
 	if err == nil {
@@ -364,15 +443,29 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 		l.wakeLogin() // a Serve waiting for a login serves at once (ruling M5-P9)
 		return res, nil
 	}
-	if errors.Is(err, auth.ErrTOTPRejected) {
+	switch {
+	case errors.Is(err, errNeedsMailboxPassword):
+		l.hold(pl, StateNeedsMailboxPassword)
+		return heldResult(pl), nil
+	case errors.Is(err, auth.ErrTOTPRejected):
 		if pl.tries++; pl.tries < maxTOTPTries {
-			l.hold(pl)
+			l.hold(pl, StateNeedsTOTP)
 			return LoginResult{}, mustAct("the 2FA code was rejected by Proton",
 				fmt.Sprintf("enter the current code again (%d tries left)", maxTOTPTries-pl.tries))
 		}
 		l.abort(ctx, pl)
 		pl.release()
 		return LoginResult{}, mustAct("the 2FA code was rejected "+strconv.Itoa(maxTOTPTries)+" times and the login was cancelled",
+			"run pcb login again")
+	case pl.p.TwoPassword && errors.Is(err, keys.ErrKeysLocked):
+		if pl.mailboxTries++; pl.mailboxTries < maxMailboxTries {
+			l.hold(pl, StateNeedsMailboxPassword)
+			return LoginResult{}, mustAct("the mailbox password does not unlock the account keys",
+				fmt.Sprintf("enter the mailbox password again (%d tries left)", maxMailboxTries-pl.mailboxTries))
+		}
+		l.abort(ctx, pl)
+		pl.release()
+		return LoginResult{}, mustAct("the mailbox password did not unlock the account keys "+strconv.Itoa(maxMailboxTries)+" times and the login was cancelled",
 			"run pcb login again")
 	}
 	if !pl.sealed {
@@ -382,38 +475,98 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 	return LoginResult{}, l.fail(err)
 }
 
+// maxMailboxTries is how many mailbox passwords a login may try in all,
+// counted apart from its 2FA codes.
+const maxMailboxTries = 3
+
+// errNeedsMailboxPassword: a two-password account reached the derivation
+// without its mailbox password; finish holds the login for it.
+var errNeedsMailboxPassword = errors.New("the login needs the mailbox password")
+
+// complete runs the steps after SRP that are not done yet: the 2FA code and
+// the fetch of what the key passphrase is derived from (once: a login held
+// for its mailbox password has both behind it), then the derivation and the
+// sealing.
 func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (LoginResult, error) {
-	p := pl.p
-	if p.NeedsTOTP {
-		if wait := totp.Wait(now); wait > 0 {
-			if err := l.o.Sleep(ctx, wait); err != nil {
-				return LoginResult{}, err
-			}
-			now = now.Add(wait)
+	if !pl.keysFetched() {
+		var err error
+		if now, err = l.passTOTP(ctx, pl, totp, now); err != nil {
+			return LoginResult{}, err
 		}
-		if err := p.SubmitTOTP(ctx, totp.Code(now)); err != nil {
+		if err := l.fetchKeys(ctx, pl); err != nil {
 			return LoginResult{}, err
 		}
 	}
-	c := l.client(p.Tokens)
-	pl.live = c
-	scope := auth.Scope{M: l.mgr, C: c, Username: pl.username, Password: pl.password}
-	salts, err := keys.FetchSalts(ctx, c, scope)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	user, addrs, err := keys.Fetch(ctx, c)
-	if err != nil {
-		return LoginResult{}, err
-	}
-	keyPass, err := keys.DeriveKeyPass(user, addrs, salts, pl.password)
+	keyPass, err := l.deriveKeyPass(pl)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	defer clear(keyPass) // sealed below; the account copy shares it
+	return l.seal(ctx, pl, keyPass, now)
+}
+
+// passTOTP submits the 2FA code when the account asks for one, first
+// waiting for the next period when the code would repeat the last one. It
+// returns the time after that wait.
+func (l *Local) passTOTP(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (time.Time, error) {
+	if !pl.p.NeedsTOTP {
+		return now, nil
+	}
+	if wait := totp.Wait(now); wait > 0 {
+		if err := l.o.Sleep(ctx, wait); err != nil {
+			return now, err
+		}
+		now = now.Add(wait)
+	}
+	return now, pl.p.SubmitTOTP(ctx, totp.Code(now))
+}
+
+// fetchKeys opens the login's client and fetches the key salts (behind the
+// scope unlock, with the login password), the user and the addresses into
+// pl, for the derivation.
+func (l *Local) fetchKeys(ctx context.Context, pl *pendingLogin) error {
+	c := l.client(pl.p.Tokens)
+	pl.live = c
+	scope := auth.Scope{M: l.mgr, C: c, Username: pl.username, Password: pl.password}
+	salts, err := keys.FetchSalts(ctx, c, scope)
+	if err != nil {
+		return err
+	}
+	user, addrs, err := keys.Fetch(ctx, c)
+	if err != nil {
+		return err
+	}
+	pl.salts, pl.user, pl.addrs = salts, user, addrs
+	return nil
+}
+
+// deriveKeyPass derives the key passphrase from what fetchKeys fetched: from
+// the login password, or from the mailbox password of a two-password account
+// (errNeedsMailboxPassword without one). The mailbox password is zeroed
+// once tried, whatever the outcome. The result is a secret.
+func (l *Local) deriveKeyPass(pl *pendingLogin) ([]byte, error) {
+	password := pl.password
+	if pl.p.TwoPassword {
+		if len(pl.mailbox) == 0 {
+			return nil, errNeedsMailboxPassword
+		}
+		password = pl.mailbox
+		defer func() { clear(pl.mailbox); pl.mailbox = nil }()
+	}
+	keyPass, err := keys.DeriveKeyPass(pl.user, pl.addrs, pl.salts, password)
+	if err != nil {
+		return nil, err
+	}
 	if l.keyPassHook != nil {
 		l.keyPassHook(keyPass)
 	}
+	return keyPass, nil
+}
+
+// seal stores the login's session and keyPass and marks the login ready.
+// A state.json that cannot be written puts the secrets back as they were.
+func (l *Local) seal(ctx context.Context, pl *pendingLogin, keyPass []byte, now time.Time) (LoginResult, error) {
+	p, c := pl.p, pl.live
 	// The client's tokens, not p.Tokens: a refresh during the key calls spent
 	// the refresh token SRP returned.
 	tok := c.Tokens()
@@ -439,7 +592,7 @@ func (l *Local) complete(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 	l.dropClient()
 	// LastLogin is a person's last login; an unattended relogin only moves
 	// LastRelogin.
-	err = l.writeLogin(ctx, pl.last, func(cur store.State) store.State {
+	err := l.writeLogin(ctx, pl.last, func(cur store.State) store.State {
 		st := store.State{
 			AccountID: acc.ID, Phase: store.PhaseReady, Unattended: pl.unattended,
 			LastLogin: now, LastRelogin: pl.last.LastRelogin,

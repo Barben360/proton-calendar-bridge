@@ -1,0 +1,389 @@
+package service_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
+	"github.com/Barben360/proton-calendar-bridge/internal/store"
+)
+
+// keysOpen reports whether the sealed KeyPass of a opens every address key
+// of the fake's account (fetched with a's own session).
+func keysOpen(t *testing.T, e *env, a store.Account) bool {
+	t.Helper()
+	c := api.New(tokensOf(a), api.Options{BaseURL: e.f.URL, HTTP: &http.Client{Timeout: 30 * time.Second}})
+	user, addrs, err := keys.Fetch(t.Context(), c)
+	if err != nil {
+		t.Fatalf("keys.Fetch: %v", err)
+	}
+	u, err := keys.Unlock(user, addrs, a.KeyPass)
+	if err != nil {
+		return false
+	}
+	defer u.Close()
+	return len(u.AddrKRs) == len(addrs)
+}
+
+// noSecrets fails when anything is sealed.
+func noSecrets(t *testing.T, e *env) {
+	t.Helper()
+	if accs, err := e.secrets().Load(); err != nil || len(accs) != 0 {
+		t.Errorf("secrets = %d accounts, %v; want nothing sealed", len(accs), err)
+	}
+}
+
+func TestTwoPasswordUpfrontReady(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	r := e.req()
+	r.MailboxPassword = e.f.MailboxPassword
+	res := e.login(t, r)
+	if res.State != service.StateReady || res.AccountID != e.f.UserID(e.f.Username) {
+		t.Fatalf("Login = %+v, want ready", res)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+	if st := e.loadState(t); st.Phase != store.PhaseReady {
+		t.Errorf("state phase = %q, want ready", st.Phase)
+	}
+}
+
+func TestTwoPasswordHeldThenSubmitted(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	res := e.login(t, e.req())
+	want := t0.Add(5 * time.Minute)
+	if res.State != service.StateNeedsMailboxPassword || res.LoginExpires == nil || !res.LoginExpires.Equal(want) ||
+		res.AccountID != e.f.UserID(e.f.Username) || res.Username != e.f.Username {
+		t.Fatalf("Login = %+v; want needs-mailbox-password expiring at %v", res, want)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Fatal("secrets sealed before the mailbox password was given")
+	}
+	st, err := e.svc.Status(t.Context())
+	if err != nil || st.Phase != "needs-mailbox-password" || st.Reason != "a login is waiting for its mailbox password" ||
+		st.LoginExpires == nil || !st.LoginExpires.Equal(want) {
+		t.Fatalf("Status = %+v, %v; want needs-mailbox-password until %v", st, err, want)
+	}
+	res, err = e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if err != nil || res.State != service.StateReady || res.AccountID != e.f.UserID(e.f.Username) {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "ready" || st.LoginExpires != nil {
+		t.Errorf("Status after the mailbox password = %+v; want ready", st)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+}
+
+func TestWrongMailboxPasswordThenRight(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	e.login(t, e.req())
+	before := e.f.Calls("", "/")
+	// An empty one is refused without spending a try.
+	_, err := e.svc.SubmitMailboxPassword(t.Context(), "")
+	_ = wantExit(t, err, exitcode.Usage)
+	_, err = e.svc.SubmitMailboxPassword(t.Context(), "not-the-mailbox-password")
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the mailbox password does not unlock the account keys" || !strings.Contains(ee.Hint, "2 tries left") {
+		t.Errorf("wrong mailbox password = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("", "/"); n != before {
+		t.Errorf("%d calls to the fake for a wrong mailbox password, want 0", n-before)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-mailbox-password" {
+		t.Errorf("phase after a wrong mailbox password = %q, want needs-mailbox-password", st.Phase)
+	}
+	if _, err := os.Stat(e.secrets().Path); err == nil {
+		t.Error("secrets sealed after a wrong mailbox password")
+	}
+	res, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1 (no second SRP)", n)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Errorf("%d revocations, want 0", n)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+}
+
+func TestThreeWrongMailboxPasswordsCancel(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	e.login(t, e.req())
+	for _, left := range []string{"2 tries left", "1 tries left"} {
+		_, err := e.svc.SubmitMailboxPassword(t.Context(), "wrong")
+		if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, left) {
+			t.Errorf("hint = %q, want %q", ee.Hint, left)
+		}
+	}
+	_, err := e.svc.SubmitMailboxPassword(t.Context(), "wrong")
+	ee := wantExit(t, err, exitcode.MustAct)
+	if !strings.Contains(ee.Error(), "cancelled") || ee.Hint != "run pcb login again" {
+		t.Errorf("third wrong mailbox password = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d revocations, want 1", n)
+	}
+	noSecrets(t, e)
+	if st, _ := e.svc.Status(t.Context()); st.Phase == "needs-mailbox-password" {
+		t.Error("Status still reports a login waiting")
+	}
+	// Nothing waits any more, even with the right password.
+	_, err = e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a mailbox password" {
+		t.Errorf("after the cancel = %q", ee.Error())
+	}
+	noSecrets(t, e)
+}
+
+func TestTOTPThenMailboxPassword(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoFA: true, TwoPassword: true}, ft.AfterFunc)
+	res := e.login(t, e.req())
+	want := t0.Add(5 * time.Minute)
+	if res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login = %+v, want needs-totp", res)
+	}
+	e.clk.advance(time.Minute)
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if err != nil || res.State != service.StateNeedsMailboxPassword || res.LoginExpires == nil || !res.LoginExpires.Equal(want) {
+		t.Fatalf("SubmitTOTP = %+v, %v; want needs-mailbox-password still expiring at %v", res, err, want)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-mailbox-password" || st.LoginExpires == nil || !st.LoginExpires.Equal(want) {
+		t.Errorf("Status = %+v; want needs-mailbox-password until %v", st, want)
+	}
+	if n := ft.count(); n != 1 {
+		t.Errorf("%d expiry timers, want 1 (one deadline for the whole login)", n)
+	}
+	res, err = e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/2fa"); n != 1 {
+		t.Errorf("%d 2FA submissions, want 1", n)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+	if ft.timer(t, 0).fire() {
+		t.Error("the expiry timer was left armed after the login completed")
+	}
+}
+
+func TestUpfrontMailboxPasswordSurvivesTOTPHold(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true, TwoPassword: true})
+	r := e.req()
+	r.MailboxPassword = e.f.MailboxPassword
+	if res := e.login(t, r); res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login = %+v, want needs-totp", res)
+	}
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitTOTP = %+v, %v; want ready directly", res, err)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+}
+
+func TestSinglePasswordIgnoresMailboxPassword(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	r := e.req()
+	r.MailboxPassword = "a-mailbox-password-this-account-does-not-use"
+	if res := e.login(t, r); res.State != service.StateReady {
+		t.Fatalf("Login = %+v, want ready", res)
+	}
+	// The fake's keys open only with the passphrase of the login password.
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+}
+
+func TestSubmitOnTheWrongStepIsMustAct(t *testing.T) {
+	t.Parallel()
+	t.Run("2FA code while the mailbox password is awaited", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{TwoPassword: true})
+		e.login(t, e.req())
+		_, err := e.svc.SubmitTOTP(t.Context(), "123456")
+		if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a 2FA code" || !strings.Contains(ee.Hint, "mailbox password") {
+			t.Errorf("SubmitTOTP = %q (hint %q)", ee.Error(), ee.Hint)
+		}
+		if n := e.f.Calls("POST", "/auth/v4/2fa"); n != 0 {
+			t.Errorf("%d 2FA submissions, want 0", n)
+		}
+		if res, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword); err != nil || res.State != service.StateReady {
+			t.Fatalf("the held login did not survive: %+v, %v", res, err)
+		}
+	})
+	t.Run("mailbox password while the 2FA code is awaited", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{TwoFA: true, TwoPassword: true})
+		e.login(t, e.req())
+		_, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+		if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a mailbox password" || !strings.Contains(ee.Hint, "2FA code") {
+			t.Errorf("SubmitMailboxPassword = %q (hint %q)", ee.Error(), ee.Hint)
+		}
+		if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-totp" {
+			t.Errorf("phase = %q, want needs-totp", st.Phase)
+		}
+		res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+		if err != nil || res.State != service.StateNeedsMailboxPassword {
+			t.Fatalf("the held login did not survive: %+v, %v", res, err)
+		}
+	})
+	t.Run("nothing held", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, protontest.Options{})
+		_, err := e.svc.SubmitMailboxPassword(t.Context(), "anything")
+		if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a mailbox password" || ee.Hint != "run pcb login first" {
+			t.Errorf("SubmitMailboxPassword = %q (hint %q)", ee.Error(), ee.Hint)
+		}
+	})
+}
+
+func TestMailboxWaitExpires(t *testing.T) {
+	t.Parallel()
+	ft := &fakeTimers{}
+	e := newEnvWith(t, protontest.Options{TwoPassword: true}, ft.AfterFunc)
+	e.login(t, e.req())
+	if n := ft.count(); n != 1 || ft.timer(t, 0).d != 5*time.Minute {
+		t.Fatalf("%d timers, want one of 5 min", n)
+	}
+	e.clk.advance(5 * time.Minute)
+	if !ft.timer(t, 0).fire() {
+		t.Fatal("the expiry timer was stopped before it fired")
+	}
+	_, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the login waiting for its mailbox password expired after 5 minutes" || ee.Hint != "run pcb login again" {
+		t.Errorf("SubmitMailboxPassword after expiry = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	// SubmitTOTP says the same: the login that expired waited for its mailbox password.
+	_, err = e.svc.SubmitTOTP(t.Context(), "123456")
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "the login waiting for its mailbox password expired after 5 minutes" {
+		t.Errorf("SubmitTOTP after expiry = %q", ee.Error())
+	}
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1 (the half session revoked)", n)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase == "needs-mailbox-password" || st.LoginExpires != nil {
+		t.Errorf("Status after expiry = %+v; want no login waiting", st)
+	}
+	noSecrets(t, e)
+}
+
+func TestMailboxPasswordNeverStored(t *testing.T) {
+	t.Parallel()
+	const mailbox = "mailbox-secret-7f3a9c"
+	e := newEnv(t, protontest.Options{TwoPassword: true, MailboxPassword: mailbox})
+	r := e.req()
+	r.MailboxPassword = mailbox
+	r.UnattendedRelogin = true
+	if res := e.login(t, r); res.State != service.StateReady {
+		t.Fatalf("Login = %+v, want ready", res)
+	}
+	accs := e.accounts(t)
+	if len(accs) != 1 {
+		t.Fatalf("%d sealed accounts, want 1", len(accs))
+	}
+	if a := e.account(t); a.Relogin == nil || a.Relogin.Password != e.f.Password {
+		t.Errorf("Relogin = %+v; want the login password sealed for unattended relogin", a.Relogin)
+	}
+	sealed, err := json.Marshal(accs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sealed, []byte(mailbox)) {
+		t.Error("the sealed store contains the mailbox password")
+	}
+	raw, err := os.ReadFile(filepath.Join(e.dirs.State, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(mailbox)) {
+		t.Error("state.json contains the mailbox password")
+	}
+	if s := fmt.Sprintf("%v %+v %#v %s", r, r, r, r); strings.Contains(s, mailbox) {
+		t.Errorf("fmt shows the mailbox password: %s", s)
+	}
+	var line bytes.Buffer
+	slog.New(slog.NewJSONHandler(&line, nil)).Info("login", "request", r)
+	if strings.Contains(line.String(), mailbox) {
+		t.Errorf("slog shows the mailbox password: %s", line.String())
+	}
+}
+
+func TestNonASCIIMailboxPassword(t *testing.T) {
+	t.Parallel()
+	const mailbox = "mot-de-passe-é"
+	e := newEnv(t, protontest.Options{TwoPassword: true, MailboxPassword: mailbox})
+	if res := e.login(t, e.req()); res.State != service.StateNeedsMailboxPassword {
+		t.Fatalf("Login = %+v, want needs-mailbox-password", res)
+	}
+	res, err := e.svc.SubmitMailboxPassword(t.Context(), mailbox)
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+}
+
+// A wrong mailbox password given up front counts as the first try: the
+// login is held for another one, without a second SRP.
+func TestWrongUpfrontMailboxPasswordIsHeld(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	r := e.req()
+	r.MailboxPassword = "not-the-mailbox-password"
+	_, err := e.svc.Login(t.Context(), r)
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the mailbox password does not unlock the account keys" || !strings.Contains(ee.Hint, "2 tries left") {
+		t.Errorf("Login = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-mailbox-password" {
+		t.Fatalf("phase = %q, want needs-mailbox-password", st.Phase)
+	}
+	res, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+}
