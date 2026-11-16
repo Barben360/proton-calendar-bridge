@@ -212,6 +212,11 @@ type rig struct {
 	errb     bytes.Buffer
 	// offset is how far the rig's clock (now) runs ahead of t0.
 	offset atomic.Int64
+	// slept records the command's own waits (IO.Sleep), which move the
+	// rig's clock on instead of waiting; sleepErr, when set, ends each one
+	// with it (Ctrl-C during the wait).
+	slept    []time.Duration
+	sleepErr error
 }
 
 // now is the rig's clock: t0 until advance moves it. The fake and every
@@ -337,6 +342,15 @@ func (r *rig) run(args ...string) exitcode.Code {
 	io := cli.IO{Stdout: &r.out, Stderr: &r.errb, Term: r.term, Env: func(k string) string { return r.env[k] }}
 	io.OpenHub = r.openHub(false)
 	io.DialDaemon = r.dial
+	io.Now = r.now
+	io.Sleep = func(_ context.Context, d time.Duration) error {
+		r.slept = append(r.slept, d)
+		if r.sleepErr != nil {
+			return r.sleepErr
+		}
+		r.advance(d)
+		return nil
+	}
 	if r.keyring != nil {
 		io.Keyring = r.keyring
 	}

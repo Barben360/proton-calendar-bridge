@@ -20,6 +20,12 @@ import (
 // MinInterval is the shortest time between two login attempts.
 const MinInterval = 60 * time.Second
 
+// CaptchaRetryInterval is the shortest time before a login attempt that
+// carries a solved CAPTCHA token. A person solved the challenge in between,
+// so the retry is not a login storm; the floor still bounds a script that
+// replays a token in a loop.
+const CaptchaRetryInterval = 10 * time.Second
+
 // maxSkew is how far ahead of now a stamp may be and still count: beyond,
 // the clock was stepped back (VM restore, NTP step, an RTC at boot) and the
 // stamp is stale.

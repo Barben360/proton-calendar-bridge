@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
@@ -236,7 +237,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 			return l.humanNeeded(ctx, st, mustAct("the stored TOTP secret cannot be read", "run pcb login"))
 		}
 	}
-	release, now, err := l.acquire(ctx, false, l.o.Now())
+	release, now, err := l.acquire(ctx, false, loginguard.MinInterval, l.o.Now())
 	if err != nil {
 		return err
 	}

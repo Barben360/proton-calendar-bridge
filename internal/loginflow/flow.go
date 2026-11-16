@@ -58,8 +58,9 @@ const cancelTimeout = 10 * time.Second
 // string, a copy Go cannot zero (as the seal package documents).
 type Flow struct {
 	hub   func() (Hub, error)
-	entry string     // where the flow runs, for the Hub's log (service.LoginRequest.Entry)
-	op    sync.Mutex // one Hub-reaching call at a time
+	entry string           // where the flow runs, for the Hub's log (service.LoginRequest.Entry)
+	now   func() time.Time // the clock of CaptchaWait
+	op    sync.Mutex       // one Hub-reaching call at a time
 
 	mu         sync.Mutex // guards the fields below
 	step       Step
@@ -67,10 +68,11 @@ type Flow struct {
 	captchaURL string
 	pw         []byte // the password, until the login ends
 	username   string
-	captchaTok string // the token of the CAPTCHA challenge, for the retry
-	account    string // the local ID of the account being added
-	created    bool   // Submit made that account (it did not exist)
-	wasReady   bool   // that account was ready before Submit: Cancel leaves it be
+	captchaTok string    // the token of the CAPTCHA challenge, for the retry
+	account    string    // the local ID of the account being added
+	created    bool      // Submit made that account (it did not exist)
+	wasReady   bool      // that account was ready before Submit: Cancel leaves it be
+	retryAt    time.Time // on StepCaptcha, when the Hub lets the retry reach Proton (CaptchaWait)
 }
 
 // New returns a flow on its first step. entry is where it runs
@@ -78,7 +80,7 @@ type Flow struct {
 // gives the accounts at each call: an error (the desktop bridge is stopped)
 // refuses the call with it.
 func New(entry string, hub func() (Hub, error)) *Flow {
-	return &Flow{hub: hub, entry: entry, step: StepCredentials}
+	return &Flow{hub: hub, entry: entry, now: time.Now, step: StepCredentials}
 }
 
 // Step is the current screen.
@@ -101,6 +103,19 @@ func (f *Flow) CaptchaURL() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.captchaURL
+}
+
+// CaptchaWait is how long the CAPTCHA retry will wait before it reaches
+// Proton, on StepCaptcha: until the CaptchaRetryAt the Hub returned with
+// the CAPTCHA (it holds the retry until then). 0 on any other step, once
+// that time is past, or without one (a CAPTCHA add resumed from the list).
+func (f *Flow) CaptchaWait() time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.step != StepCaptcha || f.retryAt.IsZero() {
+		return 0
+	}
+	return max(0, f.retryAt.Sub(f.now()))
 }
 
 // Account is the local ID of the account the flow logs in, once the Hub
@@ -254,7 +269,7 @@ func (f *Flow) settle(created bool, res service.LoginResult, err error) error {
 		f.step, f.captchaURL, f.captchaTok = StepTOTP, "", ""
 	case service.StateNeedsCaptcha:
 		// The retry needs the password: it stays until that login ends.
-		f.step, f.captchaURL, f.captchaTok = StepCaptcha, res.CaptchaURL, res.CaptchaToken
+		f.step, f.captchaURL, f.captchaTok, f.retryAt = StepCaptcha, res.CaptchaURL, res.CaptchaToken, res.CaptchaRetryAt
 	default:
 		return f.failLocked(errors.New("the login ended in an unknown state: " + string(res.State)))
 	}

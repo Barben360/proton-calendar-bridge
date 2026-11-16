@@ -105,7 +105,7 @@ Every command has `--json`. It prints one envelope on stdout and nothing else:
 {"schema_version": 2, "command": "...", "ok": true, "data": {}}
 ```
 
-- On failure `ok` is false and `error` is set. An envelope can carry `data` and `error` together: a CAPTCHA puts `captcha_token` and `captcha_url` in `data`; a partial sync its counts.
+- On failure `ok` is false and `error` is set. An envelope can carry `data` and `error` together: a CAPTCHA puts `captcha_token`, `captcha_url` and `captcha_retry_at` (when the retry with that token may reach Proton) in `data`; a partial sync its counts.
 - `--json` exit codes are the same as without it.
 
 ### Schema version 2
