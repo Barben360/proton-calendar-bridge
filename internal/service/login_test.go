@@ -742,7 +742,6 @@ func TestEveryErrorIsAnExitError(t *testing.T) {
 	cases := []tc{
 		{"wrong password", protontest.Options{}, exitcode.MustAct, login(func(r *service.LoginRequest) { r.Password = "wrong-" + r.Password })},
 		{"totp rejected", protontest.Options{TwoFA: true}, exitcode.MustAct, login(func(r *service.LoginRequest) { r.TOTP = "000000" })},
-		{"two password", protontest.Options{TwoPassword: true}, exitcode.MustAct, login(nil)},
 		{"fido2", protontest.Options{FIDO2Only: true}, exitcode.MustAct, login(nil)},
 		{"bad server proof", protontest.Options{BadLoginProof: true}, exitcode.Blocked, login(nil)},
 		{"proton down", protontest.Options{}, exitcode.Blocked, func(t *testing.T, e *env) error {

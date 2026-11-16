@@ -66,7 +66,6 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // with errors.Is.
 var (
 	ErrBadCredentials = errors.New("wrong Proton username or password")
-	ErrTwoPassword    = errors.New("the Proton account uses two-password mode, which pcb does not support")
 	ErrFIDO2          = errors.New("the Proton account's only second factor is a security key (FIDO2), which pcb does not support")
 	ErrTOTPRejected   = errors.New("the 2FA code was rejected by Proton")
 	// ErrCaptchaRejected: the CAPTCHA token sent to Begin is invalid or expired.
@@ -153,6 +152,9 @@ type Pending struct {
 	Tokens    api.Tokens
 	UserID    string
 	NeedsTOTP bool
+	// TwoPassword: the account is in two-password mode, so the account keys
+	// are unlocked by the mailbox password, not the login password.
+	TwoPassword bool
 
 	c     *gpa.Client
 	ended bool // a refresh failed for good: the session is gone
@@ -171,9 +173,10 @@ func (Pending) LogValue() slog.Value { return slog.StringValue(redacted) }
 
 // Begin runs SRP for username. A non-empty captchaToken is a solved CAPTCHA
 // challenge. Errors: *CaptchaError, *UnsupportedVerificationError,
-// ErrCaptchaRejected, ErrBadCredentials, ErrServerProof, and ErrTwoPassword or
-// ErrFIDO2 once the session they opened is revoked. Begin sends one
-// POST /auth/v4, within CallTimeout.
+// ErrCaptchaRejected, ErrBadCredentials, ErrServerProof, and ErrFIDO2 once
+// the session it opened is revoked. A two-password account is returned with
+// TwoPassword set. Begin sends one POST /auth/v4,
+// within CallTimeout.
 func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte, captchaToken string) (*Pending, error) {
 	var hv *gpa.APIHVDetails
 	if captchaToken != "" {
@@ -187,15 +190,11 @@ func Begin(ctx context.Context, m *gpa.Manager, username string, password []byte
 	}
 	p := pending(c, api.Tokens{UID: a.UID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken}, a.UserID)
 	p.NeedsTOTP = a.TwoFA.Enabled&gpa.HasTOTP != 0
-	var refused error
-	switch {
-	case a.PasswordMode == gpa.TwoPasswordMode:
-		refused = ErrTwoPassword
-	case a.TwoFA.Enabled != 0 && !p.NeedsTOTP:
-		refused = ErrFIDO2
-	default:
+	p.TwoPassword = a.PasswordMode == gpa.TwoPasswordMode
+	if a.TwoFA.Enabled == 0 || p.NeedsTOTP {
 		return p, nil
 	}
+	refused := ErrFIDO2
 	if err := p.revoke(ctx); err != nil {
 		refused = errors.Join(refused, err)
 	}

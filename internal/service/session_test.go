@@ -279,7 +279,7 @@ func TestReloginThrottled(t *testing.T) {
 
 func TestChangedPasswordNeedsLogin(t *testing.T) {
 	t.Parallel()
-	const reason = "account keys no longer unlock (password changed?)"
+	const reason = "account keys no longer unlock (password or mailbox password changed?)"
 	e := newEnv(t, protontest.Options{})
 	e.login(t, e.req())
 	e.editAccount(t, func(a *store.Account) { a.KeyPass = []byte("not-the-key-passphrase") })

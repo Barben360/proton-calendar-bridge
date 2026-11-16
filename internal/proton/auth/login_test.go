@@ -75,6 +75,9 @@ func TestBeginPasswordOnly(t *testing.T) {
 	if p.NeedsTOTP {
 		t.Error("NeedsTOTP = true for a password-only account")
 	}
+	if p.TwoPassword {
+		t.Error("TwoPassword = true for a single-password account")
+	}
 	if p.Tokens.UID == "" || p.Tokens.AccessToken == "" || p.Tokens.RefreshToken == "" {
 		t.Errorf("tokens not all set: UID %t, access %t, refresh %t", p.Tokens.UID != "", p.Tokens.AccessToken != "", p.Tokens.RefreshToken != "")
 	}
@@ -166,15 +169,19 @@ func TestBeginWrongPassword(t *testing.T) {
 	}
 }
 
-func TestBeginRefusesTwoPassword(t *testing.T) {
+func TestBeginTwoPasswordReturnsPending(t *testing.T) {
 	t.Parallel()
 	f := protontest.New(t, protontest.Options{TwoPassword: true})
 	p, err := auth.Begin(t.Context(), manager(t, f), f.Username, []byte(f.Password), "")
-	if !errors.Is(err, auth.ErrTwoPassword) || p != nil {
-		t.Fatalf("Begin = %v, %v; want nil, ErrTwoPassword", p, err)
+	if err != nil || p == nil {
+		t.Fatalf("Begin = %v, %v; want a pending login", p, err)
 	}
-	if n := f.Calls("DELETE", "/auth/v4"); n != 1 {
-		t.Fatalf("DELETE /auth/v4 calls = %d, want 1 (the opened session revoked)", n)
+	t.Cleanup(p.Close)
+	if !p.TwoPassword {
+		t.Error("TwoPassword = false for a two-password account")
+	}
+	if n := f.Calls("DELETE", "/auth/v4"); n != 0 {
+		t.Fatalf("DELETE /auth/v4 calls = %d, want 0 (the session is kept)", n)
 	}
 }
 
@@ -453,8 +460,7 @@ func TestBeginRefusalReportsAFailedRevoke(t *testing.T) {
 		o    protontest.Options
 		want error
 	}{
-		"two-password": {protontest.Options{TwoPassword: true}, auth.ErrTwoPassword},
-		"FIDO2 only":   {protontest.Options{FIDO2Only: true}, auth.ErrFIDO2},
+		"FIDO2 only": {protontest.Options{FIDO2Only: true}, auth.ErrFIDO2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
