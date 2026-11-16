@@ -35,7 +35,12 @@ type lab struct {
 // newLab opens real accounts (a service.Hub) over a fake Proton.
 func newLab(t *testing.T) *lab {
 	t.Helper()
-	f := protontest.New(t, protontest.Options{})
+	return newLabWith(t, protontest.Options{})
+}
+
+func newLabWith(t *testing.T, opts protontest.Options) *lab {
+	t.Helper()
+	f := protontest.New(t, opts)
 	root := t.TempDir()
 	dirs := paths.Dirs{Config: filepath.Join(root, "cfg"), State: filepath.Join(root, "state")}
 	cfg := config.Defaults(dirs)
@@ -306,4 +311,190 @@ func TestFlowLoginTurnsUnattendedReloginOff(t *testing.T) {
 			t.Errorf("captcha %t: unattended relogin still on after a login through the flow", captcha)
 		}
 	}
+}
+
+// mailboxLab is a lab whose account is in two-password mode.
+func mailboxLab(t *testing.T) *lab {
+	t.Helper()
+	return newLabWith(t, protontest.Options{TwoPassword: true})
+}
+
+// A two-password account stops on the mailbox step once the login password
+// is accepted; the flow drops the login password there (the Hub holds the
+// login), and the mailbox password finishes it.
+func TestFlowMailboxPasswordStep(t *testing.T) {
+	l := mailboxLab(t)
+	f := l.flow()
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if f.Step() != loginflow.StepMailboxPassword {
+		t.Fatalf("Step %q, want mailbox-password", f.Step())
+	}
+	if f.PasswordBuf() != nil {
+		t.Error("the flow still holds the login password on the mailbox step")
+	}
+	if err := f.SubmitMailboxPassword(t.Context(), []byte(l.f.MailboxPassword)); err != nil {
+		t.Fatalf("SubmitMailboxPassword: %v", err)
+	}
+	if f.Step() != loginflow.StepDone || f.Err() != nil {
+		t.Errorf("Step %q, Err %v; want done, nil", f.Step(), f.Err())
+	}
+}
+
+// 2FA first, then the mailbox password.
+func TestFlowTOTPThenMailboxPassword(t *testing.T) {
+	l := mailboxLab(t)
+	uri := l.f.SetTwoFA(l.f.Username, true)
+	f := l.flow()
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepTOTP {
+		t.Fatalf("Submit: %v, step %q", err, f.Step())
+	}
+	if err := f.SubmitTOTP(t.Context(), code(t, uri)); err != nil {
+		t.Fatalf("SubmitTOTP: %v", err)
+	}
+	if f.Step() != loginflow.StepMailboxPassword {
+		t.Fatalf("Step %q, want mailbox-password", f.Step())
+	}
+	if err := f.SubmitMailboxPassword(t.Context(), []byte(l.f.MailboxPassword)); err != nil || f.Step() != loginflow.StepDone {
+		t.Fatalf("SubmitMailboxPassword: %v, step %q", err, f.Step())
+	}
+}
+
+// A wrong mailbox password keeps the step with the error while the Hub holds
+// the login; once the Hub drops it (3 tries), the flow is back on the
+// credentials. The right one still works after a wrong one.
+func TestFlowWrongMailboxPassword(t *testing.T) {
+	l := mailboxLab(t)
+	f := l.flow()
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepMailboxPassword {
+		t.Fatalf("Submit: %v, step %q", err, f.Step())
+	}
+	for i := 1; i <= 2; i++ {
+		err := f.SubmitMailboxPassword(t.Context(), []byte("wrong-mailbox-pw"))
+		var ee *exitcode.Error
+		if !errors.As(err, &ee) || ee.Code != exitcode.MustAct {
+			t.Fatalf("try %d: err = %v, want exit %d", i, err, exitcode.MustAct)
+		}
+		if f.Step() != loginflow.StepMailboxPassword || f.Err() == nil {
+			t.Fatalf("try %d: step %q, Err %v; want the step kept with Err set", i, f.Step(), f.Err())
+		}
+	}
+	if err := f.SubmitMailboxPassword(t.Context(), []byte("wrong-mailbox-pw")); err == nil {
+		t.Fatal("third wrong try: no error")
+	}
+	if f.Step() != loginflow.StepCredentials || f.Err() == nil || f.Account() != "" {
+		t.Errorf("after the Hub dropped the login: step %q, Err %v, account %q; want credentials, Err set, no account", f.Step(), f.Err(), f.Account())
+	}
+
+	l.forgetLastLogin(t)
+	f = l.flow()
+	if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.SubmitMailboxPassword(t.Context(), []byte("wrong-mailbox-pw"))
+	if err := f.SubmitMailboxPassword(t.Context(), []byte(l.f.MailboxPassword)); err != nil || f.Step() != loginflow.StepDone || f.Err() != nil {
+		t.Errorf("right one after a wrong one: %v, step %q, Err %v", err, f.Step(), f.Err())
+	}
+}
+
+// SubmitMailboxPassword off its step is a usage error and changes nothing.
+func TestFlowMailboxPasswordOnAnotherStep(t *testing.T) {
+	l := mailboxLab(t)
+	f := l.flow()
+	err := f.SubmitMailboxPassword(t.Context(), []byte("x"))
+	var ee *exitcode.Error
+	if !errors.As(err, &ee) || ee.Code != exitcode.Usage {
+		t.Fatalf("err = %v, want a usage error", err)
+	}
+	if f.Step() != loginflow.StepCredentials {
+		t.Errorf("Step %q, want credentials", f.Step())
+	}
+}
+
+// cancelHub records which of Cancel's Hub calls ran.
+type cancelHub struct {
+	*service.Hub
+	calls []string
+}
+
+func (c *cancelHub) AbandonLogin(ctx context.Context, selector string) error {
+	c.calls = append(c.calls, "abandon")
+	return c.Hub.AbandonLogin(ctx, selector)
+}
+
+func (c *cancelHub) SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error) {
+	c.calls = append(c.calls, "signout")
+	return c.Hub.SignOut(ctx, selector, req)
+}
+
+func (c *cancelHub) Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error) {
+	c.calls = append(c.calls, "remove")
+	return c.Hub.Remove(ctx, selector, req)
+}
+
+// Cancel on the mailbox step: an add this flow made is removed, an account
+// that was ready is only abandoned (its session stays), another one that
+// existed pending is signed out.
+func TestCancelOnMailboxStep(t *testing.T) {
+	// reach returns a recording flow on its mailbox step; finishFirst logs
+	// the account in completely beforehand (it was ready).
+	reach := func(t *testing.T, l *lab, finishFirst bool) (*loginflow.Flow, *cancelHub) {
+		t.Helper()
+		h := &cancelHub{Hub: l.hub}
+		if finishFirst {
+			first := l.flow()
+			if err := first.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
+				t.Fatal(err)
+			}
+			if err := first.SubmitMailboxPassword(t.Context(), []byte(l.f.MailboxPassword)); err != nil || first.Step() != loginflow.StepDone {
+				t.Fatalf("first login: %v, step %q", err, first.Step())
+			}
+			l.forgetLastLogin(t)
+		}
+		f := loginflow.New(service.EntryWizard, func() (loginflow.Hub, error) { return h, nil })
+		if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepMailboxPassword {
+			t.Fatalf("Submit: %v, step %q", err, f.Step())
+		}
+		return f, h
+	}
+	t.Run("created is removed", func(t *testing.T) {
+		l := mailboxLab(t)
+		f, h := reach(t, l, false)
+		f.Cancel()
+		if want := []string{"remove"}; !slices.Equal(h.calls, want) {
+			t.Errorf("Hub calls on Cancel = %q, want %q", h.calls, want)
+		}
+		if got := l.hub.Accounts(); len(got) != 0 {
+			t.Errorf("accounts after Cancel = %+v, want none", got)
+		}
+		if f.Step() != loginflow.StepCredentials {
+			t.Errorf("Step %q, want credentials", f.Step())
+		}
+	})
+	t.Run("was ready is abandoned", func(t *testing.T) {
+		l := mailboxLab(t)
+		f, h := reach(t, l, true)
+		f.Cancel()
+		if want := []string{"abandon"}; !slices.Equal(h.calls, want) {
+			t.Errorf("Hub calls on Cancel = %q, want %q", h.calls, want)
+		}
+	})
+	t.Run("existed pending is signed out", func(t *testing.T) {
+		l := mailboxLab(t)
+		pre := l.flow()
+		if err := pre.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || pre.Step() != loginflow.StepMailboxPassword {
+			t.Fatalf("first Submit: %v, step %q", err, pre.Step())
+		}
+		l.forgetLastLogin(t)
+		h := &cancelHub{Hub: l.hub}
+		f := loginflow.New(service.EntryWizard, func() (loginflow.Hub, error) { return h, nil })
+		if err := f.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil || f.Step() != loginflow.StepMailboxPassword {
+			t.Fatalf("second Submit: %v, step %q", err, f.Step())
+		}
+		f.Cancel()
+		if want := []string{"signout"}; !slices.Equal(h.calls, want) {
+			t.Errorf("Hub calls on Cancel = %q, want %q", h.calls, want)
+		}
+	})
 }
