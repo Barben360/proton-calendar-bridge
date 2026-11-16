@@ -78,13 +78,16 @@ func (f *fakeTerm) ReadSecret(ctx context.Context, prompt string) (string, error
 
 // stubAPI is a service.API that records what the CLI asks of it.
 type stubAPI struct {
-	login       func(service.LoginRequest) (service.LoginResult, error)
-	logins      []service.LoginRequest
-	totps       []string
-	submit      func(string) (service.LoginResult, error)
-	closed      int
-	closeErr    error
-	statusPhase string
+	login     func(service.LoginRequest) (service.LoginResult, error)
+	logins    []service.LoginRequest
+	totps     []string
+	submit    func(string) (service.LoginResult, error)
+	mailboxes []string
+	// submitMailbox answers SubmitMailboxPassword (nil: ready).
+	submitMailbox func(string) (service.LoginResult, error)
+	closed        int
+	closeErr      error
+	statusPhase   string
 }
 
 func (s *stubAPI) Login(_ context.Context, r service.LoginRequest) (service.LoginResult, error) {
@@ -97,9 +100,12 @@ func (s *stubAPI) SubmitTOTP(_ context.Context, c string) (service.LoginResult, 
 	return s.submit(c)
 }
 
-// SubmitMailboxPassword is not used by the CLI yet.
-func (*stubAPI) SubmitMailboxPassword(context.Context, string) (service.LoginResult, error) {
-	return service.LoginResult{}, nil
+func (s *stubAPI) SubmitMailboxPassword(_ context.Context, p string) (service.LoginResult, error) {
+	s.mailboxes = append(s.mailboxes, p)
+	if s.submitMailbox == nil {
+		return ready()
+	}
+	return s.submitMailbox(p)
 }
 
 func (s *stubAPI) Logout(context.Context, service.LogoutRequest) (service.LogoutResult, error) {
