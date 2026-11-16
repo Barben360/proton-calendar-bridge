@@ -8,6 +8,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 )
@@ -227,7 +228,9 @@ func (l *Local) beginRelogin(ctx context.Context, username string, password []by
 // further automatic attempt is made; a transient failure (Blocked: too soon,
 // Proton down) leaves the state as it was. That includes a 429 whose
 // Retry-After is too long to wait: nothing is persisted but the guard's
-// stamp, so the next run retries once the guard allows it.
+// stamp, so the next run retries once the guard allows it. A two-password
+// account's keys are opened with the sealed key passphrase (reopenKeys); one
+// that no longer opens them marks the login needs-login.
 func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Account) error {
 	var totp *otp.TOTP
 	if uri := acc.Relogin.TOTPURI; uri != "" {
@@ -263,15 +266,29 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 		return l.humanNeeded(ctx, st, mustAct("Proton now asks for a 2FA code and no TOTP secret is stored", "run pcb login"))
 	}
 	pl := &pendingLogin{p: p, username: acc.Username, password: password, unattended: true, relogin: true, totpURI: acc.Relogin.TOTPURI, last: st}
-	if _, err := l.complete(ctx, pl, totp, now); err != nil {
+	if p.TwoPassword {
+		// The mailbox password is never stored: the sealed key passphrase
+		// it was derived from opens the keys.
+		err = l.reopenKeys(ctx, pl, acc.KeyPass, totp, now)
+	} else {
+		_, err = l.complete(ctx, pl, totp, now)
+	}
+	if err != nil {
 		if !pl.sealed {
 			l.abort(ctx, pl)
+		}
+		if p.TwoPassword && errors.Is(err, keys.ErrKeysLocked) {
+			return l.humanNeeded(ctx, st, mustAct(staleKeyPass, "run pcb login"))
 		}
 		return l.humanNeeded(ctx, st, l.fail(err))
 	}
 	p.Close()
 	return nil
 }
+
+// staleKeyPass is the needs-login reason of a two-password account's
+// relogin whose sealed key passphrase no longer opens the keys.
+const staleKeyPass = "the mailbox password or the account keys changed"
 
 // humanNeeded returns err; when err is a MustAct, the login is first marked
 // needs-login with err's message as the reason (it is secret-free: the

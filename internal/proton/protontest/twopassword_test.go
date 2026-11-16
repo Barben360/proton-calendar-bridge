@@ -131,3 +131,20 @@ func TestOnePasswordFakeUnchanged(t *testing.T) {
 		t.Fatal("the ignored mailbox password opens the keys")
 	}
 }
+
+// TestSetMailboxPasswordRekeys: after SetMailboxPassword the account's keys
+// open with the new mailbox password, and no longer with the old one.
+func TestSetMailboxPasswordRekeys(t *testing.T) {
+	t.Parallel()
+	const next = "the-next-mailbox-password"
+	f := protontest.New(t, protontest.Options{TwoPassword: true})
+	old := f.MailboxPassword
+	f.SetMailboxPassword(f.Username, next)
+	user, addrs, salts := keyMaterial(t, f, f.Login(t, f.Username))
+	if opens(t, user, addrs, salts, old) {
+		t.Error("the keys still open with the old mailbox password")
+	}
+	if !opens(t, user, addrs, salts, next) {
+		t.Error("the keys do not open with the new mailbox password")
+	}
+}

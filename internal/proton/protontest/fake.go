@@ -255,6 +255,24 @@ func (f *Fake) AddUser(username, password string) (userID string) {
 	return id
 }
 
+// SetMailboxPassword re-keys username's account of a two-password fake
+// (Options.TwoPassword): its keys are then served locked with mailbox, no
+// longer with the mailbox password they had. Fake.MailboxPassword, what
+// AddUser gives a new account, is left as it is.
+func (f *Fake) SetMailboxPassword(username, mailbox string) {
+	f.t.Helper()
+	if !f.o.TwoPassword {
+		f.t.Fatal("protontest: SetMailboxPassword needs Options.TwoPassword")
+	}
+	r, err := f.pool.relocker(username, mailbox)
+	if err != nil {
+		f.t.Fatalf("protontest: mailbox password of %q: %v", username, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.relockers[username] = r
+}
+
 // UserID returns the user ID of username, "" if unknown.
 func (f *Fake) UserID(username string) string {
 	f.mu.Lock()

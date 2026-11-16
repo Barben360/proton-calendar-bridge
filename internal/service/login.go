@@ -541,6 +541,30 @@ func (l *Local) fetchKeys(ctx context.Context, pl *pendingLogin) error {
 	return nil
 }
 
+// reopenKeys is what follows a relogin's SRP for a two-password account:
+// the 2FA code, then the user and addresses only (no salts, no scope
+// unlock) and the keys opened with the sealed keyPass, which seals the new
+// tokens. A keyPass that no longer opens the keys is keys.ErrKeysLocked.
+func (l *Local) reopenKeys(ctx context.Context, pl *pendingLogin, keyPass []byte, totp *otp.TOTP, now time.Time) error {
+	now, err := l.passTOTP(ctx, pl, totp, now)
+	if err != nil {
+		return err
+	}
+	c := l.client(pl.p.Tokens)
+	pl.live = c
+	user, addrs, err := keys.Fetch(ctx, c)
+	if err != nil {
+		return err
+	}
+	u, err := keys.Unlock(user, addrs, keyPass)
+	if err != nil {
+		return err
+	}
+	u.Close()
+	_, err = l.seal(ctx, pl, keyPass, now)
+	return err
+}
+
 // deriveKeyPass derives the key passphrase from what fetchKeys fetched: from
 // the login password, or from the mailbox password of a two-password account
 // (errNeedsMailboxPassword without one). The mailbox password is zeroed
