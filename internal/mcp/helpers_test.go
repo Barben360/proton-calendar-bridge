@@ -98,6 +98,10 @@ func (h *stubHub) Login(_ context.Context, req service.LoginRequest) (service.Lo
 	return service.LoginResult{}, errors.New("not in this test")
 }
 
+func (h *stubHub) SubmitMailboxPassword(context.Context, string, string) (service.LoginResult, error) {
+	return service.LoginResult{}, nil
+}
+
 func (h *stubHub) SubmitTOTP(context.Context, string, string) (service.LoginResult, error) {
 	return service.LoginResult{}, errors.New("not in this test")
 }

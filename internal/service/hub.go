@@ -858,8 +858,11 @@ func (h *Hub) logOutcome(msg string, args []any, id string, res LoginResult, err
 	}
 	if err == nil {
 		outcome := string(res.State)
-		if res.State == StateNeedsTOTP {
+		switch res.State {
+		case StateNeedsTOTP:
 			outcome = "needs-2fa"
+		case StateNeedsMailboxPassword:
+			outcome = "needs-mailbox-password"
 		}
 		args = append(args, "outcome", outcome)
 	} else if d, ok := loginWait(err); ok {
@@ -1101,7 +1104,7 @@ func (h *Hub) submitTOTP(ctx context.Context, selector, code string) (res LoginR
 		return LoginResult{}, false, err
 	}
 	defer end()
-	a, err := h.pickWaiting(selector)
+	a, err := h.pickWaiting(selector, "2FA code")
 	if err != nil {
 		return LoginResult{}, false, err
 	}
@@ -1111,7 +1114,39 @@ func (h *Hub) submitTOTP(ctx context.Context, selector, code string) (res LoginR
 	return h.settle(ctx, a, false, fresh, res, err)
 }
 
-func (h *Hub) pickWaiting(selector string) (*hubAccount, error) {
+// SubmitMailboxPassword finishes the login of the account selector names
+// that waits for its mailbox password (a two-password account, after its
+// 2FA code if it has one), with the rules of Login. A wrong password keeps
+// the login held, up to its tries. An empty selector is the only account
+// whose login waits. The password is never logged.
+func (h *Hub) SubmitMailboxPassword(ctx context.Context, selector, password string) (LoginResult, error) {
+	res, changed, err := h.submitMailboxPassword(ctx, selector, password)
+	h.loops()
+	h.notify(changed)
+	return res, err
+}
+
+func (h *Hub) submitMailboxPassword(ctx context.Context, selector, password string) (res LoginResult, changed bool, err error) {
+	id := ""
+	defer func() { h.logOutcome("login mailbox password", nil, id, res, err) }()
+	end, err := h.begin()
+	if err != nil {
+		return LoginResult{}, false, err
+	}
+	defer end()
+	a, err := h.pickWaiting(selector, "mailbox password")
+	if err != nil {
+		return LoginResult{}, false, err
+	}
+	id = a.id
+	fresh := freshDir(a.dir)
+	res, err = a.local.SubmitMailboxPassword(ctx, password)
+	return h.settle(ctx, a, false, fresh, res, err)
+}
+
+// pickWaiting is the account selector names, or the only one whose login
+// waits; what names the step it waits for, in the refusal.
+func (h *Hub) pickWaiting(selector, what string) (*hubAccount, error) {
 	if h.isClosed() {
 		return nil, errClosed()
 	}
@@ -1131,7 +1166,7 @@ func (h *Hub) pickWaiting(selector string) (*hubAccount, error) {
 	}
 	switch len(waiting) {
 	case 0:
-		return nil, mustAct("no login is waiting for a 2FA code", "run pcb login first")
+		return nil, mustAct("no login is waiting for a "+what, "run pcb login first")
 	case 1:
 		return waiting[0], nil
 	}

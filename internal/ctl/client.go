@@ -160,6 +160,14 @@ func (c *Client) SubmitTOTP(ctx context.Context, accountID, code string) (servic
 	return res, err
 }
 
+// SubmitMailboxPassword sends the mailbox password of the login the daemon
+// holds for the account (Hub.SubmitMailboxPassword); accountID is a selector.
+func (c *Client) SubmitMailboxPassword(ctx context.Context, accountID, password string) (service.LoginResult, error) {
+	var res service.LoginResult
+	err := c.post(ctx, accountRoute(accountID, "login/mailbox-password"), MailboxPasswordRequest{Password: password}, &res)
+	return res, err
+}
+
 // Logout asks the daemon to sign the account out (Hub.SignOut).
 func (c *Client) Logout(ctx context.Context, accountID string, req service.LogoutRequest) (service.LogoutResult, error) {
 	var res service.LogoutResult

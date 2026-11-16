@@ -37,6 +37,7 @@ type Hub interface {
 	Account(selector string) (service.API, service.AccountInfo, error)
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
 	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
+	SubmitMailboxPassword(ctx context.Context, selector, password string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	SetCalDAV(ctx context.Context, selector string, on bool) (service.AccountInfo, error)
@@ -95,6 +96,7 @@ var routes = []route{
 	{"/v2/status", http.MethodGet, "status", (*Server).status},
 	{"/v2/login", http.MethodPost, "login", (*Server).login},
 	{"/v2/accounts/{id}/login/totp", http.MethodPost, "login resume", (*Server).submitTOTP},
+	{"/v2/accounts/{id}/login/mailbox-password", http.MethodPost, "login resume", (*Server).submitMailboxPassword},
 	{"/v2/accounts/{id}/logout", http.MethodPost, "logout", (*Server).logout},
 	{"/v2/accounts/{id}/remove", http.MethodPost, "account remove", (*Server).remove},
 	{"/v2/accounts/{id}/caldav", http.MethodPost, "account caldav", (*Server).setCalDAV},
@@ -403,6 +405,22 @@ func (s *Server) submitTOTP(ctx context.Context, id string, body []byte) (any, e
 	}
 	defer unlock()
 	return s.Hub.SubmitTOTP(ctx, id, req.Code)
+}
+
+// submitMailboxPassword is POST /v2/accounts/{id}/login/mailbox-password:
+// Hub.SubmitMailboxPassword on the body's password, for the login the Hub
+// holds for that account.
+func (s *Server) submitMailboxPassword(ctx context.Context, id string, body []byte) (any, error) {
+	var req MailboxPasswordRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, errBadBody
+	}
+	unlock, err := s.oneLogin()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return s.Hub.SubmitMailboxPassword(ctx, id, req.Password)
 }
 
 // logout is POST /v2/accounts/{id}/logout: Hub.SignOut on the body, a

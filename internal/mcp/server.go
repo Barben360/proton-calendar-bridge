@@ -36,6 +36,7 @@ type Hub interface {
 	Health(ctx context.Context, selector string) (service.Health, error)
 	Login(ctx context.Context, req service.LoginRequest) (service.LoginResult, error)
 	SubmitTOTP(ctx context.Context, selector, code string) (service.LoginResult, error)
+	SubmitMailboxPassword(ctx context.Context, selector, password string) (service.LoginResult, error)
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	AbandonLogin(ctx context.Context, selector string) error
