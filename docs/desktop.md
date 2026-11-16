@@ -46,7 +46,13 @@ Closing the window hides it; Quit in the tray menu stops the bridge. Without a t
 
 ## Add an account
 
-Open the add-account wizard from the window and type the address, the password, then the 2FA code, and solve the CAPTCHA when Proton asks for one. An account in Proton's two-password mode gets one more screen after the 2FA code, "Mailbox password": type the second password (the one that decrypts your data) and press Unlock or Enter. A wrong one shows an error with the tries left and stays on that screen, with no new Proton login; the third wrong one cancels the login. The field is labelled and has the focus; every field of the wizard is labelled, the first one has the focus and Enter submits. The account list shows `needs mailbox password` while the login waits. An AI agent that starts a login opens the same wizard with the address filled in ([agents](agents.md#log-in-from-an-agent)).
+Open the add-account wizard from the window and type the address, the password, then the 2FA code, and solve the CAPTCHA when Proton asks for one. An AI agent that starts a login opens the same wizard with the address filled in ([agents](agents.md#log-in-from-an-agent)).
+
+An account in Proton's two-password mode gets one more screen after the 2FA code, "Mailbox password":
+- Type the second password (the one that decrypts your data), then press Unlock or Enter.
+- A wrong one shows an error with the tries left and stays on that screen, with no new Proton login; the third wrong one cancels the login.
+- Every field of the wizard has a label, the first one has the focus and Enter submits.
+- The account list shows `needs mailbox password` while the login waits.
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
 
