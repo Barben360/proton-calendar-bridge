@@ -1,7 +1,7 @@
 // Package loginflow is the add-account flow as a state machine with no
 // widget and no listener: credentials, then the 2FA code or a CAPTCHA, then
-// the mailbox password (two-password accounts), then done. pcb-ui's wizard (internal/ui) and the MCP login page
-// (internal/mcp/loginpage) both drive it. It reaches the accounts through
+// the mailbox password (two-password accounts), then done. pcb-ui's wizard
+// (internal/ui) and the MCP login page (internal/mcp/loginpage) both drive it. It reaches the accounts through
 // Hub only, and imports neither of its users, nor the daemon or the CLI
 // (ruling R18: ui → daemon → mcp must not lead back to ui).
 package loginflow
@@ -291,10 +291,10 @@ func (f *Flow) SubmitTOTP(ctx context.Context, code string) error {
 	f.mu.Unlock()
 
 	res, err := h.SubmitTOTP(ctx, id, code)
-	if err != nil && heldForCode(h, id) {
+	if held, ok := heldStep(h, id); err != nil && ok {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		f.err = asExitError(err)
+		f.step, f.err = held, asExitError(err)
 		return f.err
 	}
 	return f.settle(created, res, err)
@@ -324,26 +324,32 @@ func (f *Flow) SubmitMailboxPassword(ctx context.Context, password []byte) error
 	f.mu.Unlock()
 
 	res, err := h.SubmitMailboxPassword(ctx, id, string(password))
-	if err != nil && heldForCode(h, id) {
+	if held, ok := heldStep(h, id); err != nil && ok {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		f.err = asExitError(err)
+		f.step, f.err = held, asExitError(err)
 		return f.err
 	}
 	return f.settle(created, res, err)
 }
 
-// heldForCode reports whether the Hub still holds the login of id for a
-// code: its 2FA code or its mailbox password (a 2FA code accepted can be
-// followed by a wrong upfront mailbox password, which keeps the login held at
-// the mailbox step).
-func heldForCode(h Hub, id string) bool {
+// heldStep reports the step the Hub still holds the login of id at: the 2FA
+// code or the mailbox password (a 2FA code accepted can be followed by a wrong
+// upfront mailbox password, which keeps the login held at the mailbox step).
+// ok is false when the Hub holds no login for id.
+func heldStep(h Hub, id string) (step Step, ok bool) {
 	for _, a := range h.Accounts() {
 		if a.ID == id {
-			return a.Phase == string(service.StateNeedsTOTP) || a.Phase == string(service.StateNeedsMailboxPassword)
+			switch a.Phase {
+			case string(service.StateNeedsTOTP):
+				return StepTOTP, true
+			case string(service.StateNeedsMailboxPassword):
+				return StepMailboxPassword, true
+			}
+			return "", false
 		}
 	}
-	return false
+	return "", false
 }
 
 // Cancel abandons the flow: the password is zeroed, and an account this

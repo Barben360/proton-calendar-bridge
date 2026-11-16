@@ -498,3 +498,47 @@ func TestCancelOnMailboxStep(t *testing.T) {
 		}
 	})
 }
+
+// heldHub is a Hub stub whose SubmitTOTP fails with a must-act error while
+// the account is reported held at phase.
+type heldHub struct {
+	loginflow.Hub
+	phase string
+}
+
+func (h *heldHub) Accounts() []service.AccountInfo {
+	return []service.AccountInfo{{ID: "acc", Pending: true, Phase: h.phase}}
+}
+
+func (h *heldHub) Login(context.Context, service.LoginRequest) (service.LoginResult, error) {
+	return service.LoginResult{Account: "acc", State: service.StateNeedsTOTP}, nil
+}
+
+func (h *heldHub) SubmitTOTP(context.Context, string, string) (service.LoginResult, error) {
+	return service.LoginResult{}, &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("wrong mailbox password")}
+}
+
+// A good 2FA code followed by a wrong upfront mailbox password leaves the Hub
+// held at the mailbox step: the flow follows it, so the screen is not stranded
+// on the 2FA one. A Hub still at the 2FA step keeps StepTOTP.
+func TestFlowSubmitTOTPFollowsTheHeldStep(t *testing.T) {
+	for _, c := range []struct {
+		phase string
+		want  loginflow.Step
+	}{
+		{string(service.StateNeedsMailboxPassword), loginflow.StepMailboxPassword},
+		{string(service.StateNeedsTOTP), loginflow.StepTOTP},
+	} {
+		h := &heldHub{phase: c.phase}
+		f := loginflow.New(service.EntryWizard, func() (loginflow.Hub, error) { return h, nil })
+		if err := f.Submit(t.Context(), "a@example.test", []byte("pw")); err != nil || f.Step() != loginflow.StepTOTP {
+			t.Fatalf("%s: Submit: %v, step %q", c.phase, err, f.Step())
+		}
+		if err := f.SubmitTOTP(t.Context(), "123456"); err == nil {
+			t.Fatalf("%s: SubmitTOTP: no error", c.phase)
+		}
+		if f.Step() != c.want || f.Err() == nil {
+			t.Errorf("%s: step %q, Err %v; want %q with Err set", c.phase, f.Step(), f.Err(), c.want)
+		}
+	}
+}
