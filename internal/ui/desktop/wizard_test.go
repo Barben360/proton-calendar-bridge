@@ -24,6 +24,8 @@ type fakeWizard struct {
 	err      *exitcode.Error
 	calls    []string
 	pw       string             // what Submit received
+	mailbox  string             // what SubmitMailboxPassword received
+	mailBuf  []byte             // the slice it received, to see it wiped
 	script   map[string]ui.Step // call name -> step after
 	block    chan struct{}
 	doneErr  *exitcode.Error
@@ -82,6 +84,13 @@ func (f *fakeWizard) SubmitTOTP(_ context.Context, code string) error {
 	f.enter("totp " + code)
 	return nil
 }
+func (f *fakeWizard) SubmitMailboxPassword(_ context.Context, password []byte) error {
+	f.mu.Lock()
+	f.mailbox, f.mailBuf = string(password), password
+	f.mu.Unlock()
+	f.enter("mailbox")
+	return nil
+}
 func (f *fakeWizard) CaptchaSolved(context.Context) error { f.enter("captcha solved"); return nil }
 func (f *fakeWizard) Done() (ui.AccountView, string) {
 	return ui.AccountView{ID: "new1", Address: "carol@example.org", URL: "http://127.0.0.1:8080/", Username: "carol@example.org"}, "wizard-pw"
@@ -97,10 +106,11 @@ var _ WizardModel = (*ui.Wizard)(nil)
 
 func TestWizardScreensFollowSteps(t *testing.T) {
 	f := newFixture(t)
-	f.wiz.script = map[string]ui.Step{
-		"submit carol@example.org": ui.StepTOTP,
-		"totp 123456":              ui.StepCaptcha,
-		"captcha solved":           ui.StepDone,
+	f.wiz.script = map[string]ui.Step{ // the Hub's order: CAPTCHA, 2FA, mailbox password
+		"submit carol@example.org": ui.StepCaptcha,
+		"captcha solved":           ui.StepTOTP,
+		"totp 123456":              ui.StepMailboxPassword,
+		"mailbox":                  ui.StepDone,
 	}
 	f.w.Update(twoAccounts())
 	f.w.Show("a1")
@@ -126,11 +136,6 @@ func TestWizardScreensFollowSteps(t *testing.T) {
 	if f.wiz.pw != "hunter2" {
 		t.Errorf("Submit got pw=%q", f.wiz.pw)
 	}
-	if !f.has("2FA code") {
-		t.Fatalf("not on the TOTP screen: %v", f.texts())
-	}
-	test.Type(f.entry("123456"), "123456")
-	f.tap("Verify")
 	if !f.hasButton("Open verification") {
 		t.Fatalf("not on the CAPTCHA screen: %v", f.texts())
 	}
@@ -139,6 +144,23 @@ func TestWizardScreensFollowSteps(t *testing.T) {
 		t.Errorf("open called with %v", f.open)
 	}
 	f.tap("I solved it")
+	if !f.has("2FA code") {
+		t.Fatalf("not on the TOTP screen: %v", f.texts())
+	}
+	test.Type(f.entry("123456"), "123456")
+	f.tap("Verify")
+	if !f.has("This account uses two-password mode") {
+		t.Fatalf("not on the mailbox-password screen: %v", f.texts())
+	}
+	test.Type(f.field("Mailbox password"), "mbx-pw")
+	f.tap("Unlock")
+	if f.wiz.mailbox != "mbx-pw" {
+		t.Errorf("SubmitMailboxPassword got %q", f.wiz.mailbox)
+	}
+	want := []string{"submit carol@example.org", "captcha solved", "totp 123456", "mailbox"}
+	if got := f.wiz.got(); !slices.Equal(got, want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
 	for _, s := range []string{"http://127.0.0.1:8080/", "carol@example.org", mask} {
 		if !f.has(s) {
 			t.Errorf("done screen lacks %q: %v", s, f.texts())
@@ -458,5 +480,193 @@ func TestShowLeavesAWizardOnItsFirstScreen(t *testing.T) {
 	f.wait()
 	if f.w.mode != paneAccount || f.w.selected != "a1" {
 		t.Errorf("mode %v selected %q: want account a1", f.w.mode, f.w.selected)
+	}
+}
+
+// field is the visible entry right under the label text (the field's label,
+// drawn above it in the same box); it fails the test when there is none.
+func (f *fixture) field(label string) *widget.Entry {
+	f.t.Helper()
+	var found *widget.Entry
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		c, ok := o.(*fyne.Container)
+		if !ok || found != nil {
+			return
+		}
+		for i := 1; i < len(c.Objects); i++ {
+			l, isLabel := c.Objects[i-1].(*widget.Label)
+			e, isEntry := c.Objects[i].(*widget.Entry)
+			if isLabel && isEntry && l.Text == label && l.Visible() && e.Visible() {
+				found = e
+				return
+			}
+		}
+	})
+	if found == nil {
+		f.t.Fatalf("no visible entry under a label %q; visible: %v", label, f.texts())
+	}
+	return found
+}
+
+// entries is every visible entry of the screen, in drawing order.
+func (f *fixture) entries() []*widget.Entry {
+	var out []*widget.Entry
+	walk(f.roots(), func(o fyne.CanvasObject) {
+		if e, ok := o.(*widget.Entry); ok {
+			out = append(out, e)
+		}
+	})
+	return out
+}
+
+// Every wizard screen with a field is usable from the keyboard and names its
+// fields: each entry has a label above it, the first one has the focus when
+// the screen is drawn, and Enter in the last one does what the screen's main
+// button does.
+func TestWizardScreensAreKeyboardReady(t *testing.T) {
+	for _, tc := range []struct {
+		step   ui.Step
+		labels []string // the entries' labels, top to bottom
+		fill   []string // what is typed in each
+		call   string   // the model call Enter in the last entry makes
+	}{
+		{ui.StepCredentials, []string{"Proton address", "Password"}, []string{"carol@example.org", "hunter2"}, "submit carol@example.org"},
+		{ui.StepTOTP, []string{"2FA code"}, []string{"123456"}, "totp 123456"},
+		{ui.StepMailboxPassword, []string{"Mailbox password"}, []string{"mbx-pw"}, "mailbox"},
+	} {
+		t.Run(string(tc.step), func(t *testing.T) {
+			f := newFixture(t)
+			f.wiz.step = tc.step
+			f.w.Update(twoAccounts())
+			f.w.Show("")
+			f.tapAdd()
+			all := f.entries()
+			if len(all) != len(tc.labels) {
+				t.Fatalf("%d entries on the screen, want %d (%v)", len(all), len(tc.labels), tc.labels)
+			}
+			for i, l := range tc.labels {
+				if e := f.field(l); e != all[i] {
+					t.Errorf("the entry under %q is not the screen's entry #%d", l, i+1)
+				}
+			}
+			if got := f.w.win.Canvas().Focused(); got != all[0] {
+				t.Errorf("focused = %v, want the first entry (%q)", got, tc.labels[0])
+			}
+			for i, e := range all {
+				test.Type(e, tc.fill[i])
+			}
+			all[len(all)-1].TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+			f.wait()
+			if got := f.wiz.got(); !slices.Equal(got, []string{tc.call}) {
+				t.Errorf("calls after Enter = %v, want [%s]", got, tc.call)
+			}
+		})
+	}
+}
+
+// A field left behind keeps its Enter to itself: once its screen is gone (a
+// new screen drawn, or the wizard cancelled) Enter in it makes no call, and
+// the keyboard focus is not left on it.
+func TestWizardEnterInAFieldLeftBehindDoesNothing(t *testing.T) {
+	for name, leave := range map[string]func(*fixture){
+		"next screen": func(f *fixture) { f.tap("Unlock") }, // a wrong try: the screen is drawn again
+		"cancel":      func(f *fixture) { f.tap("Cancel") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.wiz.step = ui.StepMailboxPassword
+			f.w.Update(twoAccounts())
+			f.w.Show("")
+			f.tapAdd()
+			old := f.field("Mailbox password")
+			leave(f)
+			before := f.wiz.got()
+			if f.w.win.Canvas().Focused() == old {
+				t.Error("the focus stayed on the field left behind")
+			}
+			test.Type(old, "x")
+			old.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+			f.wait()
+			if got := f.wiz.got(); !slices.Equal(got, before) {
+				t.Errorf("calls %v after Enter in the old field, want %v", got, before)
+			}
+		})
+	}
+}
+
+// Enter in the address moves on to the password: it does not sign in with
+// an empty password.
+func TestWizardEnterInTheAddressGoesToThePassword(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	addr := f.field("Proton address")
+	test.Type(addr, "carol@example.org")
+	addr.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	f.wait()
+	if got := f.wiz.got(); len(got) != 0 {
+		t.Errorf("Enter in the address called %v", got)
+	}
+	if got := f.w.win.Canvas().Focused(); got != f.field("Password") {
+		t.Errorf("focused = %v, want the password entry", got)
+	}
+}
+
+// The mailbox-password screen (spec §5.6): its title, its text, the error of
+// a wrong try above the labelled field, Cancel and Unlock. Unlock sends the
+// field's text, empties the field at once and wipes the bytes sent once the
+// call returns; after a wrong try the field has the focus again.
+func TestWizardMailboxPasswordScreen(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.step = ui.StepMailboxPassword
+	f.wiz.err = &exitcode.Error{Code: exitcode.MustAct, Err: errors.New("the mailbox password does not unlock the account keys"), Hint: "2 tries left"}
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	const (
+		name    = "Mailbox password" // the title, then the field's label
+		intro   = "This account uses two-password mode: enter its mailbox password (the second password, which decrypts your data)."
+		errLine = "the mailbox password does not unlock the account keys\n2 tries left"
+	)
+	texts := f.texts()
+	var order []string // the screen's texts among those, top to bottom
+	for _, s := range texts {
+		if s == name || s == intro || s == errLine {
+			order = append(order, s)
+		}
+	}
+	if want := []string{name, intro, errLine, name}; !slices.Equal(order, want) {
+		t.Errorf("texts in order %q, want %q (all: %v)", order, want, texts)
+	}
+	unlock := f.button("Unlock")
+	if unlock.Importance != widget.HighImportance {
+		t.Error("Unlock is not the main button")
+	}
+	f.button("Cancel")
+	pw := f.field(name)
+	if !pw.Password {
+		t.Error("the mailbox password is shown in clear")
+	}
+	test.Type(pw, "mbx-pw")
+	f.wiz.block = make(chan struct{})
+	test.Tap(unlock)
+	if pw.Text != "" {
+		t.Errorf("the entry still holds %q while the call runs", pw.Text)
+	}
+	if !f.has("Working…") || !unlock.Disabled() {
+		t.Errorf("no Working…, or Unlock still enabled: %v", f.texts())
+	}
+	close(f.wiz.block)
+	f.wait()
+	if f.wiz.mailbox != "mbx-pw" {
+		t.Fatalf("SubmitMailboxPassword got %q", f.wiz.mailbox)
+	}
+	if len(f.wiz.mailBuf) == 0 || slices.ContainsFunc(f.wiz.mailBuf, func(b byte) bool { return b != 0 }) {
+		t.Errorf("the bytes sent are not wiped after the call: %q", f.wiz.mailBuf)
+	}
+	// The fake keeps the step and the error: the screen is drawn again.
+	if got := f.w.win.Canvas().Focused(); got != f.field(name) {
+		t.Errorf("focused = %v after a wrong try, want the field", got)
 	}
 }

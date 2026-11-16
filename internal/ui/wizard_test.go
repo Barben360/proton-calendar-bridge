@@ -18,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginflow"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
+	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
 
@@ -153,6 +154,30 @@ func TestWizardTOTP(t *testing.T) {
 	}
 	view, pw := w.Done()
 	if view.ID == "" || pw == "" {
+		t.Errorf("Done = %+v, %q", view, pw)
+	}
+}
+
+// A two-password account: the wizard stops on its mailbox-password step
+// once the login password is accepted, and the mailbox password finishes the
+// add.
+func TestWizardMailboxPassword(t *testing.T) {
+	l := newLabWith(t, protontest.Options{TwoPassword: true})
+	b := l.start(t)
+	w := ui.NewWizard(b)
+	if err := w.Submit(t.Context(), l.f.Username, []byte(l.f.Password)); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if w.Step() != ui.StepMailboxPassword {
+		t.Fatalf("Step = %q, want %q", w.Step(), ui.StepMailboxPassword)
+	}
+	if err := w.SubmitMailboxPassword(t.Context(), []byte(l.f.MailboxPassword)); err != nil {
+		t.Fatalf("SubmitMailboxPassword: %v", err)
+	}
+	if w.Step() != ui.StepDone || w.Err() != nil {
+		t.Fatalf("Step = %q, Err = %v", w.Step(), w.Err())
+	}
+	if view, pw := w.Done(); view.ID == "" || pw == "" {
 		t.Errorf("Done = %+v, %q", view, pw)
 	}
 }

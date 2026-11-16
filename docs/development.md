@@ -195,7 +195,7 @@ Credits for logic reused from other projects are in the [README](../README.md).
 The `pcb-ui` pictures in the README and [desktop](desktop.md) are rendered by Fyne's test driver on made-up accounts (no bridge, no keyring, no Proton call), in the light and the dark variant, at twice the window's size, with a thin frame in the theme's border colour:
 
 ```sh
-make screenshots   # writes docs/assets/ui/{account,add-account}-{light,dark}.png
+make screenshots   # writes docs/assets/ui/{account,add-account,mailbox-password}-{light,dark}.png
 ```
 
 Run it after a change to the window and commit the PNGs. The same test (`TestScreenshots` in `internal/ui/desktop/screenshots_test.go`) runs in `make test`, lighter (one view at 1×, into a temporary directory, so it does not starve the timing-sensitive login tests CI runs beside it), and fails when a picture has the wrong size, lacks its 1 px frame (so the window stands out from a README page of its own colour), or the two variants are not told apart. The output is byte-for-byte reproducible on one Fyne version.

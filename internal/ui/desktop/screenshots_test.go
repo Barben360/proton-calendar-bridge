@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"errors"
 	"image"
 	"image/color"
 	"image/draw"
@@ -15,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
@@ -78,6 +80,13 @@ func TestScreenshots(t *testing.T) {
 			}
 		}},
 		{"add-account", func(f *fixture) { f.w.openWizard("carol@proton.me") }},
+		// A two-password account after a wrong try: the error line above the field.
+		{"mailbox-password", func(f *fixture) {
+			f.wiz.step = ui.StepMailboxPassword
+			f.wiz.err = &exitcode.Error{Code: exitcode.MustAct,
+				Err: errors.New("the mailbox password does not unlock the account keys"), Hint: "enter the mailbox password again (2 tries left)"}
+			f.w.openWizard("")
+		}},
 	}
 	if dir == "" {
 		dir, scale, shots = t.TempDir(), 1, shots[:1]

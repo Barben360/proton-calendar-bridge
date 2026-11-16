@@ -55,6 +55,8 @@ type WizardModel interface {
 	Account() string
 	Submit(ctx context.Context, address string, password []byte) error
 	SubmitTOTP(ctx context.Context, code string) error
+	// SubmitMailboxPassword keeps no copy of password: the caller wipes it.
+	SubmitMailboxPassword(ctx context.Context, password []byte) error
 	CaptchaSolved(ctx context.Context) error
 	Done() (ui.AccountView, string)
 	Cancel()
@@ -469,6 +471,7 @@ func (w *Window) openWizard(address string) {
 	w.wizard = w.newWizard()
 	w.wiz.start(address)
 	w.setRight(w.wiz.root)
+	w.wiz.render() // once in the window: the first field can take the focus
 	w.drawRows()
 }
 

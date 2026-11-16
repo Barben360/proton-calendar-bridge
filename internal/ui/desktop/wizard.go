@@ -36,14 +36,15 @@ func (p *wizardPane) inFlight() bool { return p.cur != nil && p.cur.on }
 
 func (p *wizardPane) model() WizardModel { return p.w.wizard }
 
-// start shows the first screen, with address filled in when it is a sign-in.
+// start makes the pane, with address filled in when it is a sign-in; render
+// draws its first screen once the pane is in the window.
 func (p *wizardPane) start(address string) {
 	p.address = address
 	p.root = container.NewStack()
-	p.render()
 }
 
-// reset forgets the screen, hiding a password the Done screen showed.
+// reset forgets the screen, hiding a password the Done screen showed. The
+// keyboard focus leaves the screen's field with it.
 func (p *wizardPane) reset() {
 	if p.done != nil {
 		p.done.hide()
@@ -51,13 +52,37 @@ func (p *wizardPane) reset() {
 	}
 	p.address = ""
 	p.cur = nil
+	p.w.win.Canvas().Unfocus()
 }
 
-// set shows a step's screen: a white card in the pane.
+// set shows a step's screen: a white card in the pane. The focus leaves the
+// screen it replaces; a screen with fields then gives it to its first one.
 func (p *wizardPane) set(o fyne.CanvasObject) {
 	card := newPanel(o, colorCard, theme.ColorNameSeparator, 12, 16, 12)
 	p.root.Objects = []fyne.CanvasObject{container.NewVScroll(pad(4, 24, 28, 28, container.NewVBox(card)))}
 	p.root.Refresh()
+	p.w.win.Canvas().Unfocus()
+}
+
+// focus gives the keyboard to a field of the screen just drawn.
+func (p *wizardPane) focus(e *widget.Entry) { p.w.win.Canvas().Focus(e) }
+
+// field is an entry with its label drawn just above it.
+func field(label string, e *widget.Entry) fyne.CanvasObject {
+	return vbox(0, widget.NewLabel(label), e)
+}
+
+// submitOnEnter makes Enter in e do what a tap on the screen's main button
+// does, while that screen is the one shown and no call of it runs (a
+// field left behind by an earlier screen, or by a closed wizard, does
+// nothing).
+func (p *wizardPane) submitOnEnter(e *widget.Entry, main *widget.Button, b *busy) {
+	e.OnSubmitted = func(string) {
+		if p.cur != b || b.on || main.Disabled() {
+			return
+		}
+		main.OnTapped()
+	}
 }
 
 func title(s string) fyne.CanvasObject {
@@ -104,6 +129,8 @@ func (p *wizardPane) render() {
 		p.totp()
 	case ui.StepCaptcha:
 		p.captcha()
+	case ui.StepMailboxPassword:
+		p.mailboxPassword()
 	case ui.StepDone:
 		p.finish()
 	default:
@@ -139,7 +166,11 @@ func (p *wizardPane) credentials() {
 	sign.Importance = widget.HighImportance
 	b = newBusy(addr, pw, sign, cancel)
 	p.cur = b
-	p.set(container.NewVBox(title("Add an account"), p.errLabel(), addr, pw, buttons(cancel, sign), b.label))
+	addr.OnSubmitted = func(string) { p.focus(pw) }
+	p.submitOnEnter(pw, sign, b)
+	p.set(container.NewVBox(title("Add an account"), p.errLabel(),
+		field("Proton address", addr), field("Password", pw), buttons(cancel, sign), b.label))
+	p.focus(addr)
 }
 
 func (p *wizardPane) totp() {
@@ -154,7 +185,36 @@ func (p *wizardPane) totp() {
 	verify.Importance = widget.HighImportance
 	b = newBusy(code, verify, cancel)
 	p.cur = b
-	p.set(container.NewVBox(title("Two-factor code"), wrapped("Enter your 2FA code."), p.errLabel(), code, buttons(cancel, verify), b.label))
+	p.submitOnEnter(code, verify, b)
+	p.set(container.NewVBox(title("Two-factor code"), wrapped("Enter your 2FA code."), p.errLabel(),
+		field("2FA code", code), buttons(cancel, verify), b.label))
+	p.focus(code)
+}
+
+// mailboxPassword asks a two-password account for its mailbox password. As
+// with the login password, it is read from the entry into a byte slice at
+// the Unlock tap, the entry is cleared at once, and the slice is wiped when
+// the call returns.
+func (p *wizardPane) mailboxPassword() {
+	pw := widget.NewPasswordEntry()
+	cancel := p.cancelBtn()
+	var b *busy
+	unlock := widget.NewButton("Unlock", func() {
+		secret := []byte(pw.Text)
+		pw.SetText("") // the entry never holds it past the tap
+		p.call(b, "Working…", func(ctx context.Context, m WizardModel) error {
+			defer clear(secret)
+			return m.SubmitMailboxPassword(ctx, secret)
+		})
+	})
+	unlock.Importance = widget.HighImportance
+	b = newBusy(pw, unlock, cancel)
+	p.cur = b
+	p.submitOnEnter(pw, unlock, b)
+	p.set(container.NewVBox(title("Mailbox password"),
+		wrapped("This account uses two-password mode: enter its mailbox password (the second password, which decrypts your data)."),
+		p.errLabel(), field("Mailbox password", pw), buttons(cancel, unlock), b.label))
+	p.focus(pw)
 }
 
 func (p *wizardPane) captcha() {

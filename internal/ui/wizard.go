@@ -16,7 +16,10 @@ const (
 	StepCredentials = loginflow.StepCredentials
 	StepTOTP        = loginflow.StepTOTP
 	StepCaptcha     = loginflow.StepCaptcha
-	StepDone        = loginflow.StepDone
+	// StepMailboxPassword: a two-password account waits for its mailbox
+	// password.
+	StepMailboxPassword = loginflow.StepMailboxPassword
+	StepDone            = loginflow.StepDone
 )
 
 // doneTimeout bounds what Done reads from the Bridge.
