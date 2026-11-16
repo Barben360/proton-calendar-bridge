@@ -430,9 +430,9 @@ func (w *Window) showDefault() {
 const stoppedPane = "The bridge is stopped. Fix what the banner above says, then Settings → Restart bridge."
 
 // waiting is true while the wizard waits for the person mid-login (the 2FA
-// code, the mailbox password or the CAPTCHA) or a call of it runs (a Sign in in flight, review
-// M5): leaving it would cancel the login, and Cancel removes the account an
-// add created.
+// code, the mailbox password or the CAPTCHA) or a call of it runs (a Sign in
+// in flight, review M5): leaving it would cancel the login, and Cancel
+// removes the account an add created.
 func (w *Window) waiting() bool {
 	if w.mode != paneWizard || w.wizard == nil {
 		return false

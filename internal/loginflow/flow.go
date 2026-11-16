@@ -180,8 +180,8 @@ func wrongStep(want Step, got Step) error {
 // Submit logs in (or adds) the account address, with the password (the
 // flow keeps its own copy: wipe the argument when it returns). It never asks
 // for unattended relogin (pcb login --unattended-relogin only), so it turns
-// it off for an account that had it. It goes to StepDone, StepTOTP or
-// StepCaptcha, or stays on the credentials with Err set.
+// it off for an account that had it. It goes to StepDone, StepTOTP,
+// StepMailboxPassword or StepCaptcha, or stays on the credentials with Err set.
 func (f *Flow) Submit(ctx context.Context, address string, password []byte) error {
 	f.op.Lock()
 	defer f.op.Unlock()
