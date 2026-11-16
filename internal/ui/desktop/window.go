@@ -430,7 +430,7 @@ func (w *Window) showDefault() {
 const stoppedPane = "The bridge is stopped. Fix what the banner above says, then Settings → Restart bridge."
 
 // waiting is true while the wizard waits for the person mid-login (the 2FA
-// code or the CAPTCHA) or a call of it runs (a Sign in in flight, review
+// code, the mailbox password or the CAPTCHA) or a call of it runs (a Sign in in flight, review
 // M5): leaving it would cancel the login, and Cancel removes the account an
 // add created.
 func (w *Window) waiting() bool {
@@ -438,7 +438,7 @@ func (w *Window) waiting() bool {
 		return false
 	}
 	s := w.wizard.Step()
-	return s == ui.StepTOTP || s == ui.StepCaptcha || w.wiz.inFlight()
+	return s == ui.StepTOTP || s == ui.StepMailboxPassword || s == ui.StepCaptcha || w.wiz.inFlight()
 }
 
 func (w *Window) selectAccount(id string) {
@@ -477,7 +477,7 @@ func (w *Window) openWizard(address string) {
 
 // ShowLogin shows the window on the add-account wizard with username filled
 // in (an agent's login tool, pcb-ui being the daemon). A login the person
-// is in the middle of (a Sign in in flight, 2FA, CAPTCHA, the Done screen)
+// is in the middle of (a Sign in in flight, 2FA, mailbox password, CAPTCHA, the Done screen)
 // is kept: the window only comes to the front. Call it on the main
 // goroutine.
 func (w *Window) ShowLogin(username string) {
@@ -490,7 +490,7 @@ func (w *Window) ShowLogin(username string) {
 }
 
 // Show shows the window, on account when it names one the window knows. A
-// wizard waiting for the person (2FA, CAPTCHA) is kept: a notification click
+// wizard waiting for the person (2FA, mailbox password, CAPTCHA) is kept: a notification click
 // or a tray line must not drop the login it holds (live 2026-11-13, F2).
 func (w *Window) Show(account string) {
 	switch {

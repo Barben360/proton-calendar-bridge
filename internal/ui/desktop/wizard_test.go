@@ -440,7 +440,7 @@ func TestShowKeepsAWizardWaitingForThePerson(t *testing.T) {
 	for _, tc := range []struct {
 		step   ui.Step
 		screen string
-	}{{ui.StepTOTP, "Verify"}, {ui.StepCaptcha, "Open verification"}} {
+	}{{ui.StepTOTP, "Verify"}, {ui.StepMailboxPassword, "Unlock"}, {ui.StepCaptcha, "Open verification"}} {
 		for name, open := range map[string]func(*fixture){
 			"notification of the add": func(f *fixture) { f.w.Show("new1") },
 			"another account":         func(f *fixture) { f.w.Show("a1") },
