@@ -387,3 +387,51 @@ func TestWrongUpfrontMailboxPasswordIsHeld(t *testing.T) {
 		t.Errorf("%d POST /auth/v4, want 1", n)
 	}
 }
+
+// A wrong mailbox password given up front to a 2FA account waits through the
+// 2FA hold, then counts as the first try once the code passes.
+func TestWrongUpfrontMailboxPasswordDuringTOTPHold(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true, TwoPassword: true})
+	r := e.req()
+	r.MailboxPassword = "not-the-mailbox-password"
+	if res := e.login(t, r); res.State != service.StateNeedsTOTP {
+		t.Fatalf("Login = %+v, want needs-totp", res)
+	}
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, t0))
+	ee := wantExit(t, err, exitcode.MustAct)
+	if ee.Error() != "the mailbox password does not unlock the account keys" || !strings.Contains(ee.Hint, "2 tries left") {
+		t.Errorf("SubmitTOTP = %q (hint %q)", ee.Error(), ee.Hint)
+	}
+	if st, _ := e.svc.Status(t.Context()); st.Phase != "needs-mailbox-password" {
+		t.Fatalf("phase = %q, want needs-mailbox-password", st.Phase)
+	}
+	res, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if n := e.f.Calls("POST", "/auth/v4"); n != 1 {
+		t.Errorf("%d POST /auth/v4, want 1", n)
+	}
+	if !keysOpen(t, e, e.account(t)) {
+		t.Error("the sealed KeyPass does not open the account keys")
+	}
+}
+
+// Abandoning a login held for its mailbox password revokes its session.
+func TestAbandonAtMailboxStepRevokes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoPassword: true})
+	if res := e.login(t, e.req()); res.State != service.StateNeedsMailboxPassword {
+		t.Fatalf("Login = %+v, want needs-mailbox-password", res)
+	}
+	e.svc.AbandonLogin(t.Context())
+	if n := e.f.Calls("DELETE", "/auth/v4"); n != 1 {
+		t.Errorf("%d DELETE /auth/v4, want 1 (the held session revoked)", n)
+	}
+	_, err := e.svc.SubmitMailboxPassword(t.Context(), e.f.MailboxPassword)
+	if ee := wantExit(t, err, exitcode.MustAct); ee.Error() != "no login is waiting for a mailbox password" {
+		t.Errorf("SubmitMailboxPassword after abandon = %q", ee.Error())
+	}
+	noSecrets(t, e)
+}

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	gpa "github.com/ProtonMail/go-proton-api"
+
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
@@ -49,5 +51,21 @@ func TestPendingPasswordIsZeroedOnExpiry(t *testing.T) {
 	defer l.mu.Unlock()
 	if l.pending != nil || l.waiting.Load() != nil {
 		t.Error("the expired login is still pending")
+	}
+}
+
+// release drops what a held login fetched for the derivation, with its
+// passwords.
+func TestReleaseDropsFetchedKeys(t *testing.T) {
+	t.Parallel()
+	pl := &pendingLogin{
+		password: []byte("pw"), mailbox: []byte("mb"),
+		salts: gpa.Salts{{ID: "k", KeySalt: "s"}},
+		user:  gpa.User{ID: "u", Name: "n"},
+		addrs: []gpa.Address{{ID: "a"}},
+	}
+	pl.release()
+	if pl.salts != nil || pl.user.ID != "" || pl.user.Name != "" || pl.addrs != nil {
+		t.Errorf("after release: salts %v, user %q, addrs %v; want all dropped", pl.salts, pl.user.ID, pl.addrs)
 	}
 }

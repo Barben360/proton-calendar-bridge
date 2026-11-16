@@ -62,6 +62,7 @@ func (pl *pendingLogin) release() {
 	}
 	clear(pl.password)
 	clear(pl.mailbox)
+	pl.salts, pl.user, pl.addrs = nil, gpa.User{}, nil
 }
 
 // keysFetched reports whether pl passed the 2FA step and fetched what the
