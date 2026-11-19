@@ -231,13 +231,16 @@ func TestRunDrainsOnCancel(t *testing.T) {
 		res <- err
 	}()
 	<-hub.entered
-	start := time.Now()
 	r.cancel()
+	// Once the listener refuses new connections the drain has begun; Run
+	// must still wait for the request in flight.
+	r.waitNotAccepting(t)
 	select {
 	case <-r.fin:
 		t.Fatalf("Run returned (%v) while a request was in flight", r.err)
-	case <-time.After(300 * time.Millisecond):
+	default:
 	}
+	released := time.Now()
 	close(hub.release)
 	if err := <-res; err != nil {
 		t.Errorf("the request in flight did not complete: %v", err)
@@ -247,11 +250,31 @@ func TestRunDrainsOnCancel(t *testing.T) {
 		if err := r.err; err != nil {
 			t.Errorf("Run = %v, want nil", err)
 		}
-	case <-time.After(5500 * time.Millisecond):
-		t.Fatal("Run did not return within 5.5 s of the cancel")
+	case <-time.After(30 * time.Second): // a hang guard only
+		t.Fatal("Run did not return once the request in flight completed")
 	}
-	if d := time.Since(start); d > 5500*time.Millisecond {
-		t.Errorf("Run took %v", d)
+	// The request completed, so Run need not wait out the 5 s drain (its
+	// exact length is TestDrainBoundaries').
+	if d := time.Since(released); d >= 4500*time.Millisecond {
+		t.Errorf("Run returned %v after the request completed: it waited out the drain", d)
+	}
+}
+
+// waitNotAccepting waits until the daemon's listener refuses connections:
+// the stop has begun.
+func (r *running) waitNotAccepting(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", r.info.Addr, time.Second)
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("the listener still accepts connections after the stop began")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -277,7 +300,7 @@ func TestRunCutsWhatOutlivesTheDrain(t *testing.T) {
 		if err := r.err; err != nil {
 			t.Errorf("Run = %v, want nil", err)
 		}
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second): // a hang guard only: the 5 s is TestDrainBoundaries'
 		t.Fatal("a stuck request held Run past the drain")
 	}
 	if d := time.Since(start); d < 4500*time.Millisecond {
@@ -352,21 +375,9 @@ func TestSessionEndDuringTheDrainCutsItToTwoSeconds(t *testing.T) {
 	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = ended })
 	start := time.Now()
 	r.cancel()
-	time.Sleep(500 * time.Millisecond)
+	r.waitNotAccepting(t) // the drain has begun
 	close(ended)
 	drainedWithin(t, r, cut, start, 1800*time.Millisecond, 4500*time.Millisecond)
-}
-
-// SessionEnd closing after 2 s of drain ends it at once.
-func TestLateSessionEndEndsTheDrainAtOnce(t *testing.T) {
-	t.Parallel()
-	ended := make(chan struct{})
-	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = ended })
-	start := time.Now()
-	r.cancel()
-	time.Sleep(3 * time.Second)
-	close(ended)
-	drainedWithin(t, r, cut, start, 3*time.Second, 4500*time.Millisecond)
 }
 
 // The whole stop on a session end, the sync loops' end after the drain
@@ -416,13 +427,15 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// An open SessionEnd leaves the drain at 5 s.
+// An open SessionEnd leaves the drain at 5 s: the request is not cut before
+// (the 5 s itself, and the 2 s cut of a late session end, are exact in
+// TestDrainBoundaries; the upper bound here is only a hang guard).
 func TestDrainIsFiveSecondsWhileSessionEndIsOpen(t *testing.T) {
 	t.Parallel()
 	r, cut := stuckRequest(t, func(o *daemon.Options) { o.SessionEnd = make(chan struct{}) })
 	start := time.Now()
 	r.cancel()
-	drainedWithin(t, r, cut, start, 4500*time.Millisecond, 6*time.Second)
+	drainedWithin(t, r, cut, start, 4500*time.Millisecond, 30*time.Second)
 }
 
 // Closing Cut during the drain ends Run at once with ErrCut (exit 20).
@@ -442,7 +455,7 @@ func TestRunReturnsErrCutWhenCutCloses(t *testing.T) {
 	}()
 	<-hub.entered
 	r.cancel()
-	time.Sleep(100 * time.Millisecond)
+	r.waitNotAccepting(t) // the drain has begun
 	start := time.Now()
 	close(cut)
 	select {

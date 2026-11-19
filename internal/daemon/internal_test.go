@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/config"
@@ -110,36 +111,76 @@ func TestStopListenerCutsWhatOutlivesTheDrain(t *testing.T) {
 	}
 }
 
-// The session-end cut is one 2 s budget for every stop of a Run, counted
-// from the first: the control socket's stop after the listener's gets what
-// is left of it, not 2 s more.
-func TestSessionEndDrainIsSharedByTheStops(t *testing.T) {
-	t.Parallel()
-	ended := make(chan struct{})
-	d := &drain{ended: ended}
-	start := time.Now()
-	first, cancel := d.context()
-	defer cancel()
-	close(ended)
-	time.Sleep(time.Second)
-	second, cancel2 := d.context()
-	defer cancel2()
-	for _, ctx := range []context.Context{first, second} {
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-			t.Fatal("a stop's drain outlived the session-end cut")
-		}
-	}
-	if e := time.Since(start); e < 1900*time.Millisecond || e > 2900*time.Millisecond {
-		t.Errorf("the stops ended %v after the first began, want 2 s", e)
-	}
-	late, cancel3 := d.context()
-	defer cancel3()
-	select {
-	case <-late.Done():
-	case <-time.After(500 * time.Millisecond):
-		t.Error("a stop begun after the 2 s waits; want it cut at once")
+// A stop's drain lasts drainTimeout; a session end cuts every stop of a Run
+// to sessionEndDrain counted from the first stop's start (the second stop
+// gets what is left, a late end cuts at once). The times are exact: the test
+// runs in a synctest bubble, where the drain's timers and time.Now are
+// virtual, and reads each context at every millisecond.
+func TestDrainBoundaries(t *testing.T) {
+	const never = time.Duration(-1)
+	ms := time.Millisecond
+	for _, c := range []struct {
+		name string
+		// endBefore: SessionEnd closes before the first stop; endAt: after
+		// that many ms of the first stop (never: it stays open).
+		endBefore bool
+		endAt     time.Duration
+		// secondAt: the second stop begins after that long (never: none).
+		secondAt time.Duration
+		// first and second are when each stop's context ends, counted from
+		// the first stop's start (never: it does not within 9 s).
+		first, second time.Duration
+	}{
+		{name: "no session end: the stop's own 5 s", endAt: never, secondAt: never, first: 5000 * ms, second: never},
+		{name: "ended before the stop: 2 s", endBefore: true, endAt: never, secondAt: never, first: 2000 * ms, second: never},
+		{name: "ended early in the stop: 2 s after its start", endAt: 500 * ms, secondAt: never, first: 2000 * ms, second: never},
+		{name: "ended 1 ms before the 2 s", endAt: 1999 * ms, secondAt: never, first: 2000 * ms, second: never},
+		{name: "ended exactly at the 2 s: at once", endAt: 2000 * ms, secondAt: never, first: 2000 * ms, second: never},
+		{name: "ended late: at once", endAt: 3000 * ms, secondAt: never, first: 3000 * ms, second: never},
+		{name: "ended after the stop's own 5 s: nothing left to cut", endAt: 6000 * ms, secondAt: never, first: 5000 * ms, second: never},
+		{name: "second stop shares the 2 s", endBefore: true, endAt: never, secondAt: 1000 * ms, first: 2000 * ms, second: 2000 * ms},
+		{name: "second stop after the 2 s is cut at once", endBefore: true, endAt: never, secondAt: 3000 * ms, first: 2000 * ms, second: 3000 * ms},
+		{name: "second stop with no session end has its own 5 s", endAt: never, secondAt: 3000 * ms, first: 5000 * ms, second: 8000 * ms},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ended := make(chan struct{})
+				d := &drain{ended: ended}
+				if c.endBefore {
+					close(ended)
+				}
+				var ctxs [2]context.Context
+				var endedAt [2]time.Duration
+				endedAt[0], endedAt[1] = never, never
+				start := time.Now()
+				var cancels []context.CancelFunc
+				ctx, cancel := d.context()
+				ctxs[0], cancels = ctx, append(cancels, cancel)
+				for elapsed := ms; elapsed <= 9*time.Second; elapsed += ms {
+					time.Sleep(ms)
+					if elapsed == c.endAt {
+						close(ended)
+					}
+					if elapsed == c.secondAt {
+						ctx, cancel := d.context()
+						ctxs[1], cancels = ctx, append(cancels, cancel)
+					}
+					synctest.Wait()
+					for i, ctx := range ctxs {
+						if ctx != nil && endedAt[i] == never && ctx.Err() != nil {
+							endedAt[i] = time.Since(start)
+						}
+					}
+				}
+				for _, cancel := range cancels {
+					cancel()
+				}
+				synctest.Wait()
+				if endedAt[0] != c.first || endedAt[1] != c.second {
+					t.Errorf("the stops' contexts ended at %v and %v; want %v and %v (never: -1ns)", endedAt[0], endedAt[1], c.first, c.second)
+				}
+			})
+		})
 	}
 }
 
