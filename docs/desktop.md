@@ -26,7 +26,7 @@ It runs on Linux (X11 and Wayland with a StatusNotifierItem tray) and on Windows
 
 ```sh
 pcb-ui                       # the window and the tray icon
-pcb-ui --background          # tray only (the window opens anyway when no tray answers)
+pcb-ui --background          # tray only (waits up to 15 s for the tray, then opens the window if none answers)
 ```
 
 After `make install-ui` it is also in your applications menu. On Windows the installer puts a `pcb-ui` shortcut in the Start menu.
@@ -42,7 +42,7 @@ After `make install-ui` it is also in your applications menu. On Windows the ins
 | Update available | A panel at the top of the window when a newer stable release exists: "Open release page", "Copy update command" (the `install.sh` line, with the flags of this install), and "Later", which hides it for 48 hours. It comes back after, for the same version too: a fix only protects those who install it. The tray menu shows "Update available: vX.Y.Z" above "Open pcb" as long as one exists. The tray icon does not change. ([security](security.md#the-update-check)) |
 | Settings | "Start at login", "Check for updates", "Open config.toml", "Restart bridge", the log level. |
 
-Closing the window hides it; Quit in the tray menu stops the bridge. Without a tray, closing the window quits (the same drain as Quit).
+Closing the window hides it; Quit in the tray menu stops the bridge. Without a tray, see [No tray icon on GNOME](#no-tray-icon-on-gnome) below: closing the window then quits `pcb-ui` started by hand, and only hides it when started with `--background`.
 
 ## Add an account
 
@@ -52,6 +52,7 @@ An account in Proton's two-password mode gets one more screen after the 2FA code
 - Type the second password (the one that decrypts your data), then press Unlock or Enter.
 - A wrong one shows an error with the tries left and stays on that screen, with no new Proton login; the third wrong one cancels the login.
 - Every field of the wizard has a label, the first one has the focus and Enter submits.
+- A login waiting for you (2FA code, mailbox password, CAPTCHA, or a Sign in in progress) is not dropped by accident: the Settings gear, another account or the + ask "Abandon this login?" first, and closing the window only hides it, leaving the login where it was. The wizard's own Cancel button cancels at once, even while a call to Proton hangs.
 - The account list shows `needs mailbox password` while the login waits.
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
@@ -77,7 +78,7 @@ An agent on another machine uses the remote `/mcp` with a token: turn it on in `
 
 GNOME shows no tray icon unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled.
 
-Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
+With `--background` (the autostart), `pcb-ui` first waits up to 15 seconds for the tray to register, as the AppIndicator extension or the Plasma panel often starts after it. Without a tray, `pcb-ui` opens its window and says so once. Started by hand, closing that window quits `pcb-ui`, since nothing could bring it back; with `--background` (the autostart), closing it only hides it, so the bridge keeps running, and running `pcb-ui` again shows the window; to stop it, end the `pcb-ui` process (`pkill pcb-ui`) or log out. If the tray registers later, restart `pcb-ui`. Closing the window to quit while a login waits for you (2FA code, CAPTCHA) asks "Abandon this login?" first.
 
 ## One server per state directory
 
@@ -93,7 +94,7 @@ Without a tray, `pcb-ui` opens its window and says so once, and closing that win
 
 ## Start at login
 
-Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead, the one the installer's "Start at login" box writes too ([below](#on-windows)).
+Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead, the one the installer's "Start at login" box writes too ([below](#on-windows)). The switch shows "on" only when the entry starts this executable: after the program moved (or a switch from the zip to the MSI) a stale entry shows "off", and switching it on rewrites it.
 
 ## On Windows
 

@@ -299,12 +299,53 @@ func SetAutostart(on bool, exe string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// Autostart reports whether the autostart entry exists.
-func Autostart() bool {
+// Autostart reports whether the autostart entry exists and starts exe (this
+// executable): a stale entry, after a move, is not "on".
+func Autostart(exe string) bool {
 	path, err := autostartPath()
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(path)
-	return err == nil
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	got, ok := entryExe(string(b))
+	return ok && got == exe
+}
+
+// entryExe is the program the Exec line of a desktop entry starts: the
+// inverse of what SetAutostart writes with execArg. The file's string
+// escapes come off first (\\ is a backslash), then the Exec quoting's
+// (inside quotes \" \` \$ \\ stand for themselves and %% for a percent).
+func entryExe(content string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		v, ok := strings.CutPrefix(line, "Exec=")
+		if !ok {
+			continue
+		}
+		v = strings.NewReplacer(`\\`, `\`, `\s`, " ", `\t`, "\t", `\n`, "\n", `\r`, "\r").Replace(v)
+		rest, quoted := strings.CutPrefix(v, `"`)
+		if !quoted {
+			exe, _, _ := strings.Cut(v, " ")
+			return exe, exe != ""
+		}
+		var b strings.Builder
+		for i := 0; i < len(rest); i++ {
+			switch c := rest[i]; {
+			case c == '"':
+				return b.String(), b.Len() > 0
+			case c == '\\' && i+1 < len(rest) && strings.IndexByte("\"`$\\", rest[i+1]) >= 0:
+				i++
+				b.WriteByte(rest[i])
+			case c == '%' && i+1 < len(rest) && rest[i+1] == '%':
+				i++
+				b.WriteByte('%')
+			default:
+				b.WriteByte(c)
+			}
+		}
+		return "", false // an unclosed quote
+	}
+	return "", false
 }

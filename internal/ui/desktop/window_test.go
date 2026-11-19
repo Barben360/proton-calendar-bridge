@@ -457,6 +457,35 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 	}
 }
 
+// The reason is reachable from the keyboard: the info icon takes the focus
+// (Tab) and shows its tip while it has it.
+func TestReadOnlyReasonShowsOnFocus(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	f.w.win.Resize(fyne.NewSize(880, 1000))
+	tips := f.infoTips()
+	if len(tips) != 1 {
+		t.Fatalf("%d info icons, want 1", len(tips))
+	}
+	c := f.w.win.Canvas()
+	var reached bool
+	for i := 0; i < 60 && !reached; i++ {
+		c.FocusNext()
+		reached = c.Focused() == fyne.Focusable(tips[0])
+	}
+	if !reached {
+		t.Fatal("Tab never reaches the info icon")
+	}
+	if !f.has("An ambiguous gate") {
+		t.Errorf("the focused info icon shows no reason: %v", f.texts())
+	}
+	c.Unfocus()
+	if f.has("An ambiguous gate") {
+		t.Error("the reason stays after the icon lost the focus")
+	}
+}
+
 // A calendar's colour is a dot before its name. One without a colour, or
 // with one pcb cannot read, keeps the dot's room, so the names line up.
 func TestCalendarColourDot(t *testing.T) {
@@ -1012,5 +1041,36 @@ func TestEmptyPaneOffersAdd(t *testing.T) {
 	f.tap("Cancel")
 	if f.hasButton("Add account") {
 		t.Errorf("a stopped bridge's pane offers an add: %v", f.texts())
+	}
+}
+
+// An error that comes while the window is hidden (a tray line that could not
+// open the browser) must not pile modal dialogs on a window nobody sees: the
+// latest one is kept and shown once, at the next Show.
+func TestErrorsOnAHiddenWindowShowOnceAtTheNextShow(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.w.Hide()
+	f.w.showErr(errors.New("first failure"))
+	f.w.showErr(errors.New("second failure"))
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Fatal("a dialog was opened on the hidden window")
+	}
+	f.w.Show("")
+	if !f.has("second failure") {
+		t.Fatalf("the pending error is not shown at the next Show: %v", f.texts())
+	}
+	if f.has("first failure") {
+		t.Error("an older error is shown as well")
+	}
+	f.tap("OK")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("a second dialog is stacked behind the first")
+	}
+	f.w.Hide()
+	f.w.Show("")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("the error is shown again at a later Show")
 	}
 }

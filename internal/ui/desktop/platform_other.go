@@ -10,4 +10,4 @@ func SetAutostart(bool, string) error {
 }
 
 // Autostart is always false here.
-func Autostart() bool { return false }
+func Autostart(string) bool { return false }

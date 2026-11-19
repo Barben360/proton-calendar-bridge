@@ -25,18 +25,21 @@ func TestSetAutostartWritesTheRunValue(t *testing.T) {
 	runKey = func() runkey.Store { return runkey.At(sub) }
 	t.Cleanup(func() { runKey = old })
 
-	if Autostart() {
+	exe := `C:\x y\Zoë O'Brien\pcb-ui.exe`
+	if Autostart(exe) {
 		t.Fatal("autostart on before any SetAutostart")
 	}
-	exe := `C:\x y\Zoë O'Brien\pcb-ui.exe`
 	if err := SetAutostart(true, exe); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok, err := runkey.At(sub).Get(); got != `"C:\x y\Zoë O'Brien\pcb-ui.exe" --background` || !ok || err != nil {
 		t.Errorf("Run value = %q, %v, %v", got, ok, err)
 	}
-	if !Autostart() {
-		t.Error("Autostart() = false after SetAutostart(true)")
+	if !Autostart(exe) {
+		t.Error("Autostart(exe) = false after SetAutostart(true)")
+	}
+	if Autostart(`C:\elsewhere\pcb-ui.exe`) {
+		t.Error("Autostart is on for an executable the value does not start")
 	}
 	if err := SetAutostart(false, exe); err != nil {
 		t.Fatal(err)
@@ -44,7 +47,7 @@ func TestSetAutostartWritesTheRunValue(t *testing.T) {
 	if _, ok, err := runkey.At(sub).Get(); ok || err != nil {
 		t.Errorf("the value is still there after SetAutostart(false): ok %v, err %v", ok, err)
 	}
-	if Autostart() {
+	if Autostart(exe) {
 		t.Error("Autostart() = true after SetAutostart(false)")
 	}
 }

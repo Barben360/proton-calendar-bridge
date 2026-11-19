@@ -38,7 +38,13 @@ func executable() (string, error) {
 	return filepath.EvalSymlinks(p)
 }
 
-func (s *settings) Autostart() bool { return desktop.Autostart() }
+// Autostart is on only when the entry starts this executable: a stale one
+// (the program moved, the zip replaced by the MSI) shows off, and the next
+// switch on rewrites it.
+func (s *settings) Autostart() bool {
+	exe, err := s.exe()
+	return err == nil && desktop.Autostart(exe)
+}
 
 func (s *settings) SetAutostart(on bool) error {
 	exe, err := s.exe()

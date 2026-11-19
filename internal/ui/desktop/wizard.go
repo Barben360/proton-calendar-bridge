@@ -37,6 +37,14 @@ type wizardPane struct {
 // the CAPTCHA's answer).
 func (p *wizardPane) inFlight() bool { return p.cur != nil && p.cur.on }
 
+// abortCall ends the context of the call in flight, if any: a hung call
+// (Cancel stays enabled while one runs) must not outlive the wizard.
+func (p *wizardPane) abortCall() {
+	if p.cur != nil && p.cur.abort != nil {
+		p.cur.abort()
+	}
+}
+
 func (p *wizardPane) model() WizardModel { return p.w.wizard }
 
 // start makes the pane, with address filled in when it is a sign-in; render
@@ -167,7 +175,7 @@ func (p *wizardPane) credentials() {
 		})
 	})
 	sign.Importance = widget.HighImportance
-	b = newBusy(addr, pw, sign, cancel)
+	b = newBusy(addr, pw, sign)
 	p.cur = b
 	addr.OnSubmitted = func(string) { p.focus(pw) }
 	p.submitOnEnter(pw, sign, b)
@@ -186,7 +194,7 @@ func (p *wizardPane) totp() {
 		p.call(b, "Working…", func(ctx context.Context, m WizardModel) error { return m.SubmitTOTP(ctx, c) })
 	})
 	verify.Importance = widget.HighImportance
-	b = newBusy(code, verify, cancel)
+	b = newBusy(code, verify)
 	p.cur = b
 	p.submitOnEnter(code, verify, b)
 	p.set(container.NewVBox(title("Two-factor code"), wrapped("Enter your 2FA code."), p.errLabel(),
@@ -211,7 +219,7 @@ func (p *wizardPane) mailboxPassword() {
 		})
 	})
 	unlock.Importance = widget.HighImportance
-	b = newBusy(pw, unlock, cancel)
+	b = newBusy(pw, unlock)
 	p.cur = b
 	p.submitOnEnter(pw, unlock, b)
 	p.set(container.NewVBox(title("Mailbox password"),
@@ -245,7 +253,7 @@ func (p *wizardPane) captcha() {
 		p.call(b, captchaWaitText(p.model().CaptchaWait()), func(ctx context.Context, m WizardModel) error { return m.CaptchaSolved(ctx) })
 	})
 	solved.Importance = widget.HighImportance
-	b = newBusy(openBtn, solved, cancel)
+	b = newBusy(openBtn, solved)
 	p.cur = b
 	p.set(container.NewVBox(title("Human verification"),
 		wrapped("A verification is needed. Open it, solve it in the browser, then come back and press I solved it."),

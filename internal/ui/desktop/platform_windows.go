@@ -15,8 +15,10 @@ func SetAutostart(on bool, exe string) error {
 	return runKey().Delete()
 }
 
-// Autostart reports whether the Run value pcb-ui is there.
-func Autostart() bool {
-	_, ok, err := runKey().Get()
-	return ok && err == nil
+// Autostart reports whether the Run value pcb-ui is there and starts exe
+// (this executable): a stale value, after a move or a switch from the zip
+// to the MSI, is not "on".
+func Autostart(exe string) bool {
+	data, ok, err := runKey().Get()
+	return ok && err == nil && runkey.PointsTo(data, exe)
 }

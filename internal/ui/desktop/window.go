@@ -120,6 +120,12 @@ type Window struct {
 	wizard   WizardModel // the flow in progress, nil when none
 	settings *settingsPane
 
+	// pendingErr is the last error that came while the window was hidden.
+	pendingErr error
+
+	// noTrayText is the one-time no-tray line (NoTrayLine by default).
+	noTrayText string
+
 	// quitOnClose, when set (no tray host: Attach), is what closing the
 	// window runs instead of hiding it.
 	quitOnClose func()
@@ -191,6 +197,8 @@ type busy struct {
 	label *widget.Label
 	ctrls []fyne.Disableable
 	on    bool
+	// abort ends the context of the call in flight (nil when none runs).
+	abort context.CancelFunc
 }
 
 func newBusy(ctrls ...fyne.Disableable) *busy {
@@ -223,15 +231,25 @@ func (w *Window) run(b *busy, text string, work func(ctx context.Context) error,
 		return
 	}
 	b.set(true, text)
+	ctx, abort := context.WithCancel(context.Background())
+	b.abort = abort
 	var err error
-	w.async(func() { err = work(context.Background()) }, func() {
+	w.async(func() { err = work(ctx) }, func() {
+		abort()
+		b.abort = nil
 		b.set(false, "")
 		done(err)
 	})
 }
 
-// showErr tells the person what failed and what to do about it.
+// showErr tells the person what failed and what to do about it. On a hidden
+// window the error waits (the latest only) for the next Show, instead of
+// stacking dialogs nobody sees.
 func (w *Window) showErr(err error) {
+	if !w.visible {
+		w.pendingErr = err
+		return
+	}
 	msg := err.Error()
 	var ee *exitcode.Error
 	if errors.As(err, &ee) && ee.Hint != "" {
@@ -400,6 +418,7 @@ func (w *Window) closeWizard() {
 		return
 	}
 	w.wizard = nil
+	w.wiz.abortCall()
 	w.wiz.reset()
 	if m.Step() == ui.StepDone {
 		return
@@ -445,13 +464,33 @@ func (w *Window) waiting() bool {
 	return s == ui.StepTOTP || s == ui.StepMailboxPassword || s == ui.StepCaptcha || w.wiz.inFlight()
 }
 
+// confirmLeaving runs next, after asking when a waiting wizard would be
+// cancelled by it: its login, a solved CAPTCHA and the account a first login
+// created are lost with it.
+func (w *Window) confirmLeaving(next func()) {
+	if !w.waiting() {
+		next()
+		return
+	}
+	w.confirm("Abandon this login?",
+		"The login in progress is cancelled and has to be started again; a verification you solved is lost.",
+		"Abandon", next)
+}
+
 func (w *Window) selectAccount(id string) {
-	av, ok := w.account(id)
-	if !ok {
+	if _, ok := w.account(id); !ok {
 		return
 	}
 	if w.waiting() && id == w.wizard.Account() {
 		return // the add's own row: its wizard is the place for it
+	}
+	w.confirmLeaving(func() { w.showAccount(id) })
+}
+
+func (w *Window) showAccount(id string) {
+	av, ok := w.account(id)
+	if !ok {
+		return
 	}
 	w.leave(paneAccount)
 	w.mode, w.selected = paneAccount, id
@@ -460,7 +499,9 @@ func (w *Window) selectAccount(id string) {
 	w.drawRows()
 }
 
-func (w *Window) openSettings() {
+func (w *Window) openSettings() { w.confirmLeaving(w.showSettings) }
+
+func (w *Window) showSettings() {
 	w.leave(paneSettings)
 	w.mode = paneSettings
 	w.settings.open(w.view.Listener)
@@ -469,6 +510,10 @@ func (w *Window) openSettings() {
 }
 
 func (w *Window) openWizard(address string) {
+	w.confirmLeaving(func() { w.startWizard(address) })
+}
+
+func (w *Window) startWizard(address string) {
 	w.leave(paneWizard)
 	w.closeWizard() // a flow still in progress is cancelled, a shown password hides
 	w.mode = paneWizard
@@ -488,9 +533,18 @@ func (w *Window) ShowLogin(username string) {
 	if !w.waiting() && (w.mode != paneWizard || w.wizard == nil || w.wizard.Step() == ui.StepCredentials) {
 		w.openWizard(username)
 	}
+	w.reveal()
+}
+
+// reveal shows the window, with the error that came while it was hidden.
+func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
 	w.win.RequestFocus()
+	if err := w.pendingErr; err != nil {
+		w.pendingErr = nil
+		w.showErr(err)
+	}
 }
 
 // Show shows the window, on account when it names one the window knows. A
@@ -505,14 +559,19 @@ func (w *Window) Show(account string) {
 	case w.mode == paneEmpty || w.mode == paneAccount:
 		w.showDefault()
 	}
-	w.visible = true
-	w.win.Show()
-	w.win.RequestFocus()
+	w.reveal()
 }
 
 // onClose is what closing the window does: it hides (the app keeps running
 // in the tray), or quits when there is no tray to come back from (R14).
 func (w *Window) onClose() {
+	if w.quitOnClose != nil && w.waiting() {
+		// Quitting drops the login the wizard waits on: ask first.
+		w.confirm("Abandon this login?",
+			"Closing the window quits pcb-ui, and the login in progress is lost; a verification you solved is lost with it.",
+			"Quit", func() { w.Hide(); w.quitOnClose() })
+		return
+	}
 	w.Hide() // at once: the quit's drain may take a few seconds
 	if w.quitOnClose != nil {
 		w.quitOnClose()
@@ -520,12 +579,14 @@ func (w *Window) onClose() {
 }
 
 // Hide hides the window: a shown password hides and a wizard in progress is
-// cancelled (nothing lingers in a window nobody sees).
+// cancelled (nothing lingers in a window nobody sees), unless it waits for
+// the person (see waiting): that one survives the hide, as it survives Show,
+// so the person comes back to the CAPTCHA they solved.
 func (w *Window) Hide() {
 	w.visible = false
 	w.win.Hide()
 	w.pane.pw.hide()
-	if w.mode == paneWizard {
+	if w.mode == paneWizard && !w.waiting() {
 		w.closeWizard()
 		w.showDefault()
 	}

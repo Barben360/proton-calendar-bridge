@@ -125,9 +125,17 @@ func run(args []string) int {
 	}
 	// No tray to come back from: the window opens even with --background,
 	// says so once, and closing it quits (R14).
+	// An autostarted login (--background) can beat the tray host to the
+	// session bus: wait for it a few seconds instead of probing once.
 	var ta desktop.TrayApp
-	if da, ok := a.(fdesktop.App); ok && desktop.TrayHost("") {
-		ta = da
+	if da, ok := a.(fdesktop.App); ok {
+		wait := time.Duration(0)
+		if opts.background {
+			wait = trayHostWait
+		}
+		if desktop.WaitForTrayHost(func() bool { return desktop.TrayHost("") }, wait, trayHostEvery) {
+			ta = da
+		}
 	}
 	tray := desktop.Attach(ta, win, quit, opts.background)
 	// At logoff or shutdown Windows ends pcb-ui as soon as end returns: the
@@ -157,6 +165,13 @@ func run(args []string) int {
 	return 0
 }
 
+// trayHostWait is how long an autostarted pcb-ui (--background) waits for
+// the tray host to register, trying every trayHostEvery.
+const (
+	trayHostWait  = 15 * time.Second
+	trayHostEvery = 500 * time.Millisecond
+)
+
 // probe runs the single-instance check: a running pcb-ui is shown (exit 0),
 // a running pcb serve or agent session (pcb mcp) is a dialog and exit 20.
 func probe(a fyne.App) (code int, failed bool) {
@@ -177,6 +192,9 @@ func probe(a fyne.App) (code int, failed bool) {
 // notifications.
 func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
 	var n ui.Notifier
+	sender := &alertSender{log: log, send: func(note ui.Notification) error {
+		return desktop.Notify("", note, func(account string) { fyne.Do(func() { win.Show(account) }) })
+	}}
 	for {
 		v := b.View(ctx, time.Now())
 		fyne.Do(func() {
@@ -185,15 +203,44 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 				tray.Update(v)
 			}
 		})
-		ui.Send(log, n.Next(v), func(note ui.Notification) error {
-			return desktop.Notify("", note, func(account string) { fyne.Do(func() { win.Show(account) }) })
-		})
+		sender.sendAll(&n, n.Next(v))
 		select {
 		case <-ctx.Done():
 			return
 		case <-b.Changes():
 		}
 	}
+}
+
+// alertSender sends alert notifications. A failed one is offered again at
+// the next view (Changes fires at least every 30 s), once the notification
+// daemon is up; its failure is logged once, not at every retry.
+type alertSender struct {
+	log    *slog.Logger
+	send   func(ui.Notification) error
+	failed map[string]bool // alerts whose failure was logged, until one is sent
+}
+
+func (s *alertSender) sendAll(n *ui.Notifier, notes []ui.Notification) {
+	if s.failed == nil {
+		s.failed = map[string]bool{}
+	}
+	var unsent []ui.Notification
+	for _, note := range notes {
+		key := note.Account + "\x00" + note.Code
+		err := s.send(note)
+		if err == nil {
+			s.log.Info("notification sent", "alert", note.Code, "account", note.Account)
+			delete(s.failed, key)
+			continue
+		}
+		if !s.failed[key] {
+			s.log.Warn("notification failed", "alert", note.Code, "account", note.Account, "err", err)
+		}
+		s.failed[key] = true
+		unsent = append(unsent, note)
+	}
+	n.Unsent(unsent)
 }
 
 // printError writes err and its hint as the CLI does.

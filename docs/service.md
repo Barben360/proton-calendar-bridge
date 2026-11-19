@@ -80,7 +80,7 @@ With a system service installed, `pcb mcp` does not serve on its own: use the re
 
 ## When `pcb install` refuses a path
 
-`pcb install` refuses a binary or home path that contains a space, `%`, `$` or a non-ASCII letter (exit 10, also under `--plan`): systemd would split or expand it. Move the binary, or install with a `PREFIX` without those characters.
+`pcb install` refuses a binary or home path that contains a space, `%`, `$`, a quote or a backslash (accented and other non-ASCII letters are fine) (exit 10, also under `--plan`): systemd would split or expand it. Move the binary, or install with a `PREFIX` without those characters.
 
 ## When a step fails
 

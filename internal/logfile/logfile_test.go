@@ -289,3 +289,37 @@ func TestLogfileFailedCloseKeepsLogging(t *testing.T) {
 		t.Errorf("log = %q, want the last write", got)
 	}
 }
+
+// One failed reopen during a rotation fails that write only: the next write
+// opens the file again, so a transient failure (a full disk, a directory
+// briefly gone) does not leave the log empty for the rest of the session.
+func TestLogfileRetriesAFailedReopenOnTheNextWrite(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "logs")
+	path := filepath.Join(dir, "ui.log")
+	f, err := logfile.Open(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	write(t, f, "aaaaaa")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("bbbbbb")); err == nil { // rotates: the reopen fails
+		t.Fatal("a write whose reopen failed reported success")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, f, "cc")
+	if got := read(t, path); got != "cc" {
+		t.Errorf("log = %q, want the write after the failed reopen", got)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("x")); err == nil {
+		t.Error("a write after Close succeeded: only Close may latch")
+	}
+}

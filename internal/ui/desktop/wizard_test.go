@@ -32,6 +32,7 @@ type fakeWizard struct {
 	canceled chan struct{}
 	account  string        // what Account returns: the add's local ID
 	wait     time.Duration // what CaptchaWait returns
+	hang     bool          // Submit returns only when its context ends
 }
 
 func (f *fakeWizard) enter(call string) {
@@ -74,10 +75,16 @@ func (f *fakeWizard) Account() string {
 	return f.account
 }
 func (f *fakeWizard) CaptchaURL() string { return "https://verify.example/captcha?token=t" }
-func (f *fakeWizard) Submit(_ context.Context, address string, password []byte) error {
+func (f *fakeWizard) Submit(ctx context.Context, address string, password []byte) error {
 	f.mu.Lock()
 	f.pw = string(password)
+	hang := f.hang
 	f.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		f.enter("submit aborted")
+		return ctx.Err()
+	}
 	f.enter("submit " + address)
 	return nil
 }
@@ -265,15 +272,16 @@ func TestWizardShowsError(t *testing.T) {
 }
 
 func TestWizardCancelledWhenLeft(t *testing.T) {
+	// Nothing is waiting on the first screen, so leaving it asks nothing;
+	// the Cancel button cancels a waiting login too (the person pressed it).
 	for name, leave := range map[string]func(*fixture){
-		"cancel button": func(f *fixture) { f.tap("Cancel") },
+		"cancel button": func(f *fixture) { f.wiz.step = ui.StepTOTP; f.w.wiz.render(); f.tap("Cancel") },
 		"other account": func(f *fixture) { test.Tap(f.w.rows[0].btn); f.wait() },
 		"hide":          func(f *fixture) { f.w.Hide(); f.wait() },
 		"settings":      func(f *fixture) { f.tap("Settings") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
-			f.wiz.step = ui.StepTOTP
 			f.w.Update(twoAccounts())
 			f.w.Show("")
 			f.tapAdd()
@@ -291,7 +299,6 @@ func TestWizardCancelledWhenLeft(t *testing.T) {
 
 func TestWizardCancelRunsOffTheCallerGoroutine(t *testing.T) {
 	f := newFixture(t)
-	f.wiz.step = ui.StepTOTP
 	f.w.Update(twoAccounts())
 	f.w.Show("")
 	f.tapAdd()
@@ -313,7 +320,6 @@ func TestWizardCancelRunsOffTheCallerGoroutine(t *testing.T) {
 
 func TestAddAccountDuringWizardCancelsTheOldOne(t *testing.T) {
 	f := newFixture(t)
-	f.wiz.step = ui.StepTOTP
 	f.w.Update(twoAccounts())
 	f.w.Show("")
 	f.tapAdd()
@@ -393,9 +399,8 @@ func TestShowLoginKeepsALoginInProgress(t *testing.T) {
 		t.Errorf("the login in progress was cancelled: %v", f.wiz.got())
 	}
 	f.entry("123456") // the 2FA screen is still there
-	// Once that login is left, the wizard opens for the agent's username.
-	f.w.Hide()
-	f.wait()
+	// Once that login is cancelled, the wizard opens for the agent's username.
+	f.tap("Cancel")
 	f.w.ShowLogin("dave@example.org")
 	f.wait()
 	if got := f.entry("name@example.org").Text; got != "dave@example.org" {
@@ -682,5 +687,139 @@ func TestWizardMailboxPasswordScreen(t *testing.T) {
 	// The fake keeps the step and the error: the screen is drawn again.
 	if got := f.w.win.Canvas().Focused(); got != f.field(name) {
 		t.Errorf("focused = %v after a wrong try, want the field", got)
+	}
+}
+
+// Leaving a wizard that waits for the person (2FA code, mailbox password,
+// CAPTCHA, or a call in flight) by the Settings gear, another account's row or
+// the + asks first: a solved CAPTCHA and the account a first login created
+// are lost with the login, and the 60 s guard must then be waited out.
+func TestLeavingAWaitingWizardAsksToAbandonIt(t *testing.T) {
+	for _, step := range []ui.Step{ui.StepTOTP, ui.StepMailboxPassword, ui.StepCaptcha} {
+		for name, leave := range map[string]func(*fixture){
+			"settings":      func(f *fixture) { test.Tap(f.w.gear); f.wait() },
+			"other account": func(f *fixture) { test.Tap(f.w.rows[0].btn); f.wait() },
+			"add":           func(f *fixture) { test.Tap(f.w.addBtn); f.wait() },
+		} {
+			t.Run(string(step)+"/"+name, func(t *testing.T) {
+				f := newFixture(t)
+				f.wiz.step, f.wiz.account = step, "new1"
+				f.w.Update(withPending())
+				f.w.Show("")
+				f.tapAdd()
+				f.w.Update(withPending())
+				leave(f)
+				if !f.has("Abandon this login?") {
+					t.Fatalf("no confirmation: %v", f.texts())
+				}
+				if got := f.wiz.got(); len(got) != 0 {
+					t.Fatalf("the login was cancelled before the answer: %v", got)
+				}
+				// Keep it.
+				f.tap("Cancel")
+				if got := f.wiz.got(); len(got) != 0 || f.w.mode != paneWizard || f.w.wizard == nil {
+					t.Fatalf("kept login lost: calls %v, mode %v", got, f.w.mode)
+				}
+				// Abandon it.
+				leave(f)
+				f.tap("Abandon")
+				if got := f.wiz.got(); !slices.Equal(got, []string{"cancel"}) {
+					t.Errorf("calls = %v, want one cancel after confirming", got)
+				}
+				if f.w.mode == paneWizard && name != "add" || f.w.wizard == nil && name == "add" {
+					t.Errorf("mode %v wizard %v: the pane did not change after confirming", f.w.mode, f.w.wizard)
+				}
+			})
+		}
+	}
+}
+
+func TestLeavingASignInInFlightAsksToAbandonIt(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.entry("name@example.org").SetText("carol@example.org")
+	f.entry("Proton password").SetText("pw")
+	f.wiz.block = make(chan struct{})
+	test.Tap(f.button("Sign in")) // in flight
+	test.Tap(f.w.gear)
+	if !f.has("Abandon this login?") {
+		close(f.wiz.block)
+		t.Fatalf("no confirmation: %v", f.texts())
+	}
+	close(f.wiz.block)
+	f.wait()
+}
+
+// Closing the window hides it, and a waiting wizard survives the hide as it
+// survives a Show: the person comes back to it from the tray.
+func TestHideKeepsAWizardWaitingForThePerson(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.step = ui.StepCaptcha
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.w.Hide()
+	f.wait()
+	if got := f.wiz.got(); len(got) != 0 {
+		t.Fatalf("hiding cancelled the login: %v", got)
+	}
+	f.w.Show("")
+	if f.w.mode != paneWizard || !f.hasButton("Open verification") {
+		t.Errorf("the CAPTCHA screen is gone after a hide: %v", f.texts())
+	}
+}
+
+// A hung Sign in must be cancellable: the Cancel button stays enabled while a
+// call runs and ends the call's context, then drops the login.
+func TestCancelEndsASignInInFlight(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.hang = true
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.entry("name@example.org").SetText("carol@example.org")
+	f.entry("Proton password").SetText("pw")
+	test.Tap(f.button("Sign in")) // in flight, never answers by itself
+	cancel := f.button("Cancel")
+	if cancel.Disabled() {
+		t.Fatal("Cancel is disabled while the call runs: a hung call cannot be cancelled")
+	}
+	test.Tap(cancel)
+	f.wait() // returns only once the call's goroutine ended: its context was cancelled
+	if got := f.wiz.got(); !slices.Equal(got, []string{"submit aborted", "cancel"}) && !slices.Equal(got, []string{"cancel", "submit aborted"}) {
+		t.Errorf("calls = %v, want the call aborted and the login cancelled", got)
+	}
+	if f.w.wizard != nil {
+		t.Error("wizard still held")
+	}
+}
+
+// With no tray, closing the window quits the app: a waiting login is lost
+// with it, so the close asks first; declining keeps the window and the login.
+func TestClosingTheWindowToQuitAsksWhileALoginWaits(t *testing.T) {
+	f := newFixture(t)
+	quits := 0
+	f.w.quitOnClose = func() { quits++ }
+	f.wiz.step = ui.StepCaptcha
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.w.onClose()
+	if !f.has("Abandon this login?") || quits != 0 {
+		t.Fatalf("no confirmation before quitting (quits %d): %v", quits, f.texts())
+	}
+	if !f.w.visible || f.w.wizard == nil {
+		t.Fatal("the window or the login was dropped before the answer")
+	}
+	f.tap("Cancel")
+	if quits != 0 || !f.w.visible || f.w.wizard == nil || len(f.wiz.got()) != 0 {
+		t.Fatalf("declining: quits %d, visible %v, calls %v", quits, f.w.visible, f.wiz.got())
+	}
+	f.w.onClose()
+	f.tap("Quit")
+	if quits != 1 {
+		t.Errorf("confirming: quits = %d, want 1", quits)
 	}
 }

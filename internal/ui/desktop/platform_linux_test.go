@@ -224,7 +224,7 @@ func TestAutostartWritesDesktopFile(t *testing.T) {
 	cfg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", cfg)
 	path := filepath.Join(cfg, "autostart", "pcb-ui.desktop")
-	if Autostart() {
+	if Autostart("/opt/pcb/bin/pcb-ui") {
 		t.Fatal("autostart on before it was set")
 	}
 	if err := SetAutostart(true, "/opt/pcb/bin/pcb-ui"); err != nil {
@@ -237,8 +237,11 @@ func TestAutostartWritesDesktopFile(t *testing.T) {
 	if !strings.Contains(string(b), "\nExec=/opt/pcb/bin/pcb-ui --background\n") || !strings.HasPrefix(string(b), "[Desktop Entry]\n") {
 		t.Fatalf("desktop file:\n%s", b)
 	}
-	if !Autostart() {
+	if !Autostart("/opt/pcb/bin/pcb-ui") {
 		t.Fatal("Autostart() false after SetAutostart(true)")
+	}
+	if Autostart("/home/alice/bin/pcb-ui") {
+		t.Fatal("Autostart() true for an executable the entry does not start (a stale entry)")
 	}
 	if err := SetAutostart(false, "/opt/pcb/bin/pcb-ui"); err != nil {
 		t.Fatal(err)
@@ -246,7 +249,7 @@ func TestAutostartWritesDesktopFile(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("file still there: %v", err)
 	}
-	if Autostart() {
+	if Autostart("/opt/pcb/bin/pcb-ui") {
 		t.Fatal("Autostart() true after off")
 	}
 	if err := SetAutostart(false, ""); err != nil {
@@ -317,5 +320,36 @@ func TestAutostartDirPrivateAndOffKeepsOthers(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("off removed another file: %v", err)
+	}
+}
+
+// What SetAutostart writes, Autostart reads back as the same executable,
+// whatever the path holds.
+func TestAutostartReadsBackWhatWasWritten(t *testing.T) {
+	for _, exe := range []string{"/opt/pcb/pcb-ui", "/opt/my apps/pcb-ui", `/o/a\b c`, `/o/q"x y`, "/o/b`x y", `/o/$x y`, `/o/100%`, "/home/josé/bin/pcb-ui", "/o/tab\tx"} {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		if err := SetAutostart(true, exe); err != nil {
+			t.Fatal(err)
+		}
+		if !Autostart(exe) {
+			t.Errorf("Autostart(%q) false right after SetAutostart", exe)
+		}
+		if Autostart(exe + "x") {
+			t.Errorf("Autostart(%q) true for a different path", exe+"x")
+		}
+	}
+	// No Exec line, or an unclosed quote: not on.
+	for _, content := range []string{"[Desktop Entry]\nName=pcb\n", "[Desktop Entry]\nExec=\"/opt/pcb/pcb-ui --background\n"} {
+		cfg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", cfg)
+		if err := os.MkdirAll(filepath.Join(cfg, "autostart"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfg, "autostart", "pcb-ui.desktop"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if Autostart("/opt/pcb/pcb-ui") {
+			t.Errorf("Autostart true for %q", content)
+		}
 	}
 }
