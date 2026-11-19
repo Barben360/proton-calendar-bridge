@@ -154,6 +154,36 @@ func TestSettingsCrashReportsSwitch(t *testing.T) {
 	}
 }
 
+// PCB_CRASH_REPORTS sets the mode: the switch shows it, disabled, says
+// why, and stays disabled after another setting's work ends.
+func TestSettingsSwitchSetByTheEnvironment(t *testing.T) {
+	f := newFixture(t)
+	f.set.reportsOn, f.set.reportsBy = true, "PCB_CRASH_REPORTS"
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tap("Settings")
+	sw := f.toggle("Send crash reports")
+	if !sw.On || !sw.Disabled() {
+		t.Fatalf("switch on %v, disabled %v; want on and disabled", sw.On, sw.Disabled())
+	}
+	f.line("set by PCB_CRASH_REPORTS")
+	test.Tap(sw)
+	f.wait()
+	if slices.Contains(f.set.calls, "crashreports") || !sw.On {
+		t.Errorf("the disabled switch changed the mode: calls %v, on %v", f.set.calls, sw.On)
+	}
+	test.Tap(f.toggle("Check for updates"))
+	f.wait()
+	if !sw.Disabled() {
+		t.Error("the switch came back enabled after another setting's work")
+	}
+	test.Tap(sw)
+	f.wait()
+	if slices.Contains(f.set.calls, "crashreports") {
+		t.Errorf("the switch changed the mode after another setting's work: %v", f.set.calls)
+	}
+}
+
 func TestSettingsHideTheSwitchWithoutAReportAddress(t *testing.T) {
 	f := newFixture(t)
 	f.set.noReports = true

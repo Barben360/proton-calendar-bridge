@@ -62,12 +62,13 @@ func (s *settings) SetUpdateCheck(on bool) error {
 }
 
 // CrashReports is the "Send crash reports" switch; available is false in a
-// build without a report address.
-func (s *settings) CrashReports() (on, available bool) {
+// build without a report address, setBy names PCB_CRASH_REPORTS when it
+// sets the mode.
+func (s *settings) CrashReports() (on, available bool, setBy string) {
 	if s.reports == nil {
-		return false, false
+		return false, false, ""
 	}
-	return s.reports.Enabled(), true
+	return s.reports.Enabled(), true, s.reports.SetBy()
 }
 
 func (s *settings) SetCrashReports(on bool) error {

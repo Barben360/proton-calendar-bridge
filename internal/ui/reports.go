@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
@@ -96,8 +97,21 @@ func (r *Reports) DontSend(ctx context.Context) error { return r.Store.Discard(c
 // Enabled is the Settings switch: on while reports are sent without asking.
 func (r *Reports) Enabled() bool { return r.Store.Mode() == report.Always }
 
-// SetEnabled flips the switch: on is always send, off is ask.
+// SetBy is report.EnvSwitch when it sets the mode in force (always or
+// never), which the switch then cannot change, else "".
+func (r *Reports) SetBy() string {
+	if (report.Store{Env: r.Store.Env}).Mode() != report.Ask {
+		return report.EnvSwitch
+	}
+	return ""
+}
+
+// SetEnabled flips the switch: on is always send, off is ask. It fails
+// while PCB_CRASH_REPORTS sets the mode: the change would not be in force.
 func (r *Reports) SetEnabled(ctx context.Context, on bool) error {
+	if by := r.SetBy(); by != "" {
+		return errors.New("crash reports: the mode is set by " + by)
+	}
 	if on {
 		return r.Store.SetMode(ctx, report.Always)
 	}
