@@ -5,10 +5,16 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 # time (as scripts/release/package.sh does), never the clock, so a rebuild of
 # a tag gives the attested archive's bytes. GNU date -d @N, BSD date -r N.
 DATE    ?= $(shell e=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct 2>/dev/null)}; if [ -n "$$e" ]; then date -u -d "@$$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$$e" +%Y-%m-%dT%H:%M:%SZ; else date -u +%Y-%m-%dT%H:%M:%SZ; fi)
+# Where approved crash reports go (a Sentry DSN). Empty, the build has no
+# address and keeps and sends no report: dev and source builds, and make
+# test and make lint, which never stamp it. Only make build, ui and image
+# take it, from the release workflows' secret PCB_REPORT_DSN.
+REPORT_DSN ?=
 LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
-	-X $(PKG)/internal/buildinfo.Date=$(DATE)
+	-X $(PKG)/internal/buildinfo.Date=$(DATE) \
+	-X $(PKG)/internal/buildinfo.ReportDSN=$(REPORT_DSN)
 # GOOS=windows builds append .exe (make build ui GOOS=windows; pcb-ui only on
 # Windows itself: it needs cgo).
 GOOS    ?= $(shell go env GOOS)
@@ -123,7 +129,7 @@ IMAGE ?= pcb:local
 IMAGE_FLAGS ?=
 
 image:
-	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(IMAGE_FLAGS) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(if $(REPORT_DSN),--build-arg REPORT_DSN) $(IMAGE_FLAGS) .
 
 # Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
 container-smoke:

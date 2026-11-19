@@ -84,6 +84,7 @@ jobs:
       id-token: write
       attestations: write
     uses: ./.github/workflows/image-build.yml
+    secrets: inherit
     with:
       ref: ${{ needs.resolve.outputs.sha }}
       version: ${{ needs.resolve.outputs.tag }}

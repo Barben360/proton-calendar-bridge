@@ -15,7 +15,11 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=dev
 ARG DATE=unknown
-RUN make build OUT=/out/pcb VERSION="$VERSION" COMMIT="$COMMIT" DATE="$DATE"
+# The crash report address, empty for a build without one (make image
+# passes it only when REPORT_DSN is set, by name, so it is not on the command
+# line). Build stage only: the final image carries it in the binary alone.
+ARG REPORT_DSN=
+RUN make build OUT=/out/pcb VERSION="$VERSION" COMMIT="$COMMIT" DATE="$DATE" REPORT_DSN="$REPORT_DSN"
 # The volume's layout: a fresh named volume copies it, owner and modes too.
 RUN install -d -m 0700 -o 65532 -g 65532 /out/data /out/data/config /out/data/state
 
