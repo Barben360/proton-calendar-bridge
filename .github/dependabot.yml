@@ -14,6 +14,9 @@ updates:
     ignore:
       - dependency-name: github.com/ProtonMail/go-crypto
       - dependency-name: github.com/ProtonMail/gopenpgp/v2
+      # pflag 1.1.0 prints [=true|false] after every bool flag in --help.
+      - dependency-name: github.com/spf13/pflag
+        versions: [">= 1.1.0"]
     groups:
       go-minor-patch:
         update-types: [minor, patch]
