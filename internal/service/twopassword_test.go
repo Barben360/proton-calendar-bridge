@@ -408,8 +408,8 @@ func TestSecretsNeverReachTheLogsOrTheDisk(t *testing.T) {
 		captcha = "chal-secret-4d21e8"
 	)
 	e := newEnv(t, protontest.Options{TwoFA: true, TwoPassword: true, MailboxPassword: mailbox, Captcha: captcha})
-	var logs bytes.Buffer
-	e.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logs := &logBuffer{}
+	e.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	if err := e.svc.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -457,8 +457,8 @@ func TestSecretsNeverReachTheLogsOrTheDisk(t *testing.T) {
 		t.Fatalf("Relogin = %+v; want the password and the TOTP sealed, so that the scan has something to find", a.Relogin)
 	}
 	check("the login was ready")
-	if logs.Len() == 0 {
-		t.Log("the log is empty; the log scan proves nothing here")
+	if logs.String() == "" {
+		t.Error("the log is empty: the log scan proves nothing")
 	}
 }
 

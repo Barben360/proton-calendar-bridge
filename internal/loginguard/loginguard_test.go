@@ -469,3 +469,55 @@ func TestSpacingAndNotBeforeTheLaterWins(t *testing.T) {
 		})
 	}
 }
+
+// Defer clamps a Retry-After to MaxDefer exactly: an hour less a tick is
+// recorded as is, an hour and anything above it as an hour.
+func TestDeferClampBoundary(t *testing.T) {
+	const ms = time.Millisecond
+	for _, c := range []struct{ wait, want time.Duration }{
+		{time.Hour - ms, time.Hour - ms},
+		{time.Hour, time.Hour},
+		{time.Hour + ms, time.Hour},
+		{48 * time.Hour, time.Hour},
+	} {
+		t.Run(c.wait.String(), func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			if err := loginguard.DeferLocked(dir, t0, c.wait); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := loginguard.Remaining(dir, t0, nil); err != nil || got != c.want {
+				t.Errorf("Remaining after Defer(%v) = %v, %v; want %v", c.wait, got, err, c.want)
+			}
+		})
+	}
+}
+
+// A recorded not-before time up to MaxDefer plus 5 min ahead of now still
+// holds; one tick past it is from a clock stepped back and is ignored.
+func TestNotBeforeStaleThresholdBoundary(t *testing.T) {
+	const ms = time.Millisecond
+	limit := loginguard.MaxDefer + 5*time.Minute
+	for _, c := range []struct {
+		ahead time.Duration
+		wait  time.Duration // 0: ignored
+	}{
+		{limit - ms, limit - ms},
+		{limit, limit},
+		{limit + ms, 0},
+	} {
+		t.Run(c.ahead.String(), func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			if err := os.WriteFile(filepath.Join(dir, "not-before"), []byte(t0.Add(c.ahead).Format(time.RFC3339Nano)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := loginguard.Remaining(dir, t0, nil); err != nil || got != c.wait {
+				t.Errorf("Remaining = %v, %v; want %v", got, err, c.wait)
+			}
+			release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+			wantWait(t, "Acquire", err, c.wait)
+			if err == nil {
+				release()
+			}
+		})
+	}
+}
