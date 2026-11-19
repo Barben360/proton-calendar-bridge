@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -223,8 +224,32 @@ func Run(root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.
 }
 
 // RunContext is Run with ctx, which commands see through cmd.Context().
-func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.Code {
+//
+// A panic in a command is a bug, not a bad invocation: it ends as exit 20
+// (blocked) through the usual failure path, with an error naming an
+// internal error; the panic value and the stack go to stderr, never to
+// stdout.
+func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout, stderr io.Writer) (code exitcode.Code) {
 	asJSON := jsonRequested(args)
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, debug.Stack())
+		err := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error: pcb hit a bug while running this command"),
+			Hint: "report it with the stack printed on stderr (see docs/troubleshooting.md)"}
+		cmd, _, _ := root.Find(args)
+		if cmd == nil {
+			cmd = root
+		}
+		if asJSON {
+			_ = output.Write(stdout, CommandName(cmd), nil, err)
+		} else {
+			fmt.Fprintf(stderr, "Error: %s\nHint: %s\n", err, err.Hint)
+		}
+		code = exitcode.Blocked
+	}()
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)

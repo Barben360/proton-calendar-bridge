@@ -458,6 +458,25 @@ func TestRunReturnsErrCutWhenCutCloses(t *testing.T) {
 	}
 }
 
+// panicHub is a Hub whose Serve panics.
+type panicHub struct{ *service.Hub }
+
+func (panicHub) Serve(context.Context, service.HubServeOptions) error { panic("unexpected payload") }
+
+// A panic in Hub.Serve ends Run through its normal stop, as an error, not
+// the process.
+func TestRunTurnsAServePanicIntoAnError(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	err := daemon.Run(t.Context(), daemon.Options{Dirs: e.dirs, Config: e.cfg, Hub: panicHub{e.hub}, Kind: "tester", WaitForLogin: true})
+	if exitcode.From(err) != exitcode.Blocked || err == nil || !strings.Contains(err.Error(), "internal error") {
+		t.Fatalf("Run = %v (exit %d), want exit 20 naming an internal error", err, exitcode.From(err))
+	}
+	if _, err := os.Stat(e.dirs.Socket()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the control socket outlives the panic: %v", err)
+	}
+}
+
 func TestRunReturnsServeError(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t) // no account

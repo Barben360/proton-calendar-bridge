@@ -132,7 +132,7 @@ The same failure has the same code in every command, with `--json` or without.
 
 systemd does not restart the service on 10: it is a fault you must repair. Docker does ([container](container.md#when-the-container-stops-or-restarts-in-a-loop)).
 
-An unexpected error with no code of its own exits 20.
+An unexpected error with no code of its own exits 20. So does a bug that makes a command panic: with `--json` the one envelope says `internal error`, and the stack goes to stderr, never to stdout. In `pcb serve` and `pcb-ui`, a bug in one account's sync loop stops that account (`account-stopped`, exit code 20, `internal error`) while the others keep serving.
 
 ## Warnings
 

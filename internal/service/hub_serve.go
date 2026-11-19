@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -440,7 +442,7 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 	var err error
 	logged := ""
 	for {
-		err = a.local.Serve(ctx, opts)
+		err = serveGuarded(sv.log.With("account", a.id), func() error { return a.local.Serve(ctx, opts) })
 		if ctx.Err() != nil || !errors.Is(err, ErrSyncRunning) {
 			break
 		}
@@ -481,6 +483,22 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 		sv.poke()
 	}
 	close(run.done)
+}
+
+// serveGuarded runs serve and turns a panic in it (or in the OnState and
+// OnPass callbacks it calls) into a Blocked error, so one account's bug
+// parks that account and no other. The panic value and the stack go to the
+// log only: the error, which the park shows to clients, names an internal
+// error.
+func serveGuarded(log *slog.Logger, serve func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error in the account's sync loop"),
+				Hint: "see the log for the stack, report the bug, then restart the account"}
+		}
+	}()
+	return serve()
 }
 
 // loopState records the state a's loop entered and reports it.
