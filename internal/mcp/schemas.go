@@ -29,16 +29,19 @@ func at(s *jsonschema.Schema, path ...string) *jsonschema.Schema {
 func fp(v float64) *float64 { return &v }
 func ip(v int) *int         { return &v }
 
-// datePattern is a calendar date as start_date and end_date take it.
-const datePattern = `^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+// datePattern is a calendar date as event_create takes start_date and
+// end_date.
+// "" is accepted: the handler reads it as not given.
+const datePattern = `^([0-9]{4}-[0-9]{2}-[0-9]{2})?$`
 
 // Alarm bounds, in minutes before the start: Proton keeps at most ten
 // notifications, none after a timed event's start nor a day or more after
-// an all-day one's, each within 999 weeks (internal/ical's alarms).
+// an all-day one's, each within what the codec writes
+// (service.MaxAlarmMinutes): the schema refuses nothing it accepts.
 const (
 	maxAlarms   = 10
 	minAlarmMin = -1439
-	maxAlarmMin = 999 * 7 * 24 * 60
+	maxAlarmMin = service.MaxAlarmMinutes
 )
 
 // scopeEnum limits scope, at the root or under path, to the two scopes.
@@ -48,10 +51,10 @@ func scopeEnum(root *jsonschema.Schema) {
 	}
 }
 
-// limitBounds limits limit to 1 to service.MaxAgendaLimit.
+// limitBounds limits limit to 0 (the default page) to service.MaxAgendaLimit.
 func limitBounds(root *jsonschema.Schema) {
 	if p := at(root, "limit"); p != nil {
-		p.Minimum, p.Maximum = fp(1), fp(service.MaxAgendaLimit)
+		p.Minimum, p.Maximum = fp(0), fp(service.MaxAgendaLimit)
 	}
 }
 

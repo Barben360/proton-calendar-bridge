@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -80,5 +83,33 @@ func TestErrorClasses(t *testing.T) {
 	}
 	if len(seen) != 5 || !seen["must-act"] || !seen["retry"] || !seen["refused"] || !seen["conflict"] || !seen["not-found"] {
 		t.Errorf("classes %v", seen)
+	}
+}
+
+// Only the SDK's refusal of the arguments is rewritten as one; any other
+// error result keeps its own text.
+func TestRefusedInvalidRewritesOnlyArgumentFailures(t *testing.T) {
+	result := func(err error) sdkmcp.MethodHandler {
+		return func(context.Context, string, sdkmcp.Request) (sdkmcp.Result, error) {
+			var r sdkmcp.CallToolResult
+			r.SetError(err)
+			return &r, nil
+		}
+	}
+	run := func(err error) *toolError {
+		res, _ := refusedInvalid(result(err))(context.Background(), "tools/call", nil)
+		var te *toolError
+		if !errors.As(res.(*sdkmcp.CallToolResult).GetError(), &te) {
+			return nil
+		}
+		return te
+	}
+	te := run(errors.New(`validating "arguments": validating root: required: missing properties: ["account"]`))
+	if te == nil || te.Class != "refused" || !strings.Contains(te.Message, "account") || te.Hint == "" {
+		t.Errorf("argument failure became %+v", te)
+	}
+	te = run(errors.New("validating tool output: boom"))
+	if te == nil || te.Class != "must-act" || strings.Contains(te.Message, "arguments") {
+		t.Errorf("an output failure became %+v, want a generic failure", te)
 	}
 }

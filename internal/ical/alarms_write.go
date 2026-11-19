@@ -24,6 +24,10 @@ const (
 	maxDays          = 6999
 	maxHours         = 999
 	maxMinutes       = 9999
+	// MaxAlarmMinutes is the longest a trigger is written before the start:
+	// the most triggerOf accepts (an all-day event's 6999 days and a time
+	// of day under 24 hours).
+	MaxAlarmMinutes = maxDays*24*60 + 24*60 - 1
 )
 
 // NotificationsFromAlarms maps a VEVENT's VALARMs to notifications, in

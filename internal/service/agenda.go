@@ -38,6 +38,9 @@ type (
 	Occurrence  = ical.Occurrence
 )
 
+// MaxAlarmMinutes is the most minutes before the start an alarm may be.
+const MaxAlarmMinutes = ical.MaxAlarmMinutes
+
 // ResolveWall is the instant of the wall clock w (its fields read as a local
 // time of loc) by the codec's rule, ical.ResolveWall: the first of two in a
 // DST overlap, the offset before a gap. The adapter reads the times it is

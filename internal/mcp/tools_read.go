@@ -377,7 +377,7 @@ type listIn struct {
 	TZ        string   `json:"tz,omitempty" jsonschema:"IANA zone for times without an offset and for all-day and floating events; default the status zone"`
 	Accounts  []string `json:"accounts,omitempty" jsonschema:"accounts by address or local ID; default every account this session can see"`
 	Calendars []string `json:"calendars,omitempty" jsonschema:"calendar IDs; default every calendar"`
-	Limit     int      `json:"limit,omitempty" jsonschema:"occurrences per page, 1 to 500; default 100"`
+	Limit     int      `json:"limit,omitempty" jsonschema:"occurrences per page, 1 to 500; 0 or left out: the default, 100"`
 	Cursor    string   `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page, with the same other arguments"`
 }
 
@@ -388,7 +388,7 @@ type searchIn struct {
 	TZ        string   `json:"tz,omitempty" jsonschema:"IANA zone for times without an offset and for all-day and floating events; default the status zone"`
 	Accounts  []string `json:"accounts,omitempty" jsonschema:"accounts by address or local ID; default every account this session can see"`
 	Calendars []string `json:"calendars,omitempty" jsonschema:"calendar IDs; default every calendar"`
-	Limit     int      `json:"limit,omitempty" jsonschema:"occurrences per page, 1 to 500; default 100"`
+	Limit     int      `json:"limit,omitempty" jsonschema:"occurrences per page, 1 to 500; 0 or left out: the default, 100"`
 	Cursor    string   `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page, with the same other arguments"`
 }
 

@@ -82,7 +82,7 @@ A failure pcb cannot explain is `must-act`, with a hint to read the pcb log: no 
 
 ### Arguments
 
-The tools' input schemas (`tools/list`) carry the allowed values: `scope` is `occurrence` or `series`; `limit` is 1 to 500; `start_date` and `end_date` are `YYYY-MM-DD`; `alarms` are at most 10 values, each between -1439 (less than a day after the start, for all-day events) and 10069920 minutes (999 weeks) before the start. A call outside them is `refused`.
+The tools' input schemas (`tools/list`) carry the allowed values: `scope` is `occurrence` or `series`; `limit` is 1 to 500 (0 or left out: 100); `start_date` and `end_date` are `YYYY-MM-DD`; `alarms` are at most 10 values, each between -1439 (less than a day after the start, for all-day events) and 10079999 minutes before the start. A call outside them is `refused`.
 
 ### Times
 

@@ -109,8 +109,8 @@ func TestInputSchemasCarryTheirConstraints(t *testing.T) {
 	}
 	for _, tool := range []string{"events_list", "events_search"} {
 		l := prop(tool, "limit")
-		if l["minimum"] != float64(1) || l["maximum"] != float64(500) {
-			t.Errorf("%s limit %v, want 1 to 500", tool, l)
+		if l["minimum"] != float64(0) || l["maximum"] != float64(500) {
+			t.Errorf("%s limit %v, want 0 (the default) to 500", tool, l)
 		}
 	}
 	for _, p := range [][]string{{"start_date"}, {"end_date"}} {
@@ -300,4 +300,25 @@ func TestMixedTimeFormsAreRefusedAsAmbiguous(t *testing.T) {
 	if n := alice.asked(); n != 0 {
 		t.Errorf("%d write calls for ambiguous arguments", n)
 	}
+}
+
+// The schema refuses nothing the handlers accept.
+func TestSchemasRefuseNothingTheHandlersAccept(t *testing.T) {
+	hub := newHub()
+	cs := newRig(t, hub).connect(t, writeGrant, mcp.EntryRemote)
+	base := map[string]any{"account": "a1", "calendar": "cal-a", "summary": "Z"}
+	// An agent sends "" for the optionals it does not use.
+	mustCall(t, cs, "event_create", with(base, "start", "2026-11-20T15:00", "end", "2026-11-20T16:00",
+		"start_date", "", "end_date", "", "tz", "", "location", "", "rrule", ""))
+	mustCall(t, cs, "event_create", with(base, "start_date", "2026-11-20", "end_date", "2026-11-21", "start", "", "end", ""))
+	// limit 0 is the default page.
+	for _, tool := range []string{"events_list", "events_search"} {
+		mustCall(t, cs, tool, argsFor(tool, with(monday(), "limit", 0)))
+	}
+	// The largest alarm the codec writes: 6999 days and 23:59 before an
+	// all-day event; and the least: 23:59 after it.
+	for _, m := range []int{service.MaxAlarmMinutes, -1439, 0} {
+		mustCall(t, cs, "event_create", with(base, "start_date", "2026-11-20", "end_date", "2026-11-21", "alarms", []int{m}))
+	}
+	mustFail(t, cs, "event_create", with(base, "start_date", "2026-11-20", "end_date", "2026-11-21", "alarms", []int{service.MaxAlarmMinutes + 1}), "refused")
 }

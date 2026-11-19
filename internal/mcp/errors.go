@@ -64,7 +64,12 @@ func refusedInvalid(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
 		if cause == nil || errors.As(cause, &te) {
 			return res, err
 		}
-		detail := strings.TrimPrefix(cause.Error(), `validating "arguments": `)
+		detail, isArgs := strings.CutPrefix(cause.Error(), `validating "arguments": `)
+		if !isArgs { // not the SDK's refusal of the arguments: its text may carry anything
+			var out sdkmcp.CallToolResult
+			out.SetError(toToolError(cause))
+			return &out, nil
+		}
 		te = refusedErr("the arguments do not fit the tool: "+cutUTF8(detail, 300),
 			"tools/list gives the tool's input schema (required arguments, types, allowed values and bounds): fix the arguments and call again")
 		var out sdkmcp.CallToolResult
