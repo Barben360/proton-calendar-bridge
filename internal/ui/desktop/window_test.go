@@ -1043,3 +1043,34 @@ func TestEmptyPaneOffersAdd(t *testing.T) {
 		t.Errorf("a stopped bridge's pane offers an add: %v", f.texts())
 	}
 }
+
+// An error that comes while the window is hidden (a tray line that could not
+// open the browser) must not pile modal dialogs on a window nobody sees: the
+// latest one is kept and shown once, at the next Show.
+func TestErrorsOnAHiddenWindowShowOnceAtTheNextShow(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.w.Hide()
+	f.w.showErr(errors.New("first failure"))
+	f.w.showErr(errors.New("second failure"))
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Fatal("a dialog was opened on the hidden window")
+	}
+	f.w.Show("")
+	if !f.has("second failure") {
+		t.Fatalf("the pending error is not shown at the next Show: %v", f.texts())
+	}
+	if f.has("first failure") {
+		t.Error("an older error is shown as well")
+	}
+	f.tap("OK")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("a second dialog is stacked behind the first")
+	}
+	f.w.Hide()
+	f.w.Show("")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("the error is shown again at a later Show")
+	}
+}

@@ -120,6 +120,9 @@ type Window struct {
 	wizard   WizardModel // the flow in progress, nil when none
 	settings *settingsPane
 
+	// pendingErr is the last error that came while the window was hidden.
+	pendingErr error
+
 	// quitOnClose, when set (no tray host: Attach), is what closing the
 	// window runs instead of hiding it.
 	quitOnClose func()
@@ -236,8 +239,14 @@ func (w *Window) run(b *busy, text string, work func(ctx context.Context) error,
 	})
 }
 
-// showErr tells the person what failed and what to do about it.
+// showErr tells the person what failed and what to do about it. On a hidden
+// window the error waits (the latest only) for the next Show, instead of
+// stacking dialogs nobody sees.
 func (w *Window) showErr(err error) {
+	if !w.visible {
+		w.pendingErr = err
+		return
+	}
 	msg := err.Error()
 	var ee *exitcode.Error
 	if errors.As(err, &ee) && ee.Hint != "" {
@@ -521,9 +530,18 @@ func (w *Window) ShowLogin(username string) {
 	if !w.waiting() && (w.mode != paneWizard || w.wizard == nil || w.wizard.Step() == ui.StepCredentials) {
 		w.openWizard(username)
 	}
+	w.reveal()
+}
+
+// reveal shows the window, with the error that came while it was hidden.
+func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
 	w.win.RequestFocus()
+	if err := w.pendingErr; err != nil {
+		w.pendingErr = nil
+		w.showErr(err)
+	}
 }
 
 // Show shows the window, on account when it names one the window knows. A
@@ -538,9 +556,7 @@ func (w *Window) Show(account string) {
 	case w.mode == paneEmpty || w.mode == paneAccount:
 		w.showDefault()
 	}
-	w.visible = true
-	w.win.Show()
-	w.win.RequestFocus()
+	w.reveal()
 }
 
 // onClose is what closing the window does: it hides (the app keeps running
