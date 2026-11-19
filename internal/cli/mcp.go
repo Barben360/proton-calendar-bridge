@@ -25,7 +25,7 @@ func (a *app) newMCP() *cobra.Command {
 			"otherwise pcb mcp serves the accounts itself until the agent ends the session (kind mcp: no network " +
 			"listener, and pcb serve or pcb-ui cannot start meanwhile). --profile full (the default) allows " +
 			"everything, read-only allows reading and starting a login; --allow replaces the profile with a " +
-			"comma-separated list among freebusy, read, write, delete, login, manage. --account limits the session " +
+			"comma-separated list among freebusy, read, write, delete, unconfirmed-delete, login, manage. A delete or sign-out the agent's client cannot ask you to confirm is refused unless unconfirmed-delete is given. --account limits the session " +
 			"to accounts (address or local ID, repeatable; none: every account). With a system-scope pcb service " +
 			"installed, use its remote /mcp with a token instead (pcb mcp token).",
 		Args: NoArgs,
@@ -43,7 +43,7 @@ func (a *app) newMCP() *cobra.Command {
 		},
 	})
 	c.Flags().StringVar(&profile, "profile", "full", "what the agent may do: `PROFILE` full or read-only")
-	c.Flags().StringVar(&allow, "allow", "", "what the agent may do, instead of a profile: `CAPS` comma-separated among freebusy, read, write, delete, login, manage")
+	c.Flags().StringVar(&allow, "allow", "", "what the agent may do, instead of a profile: `CAPS` comma-separated among freebusy, read, write, delete, unconfirmed-delete, login, manage")
 	// --account here is the command's own (repeatable: the session's
 	// scope), in place of the root's selector; selecting lets it past the
 	// root's check.

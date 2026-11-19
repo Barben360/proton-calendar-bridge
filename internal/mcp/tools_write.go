@@ -24,7 +24,8 @@ import (
 // checks the account and calendar are visible (an event_id as event_get
 // does, ruling R15) and that the calendar's write gate is open. A delete
 // is confirmed by the person through a form elicitation when the client
-// declares one; otherwise the delete grant alone allows it.
+// declares one; otherwise the grant must opt in (unconfirmed-delete), else
+// it is refused.
 
 func writeTools() []toolDef {
 	return []toolDef{
@@ -639,10 +640,30 @@ func asksForm(req *sdkmcp.CallToolRequest) bool {
 	return caps.Elicitation.Form != nil || caps.Elicitation.URL == nil
 }
 
+// mayActUnasked refuses, first of all (before the event is read, so a stale
+// etag or a missing event reveals nothing), a destructive call the person
+// cannot confirm: the client declared no form elicitation and the grant
+// does not opt in with unconfirmed-delete. act is the call in words.
+func (ss *session) mayActUnasked(req *sdkmcp.CallToolRequest, act string) error {
+	if asksForm(req) || ss.grant.has(CapUnconfirmedDelete) {
+		return nil
+	}
+	return &toolError{Class: classRefused, Reason: reasonUnconfirmed,
+		Message: "this " + act + " needs the person's confirmation, which this client cannot ask for: nothing was changed",
+		Hint: "use a client that supports form elicitation, or have the person allow unconfirmed " + act + "s: re-create the token with pcb mcp token add NAME --allow ...,unconfirmed-delete " +
+			"(pcb mcp --allow ...,unconfirmed-delete for stdio); do not retry as is"}
+}
+
+// reasonUnconfirmed is the refusal of a delete or sign-out nobody can confirm.
+const reasonUnconfirmed = "pcb:unconfirmed-delete"
+
 // deleteEvent runs once, or twice when the person is asked (E19): the run
 // that asks only reads, and the answer is read on the next run, which
 // checks everything again before it deletes.
 func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (deleteOut, *sdkmcp.ElicitParams, error) {
+	if err := ss.mayActUnasked(req, "delete"); err != nil {
+		return deleteOut{}, nil, err
+	}
 	tgt, err := ss.event(ctx, in.EventID)
 	if err != nil {
 		return deleteOut{}, nil, err

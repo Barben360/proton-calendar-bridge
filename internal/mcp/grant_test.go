@@ -22,6 +22,7 @@ func TestParseCapsAppliesImplications(t *testing.T) {
 		{"freebusy", []mcp.Capability{mcp.CapFreeBusy}},
 		{"read", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead}},
 		{"write", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite}},
+		{"unconfirmed-delete,write", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapUnconfirmedDelete}},
 		{"delete,write", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete}},
 		{" read , login ", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead, mcp.CapLogin}},
 		{"manage,read,read", []mcp.Capability{mcp.CapFreeBusy, mcp.CapRead, mcp.CapManage}},
@@ -33,7 +34,7 @@ func TestParseCapsAppliesImplications(t *testing.T) {
 			t.Errorf("ParseCaps(%q) = %v, %v; want %v", tc.in, got, err, tc.want)
 		}
 	}
-	for _, in := range []string{"", "delete", "read,delete", "admin", "read,", "READ", "free busy"} {
+	for _, in := range []string{"", "delete", "unconfirmed-delete", "read,unconfirmed-delete", "read,delete", "admin", "read,", "READ", "free busy"} {
 		if got, err := mcp.ParseCaps(in); err == nil {
 			t.Errorf("ParseCaps(%q) = %v, want an error", in, got)
 		}
@@ -41,8 +42,8 @@ func TestParseCapsAppliesImplications(t *testing.T) {
 	// Every capability a token may hold parses: the two lists cannot drift.
 	for _, c := range access.TokenCaps {
 		in := c
-		if c == "delete" {
-			in = "write,delete"
+		if c == "delete" || c == "unconfirmed-delete" {
+			in = "write," + c
 		}
 		if got, err := mcp.ParseCaps(in); err != nil || !slices.Contains(got, mcp.Capability(c)) {
 			t.Errorf("token capability %q: ParseCaps = %v, %v", c, got, err)

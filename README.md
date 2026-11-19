@@ -25,7 +25,7 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 ## What it does for you
 
 - **Your calendars in Thunderbird**, read and write: create, edit, move and delete events, single occurrences included. Each change goes to Proton and is read back before Thunderbird gets its answer.
-- **Your calendars for AI agents**, through MCP: Claude Code or any MCP client lists, searches and, when you allow it, edits events. You decide per agent what it may do, and a delete asks you first when the agent's client supports it.
+- **Your calendars for AI agents**, through MCP: Claude Code or any MCP client lists, searches and, when you allow it, edits events. You decide per agent what it may do, and a delete asks you first, and is refused when the agent's client cannot ask, unless you allow it.
 - **Several Proton accounts in one bridge**, each with its own CalDAV address, passwords, cache and sync, so one account's problem never stops another.
 - **Keeps your secrets yours.** The cache is encrypted, the Proton session is sealed with a key held in your desktop keyring or a key file, and passwords never go through command-line arguments. Calendar apps sign in with app passwords you can revoke one by one.
 - **Looks after itself.** It follows Proton's change feed, survives restarts, and `pcb doctor` says what is wrong and how to fix it.

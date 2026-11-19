@@ -40,7 +40,7 @@ const TokenPrefix = "pcbm_"
 
 // TokenCaps are the capabilities a token may grant, in the order they are
 // shown. login and manage are stdio only (design §5.4): never a token's.
-var TokenCaps = []string{"freebusy", "read", "write", "delete"}
+var TokenCaps = []string{"freebusy", "read", "write", "delete", "unconfirmed-delete"}
 
 const (
 	tokenFile        = "mcp-tokens.json"

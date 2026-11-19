@@ -587,12 +587,13 @@ equal "$(jq -r .data.password "$RUN/out")" "$PASS2" "default client's password a
 
 # --------------------------------------------------------------------------
 step 19 "pcb mcp relayed to pcb serve: list, create, update, delete"
-mcp_open
+# The rehearsal client declares no elicitation, so its delete needs the opt-in.
+mcp_open --allow write,delete,unconfirmed-delete,login,manage
 equal "$(jq -c '.result.capabilities.tools != null' "$RUN/mcp.json")" true "the server offers tools"
 mcp_rpc tools/list '{}'
 equal "$(jq -c '[.result.tools[].name] | sort' "$RUN/mcp.json")" \
 	'["calendars_list","event_create","event_delete","event_get","event_update","events_list","events_search","free_busy","login","logout","status"]' \
-	"tools of the full profile (the default) over stdio"
+	"tools of the full capabilities over stdio"
 run 0 "$PCB" status --json
 equal "$(jq -c '[.data.daemon.kind, .data.daemon.pid, .data.mcp.sessions.relay]' "$RUN/out")" "[\"serve\",$PID,1]" "the daemon serves the relayed session"
 mcp_tool status '{}'
@@ -643,7 +644,7 @@ equal "$(fake_calls PUT "$SYNC_PATH")" $((WRITES0 + 3)) "writes the fake receive
 mcp_tool_fails event_get "{\"event_id\":\"$EVENT_ID\"}" not-found
 mcp_close
 # One audit line per call in the daemon's log, entry relay, never content.
-has "$RUN/serve.log" 'msg="mcp call" tool=event_delete entry=relay grant=stdio:full' "the audit of the delete"
+has "$RUN/serve.log" 'msg="mcp call" tool=event_delete entry=relay grant=stdio:custom' "the audit of the delete"
 lacks "$RUN/serve.log" "pcb-rehearsal mcp" "the audit holds no event text"
 lacks "$RUN/mcp.log" "$FAKE_PASS" "the MCP session never holds the account password"
 lacks "$RUN/mcp.err" "$FAKE_PASS" "pcb mcp's stderr never holds the account password"

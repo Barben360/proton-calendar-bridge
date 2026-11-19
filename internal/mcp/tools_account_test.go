@@ -90,6 +90,8 @@ func jsonText(t *testing.T, v any) string {
 var (
 	loginGrant  = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapLogin)
 	manageGrant = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapManage)
+	// signOutGrant is manageGrant with the opt-in to sign-outs nobody confirms.
+	signOutGrant = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapUnconfirmedDelete, mcp.CapManage)
 )
 
 // shown records the usernames ShowLogin was called with.
@@ -604,15 +606,28 @@ func TestLogoutConfirms(t *testing.T) {
 	t.Run("not asked", func(t *testing.T) {
 		hub := newHub()
 		r := newRigWith(t, hub, nil)
-		out := mustCall(t, r.connect(t, manageGrant, mcp.EntryStdio), "logout", map[string]any{"account": "b2"})
+		out := mustCall(t, r.connect(t, signOutGrant, mcp.EntryStdio), "logout", map[string]any{"account": "b2"})
 		if out["account"] != "bob@example.com" || hub.signedOut()[0] != "b2" {
 			t.Errorf("logout = %v, signed out %v", out, hub.signedOut())
+		}
+	})
+	t.Run("refused without the opt-in", func(t *testing.T) {
+		hub := newHub()
+		r := newRigWith(t, hub, nil)
+		terr := mustFail(t, r.connect(t, manageGrant, mcp.EntryStdio), "logout", map[string]any{"account": "b2"}, "refused")
+		for _, want := range []string{"unconfirmed-delete", "elicitation"} {
+			if !strings.Contains(terr.Message+" "+terr.Hint, want) {
+				t.Errorf("refusal %+v does not mention %q", *terr, want)
+			}
+		}
+		if got := hub.signedOut(); len(got) != 0 {
+			t.Errorf("signed out %v", got)
 		}
 	})
 	t.Run("outside the grant", func(t *testing.T) {
 		hub := newHub()
 		r := newRigWith(t, hub, nil)
-		g := manageGrant
+		g := signOutGrant
 		g.Accounts = []string{"a1"}
 		cs := r.connect(t, g, mcp.EntryStdio)
 		mustFail(t, cs, "logout", map[string]any{"account": "bob@example.com"}, "not-found")

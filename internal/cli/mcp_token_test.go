@@ -191,6 +191,32 @@ func TestMCPTokenRefusesDeleteWithoutWrite(t *testing.T) {
 	}
 }
 
+// The opt-in to unconfirmed deletes is a capability of the token: add takes
+// it with --allow, list shows it, and a token without it shows none.
+func TestMCPTokenOptInToUnconfirmedDelete(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, nil)
+	r.want(exitcode.Usage, "mcp", "token", "add", "bare", "--allow", "unconfirmed-delete", "--json")
+	if e := r.envelope(); e.OK || e.Error == nil || !strings.Contains(e.Error.Message, "delete needs write") {
+		t.Errorf("unconfirmed-delete without write: %+v", e)
+	}
+	tokenAdd(t, r, "plain", "--allow", "write,delete")
+	tokenAdd(t, r, "opted", "--allow", "write,delete,unconfirmed-delete")
+	got := map[string][]string{}
+	for _, e := range tokenList(t, r) {
+		got[e.Name] = e.Caps
+	}
+	if slices.Contains(got["plain"], "unconfirmed-delete") || !slices.Contains(got["opted"], "unconfirmed-delete") {
+		t.Errorf("listed caps %v: want the opt-in on opted only", got)
+	}
+	r.want(exitcode.OK, "mcp", "token", "list")
+	if lines := strings.Split(r.out.String(), "\n"); !slices.ContainsFunc(lines, func(l string) bool {
+		return strings.HasPrefix(l, "opted") && strings.Contains(l, "unconfirmed-delete")
+	}) {
+		t.Errorf("the text list does not show the opt-in:\n%s", r.out.String())
+	}
+}
+
 func TestMCPTokenUnknownAccount(t *testing.T) {
 	t.Parallel()
 	hubOf := func() *stubHub {
