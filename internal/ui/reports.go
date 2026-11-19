@@ -67,8 +67,13 @@ func (r *Reports) Text() string {
 	return strings.Join(parts, "\n\n")
 }
 
+// errNotSentNow is Send's answer when nothing could be posted (a server's
+// Retry-After or the daily limit) and reports still wait.
+var errNotSentNow = errors.New("not sent now: try again later")
+
 // Send posts the waiting reports now, whatever the mode (the person asked).
-// It fails when a report was refused or the request failed.
+// It fails when a report was refused or the request failed, and when none
+// was posted while some wait (a server's Retry-After, the daily limit).
 func (r *Reports) Send(ctx context.Context) error {
 	results, err := r.Sender.SendPending(ctx)
 	if err != nil {
@@ -78,6 +83,9 @@ func (r *Reports) Send(ctx context.Context) error {
 		if !res.Sent {
 			return res.Err
 		}
+	}
+	if n, _ := r.Pending(); len(results) == 0 && n > 0 {
+		return errNotSentNow
 	}
 	return nil
 }
