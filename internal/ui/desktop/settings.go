@@ -27,12 +27,27 @@ type settingsPane struct {
 	autostart *toggle
 	updates   *toggle
 	reports   *toggle
+	repLock   *lockable         // keeps the switch disabled while the environment sets the mode
+	repHint   *textLine         // "set by PCB_CRASH_REPORTS"
 	repRow    fyne.CanvasObject // hidden in a build without a report address
 	silent    bool              // setting the level from the settings, not the person
 	level     *widget.Select
 	addr, tls *textLine
 	tlsRow    fyne.CanvasObject
 	b         *busy
+}
+
+// lockable is a control busy disables and enables, kept disabled while
+// locked.
+type lockable struct {
+	fyne.Disableable
+	locked bool
+}
+
+func (l *lockable) Enable() {
+	if !l.locked {
+		l.Disableable.Enable()
+	}
 }
 
 // action is a grouped row that is one button.
@@ -59,8 +74,11 @@ func newSettingsPane(w *Window) *settingsPane {
 	cfg := action("Open config.toml", theme.DocumentIcon(), func() { p.simple(func() error { return w.set.OpenConfig() }) })
 	restart := action("Restart bridge", theme.ViewRefreshIcon(), func() { p.simple(func() error { return w.act.Restart(context.Background()) }) })
 	doc := action("Doctor report", theme.InfoIcon(), p.doctor)
-	p.b = newBusy(p.autostart, p.updates, p.reports, logs, cfg, restart, doc)
-	p.repRow = divided(groupRow(key("Send crash reports"), 0, nil, vcenter(p.reports)))
+	p.repLock = &lockable{Disableable: p.reports}
+	p.repHint = newTextLine("", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
+	p.repHint.Hide()
+	p.b = newBusy(p.autostart, p.updates, p.repLock, logs, cfg, restart, doc)
+	p.repRow = divided(groupRow(key("Send crash reports"), 0, nil, vcenter(p.repHint), vcenter(p.reports)))
 	hint := newTextLine("set [log] level in config.toml to keep it", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
 	hint.Truncate = true
 	p.tlsRow = divided(groupRow(key("TLS"), keyWidth, p.tls))
@@ -91,8 +109,9 @@ func newSettingsPane(w *Window) *settingsPane {
 func (p *settingsPane) open(ln *ctl.Listener) {
 	p.autostart.SetOn(p.w.set.Autostart())
 	p.updates.SetOn(p.w.set.UpdateCheck())
-	on, available := p.w.set.CrashReports()
+	on, available, setBy := p.w.set.CrashReports()
 	p.reports.SetOn(on)
+	p.setReportsLock(setBy)
 	if available {
 		p.repRow.Show()
 	} else {
@@ -108,6 +127,22 @@ func (p *settingsPane) open(ln *ctl.Listener) {
 	}
 	p.silent = false
 	p.setListener(ln)
+}
+
+// setReportsLock disables the crash reports switch, saying why, while the
+// environment variable setBy sets the mode ("": the switch works).
+func (p *settingsPane) setReportsLock(setBy string) {
+	p.repLock.locked = setBy != ""
+	if p.repLock.locked {
+		p.reports.Disable()
+		p.repHint.SetText("set by " + setBy)
+		p.repHint.Show()
+		return
+	}
+	p.repHint.Hide()
+	if !p.b.on {
+		p.reports.Enable()
+	}
 }
 
 func (p *settingsPane) setListener(ln *ctl.Listener) {
@@ -150,7 +185,7 @@ func (p *settingsPane) setReports(on bool) {
 		if err != nil {
 			p.w.showErr(err)
 			var cur bool
-			p.w.async(func() { cur, _ = p.w.set.CrashReports() }, func() { p.reports.SetOn(cur) })
+			p.w.async(func() { cur, _, _ = p.w.set.CrashReports() }, func() { p.reports.SetOn(cur) })
 		}
 	})
 }

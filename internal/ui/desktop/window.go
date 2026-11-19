@@ -46,8 +46,10 @@ type Settings interface {
 	SetUpdateCheck(on bool) error
 	// CrashReports is the "Send crash reports" switch: on is always send,
 	// off is ask. available is false in a build without a report address,
-	// which shows no switch.
-	CrashReports() (on, available bool)
+	// which shows no switch. setBy names the environment variable that sets
+	// the mode in force, which the switch then shows but cannot change ("":
+	// none).
+	CrashReports() (on, available bool, setBy string)
 	SetCrashReports(on bool) error
 }
 

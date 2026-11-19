@@ -80,7 +80,8 @@ type fakeSettings struct {
 	level     slog.Level
 	updateOff bool
 	reportsOn bool
-	noReports bool // a build without a report address
+	noReports bool   // a build without a report address
+	reportsBy string // the environment variable that sets the mode
 }
 
 func (s *fakeSettings) UpdateCheck() bool { return !s.updateOff }
@@ -90,7 +91,9 @@ func (s *fakeSettings) SetUpdateCheck(on bool) error {
 	return nil
 }
 
-func (s *fakeSettings) CrashReports() (on, available bool) { return s.reportsOn, !s.noReports }
+func (s *fakeSettings) CrashReports() (on, available bool, setBy string) {
+	return s.reportsOn, !s.noReports, s.reportsBy
+}
 func (s *fakeSettings) SetCrashReports(on bool) error {
 	s.calls = append(s.calls, "crashreports")
 	s.reportsOn = on

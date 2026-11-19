@@ -316,7 +316,7 @@ func TestAlertSenderLogsAFailureOnce(t *testing.T) {
 
 func TestSettingsCrashReportsSwitch(t *testing.T) {
 	s, _ := newSettings(t)
-	if on, available := s.CrashReports(); on || available {
+	if on, available, _ := s.CrashReports(); on || available {
 		t.Errorf("without reports: on %v, available %v", on, available)
 	}
 	if err := s.SetCrashReports(true); err == nil {
@@ -324,7 +324,7 @@ func TestSettingsCrashReportsSwitch(t *testing.T) {
 	}
 	store := report.Store{StateDir: t.TempDir(), Env: func(string) string { return "" }}
 	s.reports = &ui.Reports{Store: store}
-	if on, available := s.CrashReports(); on || !available {
+	if on, available, by := s.CrashReports(); on || !available || by != "" {
 		t.Errorf("mode ask: on %v, available %v", on, available)
 	}
 	if err := s.SetCrashReports(true); err != nil {
@@ -333,7 +333,32 @@ func TestSettingsCrashReportsSwitch(t *testing.T) {
 	if store.Mode() != report.Always {
 		t.Errorf("mode %s after switching on, want always", store.Mode())
 	}
-	if on, _ := s.CrashReports(); !on {
+	if on, _, _ := s.CrashReports(); !on {
 		t.Error("the switch is off in mode always")
+	}
+}
+
+// PCB_CRASH_REPORTS=always: the switch shows on, says why, and cannot be
+// turned off (the file would say ask while reports keep leaving).
+func TestSettingsCrashReportsSwitchSetByTheEnvironment(t *testing.T) {
+	s, _ := newSettings(t)
+	store := report.Store{StateDir: t.TempDir(), Env: func(k string) string {
+		if k == report.EnvSwitch {
+			return "always"
+		}
+		return ""
+	}}
+	s.reports = &ui.Reports{Store: store}
+	if on, available, by := s.CrashReports(); !on || !available || by != report.EnvSwitch {
+		t.Fatalf("on %v, available %v, set by %q; want on, available, set by %s", on, available, by, report.EnvSwitch)
+	}
+	if err := s.SetCrashReports(false); err == nil {
+		t.Error("switching off worked while PCB_CRASH_REPORTS=always")
+	}
+	if on, _, _ := s.CrashReports(); !on || store.Mode() != report.Always {
+		t.Errorf("after switching off: on %v, mode %s; want on, always", on, store.Mode())
+	}
+	if m := (report.Store{StateDir: store.StateDir, Env: func(string) string { return "" }}).Mode(); m != report.Ask {
+		t.Errorf("reports.json says %s, want it untouched (ask)", m)
 	}
 }
