@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -228,5 +229,41 @@ func TestDryRunBeforeOfAnOccurrenceKeepsTheElapsedDuration(t *testing.T) {
 	}
 	if got := field(out, "before.start.at"); got != nil {
 		t.Errorf("before.start = %v: the start does not change", got)
+	}
+}
+
+// free_busy answers for the range asked: what lies outside it is not shown
+// as busy.
+func TestFreeBusyIsClippedToTheRange(t *testing.T) {
+	hub := newHub()
+	a := hub.agendas["a1"]
+	day := time.Date(2026, 11, 16, 0, 0, 0, 0, paris) // a Monday, Paris
+	at := func(h, m int) time.Time { return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute) }
+	allDay := occ("cal-a", "allday@x", "Offsite", day, 24*time.Hour)
+	allDay.Occurrence.AllDay = true
+	timed := []service.AgendaOccurrence{
+		occ("cal-a", "early@x", "Early", at(7, 0), 150*time.Minute), // 07:00 to 09:30
+		occ("cal-a", "late@x", "Late", at(16, 30), 90*time.Minute),  // 16:30 to 18:00
+		occ("cal-a", "mid@x", "Mid", at(12, 0), time.Hour),          // inside the range
+	}
+	cs := newRig(t, hub).connect(t, grant(mcp.CapFreeBusy), mcp.EntryStdio)
+	busyOf := func() []string {
+		out := mustCall(t, cs, "free_busy", map[string]any{"from": "2026-11-16T09:00", "to": "2026-11-16T17:00", "accounts": []string{"a1"}})
+		var got []string
+		for _, b := range list(field(out, "accounts.0.busy")) {
+			got = append(got, fmt.Sprint(field(b, "start"), " ", field(b, "end")))
+		}
+		return got
+	}
+	// The all-day event is busy for the range, not from 00:00 to 24:00.
+	a.occ = append([]service.AgendaOccurrence{allDay}, timed...)
+	if got, want := busyOf(), []string{"2026-11-16T09:00:00+01:00 2026-11-16T17:00:00+01:00"}; !slices.Equal(got, want) {
+		t.Errorf("with an all-day event: %v, want %v", got, want)
+	}
+	// Otherwise each interval is cut at the range's bounds.
+	a.occ = timed
+	want := []string{"2026-11-16T09:00:00+01:00 2026-11-16T09:30:00+01:00", "2026-11-16T12:00:00+01:00 2026-11-16T13:00:00+01:00", "2026-11-16T16:30:00+01:00 2026-11-16T17:00:00+01:00"}
+	if got := busyOf(); !slices.Equal(got, want) {
+		t.Errorf("busy %v, want %v", got, want)
 	}
 }

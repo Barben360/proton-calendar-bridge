@@ -284,7 +284,7 @@ type freeBusyOut struct {
 func addFreeBusy(ss *session) {
 	addTool(ss, &sdkmcp.Tool{
 		Name:        "free_busy",
-		Description: "Busy intervals per account over a range, merged; transparent and cancelled events are free. No titles nor attendees.",
+		Description: "Busy intervals per account over a range, merged and cut at the range's bounds; transparent, cancelled and declined events are free. No titles nor attendees.",
 		Annotations: readOnly("Free/busy"),
 	}, func(ctx context.Context, in rangeIn) (freeBusyOut, string, error) {
 		sp, err := ss.span(in.From, in.To, in.TZ)
@@ -318,7 +318,7 @@ func addFreeBusy(ss *session) {
 				continue
 			}
 			f.answered++
-			out.Accounts = append(out.Accounts, accountBusy{Account: t.info.Address, Busy: mergeBusy(occ, sp.loc), Skipped: skipped, Note: skippedNote(skipped)})
+			out.Accounts = append(out.Accounts, accountBusy{Account: t.info.Address, Busy: mergeBusy(occ, sp), Skipped: skipped, Note: skippedNote(skipped)})
 		}
 		if err := f.err(); err != nil {
 			return freeBusyOut{}, "", err
@@ -328,25 +328,45 @@ func addFreeBusy(ss *session) {
 	})
 }
 
-// mergeBusy merges overlapping or touching occurrences into intervals.
-func mergeBusy(occ []service.Occurrence, loc *time.Location) []interval {
+// mergeBusy merges overlapping or touching occurrences into intervals, each
+// clipped to the range asked: an all-day event in a 09:00 to 17:00 query is
+// busy from 09:00 to 17:00, not from midnight.
+func mergeBusy(occ []service.Occurrence, sp span) []interval {
 	slices.SortFunc(occ, func(a, b service.Occurrence) int { return a.Start.Compare(b.Start) })
-	type span struct{ from, to time.Time }
-	var spans []span
+	type seg struct{ from, to time.Time }
+	var spans []seg
 	for _, o := range occ {
+		o.Start, o.End = latest(o.Start, sp.from), earliest(o.End, sp.to)
+		if !o.End.After(o.Start) {
+			continue // outside the range, or empty once cut
+		}
 		if n := len(spans); n > 0 && !o.Start.After(spans[n-1].to) {
 			if o.End.After(spans[n-1].to) {
 				spans[n-1].to = o.End
 			}
 			continue
 		}
-		spans = append(spans, span{o.Start, o.End})
+		spans = append(spans, seg{o.Start, o.End})
 	}
 	out := make([]interval, 0, len(spans))
 	for _, s := range spans {
-		out = append(out, interval{Start: s.from.In(loc).Format(time.RFC3339), End: s.to.In(loc).Format(time.RFC3339)})
+		out = append(out, interval{Start: s.from.In(sp.loc).Format(time.RFC3339), End: s.to.In(sp.loc).Format(time.RFC3339)})
 	}
 	return out
+}
+
+func latest(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return b
+	}
+	return a
+}
+
+func earliest(a, b time.Time) time.Time {
+	if a.After(b) {
+		return b
+	}
+	return a
 }
 
 // ---- events_list and events_search ----
