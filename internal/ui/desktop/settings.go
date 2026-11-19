@@ -26,7 +26,9 @@ type settingsPane struct {
 	root      fyne.CanvasObject
 	autostart *toggle
 	updates   *toggle
-	silent    bool // setting the level from the settings, not the person
+	reports   *toggle
+	repRow    fyne.CanvasObject // hidden in a build without a report address
+	silent    bool              // setting the level from the settings, not the person
 	level     *widget.Select
 	addr, tls *textLine
 	tlsRow    fyne.CanvasObject
@@ -47,6 +49,7 @@ func newSettingsPane(w *Window) *settingsPane {
 	p.tls = newTextLine("", theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
 	p.autostart = newToggle("Start at login", p.setAutostart)
 	p.updates = newToggle("Check for updates", p.setUpdates)
+	p.reports = newToggle("Send crash reports", p.setReports)
 	names := make([]string, len(levels))
 	for i, l := range levels {
 		names[i] = l.name
@@ -56,7 +59,8 @@ func newSettingsPane(w *Window) *settingsPane {
 	cfg := action("Open config.toml", theme.DocumentIcon(), func() { p.simple(func() error { return w.set.OpenConfig() }) })
 	restart := action("Restart bridge", theme.ViewRefreshIcon(), func() { p.simple(func() error { return w.act.Restart(context.Background()) }) })
 	doc := action("Doctor report", theme.InfoIcon(), p.doctor)
-	p.b = newBusy(p.autostart, p.updates, logs, cfg, restart, doc)
+	p.b = newBusy(p.autostart, p.updates, p.reports, logs, cfg, restart, doc)
+	p.repRow = divided(groupRow(key("Send crash reports"), 0, nil, vcenter(p.reports)))
 	hint := newTextLine("set [log] level in config.toml to keep it", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
 	hint.Truncate = true
 	p.tlsRow = divided(groupRow(key("TLS"), keyWidth, p.tls))
@@ -67,6 +71,7 @@ func newSettingsPane(w *Window) *settingsPane {
 		group("GENERAL",
 			groupRow(key("Start at login"), 0, nil, vcenter(p.autostart)),
 			divided(groupRow(key("Check for updates"), 0, nil, vcenter(p.updates))),
+			p.repRow,
 			divided(groupRow(key("Log level"), keyWidth, pad(0, 0, 0, 8, hint), vcenter(p.level))),
 		),
 		group("BRIDGE",
@@ -86,6 +91,13 @@ func newSettingsPane(w *Window) *settingsPane {
 func (p *settingsPane) open(ln *ctl.Listener) {
 	p.autostart.SetOn(p.w.set.Autostart())
 	p.updates.SetOn(p.w.set.UpdateCheck())
+	on, available := p.w.set.CrashReports()
+	p.reports.SetOn(on)
+	if available {
+		p.repRow.Show()
+	} else {
+		p.repRow.Hide()
+	}
 	p.silent = true
 	cur := p.w.set.Level()
 	p.level.SetSelected("")
@@ -129,6 +141,16 @@ func (p *settingsPane) setUpdates(on bool) {
 			p.w.showErr(err)
 			var cur bool
 			p.w.async(func() { cur = p.w.set.UpdateCheck() }, func() { p.updates.SetOn(cur) })
+		}
+	})
+}
+
+func (p *settingsPane) setReports(on bool) {
+	p.w.run(p.b, "Working…", func(context.Context) error { return p.w.set.SetCrashReports(on) }, func(err error) {
+		if err != nil {
+			p.w.showErr(err)
+			var cur bool
+			p.w.async(func() { cur, _ = p.w.set.CrashReports() }, func() { p.reports.SetOn(cur) })
 		}
 	})
 }

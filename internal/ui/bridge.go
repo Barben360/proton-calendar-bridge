@@ -20,6 +20,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -55,6 +56,10 @@ type BridgeOptions struct {
 	// shutdown): a Stop then drains for 2 s, not 5 s (daemon.Options
 	// SessionEnd). nil: never.
 	SessionEnd <-chan struct{}
+	// Reports sends the waiting crash reports in the background while the
+	// mode is always (nil: never). It is woken by the installed
+	// report.Process's saves.
+	Reports *report.Sender
 }
 
 // Bridge runs the daemon (what pcb serve runs) inside the desktop app.
@@ -213,9 +218,16 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		// The MCP tool's handler must not wait for the window.
 		showLogin = func(username string) error { go b.o.ShowLogin(username); return nil } //nolint:unparam // mcp.Options.ShowLogin has an error to return
 	}
+	var reportPoke <-chan struct{}
+	unsubscribe := func() {}
+	if p := report.Current(); b.o.Reports != nil && p != nil {
+		reportPoke, unsubscribe = p.Subscribe()
+	}
 	go func() {
 		defer cancel()
+		defer unsubscribe()
 		err := daemon.Run(runCtx, daemon.Options{
+			Reports: b.o.Reports, ReportPoke: reportPoke,
 			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
 			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
 				ShowLogin: showLogin, LoginBusy: hub.LoginInProgress}),

@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
@@ -275,5 +276,29 @@ func TestSettingsUpdateCheckWritesTheSwitchAndPokes(t *testing.T) {
 	case <-s.poke:
 	default:
 		t.Error("no poke after the switch")
+	}
+}
+
+func TestSettingsCrashReportsSwitch(t *testing.T) {
+	s, _ := newSettings(t)
+	if on, available := s.CrashReports(); on || available {
+		t.Errorf("without reports: on %v, available %v", on, available)
+	}
+	if err := s.SetCrashReports(true); err == nil {
+		t.Error("the switch worked in a build without a report address")
+	}
+	store := report.Store{StateDir: t.TempDir(), Env: func(string) string { return "" }}
+	s.reports = &ui.Reports{Store: store}
+	if on, available := s.CrashReports(); on || !available {
+		t.Errorf("mode ask: on %v, available %v", on, available)
+	}
+	if err := s.SetCrashReports(true); err != nil {
+		t.Fatal(err)
+	}
+	if store.Mode() != report.Always {
+		t.Errorf("mode %s after switching on, want always", store.Mode())
+	}
+	if on, _ := s.CrashReports(); !on {
+		t.Error("the switch is off in mode always")
 	}
 }

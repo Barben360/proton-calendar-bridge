@@ -79,12 +79,21 @@ type fakeSettings struct {
 	autoErr   error
 	level     slog.Level
 	updateOff bool
+	reportsOn bool
+	noReports bool // a build without a report address
 }
 
 func (s *fakeSettings) UpdateCheck() bool { return !s.updateOff }
 func (s *fakeSettings) SetUpdateCheck(on bool) error {
 	s.calls = append(s.calls, "updatecheck")
 	s.updateOff = !on
+	return nil
+}
+
+func (s *fakeSettings) CrashReports() (on, available bool) { return s.reportsOn, !s.noReports }
+func (s *fakeSettings) SetCrashReports(on bool) error {
+	s.calls = append(s.calls, "crashreports")
+	s.reportsOn = on
 	return nil
 }
 
