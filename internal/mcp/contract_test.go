@@ -2,14 +2,17 @@ package mcp_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
 // What an agent that branches on class and hint observes of a bad call:
@@ -153,5 +156,77 @@ func TestReadToolsWithoutAccountsSayToLogIn(t *testing.T) {
 				t.Errorf("%s %v: no hint", tool, args)
 			}
 		}
+	}
+}
+
+// Times without an offset are read as the codec reads a stored wall clock:
+// a DST gap takes the offset before it, an overlap its first occurrence.
+func TestWallClocksInDSTGapsAndOverlapsAreTheCodecs(t *testing.T) {
+	hub := newHub()
+	cs := newRig(t, hub).connect(t, writeGrant, mcp.EntryRemote)
+	alice := hub.agendas["a1"]
+	for _, tc := range []struct {
+		name, tz, start, end string
+		wantStart, wantEnd   string // UTC
+	}{
+		// 02:00 to 03:00 does not exist in New York on 2026-03-08: 02:30 is 03:30 EDT.
+		{"gap", "America/New_York", "2026-03-08T02:30", "2026-03-08T04:30", "2026-03-08T07:30:00Z", "2026-03-08T08:30:00Z"},
+		// 02:00 to 03:00 happens twice in Paris on 2026-10-25: the first is CEST.
+		{"overlap", "Europe/Paris", "2026-10-25T02:30", "2026-10-25T03:30", "2026-10-25T00:30:00Z", "2026-10-25T02:30:00Z"},
+	} {
+		n := len(alice.writes().creates)
+		mustCall(t, cs, "event_create", map[string]any{"account": "a1", "calendar": "cal-a", "summary": tc.name,
+			"start": tc.start, "end": tc.end, "tz": tc.tz})
+		f := alice.writes().creates[n].f
+		if got := f.Start.At.UTC().Format(time.RFC3339); got != tc.wantStart {
+			t.Errorf("%s: start stored as %s, want %s", tc.name, got, tc.wantStart)
+		}
+		if got := f.End.At.UTC().Format(time.RFC3339); got != tc.wantEnd {
+			t.Errorf("%s: end stored as %s, want %s", tc.name, got, tc.wantEnd)
+		}
+	}
+	// The same rule reads a range: events_list over the gap day asks the
+	// agenda from 03:30 EDT, which is also what it echoes.
+	out := mustCall(t, cs, "events_list", map[string]any{"from": "2026-03-08T02:30", "to": "2026-03-08T12:00", "tz": "America/New_York"})
+	if out["from"] != "2026-03-08T03:30:00-04:00" {
+		t.Errorf("from echoed as %v, want 03:30 EDT", out["from"])
+	}
+}
+
+// The "before" of an occurrence's dry run is the occurrence the series
+// makes: as long as the series' own, in elapsed time as Expand reads it,
+// even across a DST change.
+func TestDryRunBeforeOfAnOccurrenceKeepsTheElapsedDuration(t *testing.T) {
+	hub := newHub()
+	cs := newRig(t, hub).connect(t, writeGrant, mcp.EntryRemote)
+	alice := hub.agendas["a1"]
+	ny, _ := time.LoadLocation("America/New_York")
+	// Saturdays 23:00 to Sunday 04:00: 5 hours elapsed in a week without a change.
+	start := time.Date(2026, 2, 28, 23, 0, 0, 0, ny)
+	master := alice.events["cal-a|standup@x"]
+	master.Data.Start = service.EventTime{At: start, TZID: "America/New_York"}
+	master.Data.End = service.EventTime{At: start.Add(5 * time.Hour), TZID: "America/New_York"}
+	master.Data.RRule = "FREQ=WEEKLY"
+	alice.events["cal-a|standup@x"] = master
+	// 2026-03-08 02:00 is skipped in the night of the occurrence on 03-07.
+	rid := time.Date(2026, 3, 7, 23, 0, 0, 0, ny)
+	override := master.Data
+	override.RRule = ""
+	override.Summary = "Standup, moved"
+	override.Start.At, override.End.At = rid, rid.Add(6*time.Hour)
+	override.RecurrenceID = &service.EventTime{At: rid, TZID: "America/New_York"}
+	after := master.Data
+	after.Overrides = []service.EventData{override}
+	alice.w.after = &after
+	id := base64.RawURLEncoding.EncodeToString([]byte("a1\x00cal-a\x00standup@x\x00" + rid.UTC().Format(time.RFC3339)))
+
+	out := mustCall(t, cs, "event_update", map[string]any{"event_id": id, "etag": `"standup@x-1"`, "scope": "occurrence", "dry_run": true,
+		"tz": "America/New_York", "changes": map[string]any{"end": "2026-03-08T05:00"}})
+	// Five elapsed hours after 23:00 EST (04:00Z) end at 09:00Z, 05:00 EDT.
+	if got := field(out, "before.end.at"); got != "2026-03-08T05:00:00-04:00" {
+		t.Errorf("before.end = %v, want 05:00 EDT (5 h elapsed, as Expand gives); out %v", got, out)
+	}
+	if got := field(out, "before.start.at"); got != nil {
+		t.Errorf("before.start = %v: the start does not change", got)
 	}
 }

@@ -518,8 +518,8 @@ func sameTime(a, b service.EventTime) bool {
 }
 
 // occurrenceOf is the occurrence of d at rid: its override, else the one
-// its master generates there (the master's fields at that start, with its
-// duration on the wall clock).
+// its master generates there (the master's fields at that start, as long as
+// the master in elapsed time, as ical.Expand makes it).
 func occurrenceOf(d service.EventData, rid service.EventTime) service.EventData {
 	for _, o := range d.Overrides {
 		if o.RecurrenceID != nil && sameTime(*o.RecurrenceID, rid) {
@@ -537,17 +537,11 @@ func occurrenceOf(d service.EventData, rid service.EventTime) service.EventData 
 			o.Start.Date, o.End.Date = rid.Date, r.Add(e.Sub(s)).Format(time.DateOnly)
 		}
 	case !rid.At.IsZero():
-		loc := time.UTC // a floating time holds its wall clock as UTC
-		if z := zoneOf(d.Start.TZID); z != nil && !d.Start.Floating {
-			loc = z
-		}
-		wall := func(t time.Time) time.Time {
-			t = t.In(loc)
-			return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
-		}
-		w := wall(rid.At).Add(wall(d.End.At).Sub(wall(d.Start.At)))
-		o.Start.At = rid.At.In(loc)
-		o.End.At = time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), 0, loc)
+		// rid is an instant: the occurrence starts there and lasts as long
+		// as the master (a floating time holds its wall clock as UTC, so
+		// the difference is the same).
+		o.Start.At = rid.At.In(d.Start.At.Location())
+		o.End.At = rid.At.Add(d.End.At.Sub(d.Start.At)).In(d.End.At.Location())
 	}
 	return o
 }

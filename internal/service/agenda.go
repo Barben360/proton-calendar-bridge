@@ -38,6 +38,12 @@ type (
 	Occurrence  = ical.Occurrence
 )
 
+// ResolveWall is the instant of the wall clock w (its fields read as a local
+// time of loc) by the codec's rule, ical.ResolveWall: the first of two in a
+// DST overlap, the offset before a gap. The adapter reads the times it is
+// given with it, so what it stores is what the codec reads back.
+func ResolveWall(w time.Time, loc *time.Location) time.Time { return ical.ResolveWall(w, loc) }
+
 // The edit scopes: the series (its master) or one occurrence.
 const (
 	ScopeSeries     = ical.ScopeSeries
