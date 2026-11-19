@@ -94,7 +94,7 @@ With `--background` (the autostart), `pcb-ui` first waits up to 15 seconds for t
 
 ## Start at login
 
-Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead, the one the installer's "Start at login" box writes too ([below](#on-windows)).
+Settings, "Start at login" writes `~/.config/autostart/pcb-ui.desktop` (`$XDG_CONFIG_HOME/autostart`) with the absolute path and `--background`. Switching it off deletes that file. On Windows it writes a registry value instead, the one the installer's "Start at login" box writes too ([below](#on-windows)). The switch shows "on" only when the entry starts this executable: after the program moved (or a switch from the zip to the MSI) a stale entry shows "off", and switching it on rewrites it.
 
 ## On Windows
 

@@ -34,6 +34,18 @@ func Exe(data string) (string, bool) {
 	return exe, exe != ""
 }
 
+// PointsTo reports whether the Run value data starts exe: the same path as
+// Windows compares it, ignoring case and the kind of slash. A stale value
+// (the program moved, or a zip install replaced by the MSI) is false.
+func PointsTo(data, exe string) bool {
+	got, ok := Exe(data)
+	if !ok || exe == "" {
+		return false
+	}
+	norm := func(p string) string { return strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`) }
+	return strings.EqualFold(norm(got), norm(exe))
+}
+
 // Store is one Run value.
 type Store interface {
 	// Get is the value's data; ok is false (and err nil) when it is absent.
