@@ -304,10 +304,12 @@ func (r *renderer) resume() {
 	r.kmu.Unlock()
 }
 
-func (r *renderer) halted() bool {
+// generation returns the key generation, and false when a logout is under
+// way (no load starts then). Read it before the session a load installs from.
+func (r *renderer) generation() (uint64, bool) {
 	r.kmu.RLock()
 	defer r.kmu.RUnlock()
-	return r.halts > 0
+	return r.gen, r.halts == 0
 }
 
 // drop forgets the keys (clearing their private parameters), the rendered

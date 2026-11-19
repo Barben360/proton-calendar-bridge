@@ -160,11 +160,26 @@ var errKeysChanged = errors.New("account keys no longer unlock")
 // repaired session ends too, the login is marked needs-login, so later runs
 // do not relogin again without a person.
 func (l *Local) withSession(ctx context.Context, op func(context.Context, *api.Client, store.Account) error) error {
+	return l.withSessionGen(ctx, func(ctx context.Context, c *api.Client, acc store.Account, _ uint64) error {
+		return op(ctx, c, acc)
+	})
+}
+
+// withSessionGen is withSession for an op that installs what it builds from
+// the session into the renderer: op gets the key generation read before the
+// session was (kmu held, with the logout check), so any drop after the
+// session read, a logout's included, invalidates the install. After a
+// relogin the generation is read again: the relogin dropped the keys itself.
+func (l *Local) withSessionGen(ctx context.Context, op func(context.Context, *api.Client, store.Account, uint64) error) error {
+	gen, ok := l.r.generation()
+	if !ok {
+		return errKeysDropped()
+	}
 	c, acc, st, err := l.session(ctx)
 	if err != nil {
 		return err
 	}
-	err = op(ctx, c, acc)
+	err = op(ctx, c, acc, gen)
 	if !errors.Is(err, api.ErrSessionEnded) {
 		return l.opError(ctx, st, err)
 	}
@@ -172,7 +187,10 @@ func (l *Local) withSession(ctx context.Context, op func(context.Context, *api.C
 	if c, acc, st, err = l.relogin(ctx, c.Tokens(), ended); err != nil {
 		return err
 	}
-	err = op(ctx, c, acc)
+	if gen, ok = l.r.generation(); !ok {
+		return errKeysDropped()
+	}
+	err = op(ctx, c, acc, gen)
 	if errors.Is(err, api.ErrSessionEnded) {
 		return l.humanNeeded(ctx, st, sessionEndedBy(err, "run pcb login"))
 	}

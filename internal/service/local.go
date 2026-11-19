@@ -369,10 +369,8 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	// the session left (lock order: kmu and cmu are leaves, taken one at a
 	// time, under mu).
 	l.r.halt()
-	defer func() {
-		l.dropClient()
-		l.r.resume()
-	}()
+	defer l.r.resume() // registered first, so it runs last
+	defer l.dropClient()
 	if errors.Is(err, store.ErrRolledBack) {
 		l.revokeHeld()
 	}

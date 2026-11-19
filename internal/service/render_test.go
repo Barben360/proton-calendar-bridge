@@ -335,6 +335,34 @@ func TestObjectChanges(t *testing.T) {
 		e.sync(t, false)
 	})
 
+	t.Run("ALoadThatReadTheSessionBeforeALogoutInstallsNoKeys", func(t *testing.T) {
+		// The load read the stored session, then the whole logout ran (the
+		// revoke failed, so the session is still live at Proton), then the
+		// load went on with its stale client: its Proton calls succeed, and
+		// it must still install nothing.
+		e.f.FailNext("DELETE", "/auth/v4", 400, 2001, 0)
+		var inner error
+		e.svc.BeforeKeyLoad(func() {
+			e.svc.BeforeKeyLoad(nil)
+			if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+				inner = err
+			}
+		})
+		_, err := e.svc.ObjectsByUID(t.Context(), work, []string{"s@x"})
+		if inner != nil {
+			t.Fatal(inner)
+		}
+		if e.svc.HasKeys() {
+			t.Error("keys held after a logout that ran inside a load")
+		}
+		if err == nil {
+			t.Error("a load that straddled a logout was answered")
+		}
+		e.clk.advance(61 * time.Second) // the login guard
+		e.signIn(t)
+		e.sync(t, false)
+	})
+
 	t.Run("CloseDropsKeysAndALoadRacingItInstallsNothing", func(t *testing.T) {
 		gate := &bootstrapGate{entered: make(chan struct{}), release: make(chan struct{})}
 		svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
