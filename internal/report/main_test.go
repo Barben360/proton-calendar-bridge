@@ -7,11 +7,20 @@ import (
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 )
 
 // helperEnv names the crash a re-executed test binary performs instead of
 // running the tests: its stderr is a real Go traceback.
 const helperEnv = "PCB_REPORT_HELPER"
+
+// stateEnv names the state directory the crash-file helpers write to.
+const stateEnv = "PCB_REPORT_HELPER_STATE"
+
+// crashMeta is the Meta the crash-file helpers declare; its command holds a
+// space and an "=" to check the header's escaping.
+var crashMeta = report.Meta{Binary: "pcb", Command: "calendar a=b", Install: "test", Version: "1.2.3"}
 
 func TestMain(m *testing.M) {
 	if name := os.Getenv(helperEnv); name != "" {
@@ -30,6 +39,13 @@ func runHelper(name string) {
 		helperRuntimeError(5)
 	case "map-fatal":
 		helperMapFatal()
+	case "crashfile-goroutine":
+		_, _ = report.StartCrashFile(os.Getenv(stateEnv), crashMeta)
+		helperGoroutinePanic("MARKER-7f3a")
+	case "crashfile-clean":
+		stop, _ := report.StartCrashFile(os.Getenv(stateEnv), crashMeta)
+		stop()
+		os.Exit(0)
 	case "runtime-lookalike":
 		helperLookalike("MARKER-7f3a")
 	}
