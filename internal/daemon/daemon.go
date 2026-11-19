@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -220,15 +221,17 @@ func Run(ctx context.Context, o Options) error {
 	defer stopSync()
 	ready, synced := make(chan struct{}), make(chan error, 1)
 	go func() {
-		synced <- o.Hub.Serve(syncCtx, service.HubServeOptions{
-			ServeOptions: service.ServeOptions{
-				Ready:        func() { close(ready) },
-				Logger:       log,
-				WaitForLogin: o.WaitForLogin,
-			},
-			OnState: o.OnState,
-			OnPass:  o.OnPass,
-			Kind:    o.Kind,
+		synced <- guard(log, "the sync loops", func() error {
+			return o.Hub.Serve(syncCtx, service.HubServeOptions{
+				ServeOptions: service.ServeOptions{
+					Ready:        func() { close(ready) },
+					Logger:       log,
+					WaitForLogin: o.WaitForLogin,
+				},
+				OnState: o.OnState,
+				OnPass:  o.OnPass,
+				Kind:    o.Kind,
+			})
 		})
 	}()
 	// finish stops Hub.Serve and returns its error over err: a person is
@@ -337,11 +340,12 @@ func Run(ctx context.Context, o Options) error {
 	}
 	served := make(chan error, 1)
 	go func() {
-		if tlsConf != nil {
-			served <- srv.ServeTLS(ln, "", "")
-			return
-		}
-		served <- srv.Serve(ln)
+		served <- guard(log, "the CalDAV listener", func() error {
+			if tlsConf != nil {
+				return srv.ServeTLS(ln, "", "")
+			}
+			return srv.Serve(ln)
+		})
 	}()
 	log.Info("listener started", "addr", info.Addr, "tls", info.TLS, "mcp", remoteMCP)
 
@@ -366,6 +370,21 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	return finish(result)
+}
+
+// guard runs f and turns a panic in it into a Blocked error naming an
+// internal error in what, so Run ends through its normal stop instead of
+// the process dying with every account's cache write cut. The panic value
+// and the stack go to the log only.
+func guard(log *slog.Logger, what string, f func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("internal error in %s", what),
+				Hint: "see the log for the stack, report the bug, then run pcb serve again"}
+		}
+	}()
+	return f()
 }
 
 // unlessCut runs stop and returns its error, unless cut closes first: then
@@ -446,7 +465,7 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		if err := guard(log, "the "+what, func() error { return srv.Serve(ln) }); !errors.Is(err, http.ErrServerClosed) {
 			log.Warn("the "+what+" failed: pcb status shows the offline view", "error", err.Error())
 		}
 	}()

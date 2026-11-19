@@ -314,6 +314,40 @@ func TestOneAccountsCaptchaDoesNotStallTheOther(t *testing.T) {
 	}
 }
 
+func TestPanickingAccountLoopIsParkedAndTheOtherServes(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	h := e.open(t)
+	a, b := e.loginBoth(t, h)
+	r := newServeRig(h)
+	o := r.options(true)
+	record := o.OnPass
+	o.OnPass = func(id string, p service.WatchPass) {
+		if id == a {
+			panic("unexpected payload")
+		}
+		record(id, p)
+	}
+	done, stop := r.serve(t, o)
+	info := r.waitStopped(t, a)
+	r.waitPassed(t, b, 0)
+	if s := info.Stopped; s.Code != int(exitcode.Blocked) || !strings.Contains(s.Message, "internal error") {
+		t.Errorf("a.Stopped = %+v, want Blocked naming an internal error", s)
+	}
+	if strings.Contains(info.Stopped.Message, "unexpected payload") {
+		t.Errorf("a.Stopped.Message = %q leaks the panic value into the state", info.Stopped.Message)
+	}
+	if hl := health(t, h, b); hl.Serve != service.ServeServing {
+		t.Errorf("Health(b).Serve = %q, want serving", hl.Serve)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Hub.Serve ended (%v) though b still serves", err)
+	default:
+	}
+	_ = stop()
+}
+
 func TestDamagedCacheParksOnlyThatAccount(t *testing.T) {
 	t.Parallel()
 	e := newServeEnv(t)
