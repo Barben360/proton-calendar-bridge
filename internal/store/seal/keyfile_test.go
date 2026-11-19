@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -200,5 +201,42 @@ func TestKeyCreationReportsOtherLinkErrors(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); statErr == nil {
 		t.Fatal("a key was created despite the error")
+	}
+}
+
+// Check reads the key as Seal and Open do, without creating it: a usable
+// file is nil, a missing one is fs.ErrNotExist and stays missing, a loose
+// mode and a wrong size are refused.
+func TestKeyFileCheck(t *testing.T) {
+	path := keyPath(t)
+	k := &seal.KeyFile{Path: path}
+	if err := k.Check(); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Check with no key file = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Check created the key file: %v", err)
+	}
+	if _, err := k.Seal([]byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Check(); err != nil {
+		t.Fatalf("Check on a usable key = %v, want nil", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Check(); !errors.Is(err, seal.ErrKeyMode) {
+			t.Errorf("Check on a 0644 key = %v, want ErrKeyMode", err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Check(); err == nil {
+		t.Error("Check accepted a 5-byte key")
 	}
 }
