@@ -24,6 +24,7 @@ type settings struct {
 	exe        func() (string, error)
 	updates    *ui.Updates   // the update check's switch
 	poke       chan struct{} // wakes the update loop (buffered, 1)
+	reports    *ui.Reports   // nil: a build without a report address
 }
 
 var _ desktop.Settings = (*settings)(nil)
@@ -64,6 +65,22 @@ func (s *settings) SetUpdateCheck(on bool) error {
 	}
 	pokeLoop(s.poke)
 	return nil
+}
+
+// CrashReports is the "Send crash reports" switch; available is false in a
+// build without a report address.
+func (s *settings) CrashReports() (on, available bool) {
+	if s.reports == nil {
+		return false, false
+	}
+	return s.reports.Enabled(), true
+}
+
+func (s *settings) SetCrashReports(on bool) error {
+	if s.reports == nil {
+		return errors.New("this build has no crash report address")
+	}
+	return s.reports.SetEnabled(context.Background(), on)
 }
 
 // pokeLoop wakes the update loop without blocking (one wake is pending at

@@ -79,6 +79,13 @@ func TestScreenshots(t *testing.T) {
 				t.Fatalf("%d info icons in the account picture, want 1", len(tips))
 			}
 		}},
+		// A report saved while pcb-ui runs: the panel over the account.
+		{"crash-report", func(f *fixture) {
+			f.w.SetReports(&fakeReports{n: 1, crashed: true})
+			f.w.selectAccount("1a2b3c4d")
+			f.w.ShowReportPanel()
+			f.w.win.Content().Refresh() // the test driver does not lay out a shown box by itself
+		}},
 		{"add-account", func(f *fixture) { f.w.openWizard("carol@proton.me") }},
 		// A two-password account after a wrong try: the error line above the field.
 		{"mailbox-password", func(f *fixture) {
