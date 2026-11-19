@@ -413,7 +413,7 @@ func addEventsList(ss *session) {
 	addTool(ss, &sdkmcp.Tool{Name: "events_list", Description: listDescription, Annotations: readOnly("List events")},
 		func(ctx context.Context, in listIn) (eventsOut, string, error) {
 			return ss.listEvents(ctx, listQuery{listIn: in})
-		})
+		}, limitBounds)
 }
 
 func addEventsSearch(ss *session) {
@@ -427,7 +427,7 @@ func addEventsSearch(ss *session) {
 		}
 		return ss.listEvents(ctx, listQuery{text: in.Text, listIn: listIn{From: in.From, To: in.To, TZ: in.TZ,
 			Accounts: in.Accounts, Calendars: in.Calendars, Limit: in.Limit, Cursor: in.Cursor}})
-	})
+	}, limitBounds)
 }
 
 type listQuery struct {

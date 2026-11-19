@@ -343,7 +343,7 @@ func addEventCreate(ss *session) {
 			return out, "event created; call event_get for its etag", nil
 		}
 		return out, "event created in calendar " + in.Calendar, nil
-	})
+	}, dateFields(), alarmBounds())
 }
 
 // ---- event_update ----
@@ -506,7 +506,7 @@ func addEventUpdate(ss *session) {
 			return out, "event updated; call event_get for its etag", nil
 		}
 		return out, "event updated (" + string(scope) + ")", nil
-	})
+	}, scopeEnum, dateFields("changes"), alarmBounds("changes"))
 }
 
 // sameTime: a and b name the same date, wall clock or instant.
@@ -610,6 +610,7 @@ func addEventDelete(ss *session) {
 		Annotations: writing("Delete an event", true),
 	}
 	t.Description += " " + untrustedNote
+	t.InputSchema = inputSchema[deleteIn](t.Name, []tuner{scopeEnum})
 	sdkmcp.AddTool(ss.sdk, t, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (*sdkmcp.CallToolResult, deleteOut, error) {
 		out, ask, err := ss.deleteEvent(ctx, req, in)
 		switch {

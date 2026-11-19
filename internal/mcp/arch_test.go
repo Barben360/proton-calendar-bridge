@@ -16,11 +16,12 @@ const module = "github.com/Barben360/proton-calendar-bridge"
 // checked (sdk_e19_test.go).
 func TestMCPArch(t *testing.T) {
 	allowed := map[string]bool{
-		module + "/internal/service":       true,
-		module + "/internal/exitcode":      true,
-		module + "/internal/mcp/loginpage": true,
-		module + "/internal/access":        true,
-		module + "/internal/winzone":       true,
+		module + "/internal/service":                 true,
+		module + "/internal/exitcode":                true,
+		module + "/internal/mcp/loginpage":           true,
+		module + "/internal/access":                  true,
+		module + "/internal/winzone":                 true,
+		"github.com/google/jsonschema-go/jsonschema": true, // the SDK's schema type, for the input constraints
 	}
 	const sdk = "github.com/modelcontextprotocol/go-sdk/"
 	for _, goos := range []string{"linux", "darwin", "windows"} {

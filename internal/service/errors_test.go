@@ -203,3 +203,34 @@ func TestKeyCauseNamesTheModeOrTheAccessList(t *testing.T) {
 		}
 	}
 }
+
+// TestNeedsPerson: the Blocked failures no retry fixes are told apart from
+// those that clear, by type.
+func TestNeedsPerson(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"a final failure", final("a newer cache", "upgrade pcb"), true},
+		{"a locked keyring", keyringLockedError(), true},
+		{"human verification", humanVerification(), true},
+		{"an event stored by another client", uidStoredOtherwise(), true},
+		{"serve not serving", notServing(), true},
+		{"serve waiting for a login", &exitcode.Error{Code: exitcode.Blocked, Err: ErrWaitingForLogin}, true},
+		{"proton refused the request", protonDown(&api.Error{Status: 422, Code: 2001}), true},
+		{"a rate limit clears", protonDown(&api.Error{Status: 429}), false},
+		{"proton unavailable clears", protonDown(&api.Error{Status: 503}), false},
+		{"the network clears", classed(classNetwork, "cannot reach Proton", "retry"), false},
+		{"a calendar not synced yet", calendarPending(), false},
+		{"a write not sent in time", notSentInTime(), false},
+		{"a write not confirmed", notConfirmed(), false},
+		{"wrapped", fmt.Errorf("agenda: %w", final("x", "y")), true},
+	} {
+		if got := NeedsPerson(tc.err); got != tc.want {
+			t.Errorf("%s: NeedsPerson = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

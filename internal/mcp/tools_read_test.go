@@ -369,10 +369,10 @@ func TestOneAccountFailingDoesNotHideTheOthers(t *testing.T) {
 	hub.agendas["b2"].err = errWaiting
 	cs := newRig(t, hub).connect(t, readGrant, mcp.EntryStdio)
 	out := mustCall(t, cs, "events_list", monday())
-	if field(out, "unavailable.0.account") != "bob@example.com" || field(out, "unavailable.0.class") != "retry" || len(list(out["events"])) != 2 {
-		t.Errorf("events_list %v; want alice's two events and bob unavailable", out)
+	if field(out, "unavailable.0.account") != "bob@example.com" || field(out, "unavailable.0.class") != "must-act" || len(list(out["events"])) != 2 {
+		t.Errorf("events_list %v; want alice's two events and bob unavailable, a login being what he waits for", out)
 	}
-	mustFail(t, cs, "events_list", with(monday(), "accounts", []string{"b2"}), "retry")
+	mustFail(t, cs, "events_list", with(monday(), "accounts", []string{"b2"}), "must-act")
 }
 
 // event_get judges the organizer as the list does (the service's view of
