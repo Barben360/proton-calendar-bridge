@@ -224,3 +224,90 @@ func TestStampSkewBoundary(t *testing.T) {
 		})
 	}
 }
+
+// Defer records a Retry-After longer than MinInterval: the next login is
+// refused until it is over, naming the wait, and a new process (a new
+// Acquire on the same directory) sees it (issue 45).
+func TestDeferExtendsTheWait(t *testing.T) {
+	dir, _ := setup(t, 0)
+	release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loginguard.Defer(dir, t0, 300*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	_, err = loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(61*time.Second), nil)
+	if wait, ok := loginguard.WaitFor(err); !ok || wait != 239*time.Second {
+		t.Fatalf("61 s after a 300 s Retry-After: err = %v, want TooSoon 239s", err)
+	}
+	if e := code(t, err); e.Code != exitcode.Blocked || !strings.Contains(e.Hint, "retry in 3m59s") {
+		t.Fatalf("hint %q, want retry in 3m59s", e.Hint)
+	}
+	release, err = loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(301*time.Second), nil)
+	if err != nil {
+		t.Fatalf("after the Retry-After the login was still refused: %v", err)
+	}
+	release()
+}
+
+// A wait shorter than the spacing changes nothing; a huge one is clamped
+// to an hour.
+func TestDeferClampsAndNeverShortens(t *testing.T) {
+	dir, _ := setup(t, 0)
+	release, _ := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+	if err := loginguard.Defer(dir, t0, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(30*time.Second), nil); err == nil {
+		t.Fatal("a 5 s Retry-After shortened the 60 s spacing")
+	}
+
+	dir, _ = setup(t, 0)
+	release, _ = loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+	if err := loginguard.Defer(dir, t0, 48*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	_, err := loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(30*time.Minute), nil)
+	if wait, ok := loginguard.WaitFor(err); !ok || wait != 30*time.Minute {
+		t.Fatalf("48 h Retry-After 30 min later: err = %v, want TooSoon 30m (clamped to 1 h)", err)
+	}
+	r, err := loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(61*time.Minute), nil)
+	if err != nil {
+		t.Fatalf("a 48 h Retry-After still blocked after the 1 h clamp: %v", err)
+	}
+	r()
+}
+
+// A not-before more than an hour (plus the skew) ahead is from a clock
+// that was stepped back: it is ignored and logged, as a stale stamp is.
+func TestFutureNotBeforeIsStale(t *testing.T) {
+	dir, _ := setup(t, 0)
+	nb := t0.Add(48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	if err := os.WriteFile(filepath.Join(dir, "not-before"), []byte(nb), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatalf("a not-before 48 h ahead blocked the login: %v", err)
+	}
+	release()
+	if !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("no warning logged:\n%s", logs.String())
+	}
+}
+
+func TestMalformedNotBeforeFailsClosed(t *testing.T) {
+	dir, _ := setup(t, 0)
+	if err := os.WriteFile(filepath.Join(dir, "not-before"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+	if e := code(t, err); e.Code != exitcode.Blocked {
+		t.Fatalf("err = %v, want Blocked", err)
+	}
+}

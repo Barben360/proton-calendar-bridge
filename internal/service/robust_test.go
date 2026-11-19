@@ -130,3 +130,52 @@ func within(t *testing.T, f func() error) error {
 		return nil
 	}
 }
+
+// A login 429 with a long Retry-After extends the guard: the next login
+// within the window is refused as too soon and names what is left, and is
+// allowed once it is over (issue 45).
+func TestLoginRateLimitExtendsTheGuard(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.FailNext(http.MethodPost, "/auth/v4", http.StatusTooManyRequests, 85131, 300)
+	if _, err := e.svc.Login(t.Context(), e.req()); err == nil {
+		t.Fatal("the rate-limited login succeeded")
+	}
+	e.clk.advance(61 * time.Second)
+	_, err := e.svc.Login(t.Context(), e.req())
+	ee := wantExit(t, err, exitcode.Blocked)
+	if ee.Hint != "retry in 3m59s" {
+		t.Fatalf("second login: %v (hint %q), want refused with retry in 3m59s", ee.Err, ee.Hint)
+	}
+	e.clk.advance(240 * time.Second)
+	if res := e.login(t, e.req()); res.State == "" {
+		t.Fatalf("login after the Retry-After = %+v", res)
+	}
+}
+
+// The same for an unattended relogin: a CalDAV request or a sync pass does
+// not retry the login before Proton's Retry-After is over.
+func TestReloginRateLimitExtendsTheGuard(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.loginUnattended(t, false)
+	e.f.RevokeSessions()
+	e.clk.advance(61 * time.Second)
+	e.f.FailNext(http.MethodPost, "/auth/v4", http.StatusTooManyRequests, 85131, 300)
+	if _, err := e.svc.Calendars(t.Context()); err == nil {
+		t.Fatal("the request with a rate-limited relogin succeeded")
+	}
+	srp := e.logins()
+	e.clk.advance(61 * time.Second)
+	_, err := e.svc.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint != "retry in 3m59s" {
+		t.Fatalf("second request: hint %q, want retry in 3m59s", ee.Hint)
+	}
+	if n := e.logins() - srp; n != 0 {
+		t.Fatalf("%d login(s) reached Proton inside the Retry-After", n)
+	}
+	e.clk.advance(240 * time.Second)
+	if got := e.calendars(t); got == nil && e.phase(t) != "ready" {
+		t.Fatalf("after the Retry-After the relogin did not repair the session (phase %q)", e.phase(t))
+	}
+}

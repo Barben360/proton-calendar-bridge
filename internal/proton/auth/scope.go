@@ -65,7 +65,10 @@ func (s Scope) Unlock(ctx context.Context) error {
 	}
 	var out struct{ ServerProof string }
 	pctx, cancel := callContext(ctx)
-	err = s.C.Put(pctx, "/core/v4/users/unlock", req, &out)
+	// PutOnce: a 429 comes back at once with its Retry-After. Waiting it
+	// out inside this call would run into CallTimeout for an ask of 31 to
+	// 60 s and lose the rate-limit class.
+	err = s.C.PutOnce(pctx, "/core/v4/users/unlock", req, &out)
 	cancel()
 	if err != nil {
 		if wrongPassword(err) {

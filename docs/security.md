@@ -45,7 +45,7 @@ Only `pcb login` offers it. `pcb-ui` and the login page an AI agent opens never 
 - **CAPTCHA.** Solve it, then press Enter at the `pcb login` prompt, or run `pcb login resume --captcha-token T`. With `--json` the envelope carries `captcha_token` and `captcha_url` in `data`. A login that hits a CAPTCHA while the stored session is still working leaves that session as it was.
 - **Spacing.** pcb starts at most one login attempt per 60 s. A retry with the token of the CAPTCHA Proton just asked for comes sooner: 10 s after the previous attempt, and `pcb login` and the desktop window say how long they wait when you solved it faster. Any other token waits the full 60 s.
 - **Timeouts.** Each Proton call of a login has a 30 s deadline: exit 20, run the command again.
-- **Rate limits.** A Proton 429 names the wait (`Retry-After`).
+- **Rate limits.** A Proton 429 names the wait (`Retry-After`). When Proton answers a login with a 429, pcb records the wait (at most one hour) next to the login spacing: no login, automatic relogin included, starts before it is over, even from another process or after a restart, and the refusal says how long is left. A GET that Proton answers 5xx with a `Retry-After` is not resent before it either; one over 60 s is reported at once.
 
 ## Log out
 
@@ -158,7 +158,7 @@ Whoever can read both the state directory and that key can read these passwords;
 | wrong CalDAV passwords | five from one IP in a minute are refused until the minute ends; one limiter shared by all accounts |
 | bad MCP tokens | after five in a minute from one address (IPv6 per /64), 503 with a `Retry-After` |
 | logins started by an agent | one a minute per session |
-| automatic relogins | at most one per 60 s |
+| automatic relogins | at most one per 60 s, and none before a login 429's `Retry-After` is over |
 
 Behind Docker's userland proxy every client shares one IP: see [container](container.md#wrong-passwords-behind-the-userland-proxy).
 

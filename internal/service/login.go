@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -222,6 +223,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		case ce != nil:
 			return l.needsCaptcha(ctx, ce, last, now, req.Username, false)
 		}
+		l.deferLogin(err, now)
 		return LoginResult{}, l.fail(err)
 	}
 	if _, known := accounts[p.UserID]; len(accounts) > 0 && !known {
@@ -358,7 +360,8 @@ func (l *Local) acquire(ctx context.Context, wait bool, interval time.Duration, 
 		return nil, now, acquireError(err, l.o.GuardDir)
 	}
 	release, err := loginguard.Acquire(l.o.GuardDir, interval, now, l.log())
-	if d, ok := loginguard.WaitFor(err); ok && wait {
+	// A wait longer than interval is a Proton Retry-After: refused, never slept.
+	if d, ok := loginguard.WaitFor(err); ok && wait && d <= interval {
 		if err := l.o.Sleep(ctx, d); err != nil {
 			return nil, now, l.fail(err)
 		}
@@ -369,6 +372,20 @@ func (l *Local) acquire(ctx context.Context, wait bool, interval time.Duration, 
 		return nil, now, acquireError(err, l.o.GuardDir)
 	}
 	return release, now, nil
+}
+
+// deferLogin records a login 429's Retry-After in the guard, so no login
+// (a person's, a relogin, a sync pass) reaches Proton before it is over, not
+// only after MinInterval. It holds the guard's lock (the caller has not
+// released it). A failure to record is logged: the 60 s spacing still holds.
+func (l *Local) deferLogin(err error, now time.Time) {
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Status != http.StatusTooManyRequests || ae.RetryAfter <= 0 {
+		return
+	}
+	if derr := loginguard.Defer(l.o.GuardDir, now, ae.RetryAfter); derr != nil {
+		l.log().Warn("cannot record Proton's login Retry-After", "err", derr)
+	}
 }
 
 // needsCaptcha marks the login needs-captcha; relogin: an unattended
