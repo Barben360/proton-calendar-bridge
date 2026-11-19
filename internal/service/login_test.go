@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -76,6 +77,8 @@ type env struct {
 	svc  *service.Local
 	// after, when set, is the services' AfterFunc (the pending login's expiry).
 	after func(time.Duration, func()) func() bool
+	// logger, when set before open, is the service's Logger.
+	logger *slog.Logger
 }
 
 func newEnv(t *testing.T, fo protontest.Options) *env {
@@ -100,7 +103,7 @@ func newEnvWith(t *testing.T, fo protontest.Options, after func(time.Duration, f
 // open starts a service on the env's dirs, closed with the test.
 func (e *env) open(t *testing.T) *service.Local {
 	t.Helper()
-	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, AfterFunc: e.after})
+	s, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep, AfterFunc: e.after, Logger: e.logger})
 	if err != nil {
 		t.Fatal(err)
 	}

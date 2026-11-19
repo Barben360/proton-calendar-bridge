@@ -338,3 +338,186 @@ func TestDeferLockedRecordsTheWaitAndRefusesWhileAnotherLoginRuns(t *testing.T) 
 		t.Fatal("DeferLocked wrote while another login held the lock")
 	}
 }
+
+// wantWait fails the test unless err refuses with TooSoon{want}; want 0
+// means the login must have been let through.
+func wantWait(t *testing.T, what string, err error, want time.Duration) {
+	t.Helper()
+	wait, refused := loginguard.WaitFor(err)
+	switch {
+	case want == 0 && err != nil:
+		t.Errorf("%s: refused (wait %v, %v), want the login let through", what, wait, err)
+	case want > 0 && (!refused || wait != want):
+		t.Errorf("%s: err = %v (TooSoon %v, %v), want TooSoon %v", what, err, wait, refused, want)
+	}
+}
+
+// The spacing's exact boundary, in literal seconds so that a changed
+// constant fails here: an attempt exactly the interval after the last is
+// let through, one tick before is refused naming the tick, and so on either
+// side. A plain login waits a minute, one that carries a solved CAPTCHA
+// token ten seconds.
+func TestIntervalBoundary(t *testing.T) {
+	const ms = time.Millisecond
+	for _, iv := range []struct {
+		name     string
+		interval time.Duration
+		cases    []struct{ age, wait time.Duration } // wait 0: let through
+	}{
+		{"MinInterval", loginguard.MinInterval, []struct{ age, wait time.Duration }{
+			{59 * time.Second, time.Second}, {60*time.Second - ms, ms}, {60 * time.Second, 0}, {60*time.Second + ms, 0}, {61 * time.Second, 0},
+		}},
+		{"CaptchaRetryInterval", loginguard.CaptchaRetryInterval, []struct{ age, wait time.Duration }{
+			{9 * time.Second, time.Second}, {10*time.Second - ms, ms}, {10 * time.Second, 0}, {10*time.Second + ms, 0}, {11 * time.Second, 0},
+		}},
+	} {
+		for _, c := range iv.cases {
+			t.Run(iv.name+"/"+c.age.String(), func(t *testing.T) {
+				dir, stamp := setup(t, c.age)
+				before, _ := os.ReadFile(stamp)
+				release, err := loginguard.Acquire(dir, iv.interval, t0, nil)
+				wantWait(t, iv.name+" "+c.age.String()+" after the last attempt", err, c.wait)
+				if err == nil {
+					release()
+					return
+				}
+				if after, _ := os.ReadFile(stamp); string(after) != string(before) {
+					t.Errorf("stamp rewritten by a refusal: %q", after)
+				}
+			})
+		}
+	}
+}
+
+// The not-before boundary (a recorded Retry-After): exactly at the recorded
+// time the login is let through, one tick before it is refused naming the
+// tick. With no stamp at all, the record alone decides.
+func TestNotBeforeBoundary(t *testing.T) {
+	const retry = 300 * time.Second
+	for _, c := range []struct {
+		name  string
+		stamp bool // a login at t0 precedes the Retry-After
+		at    time.Duration
+		wait  time.Duration
+	}{
+		{"stamped, just before", true, retry - time.Millisecond, time.Millisecond},
+		{"stamped, one second before", true, retry - time.Second, time.Second},
+		{"stamped, exactly at", true, retry, 0},
+		{"stamped, just after", true, retry + time.Millisecond, 0},
+		{"unstamped, just before", false, retry - time.Millisecond, time.Millisecond},
+		{"unstamped, exactly at", false, retry, 0},
+		{"unstamped, just after", false, retry + time.Millisecond, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			if c.stamp {
+				release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := loginguard.Defer(dir, t0, retry); err != nil {
+					t.Fatal(err)
+				}
+				release()
+			} else if err := loginguard.DeferLocked(dir, t0, retry); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := loginguard.Remaining(dir, t0.Add(c.at), nil); err != nil || got != c.wait {
+				t.Errorf("Remaining = %v, %v; want %v", got, err, c.wait)
+			}
+			release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(c.at), nil)
+			wantWait(t, "Acquire", err, c.wait)
+			if err == nil {
+				release()
+			}
+		})
+	}
+}
+
+// The login waits for the later of the spacing and the record, each
+// deciding exactly at its own boundary.
+func TestSpacingAndNotBeforeTheLaterWins(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		retry time.Duration
+		at    time.Duration
+		wait  time.Duration
+	}{
+		// A short Retry-After under the spacing: the spacing decides.
+		{"spacing later, just before it", 30 * time.Second, loginguard.MinInterval - time.Second, time.Second},
+		{"spacing later, exactly at it", 30 * time.Second, loginguard.MinInterval, 0},
+		// A long Retry-After: past the spacing, the record still holds.
+		{"record later, past the spacing", 300 * time.Second, loginguard.MinInterval, 240 * time.Second},
+		{"record later, just before it", 300 * time.Second, 300*time.Second - time.Second, time.Second},
+		{"record later, exactly at it", 300 * time.Second, 300 * time.Second, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := loginguard.Defer(dir, t0, c.retry); err != nil {
+				t.Fatal(err)
+			}
+			release()
+			release, err = loginguard.Acquire(dir, loginguard.MinInterval, t0.Add(c.at), nil)
+			wantWait(t, "Acquire", err, c.wait)
+			if err == nil {
+				release()
+			}
+		})
+	}
+}
+
+// Defer clamps a Retry-After to MaxDefer exactly: an hour less a tick is
+// recorded as is, an hour and anything above it as an hour.
+func TestDeferClampBoundary(t *testing.T) {
+	const ms = time.Millisecond
+	for _, c := range []struct{ wait, want time.Duration }{
+		{time.Hour - ms, time.Hour - ms},
+		{time.Hour, time.Hour},
+		{time.Hour + ms, time.Hour},
+		{48 * time.Hour, time.Hour},
+	} {
+		t.Run(c.wait.String(), func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			if err := loginguard.DeferLocked(dir, t0, c.wait); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := loginguard.Remaining(dir, t0, nil); err != nil || got != c.want {
+				t.Errorf("Remaining after Defer(%v) = %v, %v; want %v", c.wait, got, err, c.want)
+			}
+		})
+	}
+}
+
+// A recorded not-before time up to MaxDefer plus 5 min ahead of now still
+// holds; one tick past it is from a clock stepped back and is ignored.
+func TestNotBeforeStaleThresholdBoundary(t *testing.T) {
+	const ms = time.Millisecond
+	limit := loginguard.MaxDefer + 5*time.Minute
+	for _, c := range []struct {
+		ahead time.Duration
+		wait  time.Duration // 0: ignored
+	}{
+		{limit - ms, limit - ms},
+		{limit, limit},
+		{limit + ms, 0},
+	} {
+		t.Run(c.ahead.String(), func(t *testing.T) {
+			dir, _ := setup(t, 0)
+			if err := os.WriteFile(filepath.Join(dir, "not-before"), []byte(t0.Add(c.ahead).Format(time.RFC3339Nano)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := loginguard.Remaining(dir, t0, nil); err != nil || got != c.wait {
+				t.Errorf("Remaining = %v, %v; want %v", got, err, c.wait)
+			}
+			release, err := loginguard.Acquire(dir, loginguard.MinInterval, t0, nil)
+			wantWait(t, "Acquire", err, c.wait)
+			if err == nil {
+				release()
+			}
+		})
+	}
+}

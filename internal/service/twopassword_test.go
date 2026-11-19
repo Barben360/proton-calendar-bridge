@@ -3,11 +3,14 @@ package service_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -345,6 +348,117 @@ func TestMailboxPasswordNeverStored(t *testing.T) {
 	slog.New(slog.NewJSONHandler(&line, nil)).Info("login", "request", r)
 	if strings.Contains(line.String(), mailbox) {
 		t.Errorf("slog shows the mailbox password: %s", line.String())
+	}
+}
+
+// leaks lists where secrets appear in plaintext: in the log, or in any file
+// under the config and state directories (the cache and the logs live in
+// the state directory).
+func leaks(t *testing.T, e *env, logs string, secrets map[string]string) []string {
+	t.Helper()
+	var out []string
+	for name, secret := range secrets {
+		if strings.Contains(logs, secret) {
+			out = append(out, name+" in the log")
+		}
+	}
+	files := 0
+	for _, root := range []string{e.dirs.Config, e.dirs.State} {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			files++
+			for name, secret := range secrets {
+				if strings.Contains(path, secret) || bytes.Contains(b, []byte(secret)) {
+					out = append(out, name+" in "+path)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if files == 0 {
+		t.Fatal("no file under the config and state directories: the scan proves nothing")
+	}
+	slices.Sort(out)
+	return out
+}
+
+// A login that goes through a CAPTCHA, a TOTP code and a mailbox password
+// leaves none of them, nor the login password, in the log or in a file of
+// the config and state directories: the sealed store is encrypted, and
+// nothing else keeps them.
+func TestSecretsNeverReachTheLogsOrTheDisk(t *testing.T) {
+	t.Parallel()
+	const (
+		mailbox = "mailbox-secret-7f3a9c"
+		captcha = "chal-secret-4d21e8"
+	)
+	e := newEnv(t, protontest.Options{TwoFA: true, TwoPassword: true, MailboxPassword: mailbox, Captcha: captcha})
+	logs := &logBuffer{}
+	e.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := e.svc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e.svc = e.open(t)
+	totpURI := e.f.TOTPURI
+	_, totpSecret, _ := strings.Cut(totpURI, "secret=")
+	secrets := map[string]string{
+		"the mailbox password": mailbox,
+		"the CAPTCHA token":    captcha,
+		"the TOTP secret":      totpSecret,
+		"the login password":   e.f.Password,
+	}
+	if totpSecret == "" {
+		t.Fatalf("no TOTP secret in %q", totpURI)
+	}
+	// While Proton's challenge waits, its token is in state.json by design
+	// (the window shows it); once solved and used it must be gone.
+	check := func(step string) {
+		t.Helper()
+		scan := maps.Clone(secrets)
+		if step == "the CAPTCHA was asked" {
+			delete(scan, "the CAPTCHA token")
+		}
+		if got := leaks(t, e, logs.String(), scan); len(got) != 0 {
+			t.Errorf("after %s: %s", step, strings.Join(got, "; "))
+		}
+	}
+
+	res := e.login(t, e.req())
+	if res.State != service.StateNeedsCaptcha || res.CaptchaToken != captcha {
+		t.Fatalf("Login = %+v, want the CAPTCHA", res)
+	}
+	check("the CAPTCHA was asked")
+	e.clk.advance(30 * time.Second)
+	r := e.req()
+	r.CaptchaToken, r.TOTP, r.UnattendedRelogin = captcha, totpURI, true
+	if res = e.login(t, r); res.State != service.StateNeedsMailboxPassword {
+		t.Fatalf("Login with the solved CAPTCHA and the TOTP = %+v, want needs-mailbox-password", res)
+	}
+	check("the mailbox password was asked")
+	if res, err := e.svc.SubmitMailboxPassword(t.Context(), mailbox); err != nil || res.State != service.StateReady {
+		t.Fatalf("SubmitMailboxPassword = %+v, %v; want ready", res, err)
+	}
+	if a := e.account(t); a.Relogin == nil || a.Relogin.Password != e.f.Password || a.Relogin.TOTPURI != totpURI {
+		t.Fatalf("Relogin = %+v; want the password and the TOTP sealed, so that the scan has something to find", a.Relogin)
+	}
+	check("the login was ready")
+	if logs.String() == "" {
+		t.Error("the log is empty: the log scan proves nothing")
 	}
 }
 
