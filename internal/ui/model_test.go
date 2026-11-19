@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -234,6 +235,33 @@ func TestNotifyOncePerOccurrence(t *testing.T) {
 	other.Alerts = []ctl.Alert{errAlert("b", ctl.CodeNeedsLogin)}
 	if got := n.Next(ui.Build(status(bad, other), now)); len(got) != 1 || got[0].Account != "b" {
 		t.Fatalf("second account: %+v, want one for b", got)
+	}
+}
+
+// A notification the desktop refused (its daemon not up yet at login) is
+// offered again at the next view: only a delivered alert counts as seen.
+func TestNotifyOffersAnUnsentAlertAgain(t *testing.T) {
+	var n ui.Notifier
+	bad := ready("a", time.Minute, 300)
+	bad.Alerts = []ctl.Alert{errAlert("a", ctl.CodeNeedsLogin)}
+	bad.Phase = "needs-login"
+	v := ui.Build(status(bad), now)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	failed := ui.Send(log, n.Next(v), func(ui.Notification) error { return errors.New("no notification server") })
+	if len(failed) != 1 || failed[0].Code != ctl.CodeNeedsLogin {
+		t.Fatalf("Send returned %+v, want the one that failed", failed)
+	}
+	n.Unsent(failed)
+	got := n.Next(v)
+	if len(got) != 1 || got[0].Code != ctl.CodeNeedsLogin {
+		t.Fatalf("next view after a failed send: %+v, want the alert again", got)
+	}
+	if failed := ui.Send(log, got, func(ui.Notification) error { return nil }); len(failed) != 0 {
+		t.Fatalf("failed = %+v", failed)
+	}
+	n.Unsent(nil)
+	if got := n.Next(v); len(got) != 0 {
+		t.Fatalf("after a delivery: %+v, want none (once per occurrence)", got)
 	}
 }
 

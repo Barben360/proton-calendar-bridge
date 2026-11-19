@@ -185,9 +185,11 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 				tray.Update(v)
 			}
 		})
-		ui.Send(log, n.Next(v), func(note ui.Notification) error {
+		// A failed send is offered again at the next view (Changes fires at
+		// least every 30 s), once the notification daemon is up.
+		n.Unsent(ui.Send(log, n.Next(v), func(note ui.Notification) error {
 			return desktop.Notify("", note, func(account string) { fyne.Do(func() { win.Show(account) }) })
-		})
+		}))
 		select {
 		case <-ctx.Done():
 			return

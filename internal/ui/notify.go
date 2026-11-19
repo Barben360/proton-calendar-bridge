@@ -21,7 +21,8 @@ var notified = map[string]bool{
 	ctl.CodeKeyUnavailable: true,
 }
 
-// Notifier decides which alerts of a View are new.
+// Notifier decides which alerts of a View are new. An alert whose send
+// failed is handed back with Unsent and offered again at the next view.
 type Notifier struct {
 	mu   sync.Mutex
 	seen map[string]bool
@@ -70,6 +71,17 @@ func (n *Notifier) Next(v View) []Notification {
 	return out
 }
 
+// Unsent takes notes (what Send returned as failed) back out of the seen
+// alerts, so the next view offers them again: a notification daemon that is
+// not up yet at login must not lose the alert for the session.
+func (n *Notifier) Unsent(notes []Notification) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, note := range notes {
+		delete(n.seen, note.Account+"\x00"+note.Code)
+	}
+}
+
 var link = regexp.MustCompile(`https?://\S+`)
 
 func body(al ctl.Alert) string {
@@ -83,13 +95,15 @@ func body(al ctl.Alert) string {
 // Send sends each notification with send and logs it: at Info "notification
 // sent" with its alert and the account's local ID ("" for the process), at
 // Warn "notification failed" with the error. The title (an address) and the
-// body are never logged.
-func Send(log *slog.Logger, notes []Notification, send func(Notification) error) {
+// body are never logged. It returns the notifications whose send failed.
+func Send(log *slog.Logger, notes []Notification, send func(Notification) error) (failed []Notification) {
 	for _, n := range notes {
 		if err := send(n); err != nil {
 			log.Warn("notification failed", "alert", n.Code, "account", n.Account, "err", err)
+			failed = append(failed, n)
 			continue
 		}
 		log.Info("notification sent", "alert", n.Code, "account", n.Account)
 	}
+	return failed
 }
