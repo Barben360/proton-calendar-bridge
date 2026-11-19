@@ -25,15 +25,11 @@ import (
 // build the report the dead process would have.
 const crashHeader = "# pcb crash file v1"
 
-// emptyCrashAge is how long a crash file with nothing past its header
-// lives: its process may still be running, or died without a crash.
-const emptyCrashAge = 24 * time.Hour
-
 // maxCrashFile bounds what is read of a crash file.
 const maxCrashFile = 1 << 20
 
 var (
-	crashName   = regexp.MustCompile(`^crash-.*-(\d+)-\d+\.txt$`)
+	crashName   = regexp.MustCompile(`^(crash-.*-(\d+)-\d+)\.txt$`)
 	binaryChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 )
 
@@ -51,7 +47,9 @@ func isDir(p string) bool {
 // <state>/reports/crash-<binary>-<pid>-<nanos>.txt, whose first line holds
 // m. Without a state directory it does nothing. stop ends it and removes
 // the file, for a clean exit: a file left behind is a crash, offered by
-// Store.Collect at the next start.
+// Store.Collect at the next start. The process holds a lock on
+// crash-….lock for its whole life (the system drops it when the process
+// dies), which tells Collect the file is no one's any more.
 func StartCrashFile(stateDir string, m Meta) (stop func(), err error) {
 	noop := func() {}
 	if !isDir(stateDir) {
@@ -62,13 +60,27 @@ func StartCrashFile(stateDir string, m Meta) (stop func(), err error) {
 	}
 	name := fmt.Sprintf("crash-%s-%d-%d.txt", binaryChars.ReplaceAllString(m.Binary, "_"), os.Getpid(), time.Now().UnixNano())
 	path := filepath.Join(Dir(stateDir), name)
+	lock := strings.TrimSuffix(path, ".txt") + ".lock"
+	unlock, _, err := filelock.TryLock(lock)
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+		unlock = func() {}
+	case err != nil:
+		return noop, err
+	}
+	release := func() {
+		unlock()
+		_ = os.Remove(lock)
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		release()
 		return noop, err
 	}
 	if _, err := io.WriteString(f, header(m)); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
+		release()
 		return noop, err
 	}
 	// The runtime keeps its own duplicate of the descriptor: closing f
@@ -77,11 +89,13 @@ func StartCrashFile(stateDir string, m Meta) (stop func(), err error) {
 	_ = f.Close()
 	if err != nil {
 		_ = os.Remove(path)
+		release()
 		return noop, err
 	}
 	return func() {
 		_ = debug.SetCrashOutput(nil, debug.CrashOptions{})
 		_ = os.Remove(path)
+		release()
 	}, nil
 }
 
@@ -123,9 +137,11 @@ func parseHeader(line string) (Meta, bool) {
 }
 
 // Collect turns the crash files of dead processes into pending reports and
-// deletes them, and returns how many reports it saved. This process's own
-// file is left alone, and so is a header-only file younger than 24 hours
-// (its process may still run); an older one is deleted. A file that does
+// deletes them, and returns how many reports it saved. A crash file whose
+// lock a running process holds (this one included) is left alone; one with
+// nothing past its header and no holder is a clean death and is deleted
+// (where locks are unsupported it is kept, and only files with a
+// traceback are collected). A file that does
 // not read as a traceback becomes a report of kind panic with no frames,
 // rather than being lost. Calls serialise on <state>/reports/collect.lock
 // (Save has its own lock), so two processes never report one crash twice.
@@ -150,28 +166,35 @@ func (s Store) Collect(ctx context.Context) (int, error) {
 		defer unlock()
 	}
 	own := strconv.Itoa(os.Getpid())
-	now := time.Now
-	if s.Now != nil {
-		now = s.Now
-	}
 	saved := 0
 	for _, ent := range entries {
 		m := crashName.FindStringSubmatch(ent.Name())
-		if m == nil || !ent.Type().IsRegular() || m[1] == own {
+		if m == nil || !ent.Type().IsRegular() || m[2] == own {
 			continue
 		}
 		path := filepath.Join(dir, ent.Name())
-		meta, body, at, err := readCrashFile(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue // collected by another process meanwhile
-		}
+		lock := filepath.Join(dir, m[1]+".lock")
+		o, locked, err := tryOwn(lock)
 		if err != nil {
 			return saved, err
 		}
+		if !locked {
+			continue // its process is running
+		}
+		meta, body, at, err := readCrashFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			o.keep() // collected by another process meanwhile
+			continue
+		}
+		if err != nil {
+			o.keep()
+			return saved, err
+		}
 		if strings.TrimSpace(body) == "" {
-			if now().Sub(at) > emptyCrashAge {
+			if o.held {
 				_ = os.Remove(path)
 			}
+			o.done()
 			continue
 		}
 		c, err := ParseCrash([]byte(body))
@@ -179,11 +202,11 @@ func (s Store) Collect(ctx context.Context) (int, error) {
 			c = Crash{Kind: "panic", Message: removed}
 		}
 		if err := s.Save(ctx, CrashEvent(c, meta, at)); err != nil {
+			o.keep()
 			return saved, err
 		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return saved, err
-		}
+		_ = os.Remove(path) // the report is safe: a file that stays is only collected again
+		o.done()
 		if s.Mode() != Never {
 			saved++
 		}
@@ -218,4 +241,38 @@ func readCrashFile(path string) (Meta, string, time.Time, error) {
 		return Meta{}, first + string(rest), info.ModTime(), nil
 	}
 	return meta, string(rest), info.ModTime(), nil
+}
+
+// owned is a crash file's lock, taken by Collect: held is false where
+// locks are unsupported (nothing says the file's process is dead).
+type owned struct {
+	unlock func()
+	lock   string
+	held   bool
+}
+
+// tryOwn takes the lock without waiting; ok is false when a running
+// process holds it.
+func tryOwn(lock string) (*owned, bool, error) {
+	unlock, ok, err := filelock.TryLock(lock)
+	switch {
+	case errors.Is(err, filelock.ErrUnsupported):
+		return &owned{unlock: func() {}}, true, nil
+	case err != nil:
+		return nil, false, err
+	case !ok:
+		return nil, false, nil
+	}
+	return &owned{unlock: unlock, lock: lock, held: true}, true, nil
+}
+
+// keep lets go of the lock, the file staying for another try.
+func (o *owned) keep() { o.unlock() }
+
+// done lets go of the lock and removes its file: the crash file is gone.
+func (o *owned) done() {
+	o.unlock() // before the removal: Windows refuses to remove a locked file
+	if o.held {
+		_ = os.Remove(o.lock)
+	}
 }
