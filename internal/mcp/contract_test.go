@@ -267,3 +267,37 @@ func TestFreeBusyIsClippedToTheRange(t *testing.T) {
 		t.Errorf("busy %v, want %v", got, want)
 	}
 }
+
+// Both time forms in one call are ambiguous, whichever fields are given:
+// refused, never one form silently winning, and nothing is written.
+func TestMixedTimeFormsAreRefusedAsAmbiguous(t *testing.T) {
+	hub := newHub()
+	cs := newRig(t, hub).connect(t, writeGrant, mcp.EntryRemote)
+	alice := hub.agendas["a1"]
+	base := map[string]any{"account": "a1", "calendar": "cal-a", "summary": "Z"}
+	for name, args := range map[string]map[string]any{
+		"both pairs":            with(base, "start", "2026-11-20T15:00", "end", "2026-11-20T16:00", "start_date", "2026-11-20", "end_date", "2026-11-21"),
+		"start with the dates":  with(base, "start", "2026-11-20T15:00", "start_date", "2026-11-20", "end_date", "2026-11-21"),
+		"end with the dates":    with(base, "end", "2026-11-20T16:00", "start_date", "2026-11-20", "end_date", "2026-11-21"),
+		"the times with a date": with(base, "start", "2026-11-20T15:00", "end", "2026-11-20T16:00", "end_date", "2026-11-21"),
+		"a time with a date":    with(base, "start", "2026-11-20T15:00", "end_date", "2026-11-21"),
+	} {
+		terr := mustFail(t, cs, "event_create", args, "refused")
+		if !strings.Contains(terr.Message, "ambiguous") || terr.Hint == "" {
+			t.Errorf("%s: %+v, want a refusal saying the call is ambiguous", name, *terr)
+		}
+	}
+	// event_update takes the same rule.
+	for name, changes := range map[string]map[string]any{
+		"start and start_date": {"start": "2026-11-20T15:00", "start_date": "2026-11-20"},
+		"end and end_date":     {"end": "2026-11-20T16:00", "end_date": "2026-11-21"},
+	} {
+		terr := mustFail(t, cs, "event_update", map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series", "changes": changes}, "refused")
+		if !strings.Contains(terr.Message, "ambiguous") {
+			t.Errorf("update %s: %+v, want ambiguous", name, *terr)
+		}
+	}
+	if n := alice.asked(); n != 0 {
+		t.Errorf("%d write calls for ambiguous arguments", n)
+	}
+}

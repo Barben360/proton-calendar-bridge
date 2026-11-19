@@ -81,6 +81,16 @@ func eventZone(t *service.EventTime) string {
 	return t.TZID
 }
 
+// oneTimeForm refuses a call giving both forms of a time: which one is
+// meant cannot be told, so neither wins.
+func (a fieldArgs) oneTimeForm() error {
+	if (a.start != nil || a.end != nil) && (a.startDate != nil || a.endDate != nil) {
+		return refusedErr("start or end, and start_date or end_date, are all given: the call is ambiguous, nothing was written",
+			"give start and end for a timed event ("+timeArgHelp+"), or start_date and end_date for an all-day one, not both")
+	}
+	return nil
+}
+
 // fields reads a call's fields: times read in loc and written with tzid,
 // dates as dates, null as cleared. Refusals name the argument.
 func (a fieldArgs) fields(loc *time.Location, tzid string) (service.EventFields, error) {
@@ -90,9 +100,8 @@ func (a fieldArgs) fields(loc *time.Location, tzid string) (service.EventFields,
 			return f, refusedErr(name+" cannot be null", "leave it out to keep it, or give a value")
 		}
 	}
-	if (a.start != nil || a.end != nil) && (a.startDate != nil || a.endDate != nil) {
-		return f, refusedErr("give start and end, or start_date and end_date, not both",
-			"start and end are times ("+timeArgHelp+"); start_date and end_date make an all-day event")
+	if err := a.oneTimeForm(); err != nil {
+		return f, err
 	}
 	cleared := func(name string, v *string) *string {
 		if a.nulls[name] {
@@ -303,6 +312,9 @@ func addEventCreate(ss *session) {
 			start: optional(in.Start), end: optional(in.End), startDate: optional(in.StartDate), endDate: optional(in.EndDate), busy: in.Busy}
 		if in.Alarms != nil {
 			args.alarms = &in.Alarms
+		}
+		if err := args.oneTimeForm(); err != nil {
+			return writeOut{}, "", err
 		}
 		switch {
 		case strings.TrimSpace(in.Summary) == "":
