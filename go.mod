@@ -5,10 +5,10 @@ go 1.27
 require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/Microsoft/go-winio v0.6.2
-	github.com/ProtonMail/go-crypto v1.5.2-proton
+	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
-	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton
+	github.com/ProtonMail/gopenpgp/v2 v2.11.1
 	github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6
 	github.com/emersion/go-webdav v0.7.0
 	github.com/fyne-io/oksvg v0.2.1-0.20260918172519-a9af55fa95d9
