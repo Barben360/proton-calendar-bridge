@@ -76,7 +76,7 @@ On Windows there is no service: `pcb install` and every `pcb service` command ex
 | Command | What it does |
 |---|---|
 | `pcb mcp [--profile full\|read-only] [--allow CAPS] [--account A]` | MCP for the agent that runs it, on stdin and stdout; `full`, the default, allows everything, `read-only` reading and starting a login ([agents](agents.md)). |
-| `pcb mcp token add NAME --allow read` | A remote agent's bearer token, printed once. |
+| `pcb mcp token add NAME --allow read` | A remote agent's bearer token, printed once. `--allow` takes `freebusy`, `read`, `write`, `delete`, `unconfirmed-delete` (deletes without asking you, for a client that cannot ask). |
 | `pcb mcp token list`, `pcb mcp token remove NAME` | List the tokens (never their values), remove one. |
 
 ### Other

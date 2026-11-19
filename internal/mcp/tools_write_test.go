@@ -168,6 +168,8 @@ func (s stubAPI) Collections(context.Context) ([]service.Collection, error) {
 var (
 	writeGrant  = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite)
 	deleteGrant = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete)
+	// unconfirmedGrant is deleteGrant with the opt-in to deletes nobody confirms.
+	unconfirmedGrant = grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapUnconfirmedDelete)
 )
 
 // eventID is the event_id of an event, as the tools encode it.
@@ -325,7 +327,7 @@ func TestCreateReturnsIDAndETag(t *testing.T) {
 func TestUpdateStaleETagIsConflict(t *testing.T) {
 	hub := newHub()
 	r := newRig(t, hub)
-	cs := r.connect(t, deleteGrant, mcp.EntryRemote)
+	cs := r.connect(t, unconfirmedGrant, mcp.EntryRemote)
 	alice := hub.agendas["a1"]
 	update := map[string]any{"event_id": standupID, "etag": `"standup@x-0"`, "scope": "series", "changes": map[string]any{"summary": "Moved"}}
 
@@ -507,7 +509,7 @@ func TestWriteToReadOnlyCalendarRefused(t *testing.T) {
 	hub := newHub()
 	hub.cals["a1"][0].ReadOnly = true
 	r := newRig(t, hub)
-	cs := r.connect(t, deleteGrant, mcp.EntryRemote)
+	cs := r.connect(t, unconfirmedGrant, mcp.EntryRemote)
 	for _, tc := range []struct {
 		tool string
 		args map[string]any
@@ -647,13 +649,65 @@ func TestDeleteWithoutElicitationNeedsDeleteCap(t *testing.T) {
 	if n := len(hub.agendas["a1"].writes().deletes); n != 0 {
 		t.Fatalf("%d deletes under a write grant", n)
 	}
-	// The delete grant alone allows it when the client cannot be asked.
-	out := mustCall(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_delete", args)
+	// The opt-in deletes when the client cannot be asked.
+	out := mustCall(t, r.connect(t, unconfirmedGrant, mcp.EntryRemote), "event_delete", args)
 	if out["deleted"] != true {
 		t.Errorf("delete = %v", out)
 	}
 	if w := hub.agendas["a1"].writes(); len(w.deletes) != 1 || w.written != 1 {
 		t.Errorf("deletes %+v", w.deletes)
+	}
+}
+
+// A delete nobody can confirm is refused unless the grant opts in: the
+// delete grant alone is not enough. The refusal comes before the event is
+// read (a stale etag, a missing event answer the same) and names both ways
+// out; the event stays.
+func TestDeleteWithoutElicitationRefusedWithoutOptIn(t *testing.T) {
+	hub := newHub()
+	r := newRig(t, hub)
+	alice := hub.agendas["a1"]
+	cs := r.connect(t, deleteGrant, mcp.EntryRemote)
+	before := alice.asked()
+	for _, args := range []map[string]any{
+		{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"},
+		{"event_id": standupID, "etag": `"stale"`, "scope": "series"},
+		{"event_id": eventID("a1", "cal-a", "nothing@x"), "etag": `"x"`, "scope": "series"},
+	} {
+		terr := mustFail(t, cs, "event_delete", args, "refused")
+		for _, want := range []string{"confirm", "unconfirmed-delete", "elicitation"} {
+			if !strings.Contains(terr.Message+" "+terr.Hint, want) {
+				t.Errorf("%v: refusal %+v does not mention %q", args, *terr, want)
+			}
+		}
+	}
+	if n := alice.asked(); n != before {
+		t.Errorf("the agenda was asked %d times before the refusal", n-before)
+	}
+	if w := alice.writes(); len(w.deletes) != 0 || w.written != 0 {
+		t.Fatalf("deleted %+v", w)
+	}
+	if _, ok := alice.events["cal-a|standup@x"]; !ok {
+		t.Fatal("the event is gone from the fake")
+	}
+}
+
+// With elicitation the person is still asked, opt-in or not: declined
+// deletes nothing, accepted deletes.
+func TestDeleteStillAsksWithOptIn(t *testing.T) {
+	for _, g := range []mcp.Grant{deleteGrant, unconfirmedGrant} {
+		hub := newHub()
+		r := newRig(t, hub)
+		args := map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+		cs, asked := r.connectAsking(t, g, "2025-11-25", "decline")
+		mustFail(t, cs, "event_delete", args, "refused")
+		if len(asked()) != 1 || len(hub.agendas["a1"].writes().deletes) != 0 {
+			t.Fatalf("declined: asked %q, deletes %+v", asked(), hub.agendas["a1"].writes().deletes)
+		}
+		cs, asked = r.connectAsking(t, g, "2025-11-25", "accept")
+		if out := mustCall(t, cs, "event_delete", args); out["deleted"] != true || len(asked()) != 1 {
+			t.Errorf("accepted: %v, asked %q", out, asked())
+		}
 	}
 }
 
@@ -711,20 +765,20 @@ func TestEventIDToolsHideAccountsLikeMissing(t *testing.T) {
 		}{
 			{"mcp off", func(h *stubHub) (mcp.Grant, string) {
 				h.set("b2", func(a *service.AccountInfo) { a.MCP = false })
-				return deleteGrant, eventID("b2", "cal-b", "lunch@x")
+				return unconfirmedGrant, eventID("b2", "cal-b", "lunch@x")
 			}},
 			{"signed out", func(h *stubHub) (mcp.Grant, string) {
 				h.set("b2", func(a *service.AccountInfo) { a.Phase = "logged-out" })
-				return deleteGrant, eventID("b2", "cal-b", "lunch@x")
+				return unconfirmedGrant, eventID("b2", "cal-b", "lunch@x")
 			}},
 			{"calendar grant, account without it", func(*stubHub) (mcp.Grant, string) {
-				g := deleteGrant
+				g := unconfirmedGrant
 				g.Calendars = []string{"cal-a"}
 				return g, eventID("b2", "cal-a", "lunch@x")
 			}},
 			{"calendar grant, calendars unknown", func(h *stubHub) (mcp.Grant, string) {
 				h.health["b2"] = service.Health{Serve: service.ServeStopped}
-				g := deleteGrant
+				g := unconfirmedGrant
 				g.Calendars = []string{"cal-b"}
 				return g, eventID("b2", "cal-b", "lunch@x")
 			}},
@@ -747,14 +801,14 @@ func TestEventIDToolsHideAccountsLikeMissing(t *testing.T) {
 	// event_create names the account as an unknown one.
 	hub := newHub()
 	hub.set("b2", func(a *service.AccountInfo) { a.MCP = false })
-	cs := newRig(t, hub).connect(t, deleteGrant, mcp.EntryRemote)
+	cs := newRig(t, hub).connect(t, unconfirmedGrant, mcp.EntryRemote)
 	args := map[string]any{"calendar": "cal-b", "summary": "X", "start": "2026-11-20T15:00", "end": "2026-11-20T16:00"}
 	hidden := notFoundText(t, cs, "event_create", with(args, "account", "bob@example.com"), "bob@example.com")
 	unknown := notFoundText(t, cs, "event_create", with(args, "account", "carol@example.com"), "carol@example.com")
 	if hidden != unknown {
 		t.Errorf("hidden %q, unknown %q", hidden, unknown)
 	}
-	g := deleteGrant
+	g := unconfirmedGrant
 	g.Calendars = []string{"cal-a"}
 	cs = newRig(t, newHub()).connect(t, g, mcp.EntryRemote)
 	if got := notFoundText(t, cs, "event_create", with(args, "account", "bob@example.com"), "bob@example.com"); got != unknown {
@@ -863,7 +917,7 @@ func TestReadOnlyAccountRefusesChanges(t *testing.T) {
 	hub := newHub()
 	hub.set("a1", func(a *service.AccountInfo) { a.MCPMode = service.MCPReadOnly })
 	r := newRig(t, hub)
-	g := grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapManage)
+	g := grant(mcp.CapFreeBusy, mcp.CapRead, mcp.CapWrite, mcp.CapDelete, mcp.CapUnconfirmedDelete, mcp.CapManage)
 	cs := r.connect(t, g, mcp.EntryStdio)
 	create := func(account string) map[string]any {
 		return map[string]any{"account": account, "calendar": map[string]string{"a1": "cal-a", "b2": "cal-b"}[account],

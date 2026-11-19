@@ -202,7 +202,7 @@ Final review of M8 (2026-11-13, base 07496da, three area reviews): the minors ru
 - Tools: an empty scope skips the range check (`from` after `to`, or past 366 days, is an empty success when no account is visible) (`internal/mcp/scope.go:251` `span`).
 - Tools: the zone is echoed `Local` when the process's zone has no IANA name, which an agent cannot pass back as `tz` (`internal/mcp/timeargs.go:60` `localZone`); `[mcp] timezone` fixes it.
 - Tools: the confirmation is not bound to the call (no request state): a hostile client could answer `accept` unasked, as it could skip elicitation (`internal/mcp/tools_write.go:610-631`, `internal/mcp/tools_account.go` `logout`).
-- Tools: a client declaring URL elicitation only deletes on the `delete` grant alone, as one with none (`internal/mcp/tools_write.go:588` `asksForm`); documented.
+- Tools: a client declaring URL elicitation only is refused an unconfirmed delete unless the grant has `unconfirmed-delete`, as one with none (`internal/mcp/tools_write.go` `asksForm`); documented.
 - Remote: the failure limiter is keyed by the TCP peer, so behind a reverse proxy five bad tokens lock every holder out for a minute (`internal/mcp/http.go:164`, `internal/access/limiter.go`); as for CalDAV (surface-M6).
 - Remote: the per-grant server cache is cleared whole past 256 grants, and `LiveSessions` stops counting the sessions of a dropped server (`internal/mcp/server.go:76`, `:106`).
 - Remote: no test that a token removed or expired mid-session gets 401 on its next request (`internal/mcp/http.go:153` `TokenAuth`, verified per request); `Touch` errors are dropped (`:185`); no `/mcp` test over TLS on a non-loopback bind or with an absolute-form URI.

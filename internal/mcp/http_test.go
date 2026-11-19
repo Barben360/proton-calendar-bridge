@@ -386,6 +386,28 @@ func TestRemoteMCPServesReadTools(t *testing.T) {
 	}
 }
 
+// A token stored before unconfirmed-delete existed holds read, write and
+// delete only: it keeps working, with the safe default (a delete nobody
+// confirms is refused). The same token with the opt-in deletes.
+func TestRemoteTokenWithoutOptInRefusesUnconfirmedDelete(t *testing.T) {
+	t.Parallel()
+	hub := newHub()
+	r := newRemote(t, hub, nil)
+	args := map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+	old := r.client(t, r.add(t, access.Token{Name: "old", Caps: []string{"freebusy", "read", "write", "delete"}}))
+	if got, _ := toolNames(t, old); !slices.Contains(got, "event_delete") {
+		t.Errorf("tools = %v: the old token lost event_delete", got)
+	}
+	mustFail(t, old, "event_delete", args, "refused")
+	if n := len(hub.agendas["a1"].writes().deletes); n != 0 {
+		t.Fatalf("%d deletes by a token without the opt-in", n)
+	}
+	opted := r.client(t, r.add(t, access.Token{Name: "opted", Caps: []string{"write", "unconfirmed-delete"}}))
+	if out := mustCall(t, opted, "event_delete", args); out["deleted"] != true {
+		t.Errorf("delete = %v", out)
+	}
+}
+
 // slowHub answers Health after a delay: a tool call that outlives the
 // listener's timeouts.
 type slowHub struct {

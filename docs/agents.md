@@ -106,13 +106,14 @@ The tools' input schemas (`tools/list`) carry the allowed values: `scope` is `oc
 | `read` (includes `freebusy`) | + `events_list`, `event_get`, `events_search` |
 | `write` (includes `read`) | + `event_create`, `event_update` |
 | `delete` (needs `write`) | + `event_delete` |
+| `unconfirmed-delete` (includes `delete`) | the same tools, and a delete or sign-out goes through even when the client cannot ask you to confirm it ([deletes](#deletes-and-sign-outs-ask-you)) |
 | `login` (stdio only) | `login` |
 | `manage` (stdio only) | `logout` |
 | `--profile full` (default) | all six |
 | `--profile read-only` | `read` + `login` |
 
 - `--allow write,delete` replaces the profile.
-- The default lets an agent delete events and sign an account out. pcb asks you first when the agent's client can ask, not otherwise ([deletes](#deletes-and-sign-outs-ask-you)); for an agent you would not let do that unasked, use `--allow write,login` or `--profile read-only`.
+- The default lets an agent delete events and sign an account out, when pcb can ask you first: the agent's client must support form elicitation, else the call is refused ([deletes](#deletes-and-sign-outs-ask-you)). To allow it without asking, use `--allow write,delete,login,manage,unconfirmed-delete`. For an agent you would not let do either, use `--allow write,login` or `--profile read-only`.
 - `--account ADDRESS` (repeatable) limits the session to those accounts.
 - Over stdio a profile is a guard rail, not a lock: any program running as you can run `pcb` itself.
 ### Two settings, the stricter wins
@@ -153,7 +154,8 @@ Restart pcb, then:
 
 ```sh
 pcb mcp token add laptop-agent --allow read [--account ADDRESS] [--calendar ID] [--expires 30d]   # prints the token once: pcbm_...
-pcb mcp token list                     # names, grants, last use, expiry; never the tokens
+pcb mcp token add editor --allow write,delete,unconfirmed-delete   # may delete without asking you (see below)
+pcb mcp token list                     # names, grants (unconfirmed-delete included), last use, expiry; never the tokens
 pcb mcp token remove laptop-agent      # it stops working at once
 ```
 
@@ -206,7 +208,7 @@ Limits:
 
 When your client supports MCP form elicitation, a delete asks: `Delete the event on <date>: «title»?`. What goes comes first, and the title, which a third party may write, cannot rewrite the question. Declining deletes nothing. Sign-outs ask the same way.
 
-A client without elicitation deletes on the `delete` grant alone, so grant `delete` only to an agent you would let delete unasked.
+A client without form elicitation (none, or URL only) cannot ask you, so a delete or a sign-out is **refused**, with a hint naming both ways out: use a client that supports form elicitation, or give the agent `unconfirmed-delete`. It is refused before the event is read, whatever the etag. `unconfirmed-delete` includes `delete`: give it only to an agent you would let delete (and, over stdio with `manage`, sign an account out) unasked, because an instruction hidden in an invitation can make an agent call `event_delete` as easily as you can. A token created before this option existed has no `unconfirmed-delete`: it keeps working, and its deletes are refused when the client cannot ask; create it again with `--allow ...,unconfirmed-delete` to change that. A client that asks is asked whether or not the grant has it.
 
 Claude Code 2.1.325 asks; other clients are not known.
 

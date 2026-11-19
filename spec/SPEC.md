@@ -1435,6 +1435,7 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   says only `the call failed` (built: a JSON text, not structured content, which would have to match the success
   schema) [verified: `TestErrorClasses`].
 - **Grants.** Capabilities `freebusy` < `read` < `write`, plus `delete` (needs `write`: refused otherwise),
+  `unconfirmed-delete` (brings `delete`; a delete or sign-out nobody can confirm is refused without it, 2026-11-19),
   `login` and `manage` (stdio only, refused on tokens); `read` brings `freebusy`, `write` brings `read`
   [verified: `TestParseCapsAppliesImplications`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`].
   stdio profiles: `full` (all six, the default since 2026-11-14) and `read-only` (`read` + `login`); `--allow` replaces
@@ -1529,8 +1530,10 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   zero-width) and with `«»` replaced by `‹›`, so it cannot rewrite the question [verified:
   `TestDeletePromptResistsSpoofing`]. Only `accept` deletes,
   `decline` or `cancel` is `refused` and nothing is deleted. A client that declares no form elicitation (none, or URL
-  only) deletes with the `delete` grant alone [verified: `TestDeleteAsksWhenElicitationDeclared`,
-  `TestDeleteWithoutElicitationNeedsDeleteCap`, `TestRelayCarriesAConfirmation`]. Claude Code 2.1.325
+  only) is `refused` before any read (reason `pcb:unconfirmed-delete`, the hint names a client with form elicitation and the
+  `unconfirmed-delete` capability) unless the grant holds `unconfirmed-delete` (amended 2026-11-19, decision 0016)
+  [verified: `TestDeleteWithoutElicitationRefusedWithoutOptIn`, `TestDeleteWithoutElicitationNeedsDeleteCap`,
+  `TestDeleteStillAsksWithOptIn`, `TestRemoteTokenWithoutOptInRefusesUnconfirmedDelete`, `TestRelayCarriesAConfirmation`]. Claude Code 2.1.325
   declares form elicitation and asked exactly `Delete the event on 2026-11-15 10:00 Europe/Paris: «pcb-m8 renamed»?`
   (decline: refused, nothing deleted; accept: deleted) `[verified: live 2026-11-14, spec/experiments/M8-live.md]`; what other clients declare is not known.
 - **Login and logout** (stdio and relay only). `login(username)` takes no secret (the schema refuses
@@ -1572,7 +1575,7 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
     login at a time; a later login of the same session replaces its page [verified: `TestLoginToolCooldown`,
     `TestLoginToolReplacesTheSessionsPage`]. A session daemon asks its sealer guard (§13) first [verified: `TestLoginToolAsksTheGuard`].
   - `logout(account)` signs one account out as `pcb logout` does, confirmed by form elicitation when the client
-    declares it (decline: nothing changes), else on the `manage` grant alone [verified: `TestLogoutConfirms`].
+    declares it (decline: nothing changes), else `refused` unless the grant holds `unconfirmed-delete` (2026-11-19) [verified: `TestLogoutConfirms`].
   - Over remote there is no login: `status` shows `needs-login` with the step "run `pcb login` on the server, or open
     pcb-ui" [verified: `TestStatusGivesNow`].
 - **Remote access.** `Authorization: Bearer pcbm_<43 base64url characters>` (256 bits), made by `pcb mcp token add`
@@ -1896,7 +1899,7 @@ M8 behaviour (decision 0016; `internal/cli` `mcp*.go`, `internal/mcp`, `internal
   same hint; `pcb status` and `pcb doctor` show `kind mcp` on their daemon line (`daemon: running since T (pid N,
   version V, kind mcp)`) and no listener (§4.1, §15) [verified: `TestStatusAndDoctorNameTheDaemonsKind`, `TestBridgeNamesAnAgentSession`,
   `TestServeLockNamesTheKind`; `make rehearse` step 22].
-- `pcb mcp token add NAME --allow CAPS`: `CAPS` among `freebusy`, `read`, `write`, `delete` (duplicates dropped); `login` or
+- `pcb mcp token add NAME --allow CAPS`: `CAPS` among `freebusy`, `read`, `write`, `delete`, `unconfirmed-delete` (duplicates dropped); `login` or
   `manage` is exit 2 `login and manage are stdio only: grant them with pcb mcp --profile`, `delete` without `write` exit 2
   `delete needs write: a grant that may delete may also edit` (ruling R19), an unknown one exit 2 naming the valid ones.
   `--account` (repeatable) must name an account (the daemon's view when one answers; else `no account X`, exit 2) and is
@@ -2415,8 +2418,8 @@ M8 additions (MCP, §12):
 - **Writes**: an agent edit is an ETag-guarded patch (no lost update, nothing it did not touch dropped), the M4 refusals and
   the write gate apply unchanged, and a delete asks the person when the client can ask (§12). Calendar text reaches the
   agent marked `untrusted`; that is a mitigation, not a control.
-- Residual: over stdio the grant does not hold against same-UID code; a client without form elicitation deletes on the
-  grant alone; a URL-elicitation client shows the page link in the agent's interface (the nonce is then in the client's
+- Residual: over stdio the grant does not hold against same-UID code; a client without form elicitation deletes only on a grant
+  that opts in (`unconfirmed-delete`); a URL-elicitation client shows the page link in the agent's interface (the nonce is then in the client's
   transcript, still single-use and bound to one username).
 Windows port additions (decision 0018, §13 "Platforms"):
 - Another Windows user is the adversary the port adds. The state and config directories carry a protected DACL (the user and SYSTEM, owner the user), and every check of a mode or an owner on Unix

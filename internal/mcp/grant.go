@@ -16,15 +16,16 @@ type Capability string
 // The capabilities, in the order they are shown. login and manage are
 // stdio only: a token never holds them (access.TokenCaps).
 const (
-	CapFreeBusy Capability = "freebusy" // status, calendars_list, free_busy
-	CapRead     Capability = "read"     // events_list, event_get, events_search; implies freebusy
-	CapWrite    Capability = "write"    // event_create, event_update; implies read
-	CapDelete   Capability = "delete"   // event_delete; needs write
-	CapLogin    Capability = "login"    // login (stdio only)
-	CapManage   Capability = "manage"   // logout (stdio only)
+	CapFreeBusy          Capability = "freebusy"           // status, calendars_list, free_busy
+	CapRead              Capability = "read"               // events_list, event_get, events_search; implies freebusy
+	CapWrite             Capability = "write"              // event_create, event_update; implies read
+	CapDelete            Capability = "delete"             // event_delete; needs write
+	CapUnconfirmedDelete Capability = "unconfirmed-delete" // event_delete and logout without the person's confirmation; implies delete
+	CapLogin             Capability = "login"              // login (stdio only)
+	CapManage            Capability = "manage"             // logout (stdio only)
 )
 
-var capOrder = []Capability{CapFreeBusy, CapRead, CapWrite, CapDelete, CapLogin, CapManage}
+var capOrder = []Capability{CapFreeBusy, CapRead, CapWrite, CapDelete, CapUnconfirmedDelete, CapLogin, CapManage}
 
 // Grant is what one MCP session may do: its capabilities, the accounts it
 // sees (an address or a local ID each; none: every account, those added
@@ -48,7 +49,7 @@ func knownCaps() []Capability {
 }
 
 // ParseCaps reads a comma-separated list of capabilities and applies their
-// implications: read ⇒ freebusy, write ⇒ read. delete without write is an
+// implications: read ⇒ freebusy, write ⇒ read, unconfirmed-delete ⇒ delete. delete without write is an
 // error, as is an unknown, empty or blank name. The result is in capOrder,
 // without repeats.
 func ParseCaps(s string) ([]Capability, error) {
@@ -64,6 +65,9 @@ func ParseCaps(s string) ([]Capability, error) {
 			return nil, fmt.Errorf("%q is not a capability: use %s", strings.TrimSpace(part), strings.Join(names, ", "))
 		}
 		set[c] = true
+	}
+	if set[CapUnconfirmedDelete] {
+		set[CapDelete] = true
 	}
 	if set[CapDelete] && !set[CapWrite] {
 		return nil, errors.New("delete needs write: a grant that may delete may also edit")

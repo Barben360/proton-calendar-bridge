@@ -279,7 +279,7 @@ func TestTokenAddRefusals(t *testing.T) {
 	if after := readTokenFile(t, dir); !bytes.Equal(before, after) {
 		t.Errorf("a refused Add changed the file:\n%s", after)
 	}
-	if want := []string{"freebusy", "read", "write", "delete"}; !slices.Equal(access.TokenCaps, want) {
+	if want := []string{"freebusy", "read", "write", "delete", "unconfirmed-delete"}; !slices.Equal(access.TokenCaps, want) {
 		t.Errorf("TokenCaps = %v, want %v", access.TokenCaps, want)
 	}
 }
