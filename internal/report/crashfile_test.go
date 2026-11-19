@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,6 +126,49 @@ func TestOwnFileNotCollected(t *testing.T) {
 	stop()
 	if files := crashFiles(t, state); len(files) != 0 {
 		t.Errorf("stop left %v", files)
+	}
+}
+
+// writeDeadCrash writes a crash file with a traceback that no process holds,
+// as one a dead process left, named for pid.
+func writeDeadCrash(t *testing.T, state string, pid int) string {
+	t.Helper()
+	dir := report.Dir(state)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("crash-pcb-%d-1.txt", pid))
+	body := "# pcb crash file v1 binary=pcb command=x version=1 install=test\npanic: x\n\ngoroutine 1 [running]:\nmain.main()\n\tmain.go:1 +0x1\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A pid is reused: in a container pcb serve is PID 1 at every start, so
+// the crash file of the previous PID 1 carries this process's pid. It is
+// collected all the same, while this process's own file is kept.
+func TestDeadFileWithOwnPidCollected(t *testing.T) {
+	state := t.TempDir()
+	stop, err := report.StartCrashFile(state, crashMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	own := crashFiles(t, state)
+	dead := writeDeadCrash(t, state, os.Getpid())
+	s := report.Store{StateDir: state}
+	if n, err := s.Collect(context.Background()); err != nil || n != 1 {
+		t.Fatalf("Collect = %d, %v; want the dead file collected", n, err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("dead file with this pid kept: %v", err)
+	}
+	if pend, _ := s.Pending(); len(pend) != 1 {
+		t.Errorf("%d pending, want 1", len(pend))
+	}
+	if files := crashFiles(t, state); len(own) != 1 || len(files) != 1 || files[0] != own[0] {
+		t.Errorf("crash files %v, want only this process's own %v", files, own)
 	}
 }
 

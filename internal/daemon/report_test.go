@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -322,5 +324,38 @@ func TestStartReportsWritesACrashFileWhenAsking(t *testing.T) {
 	}
 	if crashFiles(t, dir) == 0 {
 		t.Fatal("no crash file in ask mode")
+	}
+}
+
+// writeDeadCrash writes a crash file with a traceback that no process
+// holds, named for this process's pid: the previous PID 1 of a container.
+func writeDeadCrash(t *testing.T, dir string) string {
+	t.Helper()
+	rdir := report.Dir(dir)
+	if err := os.MkdirAll(rdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rdir, fmt.Sprintf("crash-pcb-%d-1.txt", os.Getpid()))
+	body := "# pcb crash file v1 binary=pcb command=serve version=1 install=docker\npanic: x\n\ngoroutine 1 [running]:\nmain.main()\n\tmain.go:1 +0x1\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Start-up collects a dead process's crash, even one whose file carries
+// this process's pid (pcb serve is PID 1 at every container start).
+func TestStartReportsCollectsTheCrashOfAPreviousSamePid(t *testing.T) {
+	dir := t.TempDir()
+	dead := writeDeadCrash(t, dir)
+	if !startReports(t, dir, nil) {
+		t.Fatal("StartReports did not start in ask mode")
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("the dead crash file is still there: %v", err)
+	}
+	pend, err := report.Store{StateDir: dir, Env: func(string) string { return "" }}.Pending()
+	if err != nil || len(pend) != 1 || pend[0].Source != "crash" {
+		t.Errorf("pending %v, %v; want the one crash", pend, err)
 	}
 }

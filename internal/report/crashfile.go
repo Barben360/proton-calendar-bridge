@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
@@ -29,9 +29,35 @@ const crashHeader = "# pcb crash file v1"
 const maxCrashFile = 1 << 20
 
 var (
-	crashName   = regexp.MustCompile(`^(crash-.*-(\d+)-\d+)\.txt$`)
+	crashName   = regexp.MustCompile(`^(crash-.*-\d+-\d+)\.txt$`)
 	binaryChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 )
+
+// ownFiles holds the names of this process's own crash files, which
+// Collect never touches. Names, not the pid: a pid is reused (in a
+// container pcb serve is PID 1 at every start), so a dead process's file
+// can carry this process's pid.
+var (
+	ownFiles   = map[string]struct{}{}
+	ownFilesMu sync.Mutex
+)
+
+func setOwn(name string, own bool) {
+	ownFilesMu.Lock()
+	defer ownFilesMu.Unlock()
+	if own {
+		ownFiles[name] = struct{}{}
+	} else {
+		delete(ownFiles, name)
+	}
+}
+
+func isOwn(name string) bool {
+	ownFilesMu.Lock()
+	defer ownFilesMu.Unlock()
+	_, ok := ownFiles[name]
+	return ok
+}
 
 func collectLockPath(stateDir string) string {
 	return filepath.Join(Dir(stateDir), "collect.lock")
@@ -85,16 +111,19 @@ func StartCrashFile(stateDir string, m Meta) (stop func(), err error) {
 	}
 	// The runtime keeps its own duplicate of the descriptor: closing f
 	// lets stop remove the file on Windows too.
+	setOwn(name, true)
 	err = debug.SetCrashOutput(f, debug.CrashOptions{})
 	_ = f.Close()
 	if err != nil {
 		_ = os.Remove(path)
+		setOwn(name, false)
 		release()
 		return noop, err
 	}
 	return func() {
 		_ = debug.SetCrashOutput(nil, debug.CrashOptions{})
 		_ = os.Remove(path)
+		setOwn(name, false)
 		release()
 	}, nil
 }
@@ -138,7 +167,7 @@ func parseHeader(line string) (Meta, bool) {
 
 // Collect turns the crash files of dead processes into pending reports and
 // deletes them, and returns how many reports it saved. A crash file whose
-// lock a running process holds (this one included) is left alone; one with
+// lock a running process holds, or that this process made, is left alone; one with
 // nothing past its header and no holder is a clean death and is deleted
 // (where locks are unsupported it is kept, and only files with a
 // traceback are collected). A file that does
@@ -165,11 +194,10 @@ func (s Store) Collect(ctx context.Context) (int, error) {
 	default:
 		defer unlock()
 	}
-	own := strconv.Itoa(os.Getpid())
 	saved := 0
 	for _, ent := range entries {
 		m := crashName.FindStringSubmatch(ent.Name())
-		if m == nil || !ent.Type().IsRegular() || m[2] == own {
+		if m == nil || !ent.Type().IsRegular() || isOwn(ent.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, ent.Name())
