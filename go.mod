@@ -5,7 +5,7 @@ go 1.27
 require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/Microsoft/go-winio v0.6.2
-	github.com/ProtonMail/go-crypto v1.5.2-proton
+	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
 	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton
