@@ -70,11 +70,13 @@ type infoTip struct {
 	widget.BaseWidget
 	text  string
 	layer *tipLayer
+	icon  *widget.Icon
 }
 
 var (
 	_ desktop.Hoverable = (*infoTip)(nil)
 	_ fyne.Tappable     = (*infoTip)(nil)
+	_ fyne.Focusable    = (*infoTip)(nil)
 )
 
 func newInfoTip(layer *tipLayer, text string) *infoTip {
@@ -84,8 +86,28 @@ func newInfoTip(layer *tipLayer, text string) *infoTip {
 }
 
 func (t *infoTip) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(widget.NewIcon(theme.NewColoredResource(theme.InfoIcon(), theme.ColorNameDisabled)))
+	t.icon = widget.NewIcon(theme.NewColoredResource(theme.InfoIcon(), theme.ColorNameDisabled))
+	return widget.NewSimpleRenderer(t.icon)
 }
+
+// FocusGained shows the tip, so the reason is reachable from the keyboard
+// (Tab); the icon takes the primary colour as the focus mark.
+func (t *infoTip) FocusGained() {
+	if t.icon != nil {
+		t.icon.SetResource(theme.NewColoredResource(theme.InfoIcon(), theme.ColorNamePrimary))
+	}
+	t.layer.show(t)
+}
+
+func (t *infoTip) FocusLost() {
+	if t.icon != nil {
+		t.icon.SetResource(theme.NewColoredResource(theme.InfoIcon(), theme.ColorNameDisabled))
+	}
+	t.layer.hide(t)
+}
+
+func (t *infoTip) TypedRune(rune)          {}
+func (t *infoTip) TypedKey(*fyne.KeyEvent) {}
 
 func (t *infoTip) MouseIn(*desktop.MouseEvent)    { t.layer.show(t) }
 func (t *infoTip) MouseMoved(*desktop.MouseEvent) {}

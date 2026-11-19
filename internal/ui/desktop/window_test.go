@@ -457,6 +457,35 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 	}
 }
 
+// The reason is reachable from the keyboard: the info icon takes the focus
+// (Tab) and shows its tip while it has it.
+func TestReadOnlyReasonShowsOnFocus(t *testing.T) {
+	f := newFixture(t)
+	f.w.Update(twoAccounts())
+	f.w.Show("a1")
+	f.w.win.Resize(fyne.NewSize(880, 1000))
+	tips := f.infoTips()
+	if len(tips) != 1 {
+		t.Fatalf("%d info icons, want 1", len(tips))
+	}
+	c := f.w.win.Canvas()
+	var reached bool
+	for i := 0; i < 60 && !reached; i++ {
+		c.FocusNext()
+		reached = c.Focused() == fyne.Focusable(tips[0])
+	}
+	if !reached {
+		t.Fatal("Tab never reaches the info icon")
+	}
+	if !f.has("An ambiguous gate") {
+		t.Errorf("the focused info icon shows no reason: %v", f.texts())
+	}
+	c.Unfocus()
+	if f.has("An ambiguous gate") {
+		t.Error("the reason stays after the icon lost the focus")
+	}
+}
+
 // A calendar's colour is a dot before its name. One without a colour, or
 // with one pcb cannot read, keeps the dot's room, so the names line up.
 func TestCalendarColourDot(t *testing.T) {
