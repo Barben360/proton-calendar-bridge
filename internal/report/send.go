@@ -76,7 +76,13 @@ type Sender struct {
 	DSN    string
 	Client *http.Client
 	Store  Store
+	// Every is how often Run also wakes, for the reports other processes
+	// save; zero is runEvery.
+	Every time.Duration
 }
+
+// runEvery is how often Run wakes by default.
+const runEvery = time.Hour
 
 // SendResult is the outcome of one report that was posted: Sent when the
 // server took it, else Err says why (the report is kept, or deleted after
@@ -251,9 +257,16 @@ func envelope(dsn string, p Pending, now time.Time) ([]byte, error) {
 }
 
 // Run sends the waiting reports whenever the mode in force is Always: at
-// start and on each poke, until ctx ends. It never logs nor prints; what
-// fails stays for the next poke or start.
+// start, on each poke (a report this process saved) and every Every (one
+// another process saved: a cron pcb sync, a collected crash), until ctx
+// ends. It never logs nor prints; what fails stays for the next wake.
 func (s Sender) Run(ctx context.Context, poke <-chan struct{}) {
+	every := s.Every
+	if every <= 0 {
+		every = runEvery
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
 	for {
 		if s.Store.Mode() == Always {
 			_, _ = s.SendPending(ctx)
@@ -262,6 +275,7 @@ func (s Sender) Run(ctx context.Context, poke <-chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-poke:
+		case <-tick.C:
 		}
 	}
 }
