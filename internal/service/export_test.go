@@ -106,6 +106,10 @@ func (l *Local) SetStateTimeout(d time.Duration) { l.stateTimeout = d }
 // login (the first one, each poll and each wake). Set it before Serve.
 func (l *Local) OnLoginCheck(f func()) { l.checkHook = f }
 
+// AfterRelogin makes f run when an op's relogin returned, before the op runs
+// again.
+func (l *Local) AfterRelogin(f func()) { l.afterRelogin = f }
+
 // OnWipe makes f run in Logout just before the local wipe.
 func (l *Local) OnWipe(f func()) { l.wipeHook = f }
 

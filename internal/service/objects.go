@@ -161,8 +161,8 @@ func (l *Local) cacheFail(err error) error {
 	return l.fail(cacheError(err))
 }
 
-// errKeysDropped: a login, logout or Close dropped the keys during a read.
-func errKeysDropped() error { return blocked("the login changed during the read", "retry") }
+// errKeysDropped: a login, logout or Close dropped (or a logout is under way and drops) the keys during a read.
+func errKeysDropped() error { return blocked("the login changed or ended during the read", "retry") }
 
 // ensureKeys unlocks what the calendars ids need and is not unlocked yet:
 // the address keys, then each calendar's keys from its bootstrap (one Proton
@@ -184,17 +184,17 @@ func (l *Local) ensureKeys(ctx context.Context, cals map[string]calendar.Type) e
 	if l.r.has(ids) {
 		return nil
 	}
-	return l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
-		return l.loadKeys(ctx, c, acc, cals)
+	return l.withSessionGen(ctx, func(ctx context.Context, c *api.Client, acc store.Account, gen uint64) error {
+		return l.loadKeys(ctx, c, acc, gen, cals)
 	})
 }
 
-func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, cals map[string]calendar.Type) error {
+func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, gen uint64, cals map[string]calendar.Type) error {
 	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.beforeLoad != nil {
 		l.r.beforeLoad()
 	}
-	gen, held := l.r.acquire()
+	_, held := l.r.acquire() // its generation is not the load's: gen was read before the session
 	defer l.r.release(held)
 	cur := held
 	if cur != nil && cur.account != acc.ID {
@@ -254,7 +254,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		discard()
 		return errClosed()
 	}
-	if l.r.gen != gen { // a login or logout dropped the keys meanwhile
+	if l.r.gen != gen || l.r.halts > 0 { // a login or logout dropped the keys meanwhile, or one is under way
 		discard()
 		return errKeysDropped()
 	}

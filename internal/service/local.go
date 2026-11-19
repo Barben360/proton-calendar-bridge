@@ -133,6 +133,7 @@ type Local struct {
 	skipSRP      func(username string) *auth.Pending    // replaces Login's SRP step when set
 	stateTimeout time.Duration                          // bounds humanNeeded's wait for state.lock when set
 	checkHook    func()                                 // runs at each login check of a Serve waiting for a login
+	afterRelogin func()                                 // runs when a relogin returned, before the op runs again
 	wipeHook     func()                                 // runs in Logout just before the wipe
 	serveHook    func()                                 // runs between a ready login check and serveOn
 	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer
@@ -363,6 +364,14 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	}
 	l.dropPending(ctx)
 	l.expired = ""
+	// The stored session outlives the drop below until its wipe: a read in
+	// between must neither install keys nor leave a client of it cached.
+	// Dropping again on the way out clears what a read that had already read
+	// the session left (lock order: kmu and cmu are leaves, taken one at a
+	// time, under mu).
+	l.r.halt()
+	defer l.r.resume() // registered first, so it runs last
+	defer l.dropClient()
 	if errors.Is(err, store.ErrRolledBack) {
 		l.revokeHeld()
 	}
