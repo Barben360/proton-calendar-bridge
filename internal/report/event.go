@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -108,13 +109,16 @@ const (
 	fingerprintFrames = 5
 )
 
+// crashKinds are the only exception types a crash report sends.
+var crashKinds = regexp.MustCompile(`^(panic|runtime error|fatal error|signal SIG[A-Z0-9]+)$`)
+
 // CrashEvent is the report of a fatal crash, read by ParseCrash. Its
 // message is kept only when it is one of the runtime's own, whoever built
 // c.
 func CrashEvent(c Crash, m Meta, now time.Time) Event {
 	kind := c.Kind
-	if kind == "" {
-		kind = "panic"
+	if !crashKinds.MatchString(kind) {
+		kind = "panic" // a hand-built Kind is no way to send text
 	}
 	msg := keptOrRemoved(c.Message)
 	return newEvent("fatal", "crash", exceptionValue{Type: kind, Value: msg, Mechanism: mechanism{Type: mechCrash}}, c.Frames, m, now)

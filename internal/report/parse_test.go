@@ -294,6 +294,10 @@ func TestRuntimeMessagesAllowList(t *testing.T) {
 		{"fatal error: concurrent map iteration and map write", "fatal error", "fatal error: concurrent map iteration and map write"},
 		{"fatal error: no goroutines (main called runtime.Goexit) - deadlock!", "fatal error", "fatal error: no goroutines (main called runtime.Goexit) - deadlock!"},
 		{"fatal error: out of memory", "fatal error", "fatal error: out of memory"},
+		{"fatal error: runtime: out of memory", "fatal error", "fatal error: runtime: out of memory"},
+		{"fatal error: runtime: cannot allocate memory", "fatal error", "fatal error: runtime: cannot allocate memory"},
+		{"panic: runtime: allocation size out of range", "runtime error", "runtime: allocation size out of range"},
+		{"fatal error: runtime: out of memory MARKER-7f3a", "fatal error", "(text removed)"},
 		{"fatal error: stack overflow", "fatal error", "fatal error: stack overflow"},
 		{"fatal error: sync: unlock of unlocked mutex", "fatal error", "fatal error: sync: unlock of unlocked mutex"},
 		{"[signal 0xc0000005 code=0x0 addr=0x0 pc=0x7ff6]", "", ""},
@@ -333,4 +337,19 @@ func exceptionValueOf(t *testing.T, e report.Event) string {
 	t.Helper()
 	_, v := exceptionValue(t, e)
 	return v
+}
+
+// A traceback cut short (a full disk, a killed process) leaves a function
+// line without its ")": the argument words must not survive.
+func TestParseCrashTruncatedFunctionLine(t *testing.T) {
+	text := "panic: x\n\ngoroutine 1 [running]:\n" +
+		daemon + ".f(0xc0000 MARKER-7f3a\n" +
+		daemon + ".(*T).M\n"
+	c, err := report.ParseCrash([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Frames) != 2 || c.Frames[1].Function != daemon+".f" || c.Frames[0].Function != daemon+".(*T).M" {
+		t.Errorf("frames %+v", c.Frames)
+	}
 }
