@@ -330,3 +330,33 @@ func TestParseDSN(t *testing.T) {
 		}
 	}
 }
+
+func TestRunSendsOnPoke(t *testing.T) {
+	k := newSink(t, nil)
+	s := newStore(t)
+	if err := s.SetMode(ctx, report.Always); err != nil {
+		t.Fatal(err)
+	}
+	poke := make(chan struct{}, 1)
+	c, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { report.Sender{DSN: k.dsn(), Store: s}.Run(c, poke); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// Run started with nothing waiting: it is idle. A report saved later
+	// goes out on the poke, once.
+	time.Sleep(50 * time.Millisecond)
+	saveN(t, s, 1)
+	poke <- struct{}{}
+	deadline := time.Now().Add(5 * time.Second)
+	for k.count() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if k.count() != 1 {
+		t.Errorf("the poke sent %d requests, want exactly 1", k.count())
+	}
+	if ids := pendingIDs(t, s); len(ids) != 0 {
+		t.Errorf("%v still waits after the send", ids)
+	}
+}

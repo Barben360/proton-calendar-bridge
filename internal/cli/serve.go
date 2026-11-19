@@ -17,6 +17,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -186,7 +187,10 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 	if mh, ok := hub.(mcp.Hub); ok { // the accounts' Hub always is; a test's stand-in may not be
 		mcpServer = mcp.NewServer(mcp.Options{Hub: mh, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version})
 	}
+	reports, poke, unsubscribe := serveReports(log)
+	defer unsubscribe()
 	return daemon.Run(runCtx, daemon.Options{
+		Reports: reports, ReportPoke: poke,
 		Dirs: dirs, Config: cfg, Hub: hub, Kind: "serve", LogLevel: cfg.Log.Level, MCP: mcpServer,
 		Logger: log, Warn: a.Stderr, Listen: a.Listen, WaitForLogin: waitForLogin, Cut: cut,
 		SessionEnd: ended,
@@ -201,6 +205,22 @@ func (a *app) serve(cmd *cobra.Command, hub Hub, log *slog.Logger, dirs paths.Di
 			notice.intro(waitForLogin && n == 0)
 		},
 	})
+}
+
+// serveReports is the background sender of the crash reports the installed
+// process keeps (nil without one) and the channel that wakes it; the
+// function ends the subscription. It logs once that reports wait for an
+// answer, in mode ask.
+func serveReports(log *slog.Logger) (*report.Sender, <-chan struct{}, func()) {
+	p := report.Current()
+	if p == nil || p.DSN == "" {
+		return nil, nil, func() {}
+	}
+	if pend, err := p.Store.Pending(); err == nil && len(pend) > 0 && p.Store.Mode() == report.Ask {
+		log.Info("crash reports waiting: pcb crash-reports show")
+	}
+	poke, unsubscribe := p.Subscribe()
+	return &report.Sender{DSN: p.DSN, Store: p.Store}, poke, unsubscribe
 }
 
 // printIntro writes what to enter in Thunderbird: the URL of each account

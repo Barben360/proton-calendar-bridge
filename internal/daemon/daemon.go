@@ -34,6 +34,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
@@ -169,6 +170,12 @@ type Options struct {
 	// socket's handler goroutine and must return quickly, for example by
 	// posting to the UI loop.
 	ShowUI func(account string) error
+	// Reports sends the waiting crash reports in the background while
+	// Run serves, when the mode in force is always (report.Sender.Run).
+	// nil: nothing is sent. It never delays Ready.
+	Reports *report.Sender
+	// ReportPoke wakes Reports when a report is saved (nil: only at start).
+	ReportPoke <-chan struct{}
 }
 
 // Info describes the CalDAV listener.
@@ -258,6 +265,19 @@ func Run(ctx context.Context, o Options) error {
 		return finish(nil)
 	}
 
+	if o.Reports != nil {
+		sendCtx, stopSend := context.WithCancel(ctx)
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			o.Reports.Run(sendCtx, o.ReportPoke)
+		}()
+		defer func() {
+			stopSend()
+			<-sent
+		}()
+	}
+
 	remoteMCP := o.Config.MCP.Remote && o.MCP != nil && !o.NoListener
 	switch {
 	case o.Config.MCP.Remote && o.NoListener:
@@ -330,7 +350,7 @@ func Run(ctx context.Context, o Options) error {
 		handler = withMCP(handler, o.MCP.HTTPHandler(auth))
 	}
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           recordPanics(handler),
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -486,6 +506,24 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			log.Info(what + " stopped")
 		})
 	}, nil
+}
+
+// recordPanics keeps a crash report of a panic in h (CalDAV or remote MCP)
+// and then aborts the request as net/http does for any handler panic: the
+// connection is cut, nothing is logged. http.ErrAbortHandler is the
+// handler's own way of aborting and is not recorded.
+func recordPanics(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				if err, ok := v.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
+					report.RecordPanic(v, debug.Stack())
+				}
+				panic(http.ErrAbortHandler)
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
 }
 
 // mcpPath is where the listener serves MCP when [mcp] remote is on.
