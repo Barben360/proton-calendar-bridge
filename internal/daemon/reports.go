@@ -28,12 +28,17 @@ type ReportStart struct {
 // an address, a state directory and a user who owns it: a crash file for a
 // fatal crash, the crash files of dead processes turned into reports, and
 // the recorder of unexpected errors. Anything failing leaves reporting off,
-// silently (ok false). stop ends it; it is for a clean exit only, so that
+// silently (ok false). Mode never keeps no crash file at all. stop ends it; it is for a clean exit only, so that
 // a crash leaves its file behind.
 func StartReports(o ReportStart) (store report.Store, stop func(), ok bool) {
 	stop = func() {}
 	store = report.Store{StateDir: o.StateDir, Env: o.Env, Now: o.Now}
 	if o.DSN == "" || o.StateDir == "" || (o.Owner != nil && o.Owner() != nil) {
+		return store, stop, false
+	}
+	// Reports turned off (the file or PCB_CRASH_REPORTS): no crash file, so
+	// no raw traceback is left on disk, and nothing is collected.
+	if store.Mode() == report.Never {
 		return store, stop, false
 	}
 	stopCrash, err := report.StartCrashFile(o.StateDir, o.Meta)
