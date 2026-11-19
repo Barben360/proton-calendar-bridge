@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -155,14 +156,15 @@ func (s *Server) build(g Grant, e Entry) *sdkmcp.Server {
 			ss.tools = append(ss.tools, t.name)
 		}
 	}
-	ss.sdk.AddReceivingMiddleware(ss.auditCalls)
+	ss.sdk.AddReceivingMiddleware(ss.auditCalls, refusedInvalid)
 	return ss.sdk
 }
 
 // addTool adds a typed tool whose handler returns its structured result
 // and a one-line text, or an error the agent reads as a toolError.
-func addTool[In, Out any](ss *session, t *sdkmcp.Tool, h func(ctx context.Context, in In) (Out, string, error)) {
+func addTool[In, Out any](ss *session, t *sdkmcp.Tool, h func(ctx context.Context, in In) (Out, string, error), tune ...tuner) {
 	t.Description += " " + untrustedNote
+	t.InputSchema = inputSchema[In](t.Name, tune)
 	sdkmcp.AddTool(ss.sdk, t, func(ctx context.Context, _ *sdkmcp.CallToolRequest, in In) (*sdkmcp.CallToolResult, Out, error) {
 		out, text, err := h(ctx, in)
 		if err != nil {
@@ -171,6 +173,16 @@ func addTool[In, Out any](ss *session, t *sdkmcp.Tool, h func(ctx context.Contex
 		}
 		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: text}}}, out, nil
 	})
+}
+
+// inputSchema is the input schema of In with the tuners' constraints. A
+// type whose schema cannot be inferred is a programming error.
+func inputSchema[In any](tool string, tune []tuner) *jsonschema.Schema {
+	s, err := tuned[In](tune)
+	if err != nil {
+		panic("mcp: input schema of " + tool + ": " + err.Error())
+	}
+	return s
 }
 
 // readOnly are the annotations of a read tool.

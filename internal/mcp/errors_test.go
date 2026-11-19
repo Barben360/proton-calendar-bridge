@@ -1,11 +1,15 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -47,8 +51,18 @@ func TestErrorClasses(t *testing.T) {
 			toolError{Class: "not-found", Message: service.ErrNoSuchObject.Error(), Hint: "h"}},
 		{"rolled back", &exitcode.Error{Code: exitcode.RolledBack, Err: errors.New("undone"), Hint: "h"},
 			toolError{Class: "retry", Message: "undone", Hint: "h"}},
-		{"not ours: text dropped", errors.New("password=hunter2"),
-			toolError{Class: "retry", Message: "the call failed", Hint: "retry; if it fails again, see the pcb log"}},
+		{"not ours: text dropped, and no retry to loop on", errors.New("password=hunter2"),
+			toolError{Class: "must-act", Message: "the call failed", Hint: "do not retry: the failure is unexplained and no retry is known to fix it; a person can read the pcb log"}},
+		{"a time-out is worth one retry", fmt.Errorf("agenda: %w", context.DeadlineExceeded),
+			toolError{Class: "retry", Message: "the call did not finish in time", Hint: "retry once; if it fails again, see the pcb log"}},
+		{"blocked until a person completes the verification", &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrHumanVerification, Hint: "open the web app"},
+			toolError{Class: "must-act", Message: service.ErrHumanVerification.Error(), Hint: "open the web app"}},
+		{"blocked on an event stored by another client", &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrUIDStoredOtherwise, Hint: "edit it in the web app"},
+			toolError{Class: "must-act", Message: service.ErrUIDStoredOtherwise.Error(), Hint: "edit it in the web app"}},
+		{"blocked while pcb serve is not serving", &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrNotServing, Hint: "run pcb serve"},
+			toolError{Class: "must-act", Message: service.ErrNotServing.Error(), Hint: "run pcb serve"}},
+		{"a write not sent in time is retried", &exitcode.Error{Code: exitcode.Blocked, Err: service.ErrWriteNotSent, Hint: "retry the change"},
+			toolError{Class: "retry", Message: service.ErrWriteNotSent.Error(), Hint: "retry the change"}},
 		{"already a tool error", notFound("no account y", "z"), toolError{Class: "not-found", Message: "no account y", Hint: "z"}},
 	} {
 		got := toToolError(tc.err)
@@ -69,5 +83,33 @@ func TestErrorClasses(t *testing.T) {
 	}
 	if len(seen) != 5 || !seen["must-act"] || !seen["retry"] || !seen["refused"] || !seen["conflict"] || !seen["not-found"] {
 		t.Errorf("classes %v", seen)
+	}
+}
+
+// Only the SDK's refusal of the arguments is rewritten as one; any other
+// error result keeps its own text.
+func TestRefusedInvalidRewritesOnlyArgumentFailures(t *testing.T) {
+	result := func(err error) sdkmcp.MethodHandler {
+		return func(context.Context, string, sdkmcp.Request) (sdkmcp.Result, error) {
+			var r sdkmcp.CallToolResult
+			r.SetError(err)
+			return &r, nil
+		}
+	}
+	run := func(err error) *toolError {
+		res, _ := refusedInvalid(result(err))(context.Background(), "tools/call", nil)
+		var te *toolError
+		if !errors.As(res.(*sdkmcp.CallToolResult).GetError(), &te) {
+			return nil
+		}
+		return te
+	}
+	te := run(errors.New(`validating "arguments": validating root: required: missing properties: ["account"]`))
+	if te == nil || te.Class != "refused" || !strings.Contains(te.Message, "account") || te.Hint == "" {
+		t.Errorf("argument failure became %+v", te)
+	}
+	te = run(errors.New("validating tool output: boom"))
+	if te == nil || te.Class != "must-act" || strings.Contains(te.Message, "arguments") {
+		t.Errorf("an output failure became %+v, want a generic failure", te)
 	}
 }

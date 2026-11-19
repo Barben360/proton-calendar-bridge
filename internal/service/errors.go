@@ -170,6 +170,30 @@ func final(msg, hint string) *exitcode.Error {
 	return &exitcode.Error{Code: exitcode.Blocked, Err: &detail{msg: msg, final: true}, Hint: hint}
 }
 
+// NeedsPerson reports whether err is a failure no retry of the same call
+// fixes, though its code is not MustAct: a final one (a newer cache, an
+// unsupported system), a locked desktop keyring, Proton's human
+// verification, a refusal of Proton's, a session that ended, a Serve not
+// serving or waiting for a login, an event stored by another client. A
+// person must act first (the MCP adapter's must-act, never retry). It
+// looks at types only, never at text.
+func NeedsPerson(err error) bool {
+	var d *detail
+	switch {
+	case err == nil:
+		return false
+	case errors.As(err, &d) && d.final, keyringLocked(err):
+		return true
+	case errors.Is(err, ErrHumanVerification), errors.Is(err, ErrUIDStoredOtherwise), errors.Is(err, ErrNotServing), errors.Is(err, ErrWaitingForLogin):
+		return true
+	}
+	switch errorClass(err) {
+	case classRefused, classSession:
+		return true
+	}
+	return false
+}
+
 // stopsWatch reports whether a watch must stop on err: a person must act
 // (MustAct), or the failure is final (a newer cache, an unsupported system).
 func stopsWatch(err error) bool {

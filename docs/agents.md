@@ -64,6 +64,40 @@ Or in a project's `.mcp.json`:
 
 Give the absolute path of `pcb` when the agent's `PATH` lacks it.
 
+## What a call looks like
+
+### Errors
+
+Every refusal or failure of a tool, including one the arguments cause before the tool runs (a missing or mistyped argument, a value outside the schema), is one result flagged as an error whose text is `{"error": {"class", "message", "hint"}}`:
+
+| `class` | Means | The agent |
+|---|---|---|
+| `refused` | the call is not acceptable as it is (`reason` names a pcb refusal) | fixes the call, or stops |
+| `must-act` | a person must do something first: log in, complete a verification in the Proton web app, start `pcb serve` | tells the person; does not retry |
+| `retry` | transient: Proton or the network is slow or down; `retry_after_s` when Proton gave one | retries after a pause |
+| `conflict` | the event changed since its etag was read | reads it again with `event_get` |
+| `not-found` | no such account, calendar or event (or not visible to this session) | looks again with `status` or a list |
+
+A failure pcb cannot explain is `must-act`, with a hint to read the pcb log: no retry is known to fix it. A read with no account to read (none logged in, or none visible to the session) is `must-act` too, naming how to log in.
+
+### Arguments
+
+The tools' input schemas (`tools/list`) carry the allowed values: `scope` is `occurrence` or `series`; `limit` is 1 to 500 (0 or left out: 100); `start_date` and `end_date` are `YYYY-MM-DD`; `alarms` are at most 10 values, each between -1439 (less than a day after the start, for all-day events) and 10079999 minutes before the start. A call outside them is `refused`.
+
+### Times
+
+- A time with an offset is that instant. A wall clock (`2026-11-14T15:00`) or a date is read in the call's `tz`, else the zone `status` shows, the way pcb reads a time already stored: a time that does not exist (a clock change skips it) takes the offset before the change, so `2026-03-08T02:30` in `America/New_York` is 03:30 EDT; a time that happens twice is the first one, so `2026-10-25T02:30` in `Europe/Paris` is 02:30 summer time.
+- A range (`from`, `to`) is at most 366 days and ends after it starts; this is checked before anything else.
+- `event_create` takes `start` and `end` (a timed event) or `start_date` and `end_date` (all-day), never both: the call is refused as ambiguous and nothing is written.
+
+### Changing an event
+
+`event_update` with only `start` (or only `start_date`) moves the event: its end moves by the same amount and the event keeps its length. Give `end` (or `end_date`) too to change the length: an end given always wins. A series with exceptions moves whole, its exceptions with it. In a dry run of one occurrence, `before` shows the occurrence as long as the series is.
+
+### Free and busy
+
+`free_busy` gives busy intervals cut at the range asked: an all-day event in a 09:00 to 17:00 query is busy from 09:00 to 17:00. Transparent and cancelled events, and events you have declined (your own `PARTSTAT=DECLINED`, whichever of your addresses it names), are free; the same events are `busy: false` in `events_list`. `skipped` counts each event that cannot be read once.
+
 ## What an agent may do
 
 | Profile or `--allow` capability | Tools |

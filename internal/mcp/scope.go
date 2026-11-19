@@ -27,6 +27,13 @@ func noAccount(name string) *toolError {
 	return notFound("no account "+name, "the status tool lists the accounts this session can see")
 }
 
+// noAccountToRead is the answer of a read with no account at all to read:
+// an empty result would read as "nothing is scheduled".
+func (ss *session) noAccountToRead() *toolError {
+	return &toolError{Class: classMustAct, Message: "no account: none is logged in for this session to read",
+		Hint: "status lists the accounts; to add one, " + ss.loginStep()}
+}
+
 func noCalendar(id string) *toolError {
 	return notFound("no calendar "+id, "calendars_list lists the calendars this session can see")
 }
@@ -55,6 +62,9 @@ func (ss *session) accounts(ctx context.Context, names []string) ([]target, erro
 	vis := ss.visible()
 	var out []target
 	if len(names) == 0 {
+		if len(vis) == 0 {
+			return nil, ss.noAccountToRead()
+		}
 		for _, a := range vis {
 			out = append(out, target{info: a, name: a.Address})
 		}
@@ -260,6 +270,14 @@ func (ss *session) span(from, to, tz string) (span, error) {
 	t, err := parseTime("to", to, loc)
 	if err != nil {
 		return span{}, err
+	}
+	// The range is judged before any account is: an 882-day one is refused
+	// whether or not there is anything to read (the service's own limit).
+	switch {
+	case !t.After(f):
+		return span{}, refusedErr("the range ends before it starts", "give a to after from")
+	case t.Sub(f) > service.MaxAgendaRange:
+		return span{}, refusedErr("the range is longer than 366 days", "ask for at most 366 days at a time")
 	}
 	return span{from: f, to: t, loc: loc, zone: zoneLabel(loc, f)}, nil
 }

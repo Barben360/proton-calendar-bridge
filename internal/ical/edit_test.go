@@ -511,7 +511,6 @@ func TestApplyEditRRuleChangeWithExceptionsIsRefused(t *testing.T) {
 		{"rrule change", Fields{RRule: new("FREQ=WEEKLY;BYDAY=TU;COUNT=10")}},
 		{"rrule removed", Fields{RRule: new("")}},
 		{"start and end shifted differently", Fields{Start: new(paris(t, "20261116T110000")), End: new(paris(t, "20261116T130000"))}},
-		{"start moved alone", Fields{Start: new(paris(t, "20261116T103000"))}},
 		{"zone changed", Fields{
 			Start: &Time{At: paris(t, "20261116T100000").At},
 			End:   &Time{At: paris(t, "20261116T110000").At},
@@ -882,5 +881,97 @@ func TestReplaceAlarmsKeepsTheActionOfAnAlarmSentAgain(t *testing.T) {
 				t.Errorf("the alarm at 60 minutes, not asked for, is still there:\n%s", s)
 			}
 		})
+	}
+}
+
+// A Start given without an End moves the event, never changes its length:
+// the End shifts by the same delta (as a series shift does).
+func TestApplyEditStartAloneKeepsTheLength(t *testing.T) {
+	single := calendar("BEGIN:VEVENT", "UID:one@pcb", "DTSTAMP:20261001T090000Z",
+		"DTSTART;TZID=Europe/Paris:20261116T100000", "DTEND;TZID=Europe/Paris:20261116T110000", "SUMMARY:x", "END:VEVENT")
+	for _, tc := range []struct {
+		name         string
+		start        Time
+		wantS, wantE Time
+	}{
+		{"earlier", paris(t, "20261116T090000"), paris(t, "20261116T090000"), paris(t, "20261116T100000")},
+		{"later than the old end", paris(t, "20261116T113000"), paris(t, "20261116T113000"), paris(t, "20261116T123000")},
+		{"another day", paris(t, "20261120T100000"), paris(t, "20261120T100000"), paris(t, "20261120T110000")},
+		// Another zone: the length elapses the same.
+		{"in UTC", Time{At: utc("2026-11-16T09:00:00Z")}, Time{At: utc("2026-11-16T09:00:00Z")}, Time{At: utc("2026-11-16T10:00:00Z")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ApplyEdit(single, ScopeSeries, nil, Fields{Start: &tc.start}, editNow)
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			d := decoded(t, out)
+			if !d.Start.At.Equal(tc.wantS.At) || !d.End.At.Equal(tc.wantE.At) {
+				t.Errorf("start %s end %s, want %s and %s", d.Start.At.UTC(), d.End.At.UTC(), tc.wantS.At.UTC(), tc.wantE.At.UTC())
+			}
+		})
+	}
+
+	// An End given too wins: nothing is carried.
+	out, err := ApplyEdit(single, ScopeSeries, nil, Fields{Start: new(paris(t, "20261116T090000")), End: new(paris(t, "20261116T120000"))}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decoded(t, out); !sameInstant(d.End, paris(t, "20261116T120000")) {
+		t.Errorf("end %+v, want the one given", d.End)
+	}
+
+	// An event without a DTEND (a DURATION) keeps its DURATION.
+	dur := calendar("BEGIN:VEVENT", "UID:dur@pcb", "DTSTAMP:20261001T090000Z",
+		"DTSTART;TZID=Europe/Paris:20261116T100000", "DURATION:PT90M", "SUMMARY:x", "END:VEVENT")
+	out, err = ApplyEdit(dur, ScopeSeries, nil, Fields{Start: new(paris(t, "20261116T080000"))}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decoded(t, out); !sameInstant(d.End, paris(t, "20261116T093000")) {
+		t.Errorf("end %+v, want 09:30 (the 90 minutes kept)", d.End)
+	}
+
+	// All-day: the end date moves with the start date.
+	allDay := calendar("BEGIN:VEVENT", "UID:day@pcb", "DTSTAMP:20261001T090000Z",
+		"DTSTART;VALUE=DATE:20261116", "DTEND;VALUE=DATE:20261119", "SUMMARY:x", "END:VEVENT")
+	out, err = ApplyEdit(allDay, ScopeSeries, nil, Fields{Start: &Time{Date: "2026-11-20"}}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decoded(t, out); d.Start.Date != "2026-11-20" || d.End.Date != "2026-11-23" {
+		t.Errorf("dates %s to %s, want 2026-11-20 to 2026-11-23", d.Start.Date, d.End.Date)
+	}
+}
+
+// One occurrence moved by its Start alone keeps its length too.
+func TestApplyEditOccurrenceStartAloneKeepsTheLength(t *testing.T) {
+	out, err := ApplyEdit(editFixture(t, "series.ics"), ScopeOccurrence, new(paris(t, "20261214T100000")),
+		Fields{Start: new(paris(t, "20261214T093000"))}, editNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := decoded(t, out).Overrides[1]
+	if !sameInstant(o.Start, paris(t, "20261214T093000")) || !sameInstant(o.End, paris(t, "20261214T103000")) {
+		t.Errorf("override %+v to %+v, want 09:30 to 10:30", o.Start, o.End)
+	}
+}
+
+// A series moved by its Start alone is a shift of the whole series, its
+// exceptions with it: the stored end has no say in the matter.
+func TestApplyEditSeriesStartAloneShiftsTheSeriesAndItsExceptions(t *testing.T) {
+	out, err := ApplyEdit(editFixture(t, "series.ics"), ScopeSeries, nil, Fields{Start: new(paris(t, "20261116T093000"))}, editNow)
+	if err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	d := decoded(t, out)
+	if !sameInstant(d.Start, paris(t, "20261116T093000")) || !sameInstant(d.End, paris(t, "20261116T103000")) {
+		t.Errorf("master %+v to %+v, want 09:30 to 10:30", d.Start, d.End)
+	}
+	if len(d.ExDates) != 1 || !sameInstant(d.ExDates[0], paris(t, "20261123T093000")) {
+		t.Errorf("EXDATE %+v, want 2026-11-23 09:30", d.ExDates)
+	}
+	if len(d.Overrides) != 1 || !sameInstant(*d.Overrides[0].RecurrenceID, paris(t, "20261130T093000")) {
+		t.Errorf("overrides %+v, want RECURRENCE-ID 2026-11-30 09:30", d.Overrides)
 	}
 }

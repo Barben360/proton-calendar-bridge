@@ -38,6 +38,15 @@ type (
 	Occurrence  = ical.Occurrence
 )
 
+// MaxAlarmMinutes is the most minutes before the start an alarm may be.
+const MaxAlarmMinutes = ical.MaxAlarmMinutes
+
+// ResolveWall is the instant of the wall clock w (its fields read as a local
+// time of loc) by the codec's rule, ical.ResolveWall: the first of two in a
+// DST overlap, the offset before a gap. The adapter reads the times it is
+// given with it, so what it stores is what the codec reads back.
+func ResolveWall(w time.Time, loc *time.Location) time.Time { return ical.ResolveWall(w, loc) }
+
 // The edit scopes: the series (its master) or one occurrence.
 const (
 	ScopeSeries     = ical.ScopeSeries
@@ -85,8 +94,9 @@ type OccurrencesRequest struct {
 // AgendaOccurrence is one occurrence with what a list shows of it. Summary,
 // Location, Description, ExternalOrganizer and Busy are the occurrence's
 // own (an override's when it is one). ExternalOrganizer: its ORGANIZER is not one
-// of the account's addresses. Busy: TRANSP is not TRANSPARENT and STATUS is
-// not CANCELLED.
+// of the account's addresses. Busy: TRANSP is not TRANSPARENT, STATUS is
+// not CANCELLED and the account itself has not declined it (an ATTENDEE of
+// one of its addresses with PARTSTAT=DECLINED).
 type AgendaOccurrence struct {
 	Ref               EventRef
 	ETag              string
@@ -108,6 +118,9 @@ type OccurrencePage struct {
 	Truncated bool
 	Next      string
 	Skipped   int
+	// skipped names those events (calendar and UID), so that FreeBusy counts
+	// one that every page skips only once.
+	skipped []string
 }
 
 // EventDetail is one event in full: Data is the whole object (master and
@@ -147,7 +160,8 @@ type Agenda interface {
 	// FreeBusy returns every busy occurrence of the range (Text, Limit and
 	// Cursor are ignored), read as Occurrences reads them, and how many
 	// events of the range it skipped (OccurrencePage.Skipped summed over
-	// its pages): their times are unknown, so they may be busy (ruling R13).
+	// its pages, each counted once): their times are unknown, so they may be
+	// busy (ruling R13).
 	FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error)
 	// CreateEvent creates an event with a new UID in calendar calID and
 	// returns its ref and ETag ("" when it could not be read back).
@@ -293,18 +307,20 @@ func (l *Local) Occurrences(ctx context.Context, req OccurrencesRequest) (Occurr
 func (l *Local) FreeBusy(ctx context.Context, req OccurrencesRequest) ([]Occurrence, int, error) {
 	req.Text, req.Cursor, req.Limit = "", "", MaxAgendaLimit
 	out := []Occurrence{}
-	skipped := 0
+	skipped := map[string]bool{} // an unreadable series is a candidate on every page
 	for {
 		p, err := l.occurrences(ctx, req, func(o *AgendaOccurrence, _ *EventData) bool { return o.Busy })
 		if err != nil {
 			return nil, 0, err
 		}
-		skipped += p.Skipped
+		for _, k := range p.skipped {
+			skipped[k] = true
+		}
 		for _, it := range p.Items {
 			out = append(out, it.Occurrence)
 		}
 		if !p.Truncated {
-			return out, skipped, nil
+			return out, len(skipped), nil
 		}
 		req.Cursor = p.Next
 	}
@@ -366,6 +382,7 @@ func (l *Local) occurrences(ctx context.Context, req OccurrencesRequest, keep ke
 			got, last, err := expandObject(cal, types[cal], obj, q, own)
 			if err != nil {
 				page.Skipped++
+				page.skipped = append(page.skipped, cal+"\x00"+obj.UID)
 				l.log().Warn("the agenda skipped an event it cannot read", "calendar", cal, "uid", obj.UID, "reason", refusalOf(err).Code)
 				continue
 			}
@@ -552,10 +569,27 @@ func expandObject(cal, calType string, obj Object, q agendaQuery, own func(strin
 			Description:       src.Description,
 			CalendarType:      calType,
 			ExternalOrganizer: organizer != nil && !own(organizer.Email),
-			Busy:              src.Transp != "TRANSPARENT" && src.Status != "CANCELLED",
+			Busy:              src.Transp != "TRANSPARENT" && src.Status != "CANCELLED" && !declinedByAccount(src, data, own),
 		}})
 	}
 	return out, last, nil
+}
+
+// declinedByAccount: the account itself declined src (an ATTENDEE of one of
+// its own addresses with PARTSTAT=DECLINED), so the time is free for it. An
+// occurrence overridden without attendees of its own keeps the series'
+// (data's); another attendee's decline says nothing of the account.
+func declinedByAccount(src, data EventData, own func(string) bool) bool {
+	attendees := src.Attendees
+	if len(attendees) == 0 {
+		attendees = data.Attendees
+	}
+	for _, a := range attendees {
+		if a.Email != "" && own(a.Email) && strings.EqualFold(a.Status, "DECLINED") {
+			return true
+		}
+	}
+	return false
 }
 
 // splitObject is a rendered object's master (zero when it has none) and

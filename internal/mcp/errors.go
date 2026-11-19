@@ -1,9 +1,13 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
@@ -44,16 +48,49 @@ func refusedErr(msg, hint string) *toolError {
 	return &toolError{Class: classRefused, Message: msg, Hint: hint}
 }
 
+// refusedInvalid is the middleware that gives the SDK's refusal of a call's
+// arguments (missing or mistyped, or outside the input schema's values and
+// bounds: it answers before a handler runs, in plain text) the envelope of
+// every other tool error: class refused, the message and a hint.
+func refusedInvalid(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+	return func(ctx context.Context, method string, req sdkmcp.Request) (sdkmcp.Result, error) {
+		res, err := next(ctx, method, req)
+		r, ok := res.(*sdkmcp.CallToolResult)
+		if method != "tools/call" || err != nil || !ok || r == nil || !r.IsError {
+			return res, err
+		}
+		var te *toolError
+		cause := r.GetError()
+		if cause == nil || errors.As(cause, &te) {
+			return res, err
+		}
+		detail, isArgs := strings.CutPrefix(cause.Error(), `validating "arguments": `)
+		if !isArgs { // not the SDK's refusal of the arguments: its text may carry anything
+			var out sdkmcp.CallToolResult
+			out.SetError(toToolError(cause))
+			return &out, nil
+		}
+		te = refusedErr("the arguments do not fit the tool: "+cutUTF8(detail, 300),
+			"tools/list gives the tool's input schema (required arguments, types, allowed values and bounds): fix the arguments and call again")
+		var out sdkmcp.CallToolResult
+		out.SetError(te)
+		return &out, nil
+	}
+}
+
 // retryAfterOf is how long Proton asked to wait, as err carries it (a
 // variable so a test can stand for Proton's 429).
 var retryAfterOf = service.ProtonRetryAfter
 
 // toToolError classifies err: a stale ETag is a conflict; a selector that
 // names nothing is not-found; a refused change is refused with its code;
-// then by exit code: MustAct is must-act, Usage refused, anything else
-// retry (Blocked with Proton's Retry-After in seconds). The text of an
-// error that is not an *exitcode.Error is dropped: nothing vouches that it
-// is secret-free.
+// then by exit code: MustAct is must-act, Usage refused; a Blocked error
+// no retry fixes (service.NeedsPerson) is must-act, any other retry (with
+// Proton's Retry-After in seconds). An error that is not an
+// *exitcode.Error is retry only when it is a time-out or a cancelled
+// context; else it is must-act, lest an agent loop on a failure that never
+// clears: the person reads the pcb log. Its text is dropped: nothing
+// vouches that it is secret-free.
 func toToolError(err error) *toolError {
 	var (
 		te *toolError
@@ -64,7 +101,10 @@ func toToolError(err error) *toolError {
 		return te
 	}
 	if !errors.As(err, &ee) {
-		return &toolError{Class: classRetry, Message: "the call failed", Hint: "retry; if it fails again, see the pcb log"}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return &toolError{Class: classRetry, Message: "the call did not finish in time", Hint: "retry once; if it fails again, see the pcb log"}
+		}
+		return &toolError{Class: classMustAct, Message: "the call failed", Hint: "do not retry: the failure is unexplained and no retry is known to fix it; a person can read the pcb log"}
 	}
 	out := &toolError{Message: ee.Error(), Hint: ee.Hint}
 	switch {
@@ -78,6 +118,8 @@ func toToolError(err error) *toolError {
 		out.Class = classMustAct
 	case ee.Code == exitcode.Usage:
 		out.Class = classRefused
+	case service.NeedsPerson(err):
+		out.Class = classMustAct
 	default:
 		out.Class = classRetry
 		if d := retryAfterOf(err); d > 0 {

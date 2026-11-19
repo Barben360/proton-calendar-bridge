@@ -81,6 +81,16 @@ func eventZone(t *service.EventTime) string {
 	return t.TZID
 }
 
+// oneTimeForm refuses a call giving both forms of a time: which one is
+// meant cannot be told, so neither wins.
+func (a fieldArgs) oneTimeForm() error {
+	if (a.start != nil || a.end != nil) && (a.startDate != nil || a.endDate != nil) {
+		return refusedErr("start or end, and start_date or end_date, are all given: the call is ambiguous, nothing was written",
+			"give start and end for a timed event ("+timeArgHelp+"), or start_date and end_date for an all-day one, not both")
+	}
+	return nil
+}
+
 // fields reads a call's fields: times read in loc and written with tzid,
 // dates as dates, null as cleared. Refusals name the argument.
 func (a fieldArgs) fields(loc *time.Location, tzid string) (service.EventFields, error) {
@@ -90,9 +100,8 @@ func (a fieldArgs) fields(loc *time.Location, tzid string) (service.EventFields,
 			return f, refusedErr(name+" cannot be null", "leave it out to keep it, or give a value")
 		}
 	}
-	if (a.start != nil || a.end != nil) && (a.startDate != nil || a.endDate != nil) {
-		return f, refusedErr("give start and end, or start_date and end_date, not both",
-			"start and end are times ("+timeArgHelp+"); start_date and end_date make an all-day event")
+	if err := a.oneTimeForm(); err != nil {
+		return f, err
 	}
 	cleared := func(name string, v *string) *string {
 		if a.nulls[name] {
@@ -304,6 +313,9 @@ func addEventCreate(ss *session) {
 		if in.Alarms != nil {
 			args.alarms = &in.Alarms
 		}
+		if err := args.oneTimeForm(); err != nil {
+			return writeOut{}, "", err
+		}
 		switch {
 		case strings.TrimSpace(in.Summary) == "":
 			return writeOut{}, "", refusedErr("summary is empty", "give the event a title")
@@ -343,7 +355,7 @@ func addEventCreate(ss *session) {
 			return out, "event created; call event_get for its etag", nil
 		}
 		return out, "event created in calendar " + in.Calendar, nil
-	})
+	}, dateFields(), alarmBounds())
 }
 
 // ---- event_update ----
@@ -352,9 +364,9 @@ func addEventCreate(ss *session) {
 // null clears a text, the rule or the alarms.
 type changesIn struct {
 	Summary     *string `json:"summary,omitempty"`
-	Start       *string `json:"start,omitempty" jsonschema:"new start of a timed event: RFC 3339 with an offset, or a wall clock read in tz"`
-	End         *string `json:"end,omitempty" jsonschema:"new end (exclusive), as start"`
-	StartDate   *string `json:"start_date,omitempty" jsonschema:"new first day of an all-day event, YYYY-MM-DD"`
+	Start       *string `json:"start,omitempty" jsonschema:"new start of a timed event: RFC 3339 with an offset, or a wall clock read in tz. Without end, the end moves by the same amount: the event is moved and keeps its length"`
+	End         *string `json:"end,omitempty" jsonschema:"new end (exclusive), as start; given, it wins: the length changes with it"`
+	StartDate   *string `json:"start_date,omitempty" jsonschema:"new first day of an all-day event, YYYY-MM-DD. Without end_date, the end date moves by the same number of days"`
 	EndDate     *string `json:"end_date,omitempty" jsonschema:"new day after the last day of an all-day event (exclusive)"`
 	Location    *string `json:"location,omitempty" jsonschema:"null clears it"`
 	Description *string `json:"description,omitempty" jsonschema:"null clears it"`
@@ -506,7 +518,7 @@ func addEventUpdate(ss *session) {
 			return out, "event updated; call event_get for its etag", nil
 		}
 		return out, "event updated (" + string(scope) + ")", nil
-	})
+	}, scopeEnum, dateFields("changes"), alarmBounds("changes"))
 }
 
 // sameTime: a and b name the same date, wall clock or instant.
@@ -518,8 +530,8 @@ func sameTime(a, b service.EventTime) bool {
 }
 
 // occurrenceOf is the occurrence of d at rid: its override, else the one
-// its master generates there (the master's fields at that start, with its
-// duration on the wall clock).
+// its master generates there (the master's fields at that start, as long as
+// the master in elapsed time, as ical.Expand makes it).
 func occurrenceOf(d service.EventData, rid service.EventTime) service.EventData {
 	for _, o := range d.Overrides {
 		if o.RecurrenceID != nil && sameTime(*o.RecurrenceID, rid) {
@@ -537,17 +549,11 @@ func occurrenceOf(d service.EventData, rid service.EventTime) service.EventData 
 			o.Start.Date, o.End.Date = rid.Date, r.Add(e.Sub(s)).Format(time.DateOnly)
 		}
 	case !rid.At.IsZero():
-		loc := time.UTC // a floating time holds its wall clock as UTC
-		if z := zoneOf(d.Start.TZID); z != nil && !d.Start.Floating {
-			loc = z
-		}
-		wall := func(t time.Time) time.Time {
-			t = t.In(loc)
-			return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
-		}
-		w := wall(rid.At).Add(wall(d.End.At).Sub(wall(d.Start.At)))
-		o.Start.At = rid.At.In(loc)
-		o.End.At = time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), 0, loc)
+		// rid is an instant: the occurrence starts there and lasts as long
+		// as the master (a floating time holds its wall clock as UTC, so
+		// the difference is the same).
+		o.Start.At = rid.At.In(d.Start.At.Location())
+		o.End.At = rid.At.Add(d.End.At.Sub(d.Start.At)).In(d.End.At.Location())
 	}
 	return o
 }
@@ -610,6 +616,7 @@ func addEventDelete(ss *session) {
 		Annotations: writing("Delete an event", true),
 	}
 	t.Description += " " + untrustedNote
+	t.InputSchema = inputSchema[deleteIn](t.Name, []tuner{scopeEnum})
 	sdkmcp.AddTool(ss.sdk, t, func(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (*sdkmcp.CallToolResult, deleteOut, error) {
 		out, ask, err := ss.deleteEvent(ctx, req, in)
 		switch {

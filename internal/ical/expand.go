@@ -615,6 +615,14 @@ func parseWall(value string, loc *time.Location) (time.Time, error) {
 	return resolve(w, loc), nil
 }
 
+// ResolveWall is the instant of the wall clock w (its fields read as a local
+// time of loc) by the codec's own rule: the first of two when a DST overlap
+// repeats it, the UTC offset before the gap when a DST gap skips it. Every
+// reader of a time given as a wall clock outside the codec (the MCP tools'
+// arguments) resolves it with this, so that the instant it stores is the
+// one the codec reads back.
+func ResolveWall(w time.Time, loc *time.Location) time.Time { return resolve(w, loc) }
+
 // resolve is the instant of wall clock w (its fields read as a local time of
 // loc), by RFC 5545 §3.3.5, which §3.3.10 applies to recurrence instances: a
 // local time that occurs twice is the first of the two; one that does not

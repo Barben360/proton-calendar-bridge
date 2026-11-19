@@ -65,3 +65,41 @@ func TestWallClocksResolveAsExpandDoes(t *testing.T) {
 		t.Errorf("shifted exception %s (%t), want %s", moved.At.UTC(), ok, want)
 	}
 }
+
+// ResolveWall is the codec's rule for callers outside it (the MCP tools'
+// times): the first of two, the offset before a gap, the same as
+// parseWall gives a stored value.
+func TestResolveWallIsTheCodecsRule(t *testing.T) {
+	ny, _ := time.LoadLocation("America/New_York")
+	paris, _ := time.LoadLocation("Europe/Paris")
+	wall := func(s string) time.Time {
+		w, err := time.Parse(localLayout, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	for _, tc := range []struct {
+		name string
+		wall string
+		loc  *time.Location
+		want string
+	}{
+		{"gap: the offset before it", "20260308T023000", ny, "2026-03-08T07:30:00Z"},        // 03:30 EDT
+		{"overlap: the first of the two", "20261025T023000", paris, "2026-10-25T00:30:00Z"}, // CEST
+		{"overlap, New York", "20261101T013000", ny, "2026-11-01T05:30:00Z"},                // EDT
+		{"an ordinary time", "20261114T150000", paris, "2026-11-14T14:00:00Z"},
+		{"UTC", "20261114T150000", time.UTC, "2026-11-14T15:00:00Z"},
+	} {
+		got := ResolveWall(wall(tc.wall), tc.loc)
+		if !got.Equal(utc(tc.want)) {
+			t.Errorf("%s: %s, want %s", tc.name, got.UTC().Format(time.RFC3339), tc.want)
+		}
+		if tc.loc != time.UTC && got.Location() != tc.loc {
+			t.Errorf("%s: read in %v, want %v", tc.name, got.Location(), tc.loc)
+		}
+		if viaCodec, err := parseWall(tc.wall, tc.loc); err != nil || !viaCodec.Equal(got) {
+			t.Errorf("%s: parseWall %v (%v) differs from ResolveWall %v", tc.name, viaCodec, err, got)
+		}
+	}
+}

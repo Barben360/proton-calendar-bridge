@@ -15,7 +15,8 @@ import (
 // offset is an instant as it is; a wall clock without offset or a bare date
 // is read in the call's tz argument, else the server's zone ([mcp] timezone,
 // else the process's). The zone used is echoed in the result. Anything
-// else is refused, naming the argument: never a silent UTC.
+// else is refused, naming the argument: never a silent UTC. A wall clock in
+// a DST gap or overlap reads as the iCalendar codec reads it (parseTime).
 
 const (
 	wallLayoutSeconds = "2006-01-02T15:04:05"
@@ -39,9 +40,12 @@ func parseTime(name, v string, loc *time.Location) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
 		return t, nil
 	}
+	// A wall clock is resolved as the codec resolves a stored one: the first
+	// of two in a DST overlap, the offset before a gap (time.ParseInLocation
+	// gives other instants for both).
 	for _, layout := range []string{wallLayoutSeconds, wallLayoutMinutes, time.DateOnly} {
-		if t, err := time.ParseInLocation(layout, v, loc); err == nil {
-			return t, nil
+		if w, err := time.Parse(layout, v); err == nil {
+			return service.ResolveWall(w, loc), nil
 		}
 	}
 	return time.Time{}, refusedErr(name+" is not a time: "+quote(v),

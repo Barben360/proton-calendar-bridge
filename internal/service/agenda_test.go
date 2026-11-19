@@ -819,3 +819,110 @@ func TestDSTOverlapOverrideIsTheOccurrence(t *testing.T) {
 	}
 	contains(t, "the series", []byte(data), "EXDATE;TZID=Europe/Paris:20261025T023000")
 }
+
+// Moving an event by its start alone keeps its length, through the whole
+// write path: earlier, and past the old end.
+func TestUpdateEventStartAloneKeepsTheLength(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+	}).start(t)
+	obj := r.object(t, "a@x")
+	ref := service.EventRef{CalendarID: r.cal, UID: "a@x"}
+	was := time.Unix(base, 0).UTC()
+	for _, shift := range []time.Duration{-time.Hour, 90 * time.Minute} {
+		start := service.EventTime{At: was.Add(shift)}
+		res, err := r.svc.UpdateEvent(t.Context(), ref, obj.ETag, service.ScopeSeries, service.EventFields{Start: &start}, true)
+		if err != nil {
+			t.Fatalf("shift %v: %v", shift, err)
+		}
+		if got := res.After.End.At.Sub(res.After.Start.At); got != time.Hour || !res.After.Start.At.Equal(start.At) {
+			t.Errorf("shift %v: the event is %v long from %s, want 1h from %s", shift, got, res.After.Start.At, start.At)
+		}
+	}
+}
+
+// The account's own PARTSTAT=DECLINED is a free slot: the occurrence is not
+// busy in a list, and free/busy leaves it out. Someone else's decline, an
+// accepted or tentative reply and an occurrence overridden as declined
+// (and not the series) are each judged on their own.
+func TestDeclinedInvitationsAreNotBusy(t *testing.T) {
+	t.Parallel()
+	var me string
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddAddress(f.Username, "alias@proton.local")
+	})
+	r.signIn(t)
+	me = r.loadState(t).Address
+	if me == "" {
+		t.Fatal("no account address")
+	}
+	attendee := func(partstat, addr string) string { return "ATTENDEE;PARTSTAT=" + partstat + ";CN=X:mailto:" + addr }
+	add := func(uid string, start int64, extra ...string) {
+		r.f.AddEvent(r.cal, protontest.Event{UID: uid, Start: start, End: start + 3600, Card: card(uid, uid, start, extra...)})
+	}
+	add("declined@x", base, attendee("DECLINED", me), attendee("ACCEPTED", "them@example.org"))
+	add("alias@x", base+3600, attendee("declined", "Alias@proton.local")) // an alias of the account, in any case
+	add("accepted@x", base+7200, attendee("ACCEPTED", me))
+	add("tentative@x", base+10800, attendee("TENTATIVE", me))
+	add("theirs@x", base+14400, attendee("DECLINED", "them@example.org"), attendee("NEEDS-ACTION", me))
+	add("plain@x", base+18000)
+	// A weekly series I accepted, whose second occurrence I declined.
+	rid := base + 86400*7 + 21600
+	r.f.AddEvent(r.cal, protontest.Event{UID: "s@x", Start: base + 21600, End: base + 21600 + 3600, RRule: "FREQ=WEEKLY;COUNT=3",
+		Card: card("s@x", "s@x", base+21600, "RRULE:FREQ=WEEKLY;COUNT=3", attendee("ACCEPTED", me))})
+	r.f.AddEvent(r.cal, protontest.Event{UID: "s@x", Start: rid, End: rid + 3600, RecurrenceID: ptr(rid),
+		Card: card("s@x", "s@x", rid, "RECURRENCE-ID:"+stamp(rid), attendee("DECLINED", me))})
+	r.sync(t, false)
+
+	req := service.OccurrencesRequest{From: at(base - day), To: at(base + 20*day)}
+	busy := map[string][]bool{}
+	for _, o := range occurrences(t, r.svc, req).Items {
+		busy[o.Summary] = append(busy[o.Summary], o.Busy)
+	}
+	want := map[string][]bool{"declined@x": {false}, "alias@x": {false}, "accepted@x": {true}, "tentative@x": {true},
+		"theirs@x": {true}, "plain@x": {true}, "s@x": {true, false, true}}
+	if fmt.Sprint(busy) != fmt.Sprint(want) {
+		t.Errorf("busy flags %v, want %v", busy, want)
+	}
+	fb, skipped, err := r.svc.FreeBusy(t.Context(), req)
+	if err != nil || skipped != 0 {
+		t.Fatal(skipped, err)
+	}
+	// accepted, tentative, theirs, plain, and two of the three of the series.
+	if len(fb) != 6 {
+		t.Errorf("free/busy holds %d occurrences, want 6", len(fb))
+	}
+	for _, o := range fb {
+		for _, declined := range []int64{base, base + 3600, rid} {
+			if o.Start.Equal(at(declined)) {
+				t.Errorf("free/busy holds the declined occurrence at %s", o.Start)
+			}
+		}
+	}
+}
+
+// An event that cannot be read is counted once, however many pages the
+// free/busy read takes: its series is a candidate on each page.
+func TestFreeBusyCountsAnUnreadableEventOnce(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		for _, uid := range []string{"d1@x", "d2@x"} { // 2 x 366 busy occurrences: two pages of 500
+			f.AddEvent(cal, protontest.Event{UID: uid, Start: base, End: base + 600, RRule: "FREQ=DAILY",
+				Card: card(uid, uid, base, "RRULE:FREQ=DAILY")})
+		}
+		f.AddEvent(cal, protontest.Event{UID: "hr@x", Start: base, End: base + 3600, RRule: "FREQ=HOURLY",
+			Card: card("hr@x", "Secret hourly", base, "RRULE:FREQ=HOURLY")})
+	}).start(t)
+	req := service.OccurrencesRequest{From: at(base), To: at(base + 365*day)}
+	fb, skipped, err := r.svc.FreeBusy(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fb) <= service.MaxAgendaLimit {
+		t.Fatalf("%d busy occurrences: the read took one page, the test shows nothing", len(fb))
+	}
+	if skipped != 1 {
+		t.Errorf("skipped %d, want 1 (one unreadable event, %d busy occurrences over several pages)", skipped, len(fb))
+	}
+}
