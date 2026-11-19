@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"net/url"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -254,5 +255,37 @@ func TestTrayUpdateSkipsWhatDidNotChange(t *testing.T) {
 	}
 	if got := labels(fa.menu)[0]; got != "alice@example.org — synced 2 min ago" {
 		t.Errorf("menu line = %q", got)
+	}
+}
+
+// An autostarted pcb-ui can beat the tray host (the AppIndicator extension,
+// plasmashell) to the session bus: the probe is retried, not read once.
+func TestWaitForTrayHostRetriesUntilItAnswers(t *testing.T) {
+	calls := 0
+	probe := func() bool { calls++; return calls == 3 }
+	if !WaitForTrayHost(probe, time.Second, time.Millisecond) {
+		t.Fatal("a host that appeared on the third probe was missed")
+	}
+	if calls != 3 {
+		t.Errorf("probed %d times, want it to stop at the first answer (3)", calls)
+	}
+}
+
+func TestWaitForTrayHostGivesUpAfterTheWait(t *testing.T) {
+	calls := 0
+	start := time.Now()
+	if WaitForTrayHost(func() bool { calls++; return false }, 30*time.Millisecond, 5*time.Millisecond) {
+		t.Fatal("reported a host that never answered")
+	}
+	if calls < 2 {
+		t.Errorf("probed %d times, want it retried", calls)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("waited %v, want it bounded by the wait", d)
+	}
+	// wait 0 is one probe and no sleep.
+	calls = 0
+	if WaitForTrayHost(func() bool { calls++; return false }, 0, time.Hour) || calls != 1 {
+		t.Errorf("wait 0: %d probes, want exactly one", calls)
 	}
 }

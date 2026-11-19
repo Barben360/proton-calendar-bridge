@@ -3,6 +3,7 @@ package desktop
 import (
 	"embed"
 	"slices"
+	"time"
 
 	"fyne.io/fyne/v2"
 
@@ -150,4 +151,20 @@ func Attach(ta TrayApp, w *Window, quit func(), background bool) *Tray {
 func (t *Tray) SetUpdate(n ui.UpdateNotice) {
 	t.upd = n
 	t.Update(t.last) // NewTray has drawn once: last is a real view
+}
+
+// WaitForTrayHost runs probe (TrayHost) until it reports a host or wait has
+// passed, every `every` between tries: at an autostarted login the tray host
+// often registers a moment after pcb-ui starts. wait 0 probes once.
+func WaitForTrayHost(probe func() bool, wait, every time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if probe() {
+			return true
+		}
+		if !time.Now().Add(every).Before(deadline) {
+			return false
+		}
+		time.Sleep(every)
+	}
 }

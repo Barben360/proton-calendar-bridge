@@ -26,7 +26,7 @@ It runs on Linux (X11 and Wayland with a StatusNotifierItem tray) and on Windows
 
 ```sh
 pcb-ui                       # the window and the tray icon
-pcb-ui --background          # tray only (the window opens anyway when no tray answers)
+pcb-ui --background          # tray only (waits up to 15 s for the tray, then opens the window if none answers)
 ```
 
 After `make install-ui` it is also in your applications menu. On Windows the installer puts a `pcb-ui` shortcut in the Start menu.
@@ -77,7 +77,7 @@ An agent on another machine uses the remote `/mcp` with a token: turn it on in `
 
 GNOME shows no tray icon unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled.
 
-Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
+With `--background` (the autostart), `pcb-ui` first waits up to 15 seconds for the tray to register, as the AppIndicator extension or the Plasma panel often starts after it. Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
 
 ## One server per state directory
 

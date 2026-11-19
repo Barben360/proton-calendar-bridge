@@ -125,9 +125,17 @@ func run(args []string) int {
 	}
 	// No tray to come back from: the window opens even with --background,
 	// says so once, and closing it quits (R14).
+	// An autostarted login (--background) can beat the tray host to the
+	// session bus: wait for it a few seconds instead of probing once.
 	var ta desktop.TrayApp
-	if da, ok := a.(fdesktop.App); ok && desktop.TrayHost("") {
-		ta = da
+	if da, ok := a.(fdesktop.App); ok {
+		wait := time.Duration(0)
+		if opts.background {
+			wait = trayHostWait
+		}
+		if desktop.WaitForTrayHost(func() bool { return desktop.TrayHost("") }, wait, trayHostEvery) {
+			ta = da
+		}
 	}
 	tray := desktop.Attach(ta, win, quit, opts.background)
 	// At logoff or shutdown Windows ends pcb-ui as soon as end returns: the
@@ -156,6 +164,13 @@ func run(args []string) int {
 	_ = bridge.Stop() // the loop ended some other way (a signal Fyne took)
 	return 0
 }
+
+// trayHostWait is how long an autostarted pcb-ui (--background) waits for
+// the tray host to register, trying every trayHostEvery.
+const (
+	trayHostWait  = 15 * time.Second
+	trayHostEvery = 500 * time.Millisecond
+)
 
 // probe runs the single-instance check: a running pcb-ui is shown (exit 0),
 // a running pcb serve or agent session (pcb mcp) is a dialog and exit 20.
