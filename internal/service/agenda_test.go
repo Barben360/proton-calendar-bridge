@@ -819,3 +819,25 @@ func TestDSTOverlapOverrideIsTheOccurrence(t *testing.T) {
 	}
 	contains(t, "the series", []byte(data), "EXDATE;TZID=Europe/Paris:20261025T023000")
 }
+
+// Moving an event by its start alone keeps its length, through the whole
+// write path: earlier, and past the old end.
+func TestUpdateEventStartAloneKeepsTheLength(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+		f.AddEvent(cal, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "Lunch", base)})
+	}).start(t)
+	obj := r.object(t, "a@x")
+	ref := service.EventRef{CalendarID: r.cal, UID: "a@x"}
+	was := time.Unix(base, 0).UTC()
+	for _, shift := range []time.Duration{-time.Hour, 90 * time.Minute} {
+		start := service.EventTime{At: was.Add(shift)}
+		res, err := r.svc.UpdateEvent(t.Context(), ref, obj.ETag, service.ScopeSeries, service.EventFields{Start: &start}, true)
+		if err != nil {
+			t.Fatalf("shift %v: %v", shift, err)
+		}
+		if got := res.After.End.At.Sub(res.After.Start.At); got != time.Hour || !res.After.Start.At.Equal(start.At) {
+			t.Errorf("shift %v: the event is %v long from %s, want 1h from %s", shift, got, res.After.Start.At, start.At)
+		}
+	}
+}

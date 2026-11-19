@@ -77,10 +77,12 @@ func NewEvent(uid string, f Fields, now time.Time) ([]byte, error) {
 // id may name its series). A change that moves Start and End by the same
 // wall-clock delta in their zone moves every EXDATE and override
 // RECURRENCE-ID by that delta, the overrides' own times staying, and the
-// kept RRULE's UNTIL with them; a change of End alone moves nothing. Any
+// kept RRULE's UNTIL with them; a change of End alone moves nothing. A
+// Start given without an End moves the End by the same delta (carryEnd),
+// so it is such a shift. Any
 // other change of a series with exceptions that could leave one off the
-// new rule (an RRULE change or removal, a Start moved without End or by
-// another delta, a change of zone or between date and time, a shift that
+// new rule (an RRULE change or removal, a Start and an End moved by
+// different deltas, a change of zone or between date and time, a shift that
 // puts a moved exception on a day the rule's BYDAY, BYMONTHDAY or BYMONTH
 // no longer yields) is refused, a *Refusal SeriesHasExceptions naming how
 // many there are. A start its own rule does not yield (BYDAY=MO kept with
@@ -115,6 +117,7 @@ func ApplyEdit(vcal []byte, scope Scope, recurrenceID *Time, f Fields, now time.
 			// kept as stored, so moveSeries' shifted UNTIL is what is written.
 			f.RRule = nil
 		}
+		f = carryEnd(*master, f)
 		moved, r := moveSeries(cal, master, f, now)
 		if r != nil {
 			return nil, r
@@ -139,6 +142,7 @@ func ApplyEdit(vcal []byte, scope Scope, recurrenceID *Time, f Fields, now time.
 		if r != nil {
 			return nil, r
 		}
+		f = carryEnd(*ev, f)
 		if r := applyFields(ev, f, false); r != nil {
 			return nil, r
 		}
@@ -680,6 +684,38 @@ func timeProp(name string, t Time) (Property, *Refusal) {
 	}
 	params, value := encodeLike(t, t)
 	return Property{Name: name, Params: params, Value: value}, nil
+}
+
+// carryEnd is f with its End filled in when only a Start is given and ev
+// has a DTEND: the end moves by the same delta, so the event keeps its
+// length (a move is not a change of length). On the same wall clock (the
+// start's zone, or both dates) the delta is a wall-clock one, as moveSeries'
+// shift is; moved to another form or zone the length elapses the same. An
+// event with a DURATION already keeps it, and an End given wins: both are
+// left as they are.
+func carryEnd(ev Component, f Fields) Fields {
+	if f.Start == nil || f.End != nil {
+		return f
+	}
+	sp, ok := ev.Get("DTSTART")
+	ep, hasEnd := ev.Get("DTEND")
+	if !ok || !hasEnd {
+		return f
+	}
+	start, err1 := decodeTime(sp, sp.Value)
+	end, err2 := decodeTime(ep, ep.Value)
+	if err1 != nil || err2 != nil || (start.Date != "") != (end.Date != "") || (start.Date != "") != (f.Start.Date != "") || start.Floating || end.Floating || f.Start.Floating {
+		return f
+	}
+	switch {
+	case sameForm(start, *f.Start):
+		if moved, ok := shiftException(end, end, shiftOf(start, *f.Start)); ok {
+			f.End = &moved
+		}
+	case start.Date == "":
+		f.End = &Time{At: f.Start.At.Add(end.At.Sub(start.At)), TZID: f.Start.TZID}
+	}
+	return f
 }
 
 // checkGivenTimes refuses a Start or End timeProp refuses, before any

@@ -352,9 +352,9 @@ func addEventCreate(ss *session) {
 // null clears a text, the rule or the alarms.
 type changesIn struct {
 	Summary     *string `json:"summary,omitempty"`
-	Start       *string `json:"start,omitempty" jsonschema:"new start of a timed event: RFC 3339 with an offset, or a wall clock read in tz"`
-	End         *string `json:"end,omitempty" jsonschema:"new end (exclusive), as start"`
-	StartDate   *string `json:"start_date,omitempty" jsonschema:"new first day of an all-day event, YYYY-MM-DD"`
+	Start       *string `json:"start,omitempty" jsonschema:"new start of a timed event: RFC 3339 with an offset, or a wall clock read in tz. Without end, the end moves by the same amount: the event is moved and keeps its length"`
+	End         *string `json:"end,omitempty" jsonschema:"new end (exclusive), as start; given, it wins: the length changes with it"`
+	StartDate   *string `json:"start_date,omitempty" jsonschema:"new first day of an all-day event, YYYY-MM-DD. Without end_date, the end date moves by the same number of days"`
 	EndDate     *string `json:"end_date,omitempty" jsonschema:"new day after the last day of an all-day event (exclusive)"`
 	Location    *string `json:"location,omitempty" jsonschema:"null clears it"`
 	Description *string `json:"description,omitempty" jsonschema:"null clears it"`
