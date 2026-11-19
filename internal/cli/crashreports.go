@@ -14,6 +14,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
+	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/doctor"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
@@ -50,36 +51,23 @@ func (a *app) installKind() string {
 	return update.InstallKind(in)
 }
 
-// startReports keeps the crash reports of this pcb process, for a build
-// with an address, a state directory that resolves and a user who owns it
-// (root on a user's state leaves no file there): a crash file for a fatal
-// crash, the crash files of dead processes turned into reports, and the
-// recorder of unexpected errors. Anything failing leaves reporting off,
-// silently. The returned function ends it; it is for a clean exit only, so
-// that a crash leaves its file behind.
+// startReports keeps the crash reports of this pcb process
+// (daemon.StartReports), for a state directory that resolves. The returned
+// function ends it.
 func (a *app) startReports(root *cobra.Command, args []string) (stop func()) {
-	stop = func() {}
 	store, ok := a.reportStore()
-	if a.ReportDSN == "" || !ok || a.stateOwner() != nil {
-		return stop
+	if !ok {
+		return func() {}
 	}
 	cmd, _, err := root.Find(args)
 	if err != nil || cmd == nil {
 		cmd = root
 	}
-	m := report.Meta{Binary: "pcb", Command: cmd.CommandPath(), Install: a.installKind(), Version: buildinfo.Version}
-	stopCrash, err := report.StartCrashFile(store.StateDir, m)
-	if err != nil {
-		return stop
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), reportLockWait)
-	_, _ = store.Collect(ctx)
-	cancel()
-	report.Install(&report.Process{Store: store, Meta: m, DSN: a.ReportDSN})
-	return func() {
-		report.Uninstall()
-		stopCrash()
-	}
+	_, stop, _ = daemon.StartReports(daemon.ReportStart{
+		StateDir: store.StateDir, DSN: a.ReportDSN, Env: a.Env, Now: a.Now, Owner: a.stateOwner,
+		Meta: report.Meta{Binary: "pcb", Command: cmd.CommandPath(), Install: a.installKind(), Version: buildinfo.Version},
+	})
+	return stop
 }
 
 // reportNoticeAfter prints, once a day, that crash reports wait for an

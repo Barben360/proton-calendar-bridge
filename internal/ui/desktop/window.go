@@ -109,18 +109,19 @@ type Window struct {
 	mode     paneKind
 	selected string // the account of the account pane
 
-	banner    *widget.Label
-	bannerBox fyne.CanvasObject
-	upd       *updatePanel
-	reports   ReportsModel // nil: no crash reports in this build
-	repPanel  *reportPanel
-	notice    *widget.Label // the one-time no-tray line
-	rows      []row
-	rowBox    *fyne.Container
-	right     *fyne.Container
-	addBtn    *widget.Button // the sidebar's +
-	gear      *widget.Button
-	listen    *textLine // under Settings: where the bridge listens
+	banner     *widget.Label
+	bannerBox  fyne.CanvasObject
+	upd        *updatePanel
+	reports    ReportsModel // nil: no crash reports in this build
+	repPanel   *reportPanel
+	askPending bool          // AskReports waits for the window to be shown
+	notice     *widget.Label // the one-time no-tray line
+	rows       []row
+	rowBox     *fyne.Container
+	right      *fyne.Container
+	addBtn     *widget.Button // the sidebar's +
+	gear       *widget.Button
+	listen     *textLine // under Settings: where the bridge listens
 
 	pane     *accountPane
 	wiz      *wizardPane
@@ -544,7 +545,8 @@ func (w *Window) ShowLogin(username string) {
 	w.reveal()
 }
 
-// reveal shows the window, with the error that came while it was hidden.
+// reveal shows the window, with the error that came while it was hidden
+// and the crash reports waiting to be asked about.
 func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
@@ -552,6 +554,9 @@ func (w *Window) reveal() {
 	if err := w.pendingErr; err != nil {
 		w.pendingErr = nil
 		w.showErr(err)
+	}
+	if w.reports != nil {
+		w.presentReports()
 	}
 }
 

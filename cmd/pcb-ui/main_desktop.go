@@ -34,6 +34,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/logfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui/desktop"
 	"github.com/Barben360/proton-calendar-bridge/internal/update"
@@ -82,7 +83,8 @@ func run(args []string) int {
 	if dirs, err := daemon.ResolveDirs(os.Getenv); err == nil {
 		var stopReports func()
 		reports, stopReports = ui.StartReports(dirs.State, buildinfo.ReportDSN,
-			report.Meta{Binary: "pcb-ui", Command: "pcb-ui", Install: installKind(), Version: buildinfo.Version}, os.Getenv)
+			report.Meta{Binary: "pcb-ui", Command: "pcb-ui", Install: installKind(), Version: buildinfo.Version}, os.Getenv,
+			func() error { return service.CheckStateOwner(dirs.State, os.Geteuid(), nil) })
 		defer stopReports()
 	}
 	a := app.NewWithID(appID)
@@ -178,7 +180,7 @@ func run(args []string) int {
 	go followUpdates(ctx, updates, set.poke, win, trayOrNil(tray), desktopNotifier{}, log)
 
 	if reports != nil {
-		askReports(ctx, reports, win)
+		askReports(ctx, reports, win, !opts.background)
 	}
 
 	a.Run()
@@ -206,12 +208,13 @@ func installKind() string {
 
 // askReports asks in a dialog, once the loop runs, about the reports kept
 // by an earlier run (mode ask only), and shows the panel for each report
-// saved from now on.
-func askReports(ctx context.Context, r *ui.Reports, win *desktop.Window) {
+// saved from now on. A --background start (raise false) shows the dialog
+// only when the window is first shown.
+func askReports(ctx context.Context, r *ui.Reports, win *desktop.Window, raise bool) {
 	if n, _ := r.Pending(); n > 0 && r.Asking() {
-		go fyne.Do(win.AskReports)
+		go fyne.Do(func() { win.AskReports(raise) })
 	}
-	go r.Watch(ctx, func() { fyne.Do(win.ShowReportPanel) })
+	r.Watch(ctx, func() { fyne.Do(win.ShowReportPanel) })
 }
 
 // probe runs the single-instance check: a running pcb-ui is shown (exit 0),

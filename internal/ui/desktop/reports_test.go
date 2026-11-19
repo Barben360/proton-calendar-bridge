@@ -46,7 +46,7 @@ func TestReportDialogTitleAndButtons(t *testing.T) {
 		title   string
 	}{{true, "pcb stopped unexpectedly"}, {false, "pcb ran into an unexpected error"}} {
 		f, _ := reportsFixture(t, tc.crashed)
-		f.w.AskReports()
+		f.w.AskReports(true)
 		f.wait()
 		if !f.has(tc.title) {
 			t.Fatalf("no dialog titled %q: %v", tc.title, f.texts())
@@ -65,7 +65,7 @@ func TestReportDialogTitleAndButtons(t *testing.T) {
 func TestReportDialogAnswers(t *testing.T) {
 	for _, tc := range []struct{ button, call string }{{"Send", "send"}, {"Always send", "always"}, {"Don't send", "dont"}} {
 		f, r := reportsFixture(t, true)
-		f.w.AskReports()
+		f.w.AskReports(true)
 		f.tap(tc.button)
 		if !slices.Equal(r.calls, []string{tc.call}) {
 			t.Errorf("%s: calls %v, want [%s]", tc.button, r.calls, tc.call)
@@ -78,7 +78,7 @@ func TestReportDialogAnswers(t *testing.T) {
 
 func TestReportDialogCloseAnswersNothing(t *testing.T) {
 	f, r := reportsFixture(t, true)
-	f.w.AskReports()
+	f.w.AskReports(true)
 	f.tap("Close")
 	if len(r.calls) != 0 || f.w.win.Canvas().Overlays().Top() != nil {
 		t.Errorf("calls %v, overlay %v", r.calls, f.w.win.Canvas().Overlays().Top())
@@ -88,7 +88,7 @@ func TestReportDialogCloseAnswersNothing(t *testing.T) {
 func TestReportDialogFailureStaysAndSaysWhy(t *testing.T) {
 	f, r := reportsFixture(t, true)
 	r.err = errors.New("the report server is down")
-	f.w.AskReports()
+	f.w.AskReports(true)
 	f.tap("Send")
 	if !f.has("the report server is down") {
 		t.Errorf("the failure is not shown: %v", f.texts())
@@ -97,7 +97,7 @@ func TestReportDialogFailureStaysAndSaysWhy(t *testing.T) {
 
 func TestShowReportIsTheExactTextReadOnly(t *testing.T) {
 	f, r := reportsFixture(t, true)
-	f.w.AskReports()
+	f.w.AskReports(true)
 	f.tap("Show report")
 	if !f.has(r.text) {
 		t.Fatalf("the report text is not shown: %q", f.texts())
@@ -162,5 +162,38 @@ func TestSettingsHideTheSwitchWithoutAReportAddress(t *testing.T) {
 	f.tap("Settings")
 	if f.has("Send crash reports") {
 		t.Errorf("switch shown in a build without an address: %v", f.texts())
+	}
+}
+
+// A --background start never raises the window for a waiting report: the
+// dialog comes the first time the window is shown.
+func TestAskReportsWithoutRaiseWaitsForTheWindow(t *testing.T) {
+	f, r := reportsFixture(t, true)
+	f.w.AskReports(false)
+	f.wait()
+	if f.w.visible || f.w.win.Canvas().Overlays().Top() != nil {
+		t.Fatal("the window or the dialog came up on a background start")
+	}
+	f.w.Show("")
+	if !f.has("pcb stopped unexpectedly") || !f.hasButton("Always send") {
+		t.Fatalf("no dialog when the window is first shown: %v", f.texts())
+	}
+	f.tap("Close")
+	f.w.Show("")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("the dialog came back at the next Show")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("answers %v", r.calls)
+	}
+}
+
+func TestAskReportsSkipsReportsAnsweredMeanwhile(t *testing.T) {
+	f, r := reportsFixture(t, true)
+	f.w.AskReports(false)
+	r.n = 0
+	f.w.Show("")
+	if f.w.win.Canvas().Overlays().Top() != nil {
+		t.Error("a dialog for no report")
 	}
 }

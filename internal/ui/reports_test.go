@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,16 +156,8 @@ func startWatch(t *testing.T, r rig) (shown chan struct{}) {
 	t.Cleanup(report.Uninstall)
 	shown = make(chan struct{}, 10)
 	ctx, cancel := context.WithCancel(rctx)
-	done := make(chan struct{})
-	subscribed := make(chan struct{})
-	go func() {
-		defer close(done)
-		close(subscribed)
-		r.Watch(ctx, func() { shown <- struct{}{} })
-	}()
-	t.Cleanup(func() { cancel(); <-done })
-	<-subscribed
-	time.Sleep(50 * time.Millisecond) // Watch's Subscribe follows the goroutine's start
+	t.Cleanup(cancel)
+	r.Watch(ctx, func() { shown <- struct{}{} })
 	return shown
 }
 
@@ -195,7 +188,7 @@ func TestReportsWatchStaysQuietOutsideAsk(t *testing.T) {
 
 func TestStartReportsWithoutAddressKeepsNothing(t *testing.T) {
 	state := t.TempDir()
-	r, stop := ui.StartReports(state, "", rmeta, func(string) string { return "" })
+	r, stop := ui.StartReports(state, "", rmeta, func(string) string { return "" }, nil)
 	defer stop()
 	if r != nil || report.Current() != nil {
 		t.Errorf("reports %v, recorder %v for a build without an address", r, report.Current())
@@ -203,12 +196,28 @@ func TestStartReportsWithoutAddressKeepsNothing(t *testing.T) {
 }
 
 func TestStartReportsInstallsTheRecorder(t *testing.T) {
-	r, stop := ui.StartReports(t.TempDir(), "http://key@127.0.0.1:1/1", rmeta, func(string) string { return "" })
+	r, stop := ui.StartReports(t.TempDir(), "http://key@127.0.0.1:1/1", rmeta, func(string) string { return "" }, nil)
 	if r == nil || report.Current() == nil {
 		t.Fatalf("reports %v, recorder %v", r, report.Current())
 	}
 	stop()
 	if report.Current() != nil {
 		t.Error("the recorder outlives stop")
+	}
+}
+
+// Root on a user's state directory leaves no file there: a refused owner
+// check keeps no crash file, no reports directory and no recorder.
+func TestStartReportsRefusedOwnerMakesNoReportFiles(t *testing.T) {
+	state := t.TempDir()
+	r, stop := ui.StartReports(state, "http://key@127.0.0.1:1/1", rmeta, func(string) string { return "" },
+		func() error { return errors.New("not the owner") })
+	stop()
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r != nil || report.Current() != nil || len(entries) != 0 {
+		t.Errorf("reports %v, recorder %v, files %v; want none", r, report.Current(), entries)
 	}
 }
