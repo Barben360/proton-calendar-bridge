@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	gpa "github.com/ProtonMail/go-proton-api"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/otp"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
@@ -32,6 +35,8 @@ type pendingLogin struct {
 	relogin    bool        // an unattended relogin, not a person's login
 	totpURI    string      // the otpauth:// URI, when one was given
 	tries      int         // 2FA codes Proton rejected so far
+	twoFA      bool        // the account asked for a 2FA code
+	retries    int         // transient Proton errors after SRP so far (maxRetries)
 	sealed     bool        // its tokens are in secrets.sealed: the session must not be revoked
 	last       store.State // state.json when the login began
 	live       *api.Client // the client of the key calls; its tokens outlive p.Tokens after a refresh
@@ -191,9 +196,6 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 	if err := l.sealerUsable(ctx); err != nil {
 		return LoginResult{}, err
 	}
-	l.dropPending(ctx)
-	l.expired = ""
-
 	accounts, err := l.secrets.Load()
 	if err != nil {
 		return LoginResult{}, storeError(err, l.keyFile())
@@ -208,8 +210,13 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{}, err
 	}
 	defer release()
+	// Only once the guard has passed: a refused retry must not revoke the
+	// login still waiting for its code.
+	l.dropPending(ctx)
+	l.expired = ""
 
 	p, err := l.begin(ctx, req)
+	l.spendCaptcha(ctx, req.CaptchaToken, last)
 	if err != nil {
 		var ce *auth.CaptchaError
 		if errors.As(err, &ce) {
@@ -231,7 +238,10 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		return LoginResult{}, mustAct("another Proton account is already logged in; pcb handles one account", "run pcb logout first, then log in again")
 	}
 	pl := &pendingLogin{p: p, username: req.Username, password: []byte(req.Password), unattended: req.UnattendedRelogin, last: last,
-		expires: l.o.Now().Add(pendingTTL)}
+		expires: l.o.Now().Add(pendingTTL), twoFA: p.NeedsTOTP}
+	if !p.TwoPassword && req.MailboxPassword != "" {
+		l.log().Warn("a mailbox password was given for an account with one password: it is ignored")
+	}
 	if p.TwoPassword && req.MailboxPassword != "" {
 		pl.mailbox = []byte(req.MailboxPassword) // kept across a 2FA hold, zeroed once derived
 	}
@@ -242,7 +252,7 @@ func (l *Local) Login(ctx context.Context, req LoginRequest) (LoginResult, error
 		l.hold(pl, StateNeedsTOTP)
 		return heldResult(pl), nil
 	}
-	return l.finish(ctx, pl, totp, now)
+	return l.finish(ctx, pl, totp, now, true)
 }
 
 // sealerUsable checks, on a state sealed with the desktop keyring, that the
@@ -294,7 +304,7 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 		pl.totpURI = strings.TrimSpace(code)
 	}
 	l.unhold()
-	return l.finish(ctx, pl, totp, l.o.Now())
+	return l.finish(ctx, pl, totp, l.o.Now(), false)
 }
 
 // SubmitMailboxPassword implements API. The password is tried against the
@@ -314,7 +324,7 @@ func (l *Local) SubmitMailboxPassword(ctx context.Context, password string) (Log
 	pl := l.pending
 	pl.mailbox = []byte(password)
 	l.unhold()
-	return l.finish(ctx, pl, nil, l.o.Now())
+	return l.finish(ctx, pl, nil, l.o.Now(), false)
 }
 
 // AbandonLogin drops the login waiting for its 2FA code or its mailbox
@@ -374,16 +384,45 @@ func (l *Local) acquire(ctx context.Context, wait bool, interval time.Duration, 
 	return release, now, nil
 }
 
+// spendCaptcha forgets the CAPTCHA token a login just sent to Proton, whatever
+// the outcome: loginguard.CaptchaRetryInterval is for a token Proton has just
+// issued, not for one it has already seen (a rejected token retried in a loop
+// would reach Proton every 10 s). A new challenge is recorded by the caller
+// after it. It holds mu; last is the state.json the login began with.
+func (l *Local) spendCaptcha(ctx context.Context, token string, last store.State) {
+	if token == "" {
+		return
+	}
+	if l.challenge == token {
+		l.challenge = ""
+	}
+	if last.Captcha == nil || last.Captcha.Token != token {
+		return
+	}
+	err := store.UpdateStateContext(ctx, l.o.Dirs.State, func(cur *store.State) error {
+		if cur.Captcha != nil && cur.Captcha.Token == token {
+			cur.Captcha = nil
+		}
+		return nil
+	})
+	if err != nil {
+		l.log().Warn("cannot forget the CAPTCHA token already sent", "err", err)
+	}
+}
+
 // deferLogin records a login 429's Retry-After in the guard, so no login
 // (a person's, a relogin, a sync pass) reaches Proton before it is over, not
 // only after MinInterval. It holds the guard's lock (the caller has not
 // released it). A failure to record is logged: the 60 s spacing still holds.
-func (l *Local) deferLogin(err error, now time.Time) {
+func (l *Local) deferLogin(err error, now time.Time) { l.deferWait(err, now, loginguard.Defer) }
+
+// deferWait is deferLogin with record, the function that writes the wait.
+func (l *Local) deferWait(err error, now time.Time, record func(string, time.Time, time.Duration) error) {
 	var ae *api.Error
 	if !errors.As(err, &ae) || ae.Status != http.StatusTooManyRequests || ae.RetryAfter <= 0 {
 		return
 	}
-	if derr := loginguard.Defer(l.o.GuardDir, now, ae.RetryAfter); derr != nil {
+	if derr := record(l.o.GuardDir, now, ae.RetryAfter); derr != nil {
 		l.log().Warn("cannot record Proton's login Retry-After", "err", derr)
 	}
 }
@@ -470,8 +509,18 @@ func captchaResult(ce *auth.CaptchaError, username string, attempt time.Time) Lo
 // mailbox password that does not unlock the keys: the login then stays held
 // for up to maxTOTPTries codes and maxMailboxTries passwords in all. A
 // two-password account without its mailbox password is held for it.
-func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time) (LoginResult, error) {
+func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time, guarded bool) (LoginResult, error) {
 	res, err := l.complete(ctx, pl, totp, now)
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Path == "/auth/v4/2fa" {
+		// A 429 on the 2FA submit asks the next login to wait too; the guard's
+		// lock is the caller's when guarded, else taken for the write.
+		if guarded {
+			l.deferLogin(err, now)
+		} else {
+			l.deferWait(err, now, loginguard.DeferLocked)
+		}
+	}
 	if err == nil {
 		pl.p.Close()
 		pl.release()
@@ -504,11 +553,47 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 		return LoginResult{}, mustAct("the mailbox password did not unlock the account keys "+strconv.Itoa(maxMailboxTries)+" times and the login was cancelled",
 			"run pcb login again")
 	}
+	if pl.twoFA && !pl.sealed && transient(ctx, err) && pl.retries < maxRetries-1 {
+		// Proton failed after SRP (the 2FA submit, the salts or the user): the
+		// session is valid and the code may be spent, so the login stays held
+		// at its 2FA step instead of starting over (another SRP, 60 s, a CAPTCHA).
+		pl.retries++
+		l.hold(pl, StateNeedsTOTP)
+		mapped := l.fail(err)
+		var ee *exitcode.Error
+		if errors.As(mapped, &ee) {
+			mapped = &exitcode.Error{Code: ee.Code, Err: ee.Err,
+				Hint: fmt.Sprintf("the login is kept: submit the 2FA code again in a moment (%d tries left)", maxRetries-pl.retries)}
+		}
+		return LoginResult{}, mapped
+	}
 	if !pl.sealed {
 		l.abort(ctx, pl)
 	}
 	pl.release()
 	return LoginResult{}, l.fail(err)
+}
+
+// maxRetries is how many transient Proton errors after SRP a login survives
+// in all, counted apart from its rejected 2FA codes and mailbox passwords.
+const maxRetries = 3
+
+// transient reports whether err is Proton unavailable or rate limiting, or
+// the network failing: what may pass by waiting, with the session still
+// valid. A session Proton ended, a refused code or a cancelled ctx is not.
+func transient(ctx context.Context, err error) bool {
+	var (
+		ae *api.Error
+		ne net.Error
+		ue *url.Error
+	)
+	switch {
+	case errors.Is(err, api.ErrSessionEnded), ctx.Err() != nil:
+		return false
+	case errors.As(err, &ae):
+		return ae.Status >= 500 || ae.Status == http.StatusTooManyRequests
+	}
+	return errors.As(err, &ne) || errors.As(err, &ue) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // maxMailboxTries is how many mailbox passwords a login may try in all,
