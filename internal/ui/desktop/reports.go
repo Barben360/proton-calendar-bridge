@@ -24,7 +24,7 @@ type ReportsModel interface {
 const (
 	reportsCrashed = "pcb stopped unexpectedly"
 	reportsError   = "pcb ran into an unexpected error"
-	reportsAsk     = "A report with no event, name, address, secret or path can help fix it. Nothing is sent until you agree."
+	reportsAsk     = "It holds where pcb's code failed: never calendar content, a name, an address, a secret or a path. Nothing is sent until you agree."
 )
 
 func reportsTitle(crashed bool) string {

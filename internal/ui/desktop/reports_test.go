@@ -51,6 +51,9 @@ func TestReportDialogTitleAndButtons(t *testing.T) {
 		if !f.has(tc.title) {
 			t.Fatalf("no dialog titled %q: %v", tc.title, f.texts())
 		}
+		if body := "It holds where pcb's code failed: never calendar content, a name, an address, a secret or a path. Nothing is sent until you agree."; !slices.Contains(f.texts(), body) {
+			t.Errorf("the dialog does not say %q: %v", body, f.texts())
+		}
 		for _, b := range []string{"Show report", "Send", "Always send", "Don't send", "Close"} {
 			if !f.hasButton(b) {
 				t.Errorf("crashed=%v: no %q button: %v", tc.crashed, b, f.texts())
