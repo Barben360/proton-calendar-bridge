@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -40,8 +41,8 @@ func TestCrashInGoroutineBecomesPending(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("Collect = %d, %v; want 1", n, err)
 	}
-	if left := crashFiles(t, state); len(left) != 0 {
-		t.Errorf("collected file left: %v", left)
+	if left, _ := filepath.Glob(filepath.Join(report.Dir(state), "crash-*")); len(left) != 0 {
+		t.Errorf("collected file or its lock left: %v", left)
 	}
 	pend, err := s.Pending()
 	if err != nil || len(pend) != 1 {
@@ -127,32 +128,66 @@ func TestOwnFileNotCollected(t *testing.T) {
 	}
 }
 
-func TestStaleEmptyFilesRemoved(t *testing.T) {
+// A header-only file nobody holds is a process that died without a crash.
+func TestDeadProcessEmptyFileRemoved(t *testing.T) {
 	state := t.TempDir()
 	dir := report.Dir(state)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	hdr := "# pcb crash file v1 binary=pcb command=x version=1 install=test\n"
-	old := filepath.Join(dir, "crash-pcb-999999-1.txt")
-	fresh := filepath.Join(dir, "crash-pcb-999998-2.txt")
-	for _, p := range []string{old, fresh} {
-		if err := os.WriteFile(p, []byte(hdr), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	past := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(old, past, past); err != nil {
+	path := filepath.Join(dir, "crash-pcb-999999-1.txt")
+	if err := os.WriteFile(path, []byte("# pcb crash file v1 binary=pcb command=x version=1 install=test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := (report.Store{StateDir: state}).Collect(context.Background()); err != nil || n != 0 {
 		t.Fatalf("Collect = %d, %v", n, err)
 	}
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Errorf("25 h old empty file kept: %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("empty file of a dead process kept: %v", err)
 	}
-	if _, err := os.Stat(fresh); err != nil {
-		t.Errorf("young empty file removed: %v", err)
+}
+
+// A long-running pcb (serve, the daemon) keeps its crash file, however old,
+// so that a later crash still lands in it.
+func TestRunningProcessFileNeverCollected(t *testing.T) {
+	state := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), helperEnv+"=crashfile-live", stateEnv+"="+state)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("helper said %q, %v", line, err)
+	}
+	files := crashFiles(t, state)
+	if len(files) != 1 {
+		t.Fatalf("crash files %v", files)
+	}
+	past := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(files[0], past, past); err != nil {
+		t.Fatal(err)
+	}
+	s := report.Store{StateDir: state}
+	if n, err := s.Collect(context.Background()); err != nil || n != 0 {
+		t.Fatalf("Collect = %d, %v", n, err)
+	}
+	if _, err := os.Stat(files[0]); err != nil {
+		t.Fatalf("a running process's crash file was deleted: %v", err)
+	}
+	_ = stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(report.Dir(state), "crash-*")); len(left) != 0 {
+		t.Errorf("clean exit left %v", left)
 	}
 }
 

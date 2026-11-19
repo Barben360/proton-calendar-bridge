@@ -3,6 +3,8 @@ package report_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"testing"
@@ -44,6 +46,12 @@ func runHelper(name string) {
 		helperGoroutinePanic("MARKER-7f3a")
 	case "crashfile-clean":
 		stop, _ := report.StartCrashFile(os.Getenv(stateEnv), crashMeta)
+		stop()
+		os.Exit(0)
+	case "crashfile-live":
+		stop, _ := report.StartCrashFile(os.Getenv(stateEnv), crashMeta)
+		fmt.Println("ready")
+		_, _ = io.Copy(io.Discard, os.Stdin) // lives until its stdin closes
 		stop()
 		os.Exit(0)
 	case "runtime-lookalike":
