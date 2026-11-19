@@ -445,13 +445,33 @@ func (w *Window) waiting() bool {
 	return s == ui.StepTOTP || s == ui.StepMailboxPassword || s == ui.StepCaptcha || w.wiz.inFlight()
 }
 
+// confirmLeaving runs next, after asking when a waiting wizard would be
+// cancelled by it: its login, a solved CAPTCHA and the account a first login
+// created are lost with it.
+func (w *Window) confirmLeaving(next func()) {
+	if !w.waiting() {
+		next()
+		return
+	}
+	w.confirm("Abandon this login?",
+		"The login in progress is cancelled and has to be started again; a verification you solved is lost.",
+		"Abandon", next)
+}
+
 func (w *Window) selectAccount(id string) {
-	av, ok := w.account(id)
-	if !ok {
+	if _, ok := w.account(id); !ok {
 		return
 	}
 	if w.waiting() && id == w.wizard.Account() {
 		return // the add's own row: its wizard is the place for it
+	}
+	w.confirmLeaving(func() { w.showAccount(id) })
+}
+
+func (w *Window) showAccount(id string) {
+	av, ok := w.account(id)
+	if !ok {
+		return
 	}
 	w.leave(paneAccount)
 	w.mode, w.selected = paneAccount, id
@@ -460,7 +480,9 @@ func (w *Window) selectAccount(id string) {
 	w.drawRows()
 }
 
-func (w *Window) openSettings() {
+func (w *Window) openSettings() { w.confirmLeaving(w.showSettings) }
+
+func (w *Window) showSettings() {
 	w.leave(paneSettings)
 	w.mode = paneSettings
 	w.settings.open(w.view.Listener)
@@ -469,6 +491,10 @@ func (w *Window) openSettings() {
 }
 
 func (w *Window) openWizard(address string) {
+	w.confirmLeaving(func() { w.startWizard(address) })
+}
+
+func (w *Window) startWizard(address string) {
 	w.leave(paneWizard)
 	w.closeWizard() // a flow still in progress is cancelled, a shown password hides
 	w.mode = paneWizard
@@ -520,12 +546,14 @@ func (w *Window) onClose() {
 }
 
 // Hide hides the window: a shown password hides and a wizard in progress is
-// cancelled (nothing lingers in a window nobody sees).
+// cancelled (nothing lingers in a window nobody sees), unless it waits for
+// the person (see waiting): that one survives the hide, as it survives Show,
+// so the person comes back to the CAPTCHA they solved.
 func (w *Window) Hide() {
 	w.visible = false
 	w.win.Hide()
 	w.pane.pw.hide()
-	if w.mode == paneWizard {
+	if w.mode == paneWizard && !w.waiting() {
 		w.closeWizard()
 		w.showDefault()
 	}
