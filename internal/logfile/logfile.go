@@ -24,7 +24,7 @@ type File struct {
 	max  int64
 
 	mu   sync.Mutex
-	f    *os.File // nil once closed
+	f    *os.File // nil once closed, or after a failed reopen
 	size int64
 	// holdUntil is the size below which a failed rename is not retried.
 	holdUntil int64
@@ -76,6 +76,12 @@ func (f *File) Write(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
+	if f.f == nil { // the last rotation could not reopen the file
+		if err := f.open(); err != nil {
+			return 0, err
+		}
+		f.holdUntil = 0
+	}
 	if next := f.size + int64(len(p)); f.size > 0 && next > f.max && next > f.holdUntil {
 		if err := f.rotate(); err != nil {
 			return 0, err
@@ -98,7 +104,8 @@ func (f *File) rotate() error {
 	f.f = nil
 	renameErr := os.Rename(f.path, f.path+".1")
 	if err := f.open(); err != nil {
-		f.closed = true
+		// Not latched: the next write opens the file again (only Close
+		// latches), so a transient failure does not silence the log.
 		return err
 	}
 	if renameErr != nil {
