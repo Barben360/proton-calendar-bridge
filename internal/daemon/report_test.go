@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -91,7 +92,8 @@ func TestHandlerPanicAbortsAndRecords(t *testing.T) {
 	id, password := e.login(t)
 	store := reportStore(e)
 	install(t, store, "http://pubkey@127.0.0.1:1/7")
-	r := e.start(t, routePanicHub{e.hub}, nil)
+	var logs syncBuffer
+	r := e.start(t, routePanicHub{e.hub}, func(o *daemon.Options) { o.Logger = slog.New(slog.NewJSONHandler(&logs, nil)) })
 
 	resp, err := r.propfind(t.Context(), davURL(r, id), password)
 	if err == nil {
@@ -136,19 +138,67 @@ func TestHandlerPanicAbortsAndRecords(t *testing.T) {
 	if len(frames) < 2 || !strings.Contains(frames[0].Function, "net/http") {
 		t.Errorf("frames do not start at the outermost call: %v", frames)
 	}
+	checkPanicLogged(t, logs.String(), "routePanicHub.Route")
+}
+
+// checkPanicLogged checks that log holds one Error line for a handler
+// panic of type string whose frame names site, and never the panic's text.
+func checkPanicLogged(t *testing.T, log, site string) {
+	t.Helper()
+	if strings.Contains(log, marker) {
+		t.Errorf("the log holds the panic's text:\n%s", log)
+	}
+	var found []map[string]any
+	for line := range strings.Lines(log) {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "request handler panicked" {
+			found = append(found, rec)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d \"request handler panicked\" lines, want 1:\n%s", len(found), log)
+	}
+	rec := found[0]
+	if frame, _ := rec["frame"].(string); rec["level"] != "ERROR" || rec["type"] != "string" || !strings.HasSuffix(frame, site) {
+		t.Errorf("log line %v: want level ERROR, type string, frame …%s", rec, site)
+	}
+}
+
+//go:noinline
+func panickingHandler(http.ResponseWriter, *http.Request) { panic(marker) }
+
+// With no recorder installed (a build without an address, the mode
+// never), a handler panic still leaves its line in pcb's log.
+func TestHandlerPanicLoggedWithoutARecorder(t *testing.T) {
+	report.Uninstall()
+	var logs syncBuffer
+	h := daemon.RecordPanics(http.HandlerFunc(panickingHandler), slog.New(slog.NewJSONHandler(&logs, nil)))
+	func() {
+		defer func() {
+			if v := recover(); !errors.Is(asError(v), http.ErrAbortHandler) {
+				t.Errorf("recovered %v, want http.ErrAbortHandler", v)
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	}()
+	checkPanicLogged(t, logs.String(), "daemon_test.panickingHandler")
 }
 
 func TestHandlerAbortIsNotRecorded(t *testing.T) {
 	e := newEnv(t)
 	store := reportStore(e)
 	install(t, store, "http://pubkey@127.0.0.1:1/7")
-	h := daemon.RecordPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) }))
+	var logs syncBuffer
+	h := daemon.RecordPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) }), slog.New(slog.NewJSONHandler(&logs, nil)))
 	defer func() {
 		if v := recover(); !errors.Is(asError(v), http.ErrAbortHandler) {
 			t.Errorf("recovered %v, want http.ErrAbortHandler", v)
 		}
 		if pend, _ := store.Pending(); len(pend) != 0 {
 			t.Errorf("%d reports for an abort", len(pend))
+		}
+		if strings.Contains(logs.String(), "panicked") {
+			t.Errorf("an abort was logged as a panic:\n%s", logs.String())
 		}
 	}()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))

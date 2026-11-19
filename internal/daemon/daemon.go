@@ -350,7 +350,7 @@ func Run(ctx context.Context, o Options) error {
 		handler = withMCP(handler, o.MCP.HTTPHandler(auth))
 	}
 	srv := &http.Server{
-		Handler:           recordPanics(handler),
+		Handler:           recordPanics(handler, log),
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -508,16 +508,21 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	}, nil
 }
 
-// recordPanics keeps a crash report of a panic in h (CalDAV or remote MCP)
-// and then aborts the request as net/http does for any handler panic: the
-// connection is cut, nothing is logged. http.ErrAbortHandler is the
-// handler's own way of aborting and is not recorded.
-func recordPanics(h http.Handler) http.Handler {
+// recordPanics logs a panic in h (CalDAV or remote MCP) at Error, keeps a
+// crash report of it, then aborts the request as net/http does for any
+// handler panic: the connection is cut. The log line names the panic's Go
+// type and the last frame of pcb's code, never the panic's text or values
+// (logs carry IDs only); re-panicking http.ErrAbortHandler keeps net/http
+// from logging the text. http.ErrAbortHandler is the handler's own way of
+// aborting and is neither logged nor recorded.
+func recordPanics(h http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
 				if err, ok := v.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
-					report.RecordPanic(v, debug.Stack())
+					stack := debug.Stack()
+					log.Error("request handler panicked", "type", fmt.Sprintf("%T", v), "frame", report.PanicSite(stack))
+					report.RecordPanic(v, stack)
 				}
 				panic(http.ErrAbortHandler)
 			}
