@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/install"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
@@ -108,5 +111,47 @@ func TestStartReportsWithoutAddressDoesNothing(t *testing.T) {
 	stop()
 	if len(got) != 0 || installed {
 		t.Errorf("no address: files %v, recorder installed %v; want none", got, installed)
+	}
+}
+
+func TestServeReportsLogsWaitingReportsInAskMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    report.Mode
+		pending bool
+		dsn     string
+		want    bool
+	}{
+		{"ask with a report", report.Ask, true, "http://k@127.0.0.1:1/1", true},
+		{"ask with none", report.Ask, false, "http://k@127.0.0.1:1/1", false},
+		{"always", report.Always, true, "http://k@127.0.0.1:1/1", false},
+		{"never", report.Never, true, "http://k@127.0.0.1:1/1", false},
+		{"no address", report.Ask, true, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := report.Store{StateDir: t.TempDir(), Env: func(string) string { return "" }}
+			if err := store.SetMode(t.Context(), c.mode); err != nil {
+				t.Fatal(err)
+			}
+			if c.pending {
+				ev := report.PanicEvent("x", []report.Frame{{Function: "github.com/Barben360/proton-calendar-bridge/internal/daemon.f", InApp: true}}, report.Meta{}, time.Now())
+				if err := store.Save(t.Context(), ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report.Install(&report.Process{Store: store, DSN: c.dsn})
+			defer report.Uninstall()
+			var logs bytes.Buffer
+			sender, poke, unsubscribe := serveReports(slog.New(slog.NewTextHandler(&logs, nil)))
+			unsubscribe()
+			got := strings.Contains(logs.String(), "crash reports waiting: pcb crash-reports show")
+			if got != c.want {
+				t.Errorf("logged %v, want %v: %q", got, c.want, logs.String())
+			}
+			if (sender != nil) != (c.dsn != "") || (poke != nil) != (c.dsn != "") {
+				t.Errorf("sender %v, poke %v with dsn %q", sender, poke, c.dsn)
+			}
+		})
 	}
 }
