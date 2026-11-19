@@ -1,0 +1,218 @@
+package report_test
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
+)
+
+func crashFiles(t *testing.T, state string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(report.Dir(state), "crash-*.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// crashInHelper runs the goroutine-panic helper with a crash file in state.
+func crashInHelper(t *testing.T, state string) {
+	t.Helper()
+	crashOutput(t, "crashfile-goroutine", stateEnv+"="+state)
+}
+
+func TestCrashInGoroutineBecomesPending(t *testing.T) {
+	state := t.TempDir()
+	crashInHelper(t, state)
+	if len(crashFiles(t, state)) != 1 {
+		t.Fatalf("crash files %v, want one", crashFiles(t, state))
+	}
+	s := report.Store{StateDir: state}
+	n, err := s.Collect(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("Collect = %d, %v; want 1", n, err)
+	}
+	if left := crashFiles(t, state); len(left) != 0 {
+		t.Errorf("collected file left: %v", left)
+	}
+	pend, err := s.Pending()
+	if err != nil || len(pend) != 1 {
+		t.Fatalf("pending %v, %v", pend, err)
+	}
+	p := pend[0]
+	if p.Level != "fatal" || p.Source != "crash" {
+		t.Errorf("level %q source %q", p.Level, p.Source)
+	}
+	if strings.Contains(string(p.JSON), "MARKER-7f3a") {
+		t.Errorf("marker leaked: %s", p.JSON)
+	}
+	var ev struct {
+		Release string
+		Tags    struct{ Binary, Command, Install string }
+		Exc     struct {
+			Values []struct {
+				Stacktrace struct {
+					Frames []struct {
+						Function string
+						InApp    bool `json:"in_app"`
+					}
+				}
+			}
+		} `json:"exception"`
+	}
+	if err := json.Unmarshal(p.JSON, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Release != "pcb@1.2.3" || ev.Tags.Binary != "pcb" || ev.Tags.Command != "calendar a=b" || ev.Tags.Install != "test" {
+		t.Errorf("meta lost: %+v", ev)
+	}
+	found := false
+	for _, f := range ev.Exc.Values[0].Stacktrace.Frames {
+		if strings.HasSuffix(f.Function, ".helperPanicky") && f.InApp {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no in-app helperPanicky frame in %s", p.JSON)
+	}
+}
+
+func TestCleanExitLeavesNothing(t *testing.T) {
+	state := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), helperEnv+"=crashfile-clean", stateEnv+"="+state)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper: %v %s", err, out)
+	}
+	if files := crashFiles(t, state); len(files) != 0 {
+		t.Errorf("clean exit left %v", files)
+	}
+	if n, err := (report.Store{StateDir: state}).Collect(context.Background()); err != nil || n != 0 {
+		t.Errorf("Collect = %d, %v", n, err)
+	}
+}
+
+func TestOwnFileNotCollected(t *testing.T) {
+	state := t.TempDir()
+	stop, err := report.StartCrashFile(state, crashMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	own := crashFiles(t, state)
+	if len(own) != 1 {
+		t.Fatalf("crash files %v", own)
+	}
+	// Even with something in it, a running process's own file is its own.
+	if err := os.WriteFile(own[0], []byte("panic: x\n\ngoroutine 1 [running]:\nmain.main()\n\tmain.go:1 +0x1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := (report.Store{StateDir: state}).Collect(context.Background()); err != nil || n != 0 {
+		t.Fatalf("Collect = %d, %v", n, err)
+	}
+	if _, err := os.Stat(own[0]); err != nil {
+		t.Errorf("own file gone: %v", err)
+	}
+	stop()
+	if files := crashFiles(t, state); len(files) != 0 {
+		t.Errorf("stop left %v", files)
+	}
+}
+
+func TestStaleEmptyFilesRemoved(t *testing.T) {
+	state := t.TempDir()
+	dir := report.Dir(state)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hdr := "# pcb crash file v1 binary=pcb command=x version=1 install=test\n"
+	old := filepath.Join(dir, "crash-pcb-999999-1.txt")
+	fresh := filepath.Join(dir, "crash-pcb-999998-2.txt")
+	for _, p := range []string{old, fresh} {
+		if err := os.WriteFile(p, []byte(hdr), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := (report.Store{StateDir: state}).Collect(context.Background()); err != nil || n != 0 {
+		t.Fatalf("Collect = %d, %v", n, err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("25 h old empty file kept: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("young empty file removed: %v", err)
+	}
+}
+
+func TestCollectConcurrentMakesOnePending(t *testing.T) {
+	state := t.TempDir()
+	crashInHelper(t, state)
+	s := report.Store{StateDir: state}
+	var wg sync.WaitGroup
+	counts := make([]int, 2)
+	for i := range counts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, err := s.Collect(context.Background())
+			if err != nil {
+				t.Error(err)
+			}
+			counts[i] = n
+		}()
+	}
+	wg.Wait()
+	if counts[0]+counts[1] != 1 {
+		t.Errorf("saved %v, want 1 in all", counts)
+	}
+	if pend, _ := s.Pending(); len(pend) != 1 {
+		t.Errorf("%d pending, want 1", len(pend))
+	}
+}
+
+func TestUnparsableFileStillReported(t *testing.T) {
+	state := t.TempDir()
+	dir := report.Dir(state)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "# pcb crash file v1 binary=pcb command=x version=1 install=test\nsomething MARKER-7f3a\n"
+	if err := os.WriteFile(filepath.Join(dir, "crash-pcb-999999-1.txt"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := report.Store{StateDir: state}
+	if n, err := s.Collect(context.Background()); err != nil || n != 1 {
+		t.Fatalf("Collect = %d, %v", n, err)
+	}
+	pend, _ := s.Pending()
+	if len(pend) != 1 || strings.Contains(string(pend[0].JSON), "MARKER-7f3a") || !strings.Contains(string(pend[0].JSON), `"type":"panic"`) {
+		t.Errorf("pending %v", pend)
+	}
+}
+
+func TestNoStateDirNoCrashFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	stop, err := report.StartCrashFile(missing, crashMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("state directory created: %v", err)
+	}
+	if n, err := (report.Store{StateDir: missing}).Collect(context.Background()); err != nil || n != 0 {
+		t.Errorf("Collect = %d, %v", n, err)
+	}
+}
