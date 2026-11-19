@@ -142,12 +142,13 @@ var (
 	// typedErrors name the type at fault: the type is cut.
 	typedErrors = regexp.MustCompile(`^(runtime error: (hash of unhashable type|comparing uncomparable type))( .*)?$`)
 	// plainErrors are runtime errors printed without "runtime error: ".
-	plainErrors = wholeLine(`send on closed channel|close of nil channel|close of closed channel|assignment to entry in nil map|makechan: size out of range`)
+	plainErrors = wholeLine(`send on closed channel|close of nil channel|close of closed channel|assignment to entry in nil map|makechan: size out of range|runtime: allocation size out of range`)
 	fatalErrors = wholeLine(`fatal error: (` + strings.Join([]string{
 		`all goroutines are asleep - deadlock!`,
 		`no goroutines \(main called runtime\.Goexit\) - deadlock!`,
 		`concurrent map (writes|read and map write|iteration and map write|clone and map write)`,
-		`out of memory( \(stackalloc\)| allocating [a-z ]+)?`,
+		`(runtime: )?out of memory( \(stackalloc\)| allocating [a-z ]+)?`,
+		`runtime: cannot allocate memory`,
 		`stack overflow`,
 		`unexpected signal during runtime execution`,
 		`fault`,
@@ -218,10 +219,11 @@ func functionName(l string) string {
 		}
 		return rest
 	}
-	if strings.HasSuffix(l, ")") {
-		if i := strings.LastIndex(l, "("); i > 0 {
-			return l[:i]
-		}
+	// The arguments start at the last "(" unless it is a receiver's
+	// "pkg.(*T)"; a line cut short has no ")", and its argument words
+	// still go.
+	if i := strings.LastIndex(l, "("); i > 0 && l[i-1] != '.' {
+		return l[:i]
 	}
 	return l
 }

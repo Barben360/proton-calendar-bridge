@@ -225,6 +225,7 @@ func TestNoMarkerLeaks(t *testing.T) {
 		"crash by hand":     {report.CrashEvent(report.Crash{Kind: "panic", Message: marker}, meta, t0), `"value":"(text removed)"`},
 		"crash lookalike":   {report.CrashEvent(report.Crash{Kind: "runtime error", Message: "runtime error: " + marker}, meta, t0), `"value":"(text removed)"`},
 		"own runtime.Error": {report.PanicEvent(fakeRuntimeError{}, nil, meta, t0), `"value":"(text removed)"`},
+		"crash Kind marker": {report.CrashEvent(report.Crash{Kind: "panic " + marker, Message: "(text removed)"}, meta, t0), `"type":"panic"`},
 		"fatal in a panic":  {report.PanicEvent(fakeFatal{}, nil, meta, t0), `"value":"(text removed)"`},
 	}
 	for name, tc := range events {
