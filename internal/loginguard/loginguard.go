@@ -107,6 +107,27 @@ func Defer(dir string, now time.Time, wait time.Duration) error {
 	return nil
 }
 
+// DeferLocked is Defer for a caller that does not hold the lock: it takes it
+// for the write, and records nothing (an error) when another login holds it.
+func DeferLocked(dir string, now time.Time, wait time.Duration) error {
+	unlock, ok, err := filelock.TryLock(filepath.Join(dir, lockFile))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("another login is running")
+	}
+	defer unlock()
+	return Defer(dir, now, wait)
+}
+
+// Remaining is how long Proton's last recorded Retry-After (Defer) still asks
+// to wait at now, 0 if none: for a call that is not a login attempt (it
+// stamps nothing) but must not reach Proton before it is over.
+func Remaining(dir string, now time.Time, log *slog.Logger) (time.Duration, error) {
+	return notBefore(dir, now, log)
+}
+
 // notBefore is how long Proton's last Retry-After still asks to wait at
 // now. A recorded time more than MaxDefer plus maxSkew ahead is from a
 // clock that was stepped back: ignored and logged.

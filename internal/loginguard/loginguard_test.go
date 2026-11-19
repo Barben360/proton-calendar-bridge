@@ -311,3 +311,30 @@ func TestMalformedNotBeforeFailsClosed(t *testing.T) {
 		t.Fatalf("err = %v, want Blocked", err)
 	}
 }
+
+func TestDeferLockedRecordsTheWaitAndRefusesWhileAnotherLoginRuns(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	if err := loginguard.DeferLocked(dir, now, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loginguard.Acquire(dir, loginguard.MinInterval, now.Add(61*time.Second), nil)
+	if d, ok := loginguard.WaitFor(err); !ok || d != 239*time.Second {
+		t.Fatalf("Acquire after the deferred wait = %v, want a 239s wait", err)
+	}
+	release, err := loginguard.Acquire(t.TempDir(), loginguard.MinInterval, now, nil) // control: a free dir acquires
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	busy := t.TempDir()
+	hold, err := loginguard.Acquire(busy, loginguard.MinInterval, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold()
+	if err := loginguard.DeferLocked(busy, now, 5*time.Minute); err == nil {
+		t.Fatal("DeferLocked wrote while another login held the lock")
+	}
+}

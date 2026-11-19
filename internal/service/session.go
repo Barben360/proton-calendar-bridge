@@ -277,6 +277,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 		_, err = l.complete(ctx, pl, totp, now)
 	}
 	if err != nil {
+		l.deferTOTP(err, now, loginguard.Defer) // the guard's lock is held
 		if !pl.sealed {
 			l.abort(ctx, pl)
 		}

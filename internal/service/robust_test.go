@@ -175,7 +175,11 @@ func TestReloginRateLimitExtendsTheGuard(t *testing.T) {
 		t.Fatalf("%d login(s) reached Proton inside the Retry-After", n)
 	}
 	e.clk.advance(240 * time.Second)
-	if got := e.calendars(t); got == nil && e.phase(t) != "ready" {
-		t.Fatalf("after the Retry-After the relogin did not repair the session (phase %q)", e.phase(t))
+	e.calendars(t) // fails the test if the relogin did not repair the session
+	if p := e.phase(t); p != "ready" {
+		t.Fatalf("after the Retry-After the phase is %q, want ready", p)
+	}
+	if n := e.logins() - srp; n == 0 {
+		t.Fatal("the session was served without the relogin reaching Proton")
 	}
 }
