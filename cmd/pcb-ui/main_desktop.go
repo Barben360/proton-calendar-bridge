@@ -78,15 +78,36 @@ func run(args []string) int {
 	}
 	// The crash file comes first, before any other goroutine: a crash from
 	// here on is offered at the next start. Directories that do not resolve
-	// are reported below, by LoadConfig.
-	var reports *ui.Reports
-	if dirs, err := daemon.ResolveDirs(os.Getenv); err == nil {
-		var stopReports func()
-		reports, stopReports = ui.StartReports(dirs.State, buildinfo.ReportDSN,
-			report.Meta{Binary: "pcb-ui", Command: "pcb-ui", Install: installKind(), Version: buildinfo.Version}, os.Getenv,
-			func() error { return service.CheckStateOwner(dirs.State, os.Geteuid(), nil) })
-		defer stopReports()
+	// are reported by LoadConfig, in runApp.
+	return withReports(startReports, func(reports *ui.Reports) int { return runApp(opts, reports) })
+}
+
+// startReports keeps this pcb-ui's crash reports (ui.StartReports): nil
+// reports when they are off or the directories do not resolve.
+func startReports() (*ui.Reports, func()) {
+	dirs, err := daemon.ResolveDirs(os.Getenv)
+	if err != nil {
+		return nil, func() {}
 	}
+	return ui.StartReports(dirs.State, buildinfo.ReportDSN,
+		report.Meta{Binary: "pcb-ui", Command: "pcb-ui", Install: installKind(), Version: buildinfo.Version}, os.Getenv,
+		func() error { return service.CheckStateOwner(dirs.State, os.Geteuid(), nil) })
+}
+
+// withReports starts the crash reports, runs body with them and stops
+// them once body returns. Not deferred: a deferred stop would run while a
+// panic unwinds (every Fyne callback runs on this goroutine) and delete
+// the crash file before the runtime writes the traceback to it.
+func withReports(start func() (*ui.Reports, func()), body func(*ui.Reports) int) int {
+	reports, stop := start()
+	code := body(reports)
+	stop()
+	return code
+}
+
+// runApp is pcb-ui once its arguments are read and its crash reports
+// started (reports nil: off).
+func runApp(opts options, reports *ui.Reports) int {
 	a := app.NewWithID(appID)
 	a.SetIcon(desktop.AppIcon())
 	if code, failed := probe(a); failed {

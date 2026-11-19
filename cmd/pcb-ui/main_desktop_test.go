@@ -68,6 +68,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PCB_UI_TEST_RUN") == "1" {
 		os.Exit(run(strings.Fields(os.Getenv("PCB_UI_TEST_ARGS"))))
 	}
+	if how := os.Getenv(reportsChildEnv); how != "" {
+		os.Exit(reportsChild(how))
+	}
 	if childHook != nil && os.Getenv("PCB_UI_TEST_CLASS") == "1" {
 		os.Exit(childHook())
 	}
