@@ -229,17 +229,16 @@ func (s *alertSender) sendAll(n *ui.Notifier, notes []ui.Notification) {
 	for _, note := range notes {
 		key := note.Account + "\x00" + note.Code
 		err := s.send(note)
-		switch {
-		case err == nil:
+		if err == nil {
 			s.log.Info("notification sent", "alert", note.Code, "account", note.Account)
 			delete(s.failed, key)
-		default:
-			if !s.failed[key] {
-				s.log.Warn("notification failed", "alert", note.Code, "account", note.Account, "err", err)
-			}
-			s.failed[key] = true
-			unsent = append(unsent, note)
+			continue
 		}
+		if !s.failed[key] {
+			s.log.Warn("notification failed", "alert", note.Code, "account", note.Account, "err", err)
+		}
+		s.failed[key] = true
+		unsent = append(unsent, note)
 	}
 	n.Unsent(unsent)
 }
