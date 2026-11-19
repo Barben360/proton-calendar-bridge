@@ -6,4 +6,7 @@ var (
 	Version = "dev"
 	Commit  = "dev"
 	Date    = "dev"
+	// ReportDSN is where approved crash reports go (a Sentry DSN); empty
+	// (dev and source builds): no report is ever collected, saved or sent.
+	ReportDSN = ""
 )

@@ -1,0 +1,9 @@
+panic: runtime error: index out of range [3] with length 0
+
+goroutine 1 [running]:
+github.com/Barben360/proton-calendar-bridge/internal/daemon.first[...](...)
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:22
+github.com/Barben360/proton-calendar-bridge/internal/daemon.(*Server).Index(...)
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:24
+main.main()
+	github.com/Barben360/proton-calendar-bridge/cmd/pcb/main.go:14 +0x126

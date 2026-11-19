@@ -1,0 +1,7 @@
+panic: MARKER-7f3a MARKER-7f3a-arg
+
+goroutine 7 [running]:
+github.com/Barben360/proton-calendar-bridge/internal/daemon.(*Server).handle(0x0?, {0x48581f?, 0x0?}, 0x0?)
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:19 +0x6c
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.(*Server).Serve in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:13 +0xbb
