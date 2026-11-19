@@ -360,3 +360,30 @@ func TestRunSendsOnPoke(t *testing.T) {
 		t.Errorf("%v still waits after the send", ids)
 	}
 }
+
+// A report another process saves (no poke here) goes out at Run's next
+// periodic wake.
+func TestRunWakesPeriodically(t *testing.T) {
+	k := newSink(t, nil)
+	s := newStore(t)
+	if err := s.SetMode(ctx, report.Always); err != nil {
+		t.Fatal(err)
+	}
+	c, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		report.Sender{DSN: k.dsn(), Store: s, Every: 20 * time.Millisecond}.Run(c, make(chan struct{}))
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	time.Sleep(50 * time.Millisecond) // Run's start found nothing to send
+	saveN(t, s, 1)
+	deadline := time.Now().Add(5 * time.Second)
+	for k.count() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if k.count() != 1 {
+		t.Errorf("sent %d requests without a poke, want 1 at a periodic wake", k.count())
+	}
+}
