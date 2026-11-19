@@ -27,7 +27,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint pcb-fake rehearse screenshots
+.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck bugsink-check actionlint pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -142,6 +142,11 @@ live-preflight-test:
 vmtest-test:
 	bash scripts/win/vmtest_test.sh
 
+# Does Bugsink accept, group and keep the crash report shape (not in the gate;
+# needs docker): scripts/bugsink-check.sh.
+bugsink-check:
+	scripts/bugsink-check.sh
+
 # shellcheck of the live-session scripts, pinned by digest so CI and a
 # workstation run the same one (the runner's own v0.11.0 crashes on
 # preflight.sh: "Non-exhaustive patterns in function checkCmd").
@@ -153,7 +158,7 @@ shellcheck:
 		scripts/install.sh scripts/install_test.sh \
 		scripts/release/check.sh scripts/release/check_test.sh scripts/release/macos-smoke.sh \
 		scripts/release/package.sh scripts/release/package_test.sh scripts/release/licensertf_test.sh \
-		scripts/win/vmtest.sh scripts/win/vmtest_test.sh
+		scripts/win/vmtest.sh scripts/win/vmtest_test.sh scripts/bugsink-check.sh
 
 # The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
 ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
