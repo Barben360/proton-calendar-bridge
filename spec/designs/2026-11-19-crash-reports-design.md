@@ -92,6 +92,8 @@ A pending report is the exact JSON event that will be sent, `<state>/reports/pen
 | `exception.values[0].mechanism` | `{type: "go.crash" / "go.error" / "go.http", handled: false/true}` |
 | `extra.count` | repeats folded into this report (§5.3) |
 
+Built: Bugsink 2.6.3 accepts this shape through `/api/<project>/envelope/` and keeps every field above (release, tags, fingerprint, contexts, `in_app`, `mechanism.handled: false`, `extra.count`); it honours `fingerprint` (same stack, other fingerprint = another issue; same fingerprint = one issue with two events). `make bugsink-check` re-runs the check.
+
 Never set: `server_name`, `user`, `request`, `breadcrumbs`, `modules`, `contexts.os.version`, any environment variable. A test builds a report from a panic whose text, arguments and wrapped errors carry marker strings, and asserts none appear in the JSON.
 
 ### 5.5 Consent [author: ask after a crash; details call]
