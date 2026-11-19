@@ -11,7 +11,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  # The Dockerfile's golang and distroless digests.
+  # The Dockerfile's golang and distroless digests only; the Makefile's and
+  # image-build.yml's pinned digests are bumped by hand (docs/development.md).
   - package-ecosystem: docker
     directory: /
     schedule:
