@@ -109,15 +109,14 @@ const (
 )
 
 // CrashEvent is the report of a fatal crash, read by ParseCrash. Its
-// message is kept only when it is a runtime line, whoever built c.
+// message is kept only when it is one of the runtime's own, whoever built
+// c.
 func CrashEvent(c Crash, m Meta, now time.Time) Event {
-	kind, msg := c.Kind, c.Message
+	kind := c.Kind
 	if kind == "" {
 		kind = "panic"
 	}
-	if !runtimeLine(msg) {
-		msg = removed
-	}
+	msg := keptOrRemoved(c.Message)
 	return newEvent("fatal", "crash", exceptionValue{Type: kind, Value: msg, Mechanism: mechanism{Type: mechCrash}}, c.Frames, m, now)
 }
 
@@ -134,13 +133,14 @@ func ErrorEvent(err error, frames []Frame, m Meta, now time.Time) Event {
 }
 
 // PanicEvent is the report of a panic an HTTP handler raised: its type is
-// the panic value's Go type, or "runtime error" for the runtime's own,
-// whose message alone is kept; frames is the panicking goroutine's stack.
+// the panic value's Go type, or "runtime error" for a runtime.Error, whose
+// message is kept only when it is one of the runtime's own; frames is the
+// panicking goroutine's stack.
 func PanicEvent(v any, frames []Frame, m Meta, now time.Time) Event {
 	ex := exceptionValue{Type: fmt.Sprintf("%T", v), Value: removed, Mechanism: mechanism{Type: mechHTTP}}
 	if re, ok := v.(runtime.Error); ok {
 		ex.Type = "runtime error"
-		if msg := re.Error(); strings.HasPrefix(msg, "runtime error: ") {
+		if msg, ok := panicMessage(re.Error()); ok {
 			ex.Value = msg
 		}
 	}

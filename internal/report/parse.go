@@ -89,20 +89,21 @@ func splitLines(b []byte) []string {
 	return lines
 }
 
-// kindOf reads one line before the goroutines. Only the runtime's own lines
-// keep their text; a panic's text, which may span lines (Go indents the
-// next ones), never does.
+// kindOf reads one line before the goroutines. A message is kept only when
+// it is one of the runtime's own (runtimeMessage); a panic's text, which
+// may span lines (Go indents the next ones), never is.
 func kindOf(line string) (kind, message string, ok bool) {
 	switch {
-	case strings.HasPrefix(line, "panic: runtime error: "):
-		return "runtime error", strings.TrimPrefix(line, "panic: "), true
 	case strings.HasPrefix(line, "panic: "):
+		if msg, ok := panicMessage(strings.TrimPrefix(line, "panic: ")); ok {
+			return "runtime error", msg, true
+		}
 		return "panic", removed, true
 	case strings.HasPrefix(line, "fatal error: "):
-		return "fatal error", line, true
+		return "fatal error", keptOrRemoved(line), true
 	}
 	if m := signalName.FindStringSubmatch(line); m != nil {
-		return "signal " + m[1], line, true
+		return "signal " + m[1], keptOrRemoved(line), true
 	}
 	if m := signalLine.FindStringSubmatch(line); m != nil {
 		return "signal " + m[1], removed, true
@@ -110,15 +111,76 @@ func kindOf(line string) (kind, message string, ok bool) {
 	return "", "", false
 }
 
-// runtimeLine reports whether msg is a line of the runtime's own, as
-// kindOf keeps them.
-func runtimeLine(msg string) bool {
-	for _, p := range []string{"runtime error: ", "fatal error: ", "[signal "} {
-		if strings.HasPrefix(msg, p) {
-			return true
-		}
+func keptOrRemoved(msg string) string {
+	if kept, ok := runtimeMessage(msg); ok {
+		return kept
 	}
-	return false
+	return removed
+}
+
+// The Go runtime's own messages (GOROOT/src/runtime: error.go, panic.go,
+// chan.go, alg.go, slice.go, the fatal and throw calls): the only text a
+// report keeps. Each is matched whole, so a panic of pcb's own whose text
+// merely starts like one ("runtime error: …") is removed. Numbers are the
+// only variable part kept; a type name is cut.
+var (
+	runtimeErrors = wholeLine(`runtime error: (` + strings.Join([]string{
+		`index out of range \[-?\d+\]( with length \d+)?`,
+		`slice bounds out of range \[[-\d:]+\]( with (length|capacity) \d+)?`,
+		`cannot convert slice with length -?\d+ to array or pointer to array with length \d+`,
+		`invalid memory address or nil pointer dereference`,
+		`integer divide by zero`,
+		`integer overflow`,
+		`floating point error`,
+		`negative shift amount`,
+		`makeslice: (len|cap) out of range`,
+		`growslice: len out of range`,
+		`out-of-range immediate for simd intrinsic`,
+		`range function continued iteration after (function for loop body returned false|loop body panic|whole loop exit)`,
+		`range function recovered a loop body panic and did not resume panicking`,
+	}, "|") + `)`)
+	// typedErrors name the type at fault: the type is cut.
+	typedErrors = regexp.MustCompile(`^(runtime error: (hash of unhashable type|comparing uncomparable type))( .*)?$`)
+	// plainErrors are runtime errors printed without "runtime error: ".
+	plainErrors = wholeLine(`send on closed channel|close of nil channel|close of closed channel|assignment to entry in nil map|makechan: size out of range`)
+	fatalErrors = wholeLine(`fatal error: (` + strings.Join([]string{
+		`all goroutines are asleep - deadlock!`,
+		`no goroutines \(main called runtime\.Goexit\) - deadlock!`,
+		`concurrent map (writes|read and map write|iteration and map write|clone and map write)`,
+		`out of memory( \(stackalloc\)| allocating [a-z ]+)?`,
+		`stack overflow`,
+		`unexpected signal during runtime execution`,
+		`fault`,
+		`go of nil func value`,
+		`sync: (unlock of unlocked mutex|Unlock of unlocked RWMutex|RUnlock of unlocked RWMutex|inconsistent mutex state)`,
+	}, "|") + `)`)
+	signalMessage = wholeLine(`\[signal (SIG[A-Z0-9]+: [a-z ,/-]+|0x[0-9a-f]+)( code=0x[0-9a-f]+)?( addr=0x[0-9a-f]+)?( pc=0x[0-9a-f]+)?\]`)
+	// recovered is what Go adds to a panic recovered then raised again.
+	recovered = regexp.MustCompile(` \[recovered(, repanicked)?\]$`)
+)
+
+func wholeLine(re string) *regexp.Regexp { return regexp.MustCompile(`^(` + re + `)$`) }
+
+// panicMessage returns msg when it is one of the runtime's own panic
+// messages (a runtime.Error's text, with a type name cut and a
+// " [recovered]" dropped); ok is false otherwise.
+func panicMessage(msg string) (string, bool) {
+	msg = recovered.ReplaceAllString(msg, "")
+	if m := typedErrors.FindStringSubmatch(msg); m != nil {
+		return m[1], true
+	}
+	if runtimeErrors.MatchString(msg) || plainErrors.MatchString(msg) {
+		return msg, true
+	}
+	return "", false
+}
+
+// runtimeMessage is panicMessage, or a fatal error's or a signal's line.
+func runtimeMessage(msg string) (string, bool) {
+	if fatalErrors.MatchString(msg) || signalMessage.MatchString(msg) {
+		return msg, true
+	}
+	return panicMessage(msg)
 }
 
 // parseFrames reads one goroutine block, up to its blank line: a function

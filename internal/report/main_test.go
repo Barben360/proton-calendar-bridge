@@ -30,6 +30,8 @@ func runHelper(name string) {
 		helperRuntimeError(5)
 	case "map-fatal":
 		helperMapFatal()
+	case "runtime-lookalike":
+		helperLookalike("MARKER-7f3a")
 	}
 }
 
@@ -50,6 +52,12 @@ func helperRuntimeError(i int) int {
 	a := []int{1, 2, 3}
 	return a[i]
 }
+
+// helperLookalike panics with an error of its own whose text starts like
+// the runtime's: Go prints it "panic: runtime error: …".
+//
+//go:noinline
+func helperLookalike(word string) { panic(errors.New("runtime error: " + word)) }
 
 // helperMapFatal writes one map from several goroutines until the runtime
 // stops the process with "concurrent map writes"; helperIdle sleeps in

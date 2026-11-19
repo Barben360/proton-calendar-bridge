@@ -216,13 +216,16 @@ func TestNoMarkerLeaks(t *testing.T) {
 		e    report.Event
 		kept string
 	}{
-		"crash":           {report.CrashEvent(c, meta, t0), `"filename":"daemon/handler.go"`},
-		"error":           {report.ErrorEvent(wrapped, report.ParseStack(stack), meta, t0), `"value":"*fmt.wrapError < *fs.PathError < *errors.errorString"`},
-		"joined":          {report.ErrorEvent(errors.Join(errors.New(marker), wrapped), nil, meta, t0), `"type":"*errors.joinError"`},
-		"panic string":    {report.PanicEvent(marker, report.ParseStack(stack), meta, t0), `"filename":"a/b.go"`},
-		"panic error":     {report.PanicEvent(wrapped, nil, meta, t0), `"value":"(text removed)"`},
-		"panic lookalike": {report.PanicEvent(errors.New("runtime error: "+marker), nil, meta, t0), `"value":"(text removed)"`},
-		"crash by hand":   {report.CrashEvent(report.Crash{Kind: "panic", Message: marker}, meta, t0), `"value":"(text removed)"`},
+		"crash":             {report.CrashEvent(c, meta, t0), `"filename":"daemon/handler.go"`},
+		"error":             {report.ErrorEvent(wrapped, report.ParseStack(stack), meta, t0), `"value":"*fmt.wrapError < *fs.PathError < *errors.errorString"`},
+		"joined":            {report.ErrorEvent(errors.Join(errors.New(marker), wrapped), nil, meta, t0), `"type":"*errors.joinError"`},
+		"panic string":      {report.PanicEvent(marker, report.ParseStack(stack), meta, t0), `"filename":"a/b.go"`},
+		"panic error":       {report.PanicEvent(wrapped, nil, meta, t0), `"value":"(text removed)"`},
+		"panic lookalike":   {report.PanicEvent(errors.New("runtime error: "+marker), nil, meta, t0), `"value":"(text removed)"`},
+		"crash by hand":     {report.CrashEvent(report.Crash{Kind: "panic", Message: marker}, meta, t0), `"value":"(text removed)"`},
+		"crash lookalike":   {report.CrashEvent(report.Crash{Kind: "runtime error", Message: "runtime error: " + marker}, meta, t0), `"value":"(text removed)"`},
+		"own runtime.Error": {report.PanicEvent(fakeRuntimeError{}, nil, meta, t0), `"value":"(text removed)"`},
+		"fatal in a panic":  {report.PanicEvent(fakeFatal{}, nil, meta, t0), `"value":"(text removed)"`},
 	}
 	for name, tc := range events {
 		b := string(eventJSON(t, tc.e))
@@ -329,3 +332,16 @@ func TestFingerprintStable(t *testing.T) {
 		t.Errorf("outer frames changed the fingerprint: %q vs %q", got, fp)
 	}
 }
+
+// fakeRuntimeError is a runtime.Error that is not the runtime's.
+type fakeRuntimeError struct{}
+
+func (fakeRuntimeError) Error() string { return "runtime error: index out of range [" + marker + "]" }
+func (fakeRuntimeError) RuntimeError() {}
+
+// fakeFatal is a runtime.Error whose text is a fatal error's: not a panic
+// message, so removed.
+type fakeFatal struct{}
+
+func (fakeFatal) Error() string { return "fatal error: concurrent map writes" }
+func (fakeFatal) RuntimeError() {}
