@@ -1,6 +1,9 @@
 package daemon
 
-import "net/http"
+import (
+	"log/slog"
+	"net/http"
+)
 
 // RecordPanics is recordPanics, for the external tests.
-func RecordPanics(h http.Handler) http.Handler { return recordPanics(h) }
+func RecordPanics(h http.Handler, log *slog.Logger) http.Handler { return recordPanics(h, log) }

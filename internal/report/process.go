@@ -125,6 +125,19 @@ func RecordPanic(v any, stack []byte) {
 	p.save(PanicEvent(v, endAtPanic(ParseStack(stack)), p.Meta, p.now()))
 }
 
+// PanicSite is the function of the last frame of pcb's code in a recovered
+// panic's stack (debug.Stack()'s text taken in the recovering deferred
+// call), "" when there is none: where a panic happened, without its text.
+func PanicSite(stack []byte) string {
+	frames := endAtPanic(ParseStack(stack))
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].InApp {
+			return frames[i].Function
+		}
+	}
+	return ""
+}
+
 // endAtPanic drops the recovery's own frames from a stack taken in a
 // deferred call: the runtime's panic frame and every frame after it (the
 // deferred function, debug.Stack), so the panicking frame is the last, the
