@@ -284,7 +284,7 @@ func crashFiles(t *testing.T, dir string) int {
 	return len(m)
 }
 
-func TestStartReportsWritesNoCrashFileWhenNever(t *testing.T) {
+func TestStartReportsUnderNeverLeavesNoCrashFile(t *testing.T) {
 	setFile := func(t *testing.T, dir string) {
 		t.Helper()
 		st := report.Store{StateDir: dir}
@@ -302,11 +302,17 @@ func TestStartReportsWritesNoCrashFileWhenNever(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			env := prep(t, dir)
+			// A process started before never was chosen left its raw
+			// traceback: start-up under never deletes it, saving nothing.
+			writeDeadCrash(t, dir)
 			if startReports(t, dir, env) {
 				t.Fatal("StartReports started with reports turned off")
 			}
 			if n := crashFiles(t, dir); n != 0 {
-				t.Fatalf("%d crash files written with reports turned off", n)
+				t.Fatalf("%d crash files left with reports turned off", n)
+			}
+			if pend, err := (report.Store{StateDir: dir}).Pending(); err != nil || len(pend) != 0 {
+				t.Fatalf("pending %v, %v under never", pend, err)
 			}
 			// A later process in ask mode finds nothing to collect.
 			n, err := report.Store{StateDir: dir, Env: func(string) string { return "" }, Now: time.Now}.Collect(context.Background())

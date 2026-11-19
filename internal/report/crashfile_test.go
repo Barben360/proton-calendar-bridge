@@ -295,3 +295,24 @@ func TestNoStateDirNoCrashFile(t *testing.T) {
 		t.Errorf("Collect = %d, %v", n, err)
 	}
 }
+
+// Under never a dead process's crash file is deleted and no report kept.
+func TestCollectUnderNeverDeletesWithoutReport(t *testing.T) {
+	state := t.TempDir()
+	dead := writeDeadCrash(t, state, 999999)
+	s := report.Store{StateDir: state, Env: func(k string) string {
+		if k == report.EnvSwitch {
+			return "never"
+		}
+		return ""
+	}}
+	if n, err := s.Collect(context.Background()); err != nil || n != 0 {
+		t.Fatalf("Collect = %d, %v; want 0", n, err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("crash file kept under never: %v", err)
+	}
+	if pend, err := s.Pending(); err != nil || len(pend) != 0 {
+		t.Errorf("pending %v, %v under never", pend, err)
+	}
+}

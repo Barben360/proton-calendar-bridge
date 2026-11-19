@@ -28,8 +28,10 @@ type ReportStart struct {
 // an address, a state directory and a user who owns it: a crash file for a
 // fatal crash, the crash files of dead processes turned into reports, and
 // the recorder of unexpected errors. Anything failing leaves reporting off,
-// silently (ok false). Mode never keeps no crash file at all. stop ends it; it is for a clean exit only, so that
-// a crash leaves its file behind.
+// silently (ok false). Mode never keeps no crash file and no recorder, and
+// only deletes the crash files dead processes left (one started before
+// never was chosen), saving nothing. stop ends it; it is for a clean exit
+// only, so that a crash leaves its file behind.
 func StartReports(o ReportStart) (store report.Store, stop func(), ok bool) {
 	stop = func() {}
 	store = report.Store{StateDir: o.StateDir, Env: o.Env, Now: o.Now}
@@ -37,20 +39,28 @@ func StartReports(o ReportStart) (store report.Store, stop func(), ok bool) {
 		return store, stop, false
 	}
 	// Reports turned off (the file or PCB_CRASH_REPORTS): no crash file, so
-	// no raw traceback is left on disk, and nothing is collected.
+	// no raw traceback is left on disk. Collect still runs: under never it
+	// deletes the files dead processes left and saves no report.
 	if store.Mode() == report.Never {
+		collect(store)
 		return store, stop, false
 	}
 	stopCrash, err := report.StartCrashFile(o.StateDir, o.Meta)
 	if err != nil {
 		return store, stop, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reportLockWait)
-	_, _ = store.Collect(ctx)
-	cancel()
+	collect(store)
 	report.Install(&report.Process{Store: store, Meta: o.Meta, DSN: o.DSN})
 	return store, func() {
 		report.Uninstall()
 		stopCrash()
 	}, true
+}
+
+// collect turns dead processes' crash files into reports (none under
+// never), waiting at most reportLockWait for the locks.
+func collect(store report.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), reportLockWait)
+	defer cancel()
+	_, _ = store.Collect(ctx)
 }
