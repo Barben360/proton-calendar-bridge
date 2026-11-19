@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -118,26 +119,19 @@ func TestHandlerPanicAbortsAndRecords(t *testing.T) {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
-	index := func(sub string) int {
-		for i, f := range frames {
-			if f.Function == sub || strings.Contains(f.Function, sub) && sub != "panic" {
-				return i
-			}
+	// Outermost first (Sentry order), ending at the panicking handler: the
+	// recovery's own frames (runtime's panic, the middleware's deferred
+	// func, debug.Stack) are dropped.
+	if len(frames) == 0 || !strings.Contains(frames[len(frames)-1].Function, "routePanicHub.Route") || !frames[len(frames)-1].InApp {
+		t.Errorf("the last frame is not the in_app panicking handler:\n%v", frames)
+	}
+	for _, f := range frames {
+		if strings.HasSuffix(f.Function, "recordPanics.func1.1") || strings.Contains(f.Function, "runtime/debug") || f.Function == "panic" {
+			t.Errorf("recovery frame %q in the report", f.Function)
 		}
-		return -1
 	}
-	// Outermost first (Sentry order): the connection's serve loop, the
-	// middleware's ServeHTTP, the panicking Route, the runtime's panic, the
-	// deferred recovery, and debug.Stack last.
-	serve, route, rtpanic, stack := index("net/http.(*conn).serve"), index("routePanicHub.Route"), index("panic"), index("runtime/debug.Stack")
-	if serve < 0 || route < 0 || rtpanic < 0 || stack < 0 || serve >= route || route >= rtpanic || rtpanic >= stack {
-		t.Errorf("frame order wrong (serve %d, Route %d, rtpanic %d, Stack %d of %d):\n%v", serve, route, rtpanic, stack, len(frames), frames)
-	}
-	if stack != len(frames)-1 {
-		t.Errorf("the innermost frame is at %d of %d, want the last", stack, len(frames))
-	}
-	if route >= 0 && !frames[route].InApp {
-		t.Errorf("the panicking handler's frame is not in_app: %+v", frames[route])
+	if len(frames) < 2 || !strings.Contains(frames[0].Function, "net/http") {
+		t.Errorf("frames do not start at the outermost call: %v", frames)
 	}
 }
 
@@ -193,33 +187,70 @@ func TestServeReadyWhileSenderHangs(t *testing.T) {
 	}
 }
 
+// stuckTransport holds each request until release closes, ignoring its
+// context: a sender that cannot be interrupted.
+type stuckTransport struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *stuckTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return nil, errors.New("released")
+}
+
+// Run ends the sender with itself: it returns only once the sender
+// goroutine has, and the sender sends nothing after that.
 func TestSenderStopsWithRun(t *testing.T) {
 	e := newEnv(t)
 	e.login(t)
 	store := reportStore(e)
-	k := newReportSink(t, nil)
+	tr := &stuckTransport{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() {
+		select {
+		case <-tr.release:
+		default:
+			close(tr.release)
+		}
+	})
 	if err := store.SetMode(t.Context(), report.Always); err != nil {
 		t.Fatal(err)
-	}
-	poke := make(chan struct{}, 1)
-	r := e.start(t, e.hub, func(o *daemon.Options) {
-		o.Reports = &report.Sender{DSN: k.dsn(), Store: store}
-		o.ReportPoke = poke
-	})
-	r.cancel()
-	select {
-	case <-r.fin:
-	case <-time.After(30 * time.Second):
-		t.Fatal("Run did not return")
 	}
 	if err := store.Save(t.Context(), report.PanicEvent("x", []report.Frame{{Function: "p.f"}}, report.Meta{}, time.Now())); err != nil {
 		t.Fatal(err)
 	}
-	poke <- struct{}{}
-	time.Sleep(300 * time.Millisecond)
-	if n := k.count(); n != 0 {
-		t.Errorf("the sender sent %d requests after Run returned", n)
+	r := e.start(t, e.hub, func(o *daemon.Options) {
+		o.Reports = &report.Sender{DSN: "http://pubkey@127.0.0.1:1/7", Store: store, Client: &http.Client{Transport: tr}}
+	})
+	select {
+	case <-tr.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sender never sent")
 	}
+	r.cancel()
+	select {
+	case <-r.fin:
+		t.Fatalf("Run returned while its sender goroutine was still running (%v)", r.err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(tr.release)
+	select {
+	case <-r.fin:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return once the sender ended")
+	}
+	if n := senderGoroutines(); n != 0 {
+		t.Errorf("%d sender goroutines still run when Run returned", n)
+	}
+}
+
+// senderGoroutines counts the goroutines running report.Sender.Run.
+func senderGoroutines() int {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	return strings.Count(string(buf), "report.Sender.Run")
 }
 
 func asError(v any) error {

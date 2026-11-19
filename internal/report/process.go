@@ -122,5 +122,18 @@ func RecordPanic(v any, stack []byte) {
 	if p == nil || p.DSN == "" {
 		return
 	}
-	p.save(PanicEvent(v, ParseStack(stack), p.Meta, p.now()))
+	p.save(PanicEvent(v, endAtPanic(ParseStack(stack)), p.Meta, p.now()))
+}
+
+// endAtPanic drops the recovery's own frames from a stack taken in a
+// deferred call: the runtime's panic frame and every frame after it (the
+// deferred function, debug.Stack), so the panicking frame is the last, the
+// one a report groups and names by. A stack without a panic frame is kept.
+func endAtPanic(frames []Frame) []Frame {
+	for i := len(frames) - 1; i >= 0; i-- {
+		if f := frames[i].Function; f == "panic" || f == "runtime.gopanic" {
+			return frames[:i]
+		}
+	}
+	return frames
 }

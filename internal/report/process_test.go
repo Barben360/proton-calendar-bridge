@@ -2,7 +2,10 @@ package report_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +94,54 @@ func TestRecordDoesNotBlockOnASlowSubscriber(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("RecordError blocked on a subscriber")
+	}
+}
+
+// recovered panics, records the panic through RecordPanic from its deferred
+// call, as an HTTP middleware does.
+//
+//go:noinline
+func recovered() {
+	defer func() {
+		if v := recover(); v != nil {
+			report.RecordPanic(v, debug.Stack())
+		}
+	}()
+	panicHere()
+}
+
+//go:noinline
+func panicHere() { panic("MARKER-7f3a") }
+
+func TestRecordPanicEndsAtThePanickingFrame(t *testing.T) {
+	s := newStore(t)
+	report.Install(&report.Process{Store: s, Meta: meta, DSN: "http://k@127.0.0.1:1/1"})
+	defer report.Uninstall()
+	recovered()
+	pend, err := s.Pending()
+	if err != nil || len(pend) != 1 {
+		t.Fatalf("pending %d, %v", len(pend), err)
+	}
+	var ev struct {
+		Exception struct {
+			Values []struct {
+				Stacktrace struct{ Frames []report.Frame }
+			}
+		}
+	}
+	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil {
+		t.Fatal(err)
+	}
+	frames := ev.Exception.Values[0].Stacktrace.Frames
+	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "report_test.panicHere") {
+		t.Fatalf("the last frame is not the panicking function: %v", frames)
+	}
+	for _, f := range frames {
+		if f.Function == "panic" || strings.Contains(f.Function, "runtime/debug") || strings.HasSuffix(f.Function, "report_test.recovered.func1") {
+			t.Errorf("recovery frame %q kept", f.Function)
+		}
+	}
+	if !strings.HasSuffix(frames[len(frames)-2].Function, "report_test.recovered") {
+		t.Errorf("the caller of the panicking function is missing: %v", frames)
 	}
 }
