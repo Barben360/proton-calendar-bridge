@@ -111,6 +111,10 @@ func (t *Tray) Update(v ui.View) {
 // NoTrayLine is the one-time line shown when no tray host answers.
 const NoTrayLine = "your desktop shows no tray icons; on GNOME install the AppIndicator extension"
 
+// NoTrayBackgroundLine is the line when pcb-ui was started with
+// --background and no tray answers: closing the window hides it.
+const NoTrayBackgroundLine = NoTrayLine + "; closing this window hides it, run pcb-ui again to show it"
+
 const noTrayPref = "noTrayLineShown"
 
 // HintNoTray shows NoTrayLine in the window, once: it reports whether it did
@@ -121,7 +125,11 @@ func (w *Window) HintNoTray() bool {
 		return false
 	}
 	p.SetBool(noTrayPref, true)
-	w.notice.SetText(NoTrayLine)
+	text := w.noTrayText
+	if text == "" {
+		text = NoTrayLine
+	}
+	w.notice.SetText(text)
 	w.notice.Show()
 	return true
 }
@@ -129,12 +137,19 @@ func (w *Window) HintNoTray() bool {
 // Attach sets up how the window comes back and how the app quits. With a
 // tray host (ta non-nil) the tray holds Quit, closing the window hides it,
 // and the window opens unless background. With none (ta nil) the window
-// opens even with background, says once that there is no tray, and closing
+// opens even with background and says once that there is no tray. Closing
 // it runs quit (ruling R14: a hidden window with no tray could never be
-// quit, and its bridge would hold serve.lock unseen). Main goroutine.
+// quit), except with background (an autostart): then it only hides, so the
+// bridge is never stopped silently, and running pcb-ui again shows it. Main goroutine.
 func Attach(ta TrayApp, w *Window, quit func(), background bool) *Tray {
 	if ta == nil {
-		w.quitOnClose = quit
+		if background {
+			// Autostarted: closing must not stop the bridge silently; a new
+			// pcb-ui shows this window again (single instance).
+			w.noTrayText = NoTrayBackgroundLine
+		} else {
+			w.quitOnClose = quit
+		}
 		w.HintNoTray()
 		w.Show("")
 		return nil

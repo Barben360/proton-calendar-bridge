@@ -25,10 +25,10 @@ func TestSetAutostartWritesTheRunValue(t *testing.T) {
 	runKey = func() runkey.Store { return runkey.At(sub) }
 	t.Cleanup(func() { runKey = old })
 
-	if Autostart(`C:\\x y\\Zoë O'Brien\\pcb-ui.exe`) {
+	exe := `C:\x y\Zoë O'Brien\pcb-ui.exe`
+	if Autostart(exe) {
 		t.Fatal("autostart on before any SetAutostart")
 	}
-	exe := `C:\x y\Zoë O'Brien\pcb-ui.exe`
 	if err := SetAutostart(true, exe); err != nil {
 		t.Fatal(err)
 	}

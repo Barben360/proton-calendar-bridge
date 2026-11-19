@@ -123,6 +123,9 @@ type Window struct {
 	// pendingErr is the last error that came while the window was hidden.
 	pendingErr error
 
+	// noTrayText is the one-time no-tray line (NoTrayLine by default).
+	noTrayText string
+
 	// quitOnClose, when set (no tray host: Attach), is what closing the
 	// window runs instead of hiding it.
 	quitOnClose func()
@@ -562,6 +565,13 @@ func (w *Window) Show(account string) {
 // onClose is what closing the window does: it hides (the app keeps running
 // in the tray), or quits when there is no tray to come back from (R14).
 func (w *Window) onClose() {
+	if w.quitOnClose != nil && w.waiting() {
+		// Quitting drops the login the wizard waits on: ask first.
+		w.confirm("Abandon this login?",
+			"Closing the window quits pcb-ui, and the login in progress is lost; a verification you solved is lost with it.",
+			"Quit", func() { w.Hide(); w.quitOnClose() })
+		return
+	}
 	w.Hide() // at once: the quit's drain may take a few seconds
 	if w.quitOnClose != nil {
 		w.quitOnClose()

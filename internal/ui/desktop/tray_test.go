@@ -209,18 +209,35 @@ func TestCloseQuitsOnlyWithoutATray(t *testing.T) {
 			t.Error("--background with a tray host showed the window")
 		}
 	})
+	// Started by hand, with no tray: closing the window quits (nothing could
+	// bring a hidden one back).
 	t.Run("no tray host", func(t *testing.T) {
 		f := newFixture(t)
 		quits := 0
-		if tr := Attach(nil, f.w, func() { quits++ }, true); tr != nil {
+		if tr := Attach(nil, f.w, func() { quits++ }, false); tr != nil {
 			t.Fatal("Attach without a tray host returned a tray")
 		}
 		if !f.w.visible || !f.has(NoTrayLine) {
-			t.Fatalf("without a tray the window must open (even --background) with the no-tray line: visible %v, %v", f.w.visible, f.texts())
+			t.Fatalf("without a tray the window must open with the no-tray line: visible %v, %v", f.w.visible, f.texts())
 		}
 		f.w.onClose()
 		if quits != 1 {
 			t.Errorf("closing without a tray quit %d times, want once", quits)
+		}
+	})
+	// Autostarted (--background) with no tray: the window opens, but closing
+	// it only hides it, so the bridge Thunderbird syncs through is not
+	// stopped silently; running pcb-ui again shows it.
+	t.Run("no tray host, background", func(t *testing.T) {
+		f := newFixture(t)
+		quits := 0
+		Attach(nil, f.w, func() { quits++ }, true)
+		if !f.w.visible || !f.has(NoTrayBackgroundLine) {
+			t.Fatalf("window visible %v, want it open with the background no-tray line: %v", f.w.visible, f.texts())
+		}
+		f.w.onClose()
+		if quits != 0 || f.w.visible {
+			t.Errorf("closing: quits = %d, visible = %v; want it hidden, bridge still running", quits, f.w.visible)
 		}
 	})
 }

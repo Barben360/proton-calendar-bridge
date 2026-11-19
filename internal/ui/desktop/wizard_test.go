@@ -795,3 +795,31 @@ func TestCancelEndsASignInInFlight(t *testing.T) {
 		t.Error("wizard still held")
 	}
 }
+
+// With no tray, closing the window quits the app: a waiting login is lost
+// with it, so the close asks first; declining keeps the window and the login.
+func TestClosingTheWindowToQuitAsksWhileALoginWaits(t *testing.T) {
+	f := newFixture(t)
+	quits := 0
+	f.w.quitOnClose = func() { quits++ }
+	f.wiz.step = ui.StepCaptcha
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.w.onClose()
+	if !f.has("Abandon this login?") || quits != 0 {
+		t.Fatalf("no confirmation before quitting (quits %d): %v", quits, f.texts())
+	}
+	if !f.w.visible || f.w.wizard == nil {
+		t.Fatal("the window or the login was dropped before the answer")
+	}
+	f.tap("Cancel")
+	if quits != 0 || !f.w.visible || f.w.wizard == nil || len(f.wiz.got()) != 0 {
+		t.Fatalf("declining: quits %d, visible %v, calls %v", quits, f.w.visible, f.wiz.got())
+	}
+	f.w.onClose()
+	f.tap("Quit")
+	if quits != 1 {
+		t.Errorf("confirming: quits = %d, want 1", quits)
+	}
+}

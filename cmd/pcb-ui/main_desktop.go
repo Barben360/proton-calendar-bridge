@@ -192,6 +192,9 @@ func probe(a fyne.App) (code int, failed bool) {
 // notifications.
 func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *desktop.Tray, log *slog.Logger) {
 	var n ui.Notifier
+	sender := &alertSender{log: log, send: func(note ui.Notification) error {
+		return desktop.Notify("", note, func(account string) { fyne.Do(func() { win.Show(account) }) })
+	}}
 	for {
 		v := b.View(ctx, time.Now())
 		fyne.Do(func() {
@@ -200,17 +203,45 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 				tray.Update(v)
 			}
 		})
-		// A failed send is offered again at the next view (Changes fires at
-		// least every 30 s), once the notification daemon is up.
-		n.Unsent(ui.Send(log, n.Next(v), func(note ui.Notification) error {
-			return desktop.Notify("", note, func(account string) { fyne.Do(func() { win.Show(account) }) })
-		}))
+		sender.sendAll(&n, n.Next(v))
 		select {
 		case <-ctx.Done():
 			return
 		case <-b.Changes():
 		}
 	}
+}
+
+// alertSender sends alert notifications. A failed one is offered again at
+// the next view (Changes fires at least every 30 s), once the notification
+// daemon is up; its failure is logged once, not at every retry.
+type alertSender struct {
+	log    *slog.Logger
+	send   func(ui.Notification) error
+	failed map[string]bool // alerts whose failure was logged, until one is sent
+}
+
+func (s *alertSender) sendAll(n *ui.Notifier, notes []ui.Notification) {
+	if s.failed == nil {
+		s.failed = map[string]bool{}
+	}
+	var unsent []ui.Notification
+	for _, note := range notes {
+		key := note.Account + "\x00" + note.Code
+		err := s.send(note)
+		switch {
+		case err == nil:
+			s.log.Info("notification sent", "alert", note.Code, "account", note.Account)
+			delete(s.failed, key)
+		default:
+			if !s.failed[key] {
+				s.log.Warn("notification failed", "alert", note.Code, "account", note.Account, "err", err)
+			}
+			s.failed[key] = true
+			unsent = append(unsent, note)
+		}
+	}
+	n.Unsent(unsent)
 }
 
 // printError writes err and its hint as the CLI does.

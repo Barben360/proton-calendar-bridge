@@ -277,3 +277,35 @@ func TestSettingsUpdateCheckWritesTheSwitchAndPokes(t *testing.T) {
 		t.Error("no poke after the switch")
 	}
 }
+
+// While the notification daemon is down, the Warn is logged once per alert,
+// not at every retry; a send that works again says so.
+func TestAlertSenderLogsAFailureOnce(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	var n ui.Notifier
+	down := true
+	s := &alertSender{log: log, send: func(ui.Notification) error {
+		if down {
+			return errors.New("no notification server")
+		}
+		return nil
+	}}
+	note := []ui.Notification{{Account: "a1", Code: "needs-login"}}
+	for range 4 {
+		s.sendAll(&n, note)
+	}
+	if got := strings.Count(buf.String(), "notification failed"); got != 1 {
+		t.Errorf("%d failure lines over 4 retries, want 1:\n%s", got, buf.String())
+	}
+	down = false
+	s.sendAll(&n, note)
+	if !strings.Contains(buf.String(), `msg="notification sent"`) {
+		t.Errorf("no line when sending works again:\n%s", buf.String())
+	}
+	down = true
+	s.sendAll(&n, note)
+	if got := strings.Count(buf.String(), "notification failed"); got != 2 {
+		t.Errorf("a new failure after a success logged %d lines in total, want 2", got)
+	}
+}

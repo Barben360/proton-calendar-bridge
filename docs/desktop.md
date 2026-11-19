@@ -78,7 +78,7 @@ An agent on another machine uses the remote `/mcp` with a token: turn it on in `
 
 GNOME shows no tray icon unless the AppIndicator extension (AppIndicator and KStatusNotifierItem Support) is installed and enabled.
 
-With `--background` (the autostart), `pcb-ui` first waits up to 15 seconds for the tray to register, as the AppIndicator extension or the Plasma panel often starts after it. Without a tray, `pcb-ui` opens its window and says so once, and closing that window quits `pcb-ui`, since nothing could bring it back.
+With `--background` (the autostart), `pcb-ui` first waits up to 15 seconds for the tray to register, as the AppIndicator extension or the Plasma panel often starts after it. Without a tray, `pcb-ui` opens its window and says so once. Started by hand, closing that window quits `pcb-ui`, since nothing could bring it back; with `--background` (the autostart), closing it only hides it, so the bridge keeps running, and running `pcb-ui` again shows the window. If the tray registers later, restart `pcb-ui`. Closing the window to quit while a login waits for you (2FA code, CAPTCHA) asks "Abandon this login?" first.
 
 ## One server per state directory
 
