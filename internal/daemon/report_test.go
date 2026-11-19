@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -256,4 +257,70 @@ func senderGoroutines() int {
 func asError(v any) error {
 	err, _ := v.(error)
 	return err
+}
+
+// startReports runs StartReports for dir with the given environment and
+// returns whether it started.
+func startReports(t *testing.T, dir string, env map[string]string) bool {
+	t.Helper()
+	_, stop, ok := daemon.StartReports(daemon.ReportStart{
+		StateDir: dir, DSN: "https://k@127.0.0.1/1",
+		Meta: report.Meta{Binary: "pcb", Command: "pcb status", Install: "other", Version: "v0.0.0"},
+		Env:  func(k string) string { return env[k] },
+		Now:  time.Now,
+	})
+	t.Cleanup(stop)
+	return ok
+}
+
+func crashFiles(t *testing.T, dir string) int {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(report.Dir(dir), "crash-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(m)
+}
+
+func TestStartReportsWritesNoCrashFileWhenNever(t *testing.T) {
+	setFile := func(t *testing.T, dir string) {
+		t.Helper()
+		st := report.Store{StateDir: dir}
+		if err := st.SetMode(context.Background(), report.Never); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, prep := range map[string]func(*testing.T, string) map[string]string{
+		"environment": func(*testing.T, string) map[string]string { return map[string]string{report.EnvSwitch: "never"} },
+		"reports.json": func(t *testing.T, dir string) map[string]string {
+			setFile(t, dir)
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := prep(t, dir)
+			if startReports(t, dir, env) {
+				t.Fatal("StartReports started with reports turned off")
+			}
+			if n := crashFiles(t, dir); n != 0 {
+				t.Fatalf("%d crash files written with reports turned off", n)
+			}
+			// A later process in ask mode finds nothing to collect.
+			n, err := report.Store{StateDir: dir, Env: func(string) string { return "" }, Now: time.Now}.Collect(context.Background())
+			if err != nil || n != 0 {
+				t.Fatalf("Collect = %d, %v; want nothing", n, err)
+			}
+		})
+	}
+}
+
+func TestStartReportsWritesACrashFileWhenAsking(t *testing.T) {
+	dir := t.TempDir()
+	if !startReports(t, dir, nil) {
+		t.Fatal("StartReports did not start in ask mode")
+	}
+	if crashFiles(t, dir) == 0 {
+		t.Fatal("no crash file in ask mode")
+	}
 }
