@@ -37,7 +37,7 @@ Details: [security](security.md#log-in).
 |---|---|
 | `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, alerts). |
 | `pcb status --daemon` | Exits 20 when no daemon answers (the container's health check). |
-| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. Its last line, `update`, warns when a newer stable release exists (the fix: its page and how to update), and is skipped when switched off, on a dev build or when github.com does not answer: it never changes the exit code. |
+| `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. With no daemon running, the `caldav listener` line tries to bind the port and fails (exit 20) when another program holds it; `control socket path` fails when the state directory makes the socket path too long (107 bytes on Linux; set `PCB_STATE_DIR`). On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. Its last line, `update`, warns when a newer stable release exists (the fix: its page and how to update), and is skipped when switched off, on a dev build or when github.com does not answer: it never changes the exit code. |
 
 ### Calendars and events
 
@@ -53,7 +53,7 @@ Details: [security](security.md#log-in).
 | Command | What it does |
 |---|---|
 | `pcb client show [NAME] [--reveal]` | URL, username, password and TLS fingerprint of a client. `NAME` defaults to `default`, else the only client (exit 10 when there are several and none is `default`); `--reveal` puts the password in `--json`. |
-| `pcb client add NAME` | Another CalDAV app password, one per device; works logged out. |
+| `pcb client add NAME` | Another CalDAV app password, one per device. Needs an account (exit 10 `no account` before the first `pcb login`), not a signed-in one: it works while the account is signed out. |
 | `pcb client rotate NAME` | A new password; the old one stops working at once. |
 | `pcb client list` | The clients, never their passwords. |
 | `pcb client remove NAME\|ID` | Its password stops working at once, even for a running `pcb serve`. |
@@ -101,7 +101,7 @@ This applies to `logout`, `login resume`, `status`, `calendar list`, `event list
 
 ## JSON output
 
-Every command has `--json`. It prints one envelope on stdout and nothing else:
+Every command has `--json`. It prints one envelope on stdout and nothing else, with one exception: `--help` and `pcb help` always print the usage text (exit 0), because an envelope around help text adds nothing for a script or an agent.
 
 ```json
 {"schema_version": 2, "command": "...", "ok": true, "data": {}}
@@ -114,7 +114,7 @@ Every command has `--json`. It prints one envelope on stdout and nothing else:
 
 The schema is version 2 since the multi-account layout:
 
-- `pcb status` data is `{daemon, listener, accounts[], alerts}`; an account's login fields moved under `accounts[].login`;
+- `pcb status` data is `{daemon, accounts[], alerts}`, plus `listener` (and `mcp`) while a daemon answers: without one there is no listener to report, so the key is absent; an account's login fields moved under `accounts[].login`;
 - `pcb doctor` names each per-account result `<address>: <check>` (the local ID when the account has no address).
 
 ## Exit codes
@@ -124,7 +124,7 @@ The same failure has the same code in every command, with `--json` or without.
 | Code | Means | Examples |
 |---|---|---|
 | `0` | done | |
-| `2` | bad invocation: unknown command, flag or argument | several accounts and none named; a selector that names no account |
+| `2` | bad invocation: unknown command (the hint names the group's help and its commands), flag or argument | several accounts and none named; a selector that names no account |
 | `10` | you must act: answer, type a secret or run something | a login; a lost or unreadable key file; a `secrets.sealed` or `state.json` written by a newer pcb (upgrade pcb) |
 | `20` | blocked: the machine or the environment prevents the operation; often transient (retry) | no daemon; the port in use; another `pcb serve` running; a Proton call past its 30 s deadline |
 | `30` | failed and rolled back | reserved: no `pcb` command returns it yet |

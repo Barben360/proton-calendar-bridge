@@ -19,7 +19,7 @@ It needs Go (the version in `go.mod`), a C compiler and the GL/X headers of the 
 ## Rules for the code
 
 - **Tests that bite.** Each test fails when the behaviour it guards breaks: assert what a user or a caller observes, never an assertion that passes either way. Write the failing test first.
-- **Machine-readable output.** Every command has `--json`, printing one envelope `{schema_version, command, ok, data | error}` and nothing else on stdout, with the exit codes of `internal/exitcode`: `0` done, `2` bad invocation, `10` you must act, `20` blocked, `30` failed and rolled back, `40` partly done and resumable.
+- **Machine-readable output.** Every command has `--json`, printing one envelope `{schema_version, command, ok, data | error}` and nothing else on stdout (`--help` is the one exception: it prints usage text, exit 0), with the exit codes of `internal/exitcode`: `0` done, `2` bad invocation, `10` you must act, `20` blocked, `30` failed and rolled back, `40` partly done and resumable.
 - **No secrets anywhere.** Never in arguments, logs, errors, recorded files or commits. Secrets come from a terminal prompt, a file descriptor or the environment. A test value that looks like a secret carries an inline `gitleaks:allow` comment with the reason; a false positive already in the history goes in `.gitleaksignore` (`file:rule:line`, with the reason).
 - **Code from elsewhere.** Logic reused from another project is audited, rewritten with our own tests and credited in the README's Credits section. Never copy from ProtonMail/WebClients (GPL-3.0).
 
