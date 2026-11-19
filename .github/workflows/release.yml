@@ -186,6 +186,10 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Build pcb for the five targets
+        env:
+          # The crash report address; a missing secret is an empty one, and
+          # the build has no reporting.
+          REPORT_DSN: ${{ secrets.PCB_REPORT_DSN }}
         run: |
           for t in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; do
             out=bin/$t/pcb
@@ -273,7 +277,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev xvfb
-      - run: make ui VERSION="$GITHUB_REF_NAME"
+      - name: Build pcb-ui
+        env:
+          REPORT_DSN: ${{ secrets.PCB_REPORT_DSN }}
+        run: make ui VERSION="$GITHUB_REF_NAME"
       - name: pcb-ui prints the tag
         run: |
           got=$(xvfb-run -a bin/pcb-ui --version)
@@ -311,6 +318,8 @@ jobs:
           path-type: inherit
       - name: Build pcb-ui
         shell: msys2 {0}
+        env:
+          REPORT_DSN: ${{ secrets.PCB_REPORT_DSN }}
         run: make ui VERSION="$GITHUB_REF_NAME"
       - name: pcb-ui prints the tag
         run: |
@@ -591,6 +600,7 @@ jobs:
       id-token: write
       attestations: write
     uses: ./.github/workflows/image-build.yml
+    secrets: inherit
     with:
       ref: ${{ github.sha }}
       version: ${{ github.ref_name }}

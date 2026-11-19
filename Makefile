@@ -2,10 +2,16 @@ PKG     := github.com/Barben360/proton-calendar-bridge
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# Where approved crash reports go (a Sentry DSN). Empty, the build has no
+# address and keeps and sends no report: dev and source builds, and make
+# test and make lint, which never stamp it. Only make build, ui and image
+# take it, from the release workflows' secret PCB_REPORT_DSN.
+REPORT_DSN ?=
 LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
-	-X $(PKG)/internal/buildinfo.Date=$(DATE)
+	-X $(PKG)/internal/buildinfo.Date=$(DATE) \
+	-X $(PKG)/internal/buildinfo.ReportDSN=$(REPORT_DSN)
 # GOOS=windows builds append .exe (make build ui GOOS=windows; pcb-ui only on
 # Windows itself: it needs cgo).
 GOOS    ?= $(shell go env GOOS)
@@ -120,7 +126,7 @@ IMAGE ?= pcb:local
 IMAGE_FLAGS ?=
 
 image:
-	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(IMAGE_FLAGS) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(if $(REPORT_DSN),--build-arg REPORT_DSN) $(IMAGE_FLAGS) .
 
 # Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
 container-smoke:
