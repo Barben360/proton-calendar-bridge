@@ -159,6 +159,26 @@ func TestParseCrashFromRealPanics(t *testing.T) {
 			t.Errorf("in-app frames %q, want %q\n%s", got, want, text)
 		}
 	})
+	t.Run("runtime-lookalike", func(t *testing.T) {
+		text := crashOutput(t, "runtime-lookalike")
+		if !strings.Contains(string(text), "panic: runtime error: MARKER-7f3a") {
+			t.Fatalf("the helper did not print the look-alike line:\n%s", text)
+		}
+		c, err := report.ParseCrash(text)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, text)
+		}
+		if c.Kind != "panic" || c.Message != "(text removed)" {
+			t.Errorf("Kind, Message = %q, %q", c.Kind, c.Message)
+		}
+		b := string(eventJSON(t, report.CrashEvent(c, meta, t0)))
+		if strings.Contains(b, "MARKER-7f3a") {
+			t.Errorf("the event keeps the panic's text: %s", b)
+		}
+		if got := inApp(c.Frames); len(got) == 0 || got[len(got)-1] != helpers+".helperLookalike" {
+			t.Errorf("in-app frames %q", got)
+		}
+	})
 	t.Run("map-fatal", func(t *testing.T) {
 		text := crashOutput(t, "map-fatal", "GOTRACEBACK=all")
 		if n := len(regexp.MustCompile(`(?m)^goroutine \d+ `).FindAll(text, -1)); n < 2 {
@@ -253,3 +273,64 @@ func TestParseStackOfDebugStack(t *testing.T) {
 
 //go:noinline
 func stackHere() []byte { return debug.Stack() }
+
+// Only the runtime's own messages are kept, matched whole: one that merely
+// starts like one, or carries more, is removed.
+func TestRuntimeMessagesAllowList(t *testing.T) {
+	cases := []struct{ first, kind, message string }{
+		{"panic: runtime error: index out of range [5] with length 3", "runtime error", "runtime error: index out of range [5] with length 3"},
+		{"panic: runtime error: index out of range [-1]", "runtime error", "runtime error: index out of range [-1]"},
+		{"panic: runtime error: slice bounds out of range [:9] with capacity 2", "runtime error", "runtime error: slice bounds out of range [:9] with capacity 2"},
+		{"panic: runtime error: slice bounds out of range [3:2]", "runtime error", "runtime error: slice bounds out of range [3:2]"},
+		{"panic: runtime error: slice bounds out of range [::7] with length 4", "runtime error", "runtime error: slice bounds out of range [::7] with length 4"},
+		{"panic: runtime error: cannot convert slice with length 2 to array or pointer to array with length 4", "runtime error", "runtime error: cannot convert slice with length 2 to array or pointer to array with length 4"},
+		{"panic: runtime error: integer divide by zero", "runtime error", "runtime error: integer divide by zero"},
+		{"panic: runtime error: makeslice: len out of range", "runtime error", "runtime error: makeslice: len out of range"},
+		{"panic: runtime error: hash of unhashable type []string", "runtime error", "runtime error: hash of unhashable type"},
+		{"panic: runtime error: comparing uncomparable type map[string]int", "runtime error", "runtime error: comparing uncomparable type"},
+		{"panic: runtime error: invalid memory address or nil pointer dereference [recovered]", "runtime error", "runtime error: invalid memory address or nil pointer dereference"},
+		{"panic: send on closed channel", "runtime error", "send on closed channel"},
+		{"panic: assignment to entry in nil map [recovered, repanicked]", "runtime error", "assignment to entry in nil map"},
+		{"fatal error: concurrent map iteration and map write", "fatal error", "fatal error: concurrent map iteration and map write"},
+		{"fatal error: no goroutines (main called runtime.Goexit) - deadlock!", "fatal error", "fatal error: no goroutines (main called runtime.Goexit) - deadlock!"},
+		{"fatal error: out of memory", "fatal error", "fatal error: out of memory"},
+		{"fatal error: stack overflow", "fatal error", "fatal error: stack overflow"},
+		{"fatal error: sync: unlock of unlocked mutex", "fatal error", "fatal error: sync: unlock of unlocked mutex"},
+		{"[signal 0xc0000005 code=0x0 addr=0x0 pc=0x7ff6]", "", ""},
+		// Look-alikes.
+		{"panic: runtime error: MARKER-7f3a", "panic", "(text removed)"},
+		{"panic: runtime error: index out of range [MARKER-7f3a]", "panic", "(text removed)"},
+		{"panic: runtime error: integer divide by zero MARKER-7f3a", "panic", "(text removed)"},
+		{"panic: runtime error: slice bounds out of range [1:2] with length MARKER", "panic", "(text removed)"},
+		{"panic: send on closed channel MARKER-7f3a", "panic", "(text removed)"},
+		{"panic: fatal error: concurrent map writes", "panic", "(text removed)"},
+		{"fatal error: MARKER-7f3a", "fatal error", "(text removed)"},
+		{"fatal error: concurrent map writes MARKER-7f3a", "fatal error", "(text removed)"},
+		{"[signal SIGSEGV: MARKER-7f3a code=0x1 addr=0x0 pc=0x1]", "signal SIGSEGV", "(text removed)"},
+	}
+	for _, tc := range cases {
+		text := tc.first + "\n\ngoroutine 1 [running]:\nmain.main()\n\tmain.go:1 +0x1\n"
+		c, err := report.ParseCrash([]byte(text))
+		if tc.kind == "" {
+			// A Windows signal line is never first: only its own text is
+			// checked, through a crash built by hand.
+			c = report.Crash{Kind: "fatal error", Message: tc.first}
+			tc.kind, tc.message, err = "fatal error", tc.first, nil
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", tc.first, err)
+		}
+		if c.Kind != tc.kind || c.Message != tc.message {
+			t.Errorf("%q: Kind, Message = %q, %q; want %q, %q", tc.first, c.Kind, c.Message, tc.kind, tc.message)
+		}
+		if got := exceptionValueOf(t, report.CrashEvent(c, meta, t0)); got != tc.message {
+			t.Errorf("%q: event value %q, want %q", tc.first, got, tc.message)
+		}
+	}
+}
+
+func exceptionValueOf(t *testing.T, e report.Event) string {
+	t.Helper()
+	_, v := exceptionValue(t, e)
+	return v
+}
