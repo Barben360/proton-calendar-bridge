@@ -124,6 +124,8 @@ docker exec pcb pcb doctor        # every check, with the fix
 
 When a newer release is out, `pcb doctor`'s `update` line says so, with the fix `pull the new image: docker compose pull && docker compose up -d` (the image sets `PCB_INSTALL=container`). Add `PCB_UPDATE_CHECK=off` to the container's environment to never ask github.com ([security](security.md#the-update-check)).
 
+After a crash or an unexpected error, pcb keeps a crash report in `/data/state/reports` and does not send it: `docker exec pcb pcb crash-reports show` prints it, `send` sends it, `discard` deletes it. Add `PCB_CRASH_REPORTS=always` to the container's environment to send reports as they come (`pcb serve` sends them in the background), or `never` to keep none. A container crash loop sends at most 10 a day and the same cause once a day ([security](security.md#crash-reports)). The image built from source has no crash report address and keeps none.
+
 `pcb client show` prints the URL with the first of `hostnames`, and the certificate's fingerprint. Thunderbird shows a certificate exception dialog once: confirm it only when its fingerprint equals the printed one. Then [connect Thunderbird](thunderbird.md#connect-thunderbird).
 
 ## Wrong passwords behind the userland proxy

@@ -1,7 +1,7 @@
 # Crash and error reports — design
 
 - **Date**: 2026-11-19
-- **Status**: draft, awaiting the author's approval
+- **Status**: approved by the author on 2026-11-19; built (decision 0022)
 - **Decided by**: author (choices marked [author]); the rest is the agent's call, marked [call]
 - **Amends**: SPEC §19 and `docs/security.md` "What never leaves pcb" (a new outbound host, after consent); decision 0015 (pcb-ui: a new prompt, panel and Settings switch); to be recorded as decision 0022
 

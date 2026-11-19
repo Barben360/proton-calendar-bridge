@@ -86,6 +86,7 @@ On Windows there is no service: `pcb install` and every `pcb service` command ex
 | `pcb version` | The build's version. No network call. |
 | `pcb version --check` | Also asks github.com whether a newer stable release exists: `update available: vX.Y.Z <release page>` with how to update this install (the `install.sh` line on Linux and macOS, pulling the image in the container), or `up to date`, `check skipped: dev build`, `check failed: …`. Exits 0 in every case; with `--json`, `data.update` holds `latest`, `url`, `available`, `hint`, `error`. |
 | `pcb update-check on\|off\|status` | The daily update check of `pcb doctor` and `pcb-ui` (kept in `update.json` in the state directory). `PCB_UPDATE_CHECK=off` turns it off for one process. ([security](security.md#the-update-check)) |
+| `pcb crash-reports status\|show\|send\|discard\|always\|ask\|never` | The crash reports pcb kept. `status` (which `always`, `ask`, `never` and `discard` also end with) gives the mode, the `PCB_CRASH_REPORTS` override, how many wait and `build_has_address`; `show` prints them as they would be sent (with `--json`, the events themselves); `send` sends them now whatever the mode (exit 40 when some are left, for example past the daily limit); `discard` deletes them; `always`, `ask` and `never` set the mode (`never` also deletes those waiting). A build without a crash report address (built from source) keeps none, and `send` exits 20 saying so. ([security](security.md#crash-reports)) |
 
 ## Choose the account
 

@@ -2371,8 +2371,10 @@ event that fails it is served marked, not dropped), writes only to calendars
 whose member passphrase signature verifies with our key, and only over
 content of ours that verifies, with pinned key packets (§5.3, its residual
 risks listed there), no
-secrets in argv or logs, state directory 0700. One host besides Proton: github.com, once a day, for the update check, which
-sends nothing but the request and can be switched off (decision 0019). On a server, the daemon runs
+secrets in argv or logs, state directory 0700. Two hosts besides Proton: github.com, once a day, for the update check, which
+sends nothing but the request and can be switched off (decision 0019); and, only after the user
+agreed, `errors.bbarrois.tech` (the author's Bugsink) for a crash or unexpected-error report built from
+an allow list of fields, with no event, name, address, secret or path (decision 0022). On a server, the daemon runs
 as a dedicated `pcb` user (system service) or in its container [call].
 M5 additions:
 - The control socket (§15) is 0600 in a 0700 directory and accepts the daemon's UID only (SO_PEERCRED, Linux; the
