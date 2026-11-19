@@ -84,7 +84,8 @@ jobs:
       id-token: write
       attestations: write
     uses: ./.github/workflows/image-build.yml
-    secrets: inherit
+    secrets:
+      PCB_REPORT_DSN: ${{ secrets.PCB_REPORT_DSN }}
     with:
       ref: ${{ needs.resolve.outputs.sha }}
       version: ${{ needs.resolve.outputs.tag }}
