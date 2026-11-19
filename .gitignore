@@ -11,3 +11,6 @@ coverage.*
 
 # pcb-ui.exe's icon and version resource, written by make winres
 /cmd/pcb-ui/rsrc_windows_*.syso
+
+# CI logs downloaded for debugging (e.g. cli.log), never committed
+*.log
