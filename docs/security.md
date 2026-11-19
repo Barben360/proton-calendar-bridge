@@ -182,8 +182,32 @@ Full rules (renewal, hostnames, your own certificate): [Thunderbird](thunderbird
 | Turn it off | `pcb update-check off`, or Settings, "Check for updates" in `pcb-ui`; `PCB_UPDATE_CHECK=off` in the environment for one process. `pcb version --check` still asks: it is an explicit request. |
 | A failed check | Says nothing: no alert, no change to the tray or to an exit code. |
 
+## Crash reports
+
+When pcb crashes, or hits an error that points to a bug in pcb, it keeps a report on disk and offers it to you. Nothing is sent until you say yes (or choose "always"). The report lets the author fix the bug.
+
+| | |
+|---|---|
+| What is kept | A fatal crash of `pcb` or `pcb-ui` (a panic or a Go runtime error), an unexpected error that pcb cannot classify, and a panic in a CalDAV or MCP request handler. Not kept: Proton being down, rate limits, network errors, wrong credentials, usage errors. A build without a crash report address (one built from source, a dev build) keeps nothing. |
+| What a report holds | Only fields pcb picks, one by one: the release (`pcb@vX.Y.Z`), the operating system name and the CPU architecture, the Go version, which binary (`pcb` or `pcb-ui`), which command (`pcb serve`, never its arguments), how pcb was installed (container, script, installer or other), the kind of failure, the names of pcb's functions and their file and line in the stack, and how many times it repeated. The text of a panic or error is dropped: it only stays when it is a message of Go's runtime (`index out of range`, `nil pointer dereference`). |
+| What a report never holds | Calendar events, account or calendar names, addresses, Proton IDs, tokens, passwords, your user name, the machine's name, any path of your machine, environment variables, arguments. |
+| Where it goes | `https://errors.bbarrois.tech`, the author's own error tracker (Bugsink). Nowhere else. The server sees your IP address, as for any visit; it is configured not to record it. |
+| When | After you answered "Send" or "Always send" in `pcb-ui`, or ran `pcb crash-reports send`, or with the mode `always`. In `always`, `pcb serve` and `pcb-ui` send in the background, at start and when a report is saved; a short command (`pcb status`, a health check, a cron `pcb sync`) never sends. |
+| See it | `pcb crash-reports show` prints exactly what would be sent (the saved report is that very text); "Show report" in `pcb-ui`. |
+| Turn it off | `pcb crash-reports never`: no report is kept and those waiting are deleted. `PCB_CRASH_REPORTS=never` does it for one process (`always` forces sending the same way). Back to asking: `pcb crash-reports ask`. |
+| Delete | `pcb crash-reports discard`, or "Don't send" in `pcb-ui`. |
+| Limits | At most 10 reports are sent a day per install, at most 20 wait (the oldest goes first), and a report that failed 3 sends is dropped. A server's "slow down" (`Retry-After`) is honoured. The same cause is kept once a day. A failed send says nothing outside `pcb crash-reports send`. |
+
+The modes, kept in `reports.json` in the state directory (the reports wait in its `reports/` folder, with lock files beside them):
+- `ask` (the default): reports wait for your answer. `pcb-ui` asks in a dialog at start, or in a panel when a report is saved while it runs. Closing the dialog changes nothing: it asks again at the next start.
+- `always`: reports are sent as they come. Choose it in the dialog, with "Send crash reports" in Settings, or `pcb crash-reports always`.
+- `never`: nothing is kept.
+
+A command that is not `pcb crash-reports` never asks. While reports wait in `ask` mode, `pcb doctor` shows a warning on its `crash reports` line, `pcb serve` logs `crash reports waiting: pcb crash-reports show` at start, and a command you run in a terminal (without `--json`) prints `pcb kept a crash report: pcb crash-reports show` on stderr, at most once a day. A pcb run as root refuses to keep reports in another user's state directory, like its other files.
+
 ## What never leaves pcb
 
 - Secrets never go in argv, logs or errors.
 - Logs carry IDs only. A refused write is logged with its code, calendar, href and reason, never the event's content.
 - The MCP audit line never has a title, a description, a link or a secret ([agents](agents.md#audit)).
+- Crash reports carry none of that either, and leave only after you agree ([crash reports](#crash-reports)).
