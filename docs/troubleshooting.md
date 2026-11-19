@@ -42,7 +42,7 @@ pcb doctor
 | `pcb-ui` shows a dialog and exits 20 | `pcb serve` (the service, the container) already serves this state | `pcb service stop` first, or use one of them. [One server per state](desktop.md#one-server-per-state-directory) |
 | `pcb is already serving (pid N, kind K)`, exit 20 | Another `pcb serve`, `pcb-ui` (`ui`) or agent session (`mcp`) holds the state | Stop it, or let commands go through it. [Thunderbird](thunderbird.md#what-pcb-serve-does) |
 | `pcb-ui` says `bridge stopped: <error>` | An error in `config.toml` after "Restart bridge" | Fix the file, press "Restart bridge". [Desktop](desktop.md#edit-the-configuration) |
-| Exit 20 at start, the port in use | Another program listens on the CalDAV port | Stop it, or change `[caldav] listen`. [Listener](thunderbird.md#the-caldav-listener) |
+| Exit 20 at start, the port in use; `pcb doctor` fails its `caldav listener` line | Another program listens on the CalDAV port | Stop it, or change `[caldav] listen`. [Listener](thunderbird.md#the-caldav-listener) |
 | Thunderbird shows a certificate exception | pcb's self-signed certificate, or a replaced one | Confirm only when its SHA-256 fingerprint equals the one `pcb client show` or `pcb doctor` prints. [Certificate](thunderbird.md#tls-and-the-certificate) |
 | `pcb mcp` exits 20 asking for `pcb service start` | The user service is installed but did not answer within 30 s | `pcb service start`. [Agents](agents.md#on-this-machine-stdio) |
 | `pcb install` refuses, exit 10 | A path with a space, `%`, `$`, a quote or a backslash | [Service](service.md#when-pcb-install-refuses-a-path) |

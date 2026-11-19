@@ -186,6 +186,9 @@ func (r *refusal) Is(target error) bool { return target == ErrRefused }
 // Dial share it, so pcb serve's hint and pcb status's offline fallback agree.
 const maxPath = sunPathLen - 1
 
+// MaxSocketPath is maxPath for pcb doctor: 107 bytes on Linux.
+const MaxSocketPath = maxPath
+
 // maxBody is the largest request body.
 const maxBody = 64 << 10
 

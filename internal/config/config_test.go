@@ -115,6 +115,40 @@ func TestLoadRefusesUnknownKey(t *testing.T) {
 	}
 }
 
+func TestLoadNamesEveryUnknownKey(t *testing.T) {
+	msg := refused(t, "[proton]\nappversion = \"x\"\n[bridge]\nport = 1\n[log]\nlevl = \"info\"\n")
+	for _, key := range []string{"proton.appversion", "bridge", "log.levl"} {
+		if !strings.Contains(msg, key) {
+			t.Errorf("error %q does not name %s", msg, key)
+		}
+	}
+	if !strings.Contains(msg, "unknown keys") {
+		t.Errorf("error %q, want the plural form for several keys", msg)
+	}
+	if one := refused(t, "[proton]\nappversion = \"x\"\n"); !strings.HasPrefix(one, "unknown key ") || strings.Contains(one, "keys") {
+		t.Errorf("one unknown key: %q, want the singular form", one)
+	}
+}
+
+func TestLoadRefusesPortZeroInConfigWithAHint(t *testing.T) {
+	dirs := paths.Dirs{Config: t.TempDir(), State: t.TempDir()}
+	for _, listen := range []string{"127.0.0.1:0", "[::1]:0", "localhost:00"} {
+		path := write(t, "[caldav]\nlisten = \""+listen+"\"\n")
+		_, err := config.Load(path, dirs)
+		var xe *exitcode.Error
+		if !errors.As(err, &xe) || xe.Code != exitcode.MustAct {
+			t.Fatalf("listen %q: %v, want a must-act error", listen, err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "caldav.listen") || !strings.Contains(msg, "port 0") || !strings.Contains(msg, "1080") {
+			t.Errorf("listen %q: %q, want it to name the key, port 0 and a fixed port to use", listen, msg)
+		}
+		if strings.Contains(msg, listen) {
+			t.Errorf("error echoes the value: %q", msg)
+		}
+	}
+}
+
 func TestLoadRefusesMalformedTOMLWithoutEchoingValues(t *testing.T) {
 	msg := refused(t, "[proton]\napp_version = \"hunter2-secret\n")
 	if strings.Contains(msg, "hunter2") {
@@ -223,10 +257,18 @@ func TestLoadCalDAVIsStrict(t *testing.T) {
 			t.Errorf("%q: error %q does not name %s", body, msg, key)
 		}
 	}
-	for _, ok := range []string{"127.0.0.1:1080", "[::1]:1080", "0.0.0.0:443", "[::]:8443", "localhost:1080", "pcb.lan:1", "192.168.1.5:0"} {
+	for _, ok := range []string{"127.0.0.1:1080", "[::1]:1080", "0.0.0.0:443", "[::]:8443", "localhost:1080", "pcb.lan:1", "192.168.1.5:1"} {
 		if _, err := config.Load(write(t, "[caldav]\nlisten = \""+ok+"\"\n"), dirs); err != nil {
 			t.Errorf("listen %q refused: %v", ok, err)
 		}
+	}
+}
+
+// A --listen flag keeps port 0 (any free port: a test or a one-off run); only
+// config.toml refuses it, since its port is saved in the client.
+func TestValidateListenStillAllowsPortZero(t *testing.T) {
+	if err := config.ValidateListen("127.0.0.1:0"); err != nil {
+		t.Errorf("ValidateListen(127.0.0.1:0) = %v, want it accepted", err)
 	}
 }
 

@@ -36,13 +36,16 @@ func selfSigned(t *testing.T, dir string, hostnames ...string) tlsutil.Result {
 	return res
 }
 
+// free is a bind probe that finds every port free.
+func free(string) error { return nil }
+
 func TestListenerCheck(t *testing.T) {
 	ctx := context.Background()
-	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080"}}.Run(ctx)
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080"}, Probe: free}.Run(ctx)
 	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "127.0.0.1:1080") || !strings.Contains(got.Message, "plain HTTP") {
 		t.Errorf("loopback: %+v", got)
 	}
-	got = doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "0.0.0.0:8443"}}.Run(ctx)
+	got = doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "0.0.0.0:8443"}, Probe: free}.Run(ctx)
 	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "TLS") || !strings.Contains(got.Message, "self-signed") {
 		t.Errorf("every interface: %+v", got)
 	}
@@ -52,7 +55,7 @@ func TestListenerCheck(t *testing.T) {
 	}
 	dir := t.TempDir()
 	selfSigned(t, dir)
-	got = doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080", TLSCert: tlsutil.CertPath(dir), TLSKey: tlsutil.KeyPath(dir)}}.Run(ctx)
+	got = doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080", TLSCert: tlsutil.CertPath(dir), TLSKey: tlsutil.KeyPath(dir)}, Probe: free}.Run(ctx)
 	if got.Status != doctor.StatusOK || !strings.Contains(got.Message, "TLS") || !strings.Contains(got.Message, "tls_cert") {
 		t.Errorf("user certificate on loopback: %+v", got)
 	}
@@ -290,7 +293,7 @@ func TestBindResolvesOnceWithATimeoutAndListensFamily(t *testing.T) {
 	}}
 	cc := config.CalDAV{Listen: b.Listen}
 	ctx := context.Background()
-	lr := doctor.ListenerCheck{CalDAV: cc, Bind: b}.Run(ctx)
+	lr := doctor.ListenerCheck{CalDAV: cc, Bind: b, Probe: free}.Run(ctx)
 	cr := doctor.CertificateCheck{CalDAV: cc, TLSDir: filepath.Join(t.TempDir(), "tls"), Bind: b}.Run(ctx)
 	if calls != 1 {
 		t.Errorf("%d lookups in one doctor run, want 1", calls)
@@ -342,5 +345,72 @@ func TestCertificateCheckBindIPAndDirectoryMode(t *testing.T) {
 	got = doctor.CertificateCheck{CalDAV: same, TLSDir: dir, Now: func() time.Time { return day0 }}.Run(ctx)
 	if got.Status != doctor.StatusError || !strings.Contains(got.Fix, "chmod 700") {
 		t.Errorf("directory 0755: %+v", got)
+	}
+}
+
+// listenerWithPort is a listener of this test holding a free loopback port,
+// so the bind probe meets a port that is really in use, whatever else runs
+// on the machine.
+func listenerWithPort(t *testing.T) (addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+func TestListenerCheckErrorsOnATakenPort(t *testing.T) {
+	addr := listenerWithPort(t)
+	_, port, _ := net.SplitHostPort(addr)
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: addr}, Probe: doctor.BindProbe}.Run(context.Background())
+	if got.Status != doctor.StatusError || !strings.Contains(got.Message, "port "+port) || !strings.Contains(got.Message, "in use") ||
+		!strings.Contains(got.Fix, "[caldav] listen") || !got.Transient {
+		t.Fatalf("a taken port: %+v, want an error naming the port and the next step, transient (exit 20)", got)
+	}
+}
+
+func TestListenerCheckOKOnAFreePortAndReleasesIt(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: addr}, Probe: doctor.BindProbe}.Run(context.Background())
+	if got.Status != doctor.StatusOK {
+		t.Fatalf("a free port: %+v, want ok", got)
+	}
+	again, err := net.Listen("tcp", addr) // the probe closed its socket at once
+	if err != nil {
+		t.Fatalf("the probe kept the port: %v", err)
+	}
+	_ = again.Close()
+}
+
+func TestListenerCheckDaemonOwnsThePort(t *testing.T) {
+	addr := listenerWithPort(t) // the daemon's own port is busy, by the daemon
+	probed := false
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: addr}, Live: &doctor.Live{Addr: addr, URL: "http://" + addr},
+		Probe: func(string) error { probed = true; return nil }}.Run(context.Background())
+	if got.Status != doctor.StatusOK || probed {
+		t.Fatalf("daemon answering: %+v probed=%v, want ok and no bind probe", got, probed)
+	}
+}
+
+func TestListenerCheckOtherBindFailuresWarn(t *testing.T) {
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:1080"},
+		Probe: func(string) error { return os.ErrPermission }}.Run(context.Background())
+	if got.Status != doctor.StatusWarn || !strings.Contains(got.Message, "cannot bind") {
+		t.Fatalf("a bind refused for another reason: %+v, want a warning", got)
+	}
+}
+
+func TestListenerCheckSkipsTheProbeForPortZero(t *testing.T) {
+	got := doctor.ListenerCheck{CalDAV: config.CalDAV{Listen: "127.0.0.1:0"},
+		Probe: func(string) error { t.Error("probed port 0"); return nil }}.Run(context.Background())
+	if got.Status != doctor.StatusOK {
+		t.Fatalf("port 0: %+v", got)
 	}
 }
