@@ -133,6 +133,7 @@ type Local struct {
 	skipSRP      func(username string) *auth.Pending    // replaces Login's SRP step when set
 	stateTimeout time.Duration                          // bounds humanNeeded's wait for state.lock when set
 	checkHook    func()                                 // runs at each login check of a Serve waiting for a login
+	afterRelogin func()                                 // runs when a relogin returned, before the op runs again
 	wipeHook     func()                                 // runs in Logout just before the wipe
 	serveHook    func()                                 // runs between a ready login check and serveOn
 	pollHook     func(d time.Duration) <-chan time.Time // replaces the login poll's timer

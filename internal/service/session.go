@@ -169,7 +169,8 @@ func (l *Local) withSession(ctx context.Context, op func(context.Context, *api.C
 // the session into the renderer: op gets the key generation read before the
 // session was (kmu held, with the logout check), so any drop after the
 // session read, a logout's included, invalidates the install. After a
-// relogin the generation is read again: the relogin dropped the keys itself.
+// relogin it is the one relogin read, under mu, before its own session read
+// (the relogin dropped the keys itself, and no logout runs inside it).
 func (l *Local) withSessionGen(ctx context.Context, op func(context.Context, *api.Client, store.Account, uint64) error) error {
 	gen, ok := l.r.generation()
 	if !ok {
@@ -184,11 +185,11 @@ func (l *Local) withSessionGen(ctx context.Context, op func(context.Context, *ap
 		return l.opError(ctx, st, err)
 	}
 	ended := err
-	if c, acc, st, err = l.relogin(ctx, c.Tokens(), ended); err != nil {
+	if c, acc, st, gen, err = l.relogin(ctx, c.Tokens(), ended); err != nil {
 		return err
 	}
-	if gen, ok = l.r.generation(); !ok {
-		return errKeysDropped()
+	if l.afterRelogin != nil {
+		l.afterRelogin()
 	}
 	err = op(ctx, c, acc, gen)
 	if errors.Is(err, api.ErrSessionEnded) {
@@ -210,26 +211,37 @@ func (l *Local) opError(ctx context.Context, st store.State, err error) error {
 // already holds another session (another process relogged in), that one is
 // used. Otherwise, with unattended relogin, it logs in once with the sealed
 // credentials; without, the login is marked needs-login.
-func (l *Local) relogin(ctx context.Context, ended api.Tokens, cause error) (*api.Client, store.Account, store.State, error) {
+func (l *Local) relogin(ctx context.Context, ended api.Tokens, cause error) (*api.Client, store.Account, store.State, uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed.Load() {
-		return nil, store.Account{}, store.State{}, errClosed()
+		return nil, store.Account{}, store.State{}, 0, errClosed()
 	}
 	st, acc, err := l.stored()
 	if err != nil {
-		return nil, store.Account{}, store.State{}, err
+		return nil, store.Account{}, store.State{}, 0, err
 	}
 	if acc.UID != ended.UID || acc.RefreshToken != ended.RefreshToken {
-		return l.session(ctx)
+		return l.sessionGen(ctx)
 	}
 	if !st.Unattended || acc.Relogin == nil {
-		return nil, store.Account{}, store.State{}, l.humanNeeded(ctx, st, sessionEndedBy(cause, "run pcb login"))
+		return nil, store.Account{}, store.State{}, 0, l.humanNeeded(ctx, st, sessionEndedBy(cause, "run pcb login"))
 	}
 	if err := l.reloginOnce(ctx, st, acc); err != nil {
-		return nil, store.Account{}, store.State{}, err
+		return nil, store.Account{}, store.State{}, 0, err
 	}
-	return l.session(ctx)
+	return l.sessionGen(ctx)
+}
+
+// sessionGen is session with the key generation read before it (relogin
+// holds mu, so no logout starts between the two).
+func (l *Local) sessionGen(ctx context.Context) (*api.Client, store.Account, store.State, uint64, error) {
+	gen, ok := l.r.generation()
+	if !ok {
+		return nil, store.Account{}, store.State{}, 0, errKeysDropped()
+	}
+	c, acc, st, err := l.session(ctx)
+	return c, acc, st, gen, err
 }
 
 // beginRelogin runs a relogin's SRP step, under the login guard, unless a

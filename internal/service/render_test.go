@@ -363,6 +363,41 @@ func TestObjectChanges(t *testing.T) {
 		e.sync(t, false)
 	})
 
+	t.Run("ALoadThatReloggedInThenSawALogoutInstallsNoKeys", func(t *testing.T) {
+		// The session ended, the load relogged in (relogin returned, mu
+		// released), a whole logout ran with a failed revoke, and the load
+		// went on with the relogin's client: it must install nothing.
+		if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		e.clk.advance(61 * time.Second) // the login guard
+		e.loginUnattended(t, false)
+		e.sync(t, false)
+		e.f.RevokeSessions()
+		e.clk.advance(61 * time.Second)
+		e.f.FailNext("DELETE", "/auth/v4", 400, 2001, 0)
+		var inner error
+		e.svc.AfterRelogin(func() {
+			e.svc.AfterRelogin(nil)
+			if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+				inner = err
+			}
+		})
+		_, err := e.svc.ObjectsByUID(t.Context(), work, []string{"s@x"})
+		if inner != nil {
+			t.Fatal(inner)
+		}
+		if e.svc.HasKeys() {
+			t.Error("keys held after a logout that ran between a relogin and its retry")
+		}
+		if err == nil {
+			t.Error("a load that straddled a logout was answered")
+		}
+		e.clk.advance(61 * time.Second)
+		e.signIn(t)
+		e.sync(t, false)
+	})
+
 	t.Run("CloseDropsKeysAndALoadRacingItInstallsNothing", func(t *testing.T) {
 		gate := &bootstrapGate{entered: make(chan struct{}), release: make(chan struct{})}
 		svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,
