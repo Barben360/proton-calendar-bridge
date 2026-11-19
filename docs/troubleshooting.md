@@ -45,7 +45,7 @@ pcb doctor
 | Exit 20 at start, the port in use | Another program listens on the CalDAV port | Stop it, or change `[caldav] listen`. [Listener](thunderbird.md#the-caldav-listener) |
 | Thunderbird shows a certificate exception | pcb's self-signed certificate, or a replaced one | Confirm only when its SHA-256 fingerprint equals the one `pcb client show` or `pcb doctor` prints. [Certificate](thunderbird.md#tls-and-the-certificate) |
 | `pcb mcp` exits 20 asking for `pcb service start` | The user service is installed but did not answer within 30 s | `pcb service start`. [Agents](agents.md#on-this-machine-stdio) |
-| `pcb install` refuses, exit 10 | A path with a space, `%`, `$` or a non-ASCII letter | [Service](service.md#when-pcb-install-refuses-a-path) |
+| `pcb install` refuses, exit 10 | A path with a space, `%`, `$`, a quote or a backslash | [Service](service.md#when-pcb-install-refuses-a-path) |
 | A command run as root refuses, `sudo -u pcb pcb ...` | The state belongs to the `pcb` user | Run it as `pcb`. [System service](service.md#run-it-as-a-system-service) |
 | pcb refuses to start, `account files of an older pcb are beside the per-account layout` | An older binary was run after the upgrade | Remove those files or move the state directory aside. [Upgrade](install.md#no-downgrade-after-the-multi-account-layout) |
 | Windows: "Windows protected your PC" at the first start, or when you open the installer | SmartScreen: the binaries and the installer are not signed yet | More info, then Run anyway. [Windows](install.md#windows) |

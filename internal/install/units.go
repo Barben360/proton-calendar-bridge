@@ -3,6 +3,7 @@ package install
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -111,19 +112,29 @@ func unit(p UnitParams, system bool) []byte {
 // splits on spaces and expands %, $, quotes and backslashes.
 func checkUnitParams(p UnitParams) error {
 	for _, v := range []struct{ name, value string }{{"the pcb binary", p.Exec}, {"the config directory", p.ConfigDir}, {"the state directory", p.StateDir}} {
+		if !utf8.ValidString(v.value) {
+			return fmt.Errorf("%s holds bytes that are not valid UTF-8: pcb writes into a systemd unit only paths made of letters, digits and /._-+@,:=~ (any language, no spaces)", v.name)
+		}
 		if i := strings.IndexFunc(v.value, unsafeInUnit); i >= 0 {
 			r, _ := utf8.DecodeRuneInString(v.value[i:])
-			return fmt.Errorf("%s, %s, holds %q (U+%04X): pcb writes into a systemd unit only paths made of ASCII letters, digits and /._-+@,:=~",
+			return fmt.Errorf("%s, %s, holds %q (U+%04X): pcb writes into a systemd unit only paths made of letters, digits and /._-+@,:=~ (any language, no spaces)",
 				v.name, v.value, r, r)
 		}
 	}
 	return nil
 }
 
+// unsafeInUnit is true for a rune systemd would split on or expand. A
+// non-ASCII character is safe (a unit file is UTF-8 and systemd expands only
+// the ASCII specials % $ " ' \\ and splits only on whitespace), except a
+// space (U+00A0, U+2028...), a control character or an invalid byte, which
+// IndexFunc reports as U+FFFD.
 func unsafeInUnit(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		return false
+	case r >= utf8.RuneSelf:
+		return r == utf8.RuneError || unicode.IsSpace(r) || unicode.IsControl(r)
 	}
 	return !strings.ContainsRune("/._-+@,:=~", r)
 }

@@ -215,22 +215,41 @@ skip command systemctl restart pcb.service — neither the unit nor the binary w
 	}
 }
 
-// systemd splits unit values on spaces and expands % and $: such a path is
-// refused before anything is written.
+// systemd splits unit values on spaces and expands % $ quotes and
+// backslashes: such a path is refused before anything is written. A
+// non-ASCII letter is fine (the unit is UTF-8), a non-ASCII space or an
+// invalid byte is not.
 func TestPlanRefusesAPathAUnitCannotHold(t *testing.T) {
-	for _, home := range []string{"/home/alice smith", "/home/100%", "/home/a$b", "/home/josé"} {
+	for _, home := range []string{"/home/alice smith", "/home/100%", "/home/a$b", `/home/a"b`, "/home/a'b", `/home/a\b`,
+		"/home/a\tb", "/home/a\u00a0b", "/home/a\u2028b", "/home/\xffb"} {
 		s := newSys(t)
 		s.env["HOME"] = home
 		_, err := install.Plan(context.Background(), s.host(), install.Request{Scope: install.ScopeUser})
-		if exitcode.From(err) != exitcode.MustAct || !strings.Contains(fmt.Sprint(err), "only paths made of ASCII letters, digits and /._-+@,:=~") {
+		if exitcode.From(err) != exitcode.MustAct || !strings.Contains(fmt.Sprint(err), "pcb writes into a systemd unit only paths made of") {
 			t.Errorf("HOME=%q: err = %v, want a refusal (exit 10)", home, err)
 		}
 	}
 	s := newSys(t)
-	s.env["HOME"] = "/home/josé"
+	s.env["HOME"] = "/home/a b"
 	_, err := install.Plan(context.Background(), s.host(), install.Request{Scope: install.ScopeUser})
-	if want := `the config directory, /home/josé/.config/pcb, holds 'é' (U+00E9)`; !strings.Contains(fmt.Sprint(err), want) {
+	if want := `the config directory, /home/a b/.config/pcb, holds ' ' (U+0020)`; !strings.Contains(fmt.Sprint(err), want) {
 		t.Errorf("err = %v, want it to name the character: %q", err, want)
+	}
+}
+
+// A home with an accented letter installs: the unit holds it verbatim.
+func TestPlanAcceptsANonASCIIHome(t *testing.T) {
+	for _, home := range []string{"/home/josé", "/home/陈明", "/home/Åsa-Müller"} {
+		s := newSys(t)
+		s.env["HOME"] = home
+		steps, err := install.Plan(context.Background(), s.host(), install.Request{Scope: install.ScopeUser})
+		if err != nil {
+			t.Errorf("HOME=%q: %v, want a plan", home, err)
+			continue
+		}
+		if !strings.Contains(lines(steps), home+"/.config/pcb") {
+			t.Errorf("HOME=%q: plan does not use it:\n%s", home, lines(steps))
+		}
 	}
 }
 
