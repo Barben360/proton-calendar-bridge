@@ -108,6 +108,37 @@ func TestReportsSendFailureKeepsTheReport(t *testing.T) {
 	}
 }
 
+// A stored Retry-After lets nothing out: Send and Always send say so (the
+// dialog stays and shows it) rather than answer as if the report left.
+func TestReportsSendDuringRetryAfterSaysNotSent(t *testing.T) {
+	for name, send := range map[string]func(*ui.Reports) error{
+		"Send":        func(r *ui.Reports) error { return r.Send(rctx) },
+		"Always send": func(r *ui.Reports) error { return r.AlwaysSend(rctx) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, 200)
+			r.save(t, "a", true)
+			if err := r.Store.Edit(rctx, func(st *report.State) { st.RetryAfter = time.Now().Add(time.Hour) }); err != nil {
+				t.Fatal(err)
+			}
+			if err := send(r.Reports); err == nil || err.Error() != "not sent now: try again later" {
+				t.Errorf("error %v, want \"not sent now: try again later\"", err)
+			}
+			if n := r.pending(t); n != 1 || r.requests.Load() != 0 {
+				t.Errorf("%d pending, %d requests; want 1 and 0", n, r.requests.Load())
+			}
+		})
+	}
+}
+
+// With nothing waiting, Send has nothing to say.
+func TestReportsSendWithNothingWaiting(t *testing.T) {
+	r := newRig(t, 200)
+	if err := r.Send(rctx); err != nil {
+		t.Errorf("Send with nothing waiting: %v", err)
+	}
+}
+
 func TestReportsAlwaysSendSetsTheModeAndSends(t *testing.T) {
 	r := newRig(t, 200)
 	r.save(t, "a", true)
