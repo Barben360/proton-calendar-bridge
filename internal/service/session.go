@@ -229,7 +229,8 @@ func (l *Local) beginRelogin(ctx context.Context, username string, password []by
 // further automatic attempt is made; a transient failure (Blocked: too soon,
 // Proton down) leaves the state as it was. That includes a 429 whose
 // Retry-After is too long to wait: nothing is persisted but the guard's
-// stamp, so the next run retries once the guard allows it. A two-password
+// stamp and the Retry-After (loginguard.Defer), so the next run retries once
+// the guard allows it. A two-password
 // account's keys are opened with the sealed key passphrase (reopenKeys); one
 // that no longer opens them marks the login needs-login.
 func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Account) error {
@@ -256,6 +257,7 @@ func (l *Local) reloginOnce(ctx context.Context, st store.State, acc store.Accou
 		}
 		return phaseError(store.State{Phase: store.PhaseNeedsCaptcha, Captcha: &store.Captcha{URL: ce.URL, Token: ce.Token}})
 	case err != nil:
+		l.deferLogin(err, now)
 		return l.humanNeeded(ctx, st, l.fail(err))
 	}
 	switch {

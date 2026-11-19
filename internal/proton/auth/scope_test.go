@@ -1,10 +1,14 @@
 package auth_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
@@ -123,5 +127,29 @@ func TestScopeUnlockBadCredentialsOnlyOn422With8002(t *testing.T) {
 		if err := s.Unlock(t.Context()); err == nil || errors.Is(err, auth.ErrBadCredentials) {
 			t.Errorf("unlock answered %d/%d: err = %v, want a plain error", c.status, c.code, err)
 		}
+	}
+}
+
+// A 429 on the unlock PUT comes back at once with its Retry-After: waiting
+// it out inside the call would run into CallTimeout (30 s) for a 31 to 60 s
+// ask and lose the rate-limit class (issue 45).
+func TestScopeUnlockRateLimitKeepsRetryAfter(t *testing.T) {
+	t.Parallel()
+	f, s := lockedScope(t, protontest.Options{})
+	var slept []time.Duration
+	s.C = api.New(s.C.Tokens(), api.Options{
+		BaseURL: f.URL,
+		Limiter: rate.NewLimiter(rate.Inf, 1),
+		HTTP:    &http.Client{Timeout: 5 * time.Second},
+		Sleep:   func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil },
+	})
+	f.FailNext("PUT", "/core/v4/users/unlock", http.StatusTooManyRequests, 85131, 45)
+	err := s.Unlock(t.Context())
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != http.StatusTooManyRequests || e.RetryAfter != 45*time.Second {
+		t.Fatalf("Unlock = %v, want the 429 with Retry-After 45s", err)
+	}
+	if len(slept) != 0 {
+		t.Fatalf("Unlock waited %v inside its call; it must return the 429", slept)
 	}
 }

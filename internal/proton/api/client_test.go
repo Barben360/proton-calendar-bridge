@@ -906,3 +906,41 @@ func TestARetryIsLoggedAtDebugWithoutSecrets(t *testing.T) {
 		}
 	})
 }
+
+// A GET 503 that asks Retry-After is not resent before the wait: the longer
+// of the backoff and the ask (issue 45).
+func TestGET5xxWaitsRetryAfter(t *testing.T) {
+	var n atomic.Int32
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "30")
+			reply(w, 503, `{"Code":0,"Error":"down"}`)
+			return
+		}
+		reply(w, 200, `{"Code":1000}`)
+	}, api.Options{})
+	if err := c.Get(t.Context(), "/p", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n.Load() != 2 || len(s.d) != 1 || s.d[0] != 30*time.Second {
+		t.Fatalf("requests=%d sleeps=%v, want 2 requests and one 30s wait", n.Load(), s.d)
+	}
+}
+
+// A 503 asking for more than maxRetryAfter comes back at once, with its ask.
+func TestGET5xxRetryAfterTooLongFails(t *testing.T) {
+	var n atomic.Int32
+	c, s := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Retry-After", "600")
+		reply(w, 503, `{"Code":0,"Error":"down"}`)
+	}, api.Options{})
+	err := c.Get(t.Context(), "/p", nil, nil)
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != 503 || e.RetryAfter != 600*time.Second {
+		t.Fatalf("got %#v, want the 503 with Retry-After 600s", err)
+	}
+	if n.Load() != 1 || len(s.d) != 0 {
+		t.Fatalf("requests=%d sleeps=%v, want one request and no wait", n.Load(), s.d)
+	}
+}

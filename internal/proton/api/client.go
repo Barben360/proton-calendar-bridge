@@ -181,7 +181,8 @@ func (c *Client) Delete(ctx context.Context, path string, out any) error {
 // Policy: a 401 triggers one refresh and one retry; a 429 waits Retry-After
 // (at most 60 s, at most 3 attempts; any method, because Proton rejects a
 // rate-limited request before processing it); 5xx and network errors are retried for GET only, 3 attempts
-// with 1 s then 2 s backoff and ±20 % jitter. Errors never contain the body,
+// with 1 s then 2 s backoff and ±20 % jitter (a 5xx's Retry-After, at most
+// 60 s, is the least wait; a longer one is returned at once). Errors never contain the body,
 // the query or any header value.
 //
 // path must start with "/" and be already escaped: callers url.PathEscape
@@ -268,10 +269,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			}
 		case status >= 500 && method == http.MethodGet:
 			failed++
-			if failed >= maxAttempts {
+			// A Retry-After is a floor on the backoff; one over
+			// maxRetryAfter is returned to the caller with its ask.
+			if failed >= maxAttempts || perr.RetryAfter > maxRetryAfter {
 				return perr
 			}
-			if err := c.wait(ctx, method, path, status, backoff(failed)); err != nil {
+			if err := c.wait(ctx, method, path, status, max(backoff(failed), perr.RetryAfter)); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
 			}
 		default:

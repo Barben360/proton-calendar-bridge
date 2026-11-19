@@ -31,9 +31,14 @@ const CaptchaRetryInterval = 10 * time.Second
 // stamp is stale.
 const maxSkew = 5 * time.Minute
 
+// MaxDefer is the longest Retry-After Defer records, as ParseRetryAfter
+// clamps a header to an hour.
+const MaxDefer = time.Hour
+
 const (
-	lockFile  = "login.lock"
-	stampFile = "last-login"
+	lockFile      = "login.lock"
+	stampFile     = "last-login"
+	notBeforeFile = "not-before"
 )
 
 // TooSoon is the cause of a refusal because the previous attempt is too
@@ -59,7 +64,7 @@ func WaitFor(err error) (time.Duration, bool) {
 // refusal is a Blocked *exitcode.Error: another login holds the lock, the
 // stamp is malformed (fail closed: a manual delete costs less than a login
 // storm), or the previous attempt is younger than min (the stamp is then
-// left untouched). A stamp more than maxSkew ahead of now never blocks: it
+// left untouched; so is it while a Retry-After recorded by Defer runs). A stamp more than maxSkew ahead of now never blocks: it
 // is logged to log (nil discards it) and replaced by now, so it is logged
 // once.
 func Acquire(dir string, min time.Duration, now time.Time, log *slog.Logger) (release func(), err error) {
@@ -83,11 +88,64 @@ func Acquire(dir string, min time.Duration, now time.Time, log *slog.Logger) (re
 	return unlock, nil
 }
 
+// Defer records that Proton asked, at now, to wait before the next login
+// (a 429's Retry-After): no attempt is allowed before now+wait, whatever the
+// spacing. It outlives the process, is clamped to MaxDefer and never
+// shortens a wait already recorded. Call it with the lock Acquire returned
+// still held.
+func Defer(dir string, now time.Time, wait time.Duration) error {
+	until := now.Add(min(wait, MaxDefer))
+	path := filepath.Join(dir, notBeforeFile)
+	if b, err := atomicfile.ReadFile(path); err == nil {
+		if cur, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b))); err == nil && cur.After(until) && !cur.After(now.Add(MaxDefer)) {
+			return nil
+		}
+	}
+	if err := atomicfile.Write(path, []byte(until.UTC().Format(time.RFC3339Nano))); err != nil {
+		return fmt.Errorf("recording the login wait: %w", err)
+	}
+	return nil
+}
+
+// notBefore is how long Proton's last Retry-After still asks to wait at
+// now. A recorded time more than MaxDefer plus maxSkew ahead is from a
+// clock that was stepped back: ignored and logged.
+func notBefore(dir string, now time.Time, log *slog.Logger) (time.Duration, error) {
+	path := filepath.Join(dir, notBeforeFile)
+	b, err := atomicfile.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	var until time.Time
+	if err == nil {
+		until, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
+	}
+	if err != nil {
+		return 0, &exitcode.Error{
+			Code: exitcode.Blocked,
+			Err:  fmt.Errorf("cannot read the login wait in %s", notBeforeFile),
+			Hint: "wait a few minutes, then delete " + path,
+		}
+	}
+	if until.After(now.Add(MaxDefer + maxSkew)) {
+		if log != nil {
+			log.Warn("the recorded login wait is in the far future: the clock was set back; ignoring it",
+				"file", path, "not_before", until.UTC(), "now", now.UTC())
+		}
+		return 0, nil
+	}
+	return max(until.Sub(now), 0), nil
+}
+
 func check(dir string, min time.Duration, now time.Time, log *slog.Logger) error {
+	deferred, err := notBefore(dir, now, log)
+	if err != nil {
+		return err
+	}
 	path := filepath.Join(dir, stampFile)
 	b, err := atomicfile.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return tooSoon(deferred)
 	}
 	var last time.Time
 	if err == nil {
@@ -105,14 +163,19 @@ func check(dir string, min time.Duration, now time.Time, log *slog.Logger) error
 			log.Warn("the last login time is in the future: the clock was set back; ignoring it",
 				"file", path, "last_login", last.UTC(), "now", now.UTC())
 		}
+		return tooSoon(deferred)
+	}
+	return tooSoon(max(min-now.Sub(last), deferred))
+}
+
+// tooSoon is the refusal for a wait still to run, nil for none.
+func tooSoon(wait time.Duration) error {
+	if wait <= 0 {
 		return nil
 	}
-	if wait := min - now.Sub(last); wait > 0 {
-		return &exitcode.Error{
-			Code: exitcode.Blocked,
-			Err:  &TooSoon{Wait: wait},
-			Hint: fmt.Sprintf("retry in %s", wait.Round(time.Second)),
-		}
+	return &exitcode.Error{
+		Code: exitcode.Blocked,
+		Err:  &TooSoon{Wait: wait},
+		Hint: fmt.Sprintf("retry in %s", wait.Round(time.Second)),
 	}
-	return nil
 }
