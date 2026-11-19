@@ -94,17 +94,34 @@ func (w *Window) showReport() {
 // them in the Settings switch. Main goroutine, once, before Show.
 func (w *Window) SetReports(m ReportsModel) { w.reports = m }
 
-// AskReports asks what to do with the waiting reports in a dialog, over
-// the window (shown if hidden). Closing it changes nothing. Main goroutine.
-func (w *Window) AskReports() {
+// AskReports asks what to do with the waiting reports in a dialog over the
+// window. With raise the window is shown for it; without (a --background
+// start) the dialog waits for the first time the window is shown. Closing
+// it changes nothing. Main goroutine.
+func (w *Window) AskReports(raise bool) {
 	if w.reports == nil {
 		return
 	}
-	_, crashed := w.reports.Pending()
+	w.askPending = true
+	if raise {
+		w.Show("")
+	}
+}
+
+// presentReports opens the dialog AskReports left waiting, if reports
+// still wait (the panel may have answered them).
+func (w *Window) presentReports() {
+	if !w.askPending {
+		return
+	}
+	w.askPending = false
+	n, crashed := w.reports.Pending()
+	if n == 0 {
+		return
+	}
 	var dlg dialog.Dialog
 	a := w.newReportAnswers(func() { dlg.Hide() })
 	dlg = dialog.NewCustom(reportsTitle(crashed), "Close", container.NewVBox(wrapped(reportsAsk), a.box), w.win)
-	w.Show("")
 	dlg.Show()
 }
 

@@ -109,18 +109,19 @@ type Window struct {
 	mode     paneKind
 	selected string // the account of the account pane
 
-	banner    *widget.Label
-	bannerBox fyne.CanvasObject
-	upd       *updatePanel
-	reports   ReportsModel // nil: no crash reports in this build
-	repPanel  *reportPanel
-	notice    *widget.Label // the one-time no-tray line
-	rows      []row
-	rowBox    *fyne.Container
-	right     *fyne.Container
-	addBtn    *widget.Button // the sidebar's +
-	gear      *widget.Button
-	listen    *textLine // under Settings: where the bridge listens
+	banner     *widget.Label
+	bannerBox  fyne.CanvasObject
+	upd        *updatePanel
+	reports    ReportsModel // nil: no crash reports in this build
+	repPanel   *reportPanel
+	askPending bool          // AskReports waits for the window to be shown
+	notice     *widget.Label // the one-time no-tray line
+	rows       []row
+	rowBox     *fyne.Container
+	right      *fyne.Container
+	addBtn     *widget.Button // the sidebar's +
+	gear       *widget.Button
+	listen     *textLine // under Settings: where the bridge listens
 
 	pane     *accountPane
 	wiz      *wizardPane
@@ -499,6 +500,9 @@ func (w *Window) ShowLogin(username string) {
 	w.visible = true
 	w.win.Show()
 	w.win.RequestFocus()
+	if w.reports != nil {
+		w.presentReports()
+	}
 }
 
 // Show shows the window, on account when it names one the window knows. A
@@ -516,6 +520,9 @@ func (w *Window) Show(account string) {
 	w.visible = true
 	w.win.Show()
 	w.win.RequestFocus()
+	if w.reports != nil {
+		w.presentReports()
+	}
 }
 
 // onClose is what closing the window does: it hides (the app keeps running

@@ -5,14 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
 )
-
-// reportLockWait bounds how long start-up waits for the reports' locks: it
-// must not hold the window up.
-const reportLockWait = time.Second
 
 // Reports is what pcb-ui asks of the crash reports it keeps: the waiting
 // ones (the dialog and the panel), the answers (Send, Always send, Don't
@@ -22,30 +18,16 @@ type Reports struct {
 	Sender report.Sender
 }
 
-// StartReports keeps the crash reports of this pcb-ui process, for a build
-// with an address (dsn): a crash file for a fatal crash, the crash files of
-// dead processes turned into reports, and the recorder of unexpected
-// errors. It returns nil for a build without an address; a failure to keep
-// reports leaves them off, silently. stop is for a clean exit only, so that
-// a crash leaves its file behind.
-func StartReports(state, dsn string, m report.Meta, env func(string) string) (r *Reports, stop func()) {
-	stop = func() {}
-	if dsn == "" {
+// StartReports keeps the crash reports of this pcb-ui process
+// (daemon.StartReports, as pcb does). It returns nil when reporting is off:
+// a build without an address (dsn), a refused owner check (owner, nil: none)
+// or a failure. stop is for a clean exit only.
+func StartReports(state, dsn string, m report.Meta, env func(string) string, owner func() error) (r *Reports, stop func()) {
+	store, stop, ok := daemon.StartReports(daemon.ReportStart{StateDir: state, DSN: dsn, Meta: m, Env: env, Owner: owner})
+	if !ok {
 		return nil, stop
 	}
-	store := report.Store{StateDir: state, Env: env}
-	stopCrash, err := report.StartCrashFile(state, m)
-	if err != nil {
-		return nil, stop
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), reportLockWait)
-	_, _ = store.Collect(ctx)
-	cancel()
-	report.Install(&report.Process{Store: store, Meta: m, DSN: dsn})
-	return &Reports{Store: store, Sender: report.Sender{DSN: dsn, Store: store}}, func() {
-		report.Uninstall()
-		stopCrash()
-	}
+	return &Reports{Store: store, Sender: report.Sender{DSN: dsn, Store: store}}, stop
 }
 
 // Pending is how many reports wait, and whether one of them is a fatal
@@ -122,24 +104,27 @@ func (r *Reports) SetEnabled(ctx context.Context, on bool) error {
 	return r.Store.SetMode(ctx, report.Ask)
 }
 
-// Watch calls show each time a report is saved while the mode is ask and
-// reports wait, until ctx ends. It does nothing without an installed
-// recorder.
+// Watch calls show, on a goroutine of its own, each time a report is saved
+// while the mode is ask and reports wait, until ctx ends. It has subscribed
+// when it returns, so a report saved after is never missed. It does nothing
+// without an installed recorder.
 func (r *Reports) Watch(ctx context.Context, show func()) {
 	p := report.Current()
 	if p == nil {
 		return
 	}
 	poke, unsubscribe := p.Subscribe()
-	defer unsubscribe()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-poke:
-			if n, _ := r.Pending(); n > 0 && r.Asking() {
-				show()
+	go func() {
+		defer unsubscribe()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-poke:
+				if n, _ := r.Pending(); n > 0 && r.Asking() {
+					show()
+				}
 			}
 		}
-	}
+	}()
 }
