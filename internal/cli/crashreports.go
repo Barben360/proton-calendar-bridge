@@ -325,7 +325,7 @@ func (a *app) sendReports(cmd *cobra.Command, store report.Store) error {
 		err = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("send the crash reports: %w", sendErr), Hint: "run pcb crash-reports send again later"}
 	case sent < len(pend):
 		err = &exitcode.Error{Code: exitcode.Partial, Err: fmt.Errorf("%d of %s not sent", len(pend)-sent, reportCount(len(pend))),
-			Hint: fmt.Sprintf("they wait (at most %d are sent a day, a report is dropped after %d failed sends): run pcb crash-reports send again later",
+			Hint: fmt.Sprintf("they wait (the server may have asked pcb to wait, Retry-After; at most %d are sent a day; a report is dropped after %d failed sends): run pcb crash-reports send again later",
 				report.DailyCap, report.MaxAttempts)}
 	}
 	return Finish(cmd, d, text.String(), err)

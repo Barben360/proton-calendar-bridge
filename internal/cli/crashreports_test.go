@@ -286,6 +286,25 @@ func TestSendPartial(t *testing.T) {
 	}
 }
 
+// A stored Retry-After sends nothing: exit 40, and the hint names the
+// server's wait as well as the daily limit.
+func TestSendDuringRetryAfterNamesTheWait(t *testing.T) {
+	r := newRig(t, nil)
+	n := reportServer(t, r, func(int32) int { return http.StatusOK })
+	keepReports(t, r, 1)
+	if err := reportStore(r).Edit(t.Context(), func(st *report.State) { st.RetryAfter = r.now().Add(time.Hour) }); err != nil {
+		t.Fatal(err)
+	}
+	r.want(exitcode.Partial, "crash-reports", "send", "--json")
+	e := r.envelope().Error
+	if e == nil || !strings.Contains(e.Hint, "Retry-After") || !strings.Contains(e.Hint, "sent a day") {
+		t.Errorf("error %+v: want a hint naming Retry-After and the daily limit", e)
+	}
+	if n.Load() != 0 || len(pendingIDs(t, r)) != 1 {
+		t.Errorf("%d requests, pending %v; want none sent, the report kept", n.Load(), pendingIDs(t, r))
+	}
+}
+
 func TestCrashReportsSendWithoutAddress(t *testing.T) {
 	r := newRig(t, nil)
 	r.want(exitcode.OK, "crash-reports", "send")
