@@ -309,6 +309,32 @@ func TestObjectChanges(t *testing.T) {
 		}
 	})
 
+	t.Run("ALoadStartedDuringLogoutInstallsNoKeys", func(t *testing.T) {
+		// A read that starts after the logout dropped the keys and before it
+		// wiped the stored session finds the session still stored: it must
+		// not leave unlocked keys behind once Logout returns.
+		var during error
+		e.svc.OnWipe(func() {
+			_, during = e.svc.ObjectsByUID(t.Context(), work, []string{"s@x"})
+		})
+		if _, err := e.svc.Logout(t.Context(), service.LogoutRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		e.svc.OnWipe(nil)
+		if e.svc.HasKeys() {
+			t.Error("keys held after a logout that a read started inside")
+		}
+		if during == nil {
+			t.Error("a read started during the logout was answered")
+		}
+		if e.svc.HasCachedClient() {
+			t.Error("a client of the wiped session is cached after logout")
+		}
+		e.clk.advance(61 * time.Second) // the login guard
+		e.signIn(t)
+		e.sync(t, false)
+	})
+
 	t.Run("CloseDropsKeysAndALoadRacingItInstallsNothing", func(t *testing.T) {
 		gate := &bootstrapGate{entered: make(chan struct{}), release: make(chan struct{})}
 		svc, err := service.NewLocal(service.Options{Dirs: e.dirs, Config: e.cfg, Now: e.clk.Now, Sleep: e.clk.Sleep,

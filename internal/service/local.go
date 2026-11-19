@@ -363,6 +363,16 @@ func (l *Local) Logout(ctx context.Context, req LogoutRequest) (LogoutResult, er
 	}
 	l.dropPending(ctx)
 	l.expired = ""
+	// The stored session outlives the drop below until its wipe: a read in
+	// between must neither install keys nor leave a client of it cached.
+	// Dropping again on the way out clears what a read that had already read
+	// the session left (lock order: kmu and cmu are leaves, taken one at a
+	// time, under mu).
+	l.r.halt()
+	defer func() {
+		l.dropClient()
+		l.r.resume()
+	}()
 	if errors.Is(err, store.ErrRolledBack) {
 		l.revokeHeld()
 	}

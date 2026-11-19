@@ -43,7 +43,10 @@ type renderer struct {
 	load sync.Mutex   // serialises key loads and refreshes; held across Proton calls
 	kmu  sync.RWMutex // guards gen, ks, refreshedAt and ks.users; held for reading while keys are used
 	gen  uint64       // bumped by drop, so a load that raced it is discarded
-	ks   *keyState
+	// halts counts the logouts in progress: while it is above zero a key load
+	// installs nothing, since the session it would read is about to be wiped.
+	halts int
+	ks    *keyState
 	// refreshedAt is when the calendars' settings were last read from
 	// their bootstraps (Serve refreshes them every settingsRefresh).
 	refreshedAt time.Time
@@ -285,6 +288,26 @@ func (r *renderer) retire() {
 		r.ks.close()
 	}
 	r.ks = nil
+}
+
+// halt makes key loads refuse until the matching resume (Logout: the stored
+// session outlives the first drop of the keys until its wipe).
+func (r *renderer) halt() {
+	r.kmu.Lock()
+	r.halts++
+	r.kmu.Unlock()
+}
+
+func (r *renderer) resume() {
+	r.kmu.Lock()
+	r.halts--
+	r.kmu.Unlock()
+}
+
+func (r *renderer) halted() bool {
+	r.kmu.RLock()
+	defer r.kmu.RUnlock()
+	return r.halts > 0
 }
 
 // drop forgets the keys (clearing their private parameters), the rendered

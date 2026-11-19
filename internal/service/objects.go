@@ -161,7 +161,7 @@ func (l *Local) cacheFail(err error) error {
 	return l.fail(cacheError(err))
 }
 
-// errKeysDropped: a login, logout or Close dropped the keys during a read.
+// errKeysDropped: a login, logout or Close dropped (or a logout is under way and drops) the keys during a read.
 func errKeysDropped() error { return blocked("the login changed during the read", "retry") }
 
 // ensureKeys unlocks what the calendars ids need and is not unlocked yet:
@@ -193,6 +193,9 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 	ids := slices.Sorted(maps.Keys(cals))
 	if l.r.beforeLoad != nil {
 		l.r.beforeLoad()
+	}
+	if l.r.halted() {
+		return errKeysDropped()
 	}
 	gen, held := l.r.acquire()
 	defer l.r.release(held)
@@ -254,7 +257,7 @@ func (l *Local) loadKeys(ctx context.Context, c *api.Client, acc store.Account, 
 		discard()
 		return errClosed()
 	}
-	if l.r.gen != gen { // a login or logout dropped the keys meanwhile
+	if l.r.gen != gen || l.r.halts > 0 { // a login or logout dropped the keys meanwhile, or one is under way
 		discard()
 		return errKeysDropped()
 	}
