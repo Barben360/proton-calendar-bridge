@@ -3,6 +3,7 @@ package service_test
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +134,9 @@ func TestTransientErrorsEndTheLoginAfterThreeTries(t *testing.T) {
 			t.Fatalf("after failure %d: held = %v, want %v", i+1, held, want)
 		}
 	}
+	if n := e.f.Calls(http.MethodDelete, "/auth/v4"); n != 1 {
+		t.Errorf("%d session revocations, want 1: the cancelled login's half session is revoked", n)
+	}
 }
 
 // A validation failure that is not transient (a refused session) still ends
@@ -187,4 +191,72 @@ func TestMailboxPasswordForAOnePasswordAccountIsWarnedAbout(t *testing.T) {
 	}
 	lb.want(t, "mailbox password was given for an account with one password")
 	lb.wantNoSecret(t, "not-needed-mailbox")
+}
+
+// A held login whose 2FA submit was rate limited does not call Proton again
+// inside the Retry-After: the submit is refused with the wait, the login kept.
+func TestTOTPRateLimitHoldsTheLoginUntilTheWaitIsOver(t *testing.T) {
+	t.Parallel()
+	e := heldAtTOTP(t)
+	e.f.FailNext(http.MethodPost, "/auth/v4/2fa", http.StatusTooManyRequests, 85131, 120)
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "2m0s") {
+		t.Fatalf("hint after the 429 = %q, want it to name the 2m0s wait", ee.Hint)
+	}
+	e.clk.advance(10 * time.Second)
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint != "retry in 1m50s" {
+		t.Fatalf("early resubmit: hint %q, want retry in 1m50s", ee.Hint)
+	}
+	if n := e.f.Calls("POST", "/auth/v4/2fa"); n != 1 {
+		t.Fatalf("%d 2FA submits, want 1: none inside the Retry-After", n)
+	}
+	if p := e.phase(t); p != string(service.StateNeedsTOTP) {
+		t.Fatalf("phase = %q, want the login kept", p)
+	}
+	e.clk.advance(111 * time.Second)
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("submit after the wait = %+v, %v; want ready", res, err)
+	}
+}
+
+// A Retry-After longer than the login's remaining life ends it at once,
+// naming the wait, instead of holding a login that cannot be finished.
+func TestTOTPRateLimitBeyondTheLoginLifeEndsTheLogin(t *testing.T) {
+	t.Parallel()
+	e := heldAtTOTP(t)
+	e.f.FailNext(http.MethodPost, "/auth/v4/2fa", http.StatusTooManyRequests, 85131, 400)
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "6m40s") {
+		t.Fatalf("hint = %q, want it to name the 6m40s wait", ee.Hint)
+	}
+	if p := e.phase(t); p == string(service.StateNeedsTOTP) {
+		t.Fatalf("phase = %q, want the login ended", p)
+	}
+	if n := e.f.Calls(http.MethodDelete, "/auth/v4"); n != 1 {
+		t.Errorf("%d session revocations, want 1", n)
+	}
+}
+
+// An unattended relogin whose 2FA submit is rate limited records the wait too.
+func TestReloginTOTPRateLimitExtendsTheGuard(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{TwoFA: true})
+	e.loginUnattended(t, true)
+	e.f.RevokeSessions()
+	e.clk.advance(61 * time.Second)
+	e.f.FailNext(http.MethodPost, "/auth/v4/2fa", http.StatusTooManyRequests, 85131, 300)
+	if _, err := e.svc.Calendars(t.Context()); err == nil {
+		t.Fatal("the request with a rate-limited relogin succeeded")
+	}
+	srp := e.logins()
+	e.clk.advance(61 * time.Second)
+	_, err := e.svc.Calendars(t.Context())
+	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint != "retry in 3m59s" {
+		t.Fatalf("second request: hint %q, want retry in 3m59s", ee.Hint)
+	}
+	if n := e.logins() - srp; n != 0 {
+		t.Fatalf("%d login(s) reached Proton inside the Retry-After", n)
+	}
 }

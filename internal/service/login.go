@@ -300,6 +300,17 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 		return LoginResult{}, usage(unattendedHint, "pass the otpauth:// URI instead of a one-time code")
 	}
 	pl := l.pending
+	// Proton's Retry-After (a 429 on a login call, here the 2FA submit's) is
+	// honoured for the held login too: refused with the wait, nothing sent;
+	// a wait past the login's life ends it.
+	if wait, err := loginguard.Remaining(l.o.GuardDir, l.o.Now(), l.log()); err != nil {
+		return LoginResult{}, l.fail(err)
+	} else if wait > 0 {
+		if l.o.Now().Add(wait).After(pl.expires) {
+			l.dropPending(ctx)
+		}
+		return LoginResult{}, l.fail(&loginguard.TooSoon{Wait: wait})
+	}
 	if isURI(code) {
 		pl.totpURI = strings.TrimSpace(code)
 	}
@@ -416,6 +427,17 @@ func (l *Local) spendCaptcha(ctx context.Context, token string, last store.State
 // released it). A failure to record is logged: the 60 s spacing still holds.
 func (l *Local) deferLogin(err error, now time.Time) { l.deferWait(err, now, loginguard.Defer) }
 
+// deferTOTP is deferLogin for a 429 on the 2FA submit (a 429 elsewhere after
+// SRP is not a login's): the wait is recorded the same way. The guard's lock
+// is the caller's with loginguard.Defer, else taken for the write
+// (loginguard.DeferLocked).
+func (l *Local) deferTOTP(err error, now time.Time, record func(string, time.Time, time.Duration) error) {
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Path == "/auth/v4/2fa" {
+		l.deferWait(err, now, record)
+	}
+}
+
 // deferWait is deferLogin with record, the function that writes the wait.
 func (l *Local) deferWait(err error, now time.Time, record func(string, time.Time, time.Duration) error) {
 	var ae *api.Error
@@ -511,14 +533,11 @@ func captchaResult(ce *auth.CaptchaError, username string, attempt time.Time) Lo
 // two-password account without its mailbox password is held for it.
 func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, now time.Time, guarded bool) (LoginResult, error) {
 	res, err := l.complete(ctx, pl, totp, now)
-	var ae *api.Error
-	if errors.As(err, &ae) && ae.Path == "/auth/v4/2fa" {
-		// A 429 on the 2FA submit asks the next login to wait too; the guard's
-		// lock is the caller's when guarded, else taken for the write.
+	if err != nil {
 		if guarded {
-			l.deferLogin(err, now)
+			l.deferTOTP(err, now, loginguard.Defer)
 		} else {
-			l.deferWait(err, now, loginguard.DeferLocked)
+			l.deferTOTP(err, now, loginguard.DeferLocked)
 		}
 	}
 	if err == nil {
@@ -558,12 +577,24 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 		// session is valid and the code may be spent, so the login stays held
 		// at its 2FA step instead of starting over (another SRP, 60 s, a CAPTCHA).
 		pl.retries++
-		l.hold(pl, StateNeedsTOTP)
 		mapped := l.fail(err)
+		hint := fmt.Sprintf("the login is kept: submit the 2FA code again in a moment (%d tries left)", maxRetries-pl.retries)
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Status == http.StatusTooManyRequests && ae.RetryAfter > 0 {
+			// Proton's wait: nothing is sent before it is over (SubmitTOTP
+			// refuses), and a wait past the login's life ends it now.
+			if now.Add(ae.RetryAfter).After(pl.expires) {
+				l.abort(ctx, pl)
+				pl.release()
+				return LoginResult{}, mapped
+			}
+			hint = fmt.Sprintf("the login is kept: submit the 2FA code again in %s (%d tries left)",
+				ae.RetryAfter.Round(time.Second), maxRetries-pl.retries)
+		}
+		l.hold(pl, StateNeedsTOTP)
 		var ee *exitcode.Error
 		if errors.As(mapped, &ee) {
-			mapped = &exitcode.Error{Code: ee.Code, Err: ee.Err,
-				Hint: fmt.Sprintf("the login is kept: submit the 2FA code again in a moment (%d tries left)", maxRetries-pl.retries)}
+			mapped = &exitcode.Error{Code: ee.Code, Err: ee.Err, Hint: hint}
 		}
 		return LoginResult{}, mapped
 	}
