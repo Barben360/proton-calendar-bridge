@@ -27,7 +27,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint pcb-fake rehearse screenshots
+.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint vulncheck pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -159,6 +159,13 @@ shellcheck:
 ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 actionlint:
 	docker run --rm --network none -v "$(CURDIR):/m:ro" -w /m $(ACTIONLINT_IMAGE) -color
+
+# Known-vulnerability scan of the module graph and the call graph (a finding
+# in code the binaries reach fails). The version is pinned: CI and the weekly
+# workflow run this same target. Needs network (the Go vulnerability database).
+GOVULNCHECK_VERSION ?= v1.10.0
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 # The release scripts (scripts/release): the tag rules, the archives and
 # the MSI's licence RTF (a drift from LICENSE fails); each prints PASS last.

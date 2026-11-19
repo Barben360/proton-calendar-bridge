@@ -166,6 +166,14 @@ make shellcheck      # shellcheck the shell scripts
 | `PCB_INSTALL_ARCH` | the architecture, instead of `uname -m` |
 | `PCB_TEST_SH` | the shell `install_test.sh` runs `install.sh` with, instead of `sh`: `PCB_TEST_SH=dash make install-test` |
 
+### Known vulnerabilities
+
+```sh
+make vulncheck       # govulncheck (pinned version) over ./..., needs network
+```
+
+CI runs it in the `check` job and weekly (`.github/workflows/vulncheck.yml`), so a new advisory against a reachable dependency fails a run even when no code changed. Dependabot (`.github/dependabot.yml`) proposes the Go module, GitHub Actions and Dockerfile image (golang, distroless) bumps weekly. The digests pinned in the Makefile (shellcheck, actionlint) and in `.github/workflows/image-build.yml` (buildkit) are not tracked: bump them by hand.
+
 ## Live sessions
 
 A live session runs pcb against Proton itself. Rules:
