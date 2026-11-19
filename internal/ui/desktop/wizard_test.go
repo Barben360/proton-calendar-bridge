@@ -32,6 +32,7 @@ type fakeWizard struct {
 	canceled chan struct{}
 	account  string        // what Account returns: the add's local ID
 	wait     time.Duration // what CaptchaWait returns
+	hang     bool          // Submit returns only when its context ends
 }
 
 func (f *fakeWizard) enter(call string) {
@@ -74,10 +75,16 @@ func (f *fakeWizard) Account() string {
 	return f.account
 }
 func (f *fakeWizard) CaptchaURL() string { return "https://verify.example/captcha?token=t" }
-func (f *fakeWizard) Submit(_ context.Context, address string, password []byte) error {
+func (f *fakeWizard) Submit(ctx context.Context, address string, password []byte) error {
 	f.mu.Lock()
 	f.pw = string(password)
+	hang := f.hang
 	f.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		f.enter("submit aborted")
+		return ctx.Err()
+	}
 	f.enter("submit " + address)
 	return nil
 }
@@ -761,5 +768,30 @@ func TestHideKeepsAWizardWaitingForThePerson(t *testing.T) {
 	f.w.Show("")
 	if f.w.mode != paneWizard || !f.hasButton("Open verification") {
 		t.Errorf("the CAPTCHA screen is gone after a hide: %v", f.texts())
+	}
+}
+
+// A hung Sign in must be cancellable: the Cancel button stays enabled while a
+// call runs and ends the call's context, then drops the login.
+func TestCancelEndsASignInInFlight(t *testing.T) {
+	f := newFixture(t)
+	f.wiz.hang = true
+	f.w.Update(twoAccounts())
+	f.w.Show("")
+	f.tapAdd()
+	f.entry("name@example.org").SetText("carol@example.org")
+	f.entry("Proton password").SetText("pw")
+	test.Tap(f.button("Sign in")) // in flight, never answers by itself
+	cancel := f.button("Cancel")
+	if cancel.Disabled() {
+		t.Fatal("Cancel is disabled while the call runs: a hung call cannot be cancelled")
+	}
+	test.Tap(cancel)
+	f.wait() // returns only once the call's goroutine ended: its context was cancelled
+	if got := f.wiz.got(); !slices.Equal(got, []string{"submit aborted", "cancel"}) && !slices.Equal(got, []string{"cancel", "submit aborted"}) {
+		t.Errorf("calls = %v, want the call aborted and the login cancelled", got)
+	}
+	if f.w.wizard != nil {
+		t.Error("wizard still held")
 	}
 }

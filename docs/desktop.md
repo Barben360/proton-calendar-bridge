@@ -52,7 +52,7 @@ An account in Proton's two-password mode gets one more screen after the 2FA code
 - Type the second password (the one that decrypts your data), then press Unlock or Enter.
 - A wrong one shows an error with the tries left and stays on that screen, with no new Proton login; the third wrong one cancels the login.
 - Every field of the wizard has a label, the first one has the focus and Enter submits.
-- A login waiting for you (2FA code, mailbox password, CAPTCHA, or a Sign in in progress) is not dropped by accident: the Settings gear, another account or the + ask "Abandon this login?" first, and closing the window only hides it, leaving the login where it was. The wizard's own Cancel button cancels at once.
+- A login waiting for you (2FA code, mailbox password, CAPTCHA, or a Sign in in progress) is not dropped by accident: the Settings gear, another account or the + ask "Abandon this login?" first, and closing the window only hides it, leaving the login where it was. The wizard's own Cancel button cancels at once, even while a call to Proton hangs.
 - The account list shows `needs mailbox password` while the login waits.
 
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).

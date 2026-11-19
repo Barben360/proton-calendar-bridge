@@ -191,6 +191,8 @@ type busy struct {
 	label *widget.Label
 	ctrls []fyne.Disableable
 	on    bool
+	// abort ends the context of the call in flight (nil when none runs).
+	abort context.CancelFunc
 }
 
 func newBusy(ctrls ...fyne.Disableable) *busy {
@@ -223,8 +225,12 @@ func (w *Window) run(b *busy, text string, work func(ctx context.Context) error,
 		return
 	}
 	b.set(true, text)
+	ctx, abort := context.WithCancel(context.Background())
+	b.abort = abort
 	var err error
-	w.async(func() { err = work(context.Background()) }, func() {
+	w.async(func() { err = work(ctx) }, func() {
+		abort()
+		b.abort = nil
 		b.set(false, "")
 		done(err)
 	})
@@ -400,6 +406,7 @@ func (w *Window) closeWizard() {
 		return
 	}
 	w.wizard = nil
+	w.wiz.abortCall()
 	w.wiz.reset()
 	if m.Step() == ui.StepDone {
 		return
