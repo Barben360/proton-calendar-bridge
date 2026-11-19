@@ -18,6 +18,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/api"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/auth"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/keys"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -305,6 +306,9 @@ func mapError(err error, keyFile string) error {
 	case errors.As(err, &ne), errors.As(err, &ue):
 		return classed(classNetwork, "cannot reach Proton", "check the network connection, then retry")
 	}
+	// Nothing above knows it: a bug, most likely. A report keeps its type
+	// chain and this stack, never its text (report.RecordError).
+	report.RecordError(err)
 	return blocked("unexpected error", "run pcb doctor; if it persists, report it without any secret")
 }
 

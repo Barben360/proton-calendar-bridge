@@ -130,20 +130,7 @@ func TestVersionCheckJSON(t *testing.T) {
 // doctorUpdate runs pcb doctor --json and returns its exit code and update line.
 func doctorUpdate(t *testing.T, r *rig) (exitcode.Code, map[string]string) {
 	t.Helper()
-	code := r.run("doctor", "--json")
-	var d struct {
-		Results []map[string]string `json:"results"`
-	}
-	if err := json.Unmarshal(r.envelope().Data, &d); err != nil {
-		t.Fatal(err)
-	}
-	for _, res := range d.Results {
-		if res["name"] == "update" {
-			return code, res
-		}
-	}
-	t.Fatalf("no update line in %v", d.Results)
-	return 0, nil
+	return doctorLine(t, r, "update")
 }
 
 func TestDoctorUpdateLine(t *testing.T) {

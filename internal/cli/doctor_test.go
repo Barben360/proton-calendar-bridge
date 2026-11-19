@@ -89,21 +89,21 @@ func TestDoctorExitCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// The DPAPI key for the key file, and Windows' own checks, whose
 		// statuses depend on the machine (elevation, zone, Start at login).
-		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon,update"; got != want {
+		if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,dpapi key,caldav listener,tls certificate,accounts,elevated,time zone,start at login,service,daemon,update,crash reports"; got != want {
 			t.Fatalf("names = %s, want %s", got, want)
 		}
 		if got, want := strings.Join(statuses[:9], ",")+","+statuses[len(statuses)-1], "ok,error,skip,ok,ok,skip,ok,skip,warn,skip"; got != want {
 			t.Fatalf("statuses = %s, want %s", strings.Join(statuses, ","), want)
 		}
 		// No systemd on Windows: pcb-ui's Start at login is the service.
-		if got := env.Data.Results[len(env.Data.Results)-3]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
+		if got := env.Data.Results[len(env.Data.Results)-4]; got.Status != "skip" || got.Message != "no service on Windows: pcb-ui's Start at login runs it" {
 			t.Errorf("service = %+v", got)
 		}
-	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon,update"; got != want {
+	} else if got, want := strings.Join(names, ","), "platform,config dir,state dir,config file,sealer,key file,caldav listener,tls certificate,accounts,service,daemon,update,crash reports"; got != want {
 		t.Fatalf("names = %s, want %s", got, want)
-	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip"; got != want {
+	} else if got, want := strings.Join(statuses, ","), "ok,error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip,skip"; got != want {
 		// platform may be warn on an unsupported test host
-		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip") {
+		if !strings.HasSuffix(got, ",error,skip,ok,ok,skip,ok,skip,warn,skip,skip,skip,skip") {
 			t.Fatalf("statuses = %s, want %s", got, want)
 		}
 	}
@@ -114,7 +114,7 @@ func TestDoctorExitCode(t *testing.T) {
 
 func TestDoctorTextOK(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("the Linux list (12 lines, service: no systemd here); TestDoctorTextOKOnWindows checks Windows' list")
+		t.Skip("the Linux list (14 lines, service: no systemd here); TestDoctorTextOKOnWindows checks Windows' list")
 	}
 	cfg := isolate(t)
 	state := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "state", "pcb")
@@ -123,8 +123,11 @@ func TestDoctorTextOK(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errs)
 	}
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 13 { // 9 checks, the accounts warning with its fix line, the service, the daemon, the update check
-		t.Fatalf("stdout = %q, want 13 lines", out)
+	if len(lines) != 14 { // 9 checks, the accounts warning with its fix line, the service, the daemon, the update check, crash reports
+		t.Fatalf("stdout = %q, want 14 lines", out)
+	}
+	if want := "–  crash reports: this build has no crash report address"; lines[13] != want {
+		t.Errorf("line 13 = %q, want %q", lines[13], want)
 	}
 	if want := "–  update: dev build"; lines[12] != want {
 		t.Errorf("line 12 = %q, want %q", lines[12], want)

@@ -77,8 +77,12 @@ func (p *Process) now() time.Time {
 	return time.Now()
 }
 
+// saveWait bounds how long a report waits for the store's lock: it is
+// saved on the caller's path (a request, a command), which must not stall.
+const saveWait = time.Second
+
 func (p *Process) save(e Event) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), saveWait)
 	defer cancel()
 	if p.Store.Save(ctx, e) == nil {
 		p.notify()

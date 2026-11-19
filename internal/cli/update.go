@@ -35,17 +35,27 @@ func (a *app) updatePath() string {
 	return update.StorePath(dirs.State)
 }
 
-// updateHint is how this install is updated (update.Hint).
-func (a *app) updateHint() string {
+// thisInstall is this install as update.Hint reads it; ok is false when the
+// running binary cannot be found.
+func (a *app) thisInstall() (in update.Install, ok bool) {
 	exe, err := a.Exe()
 	if err != nil {
-		return ""
+		return update.Install{}, false
 	}
 	home := a.Env("HOME")
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
-	return update.Hint(update.Install{GOOS: runtime.GOOS, Exe: exe, Home: home, Env: a.Env})
+	return update.Install{GOOS: runtime.GOOS, Exe: exe, Home: home, Env: a.Env}, true
+}
+
+// updateHint is how this install is updated (update.Hint).
+func (a *app) updateHint() string {
+	in, ok := a.thisInstall()
+	if !ok {
+		return ""
+	}
+	return update.Hint(in)
 }
 
 // updateData is pcb version --check's "update".

@@ -54,3 +54,45 @@ func TestHintInTheContainer(t *testing.T) {
 		t.Errorf("Hint = %q, want %q", got, want)
 	}
 }
+
+func TestInstallKind(t *testing.T) {
+	container := install("linux", "/usr/local/bin/pcb")
+	container.Env = func(k string) string {
+		if k == "PCB_INSTALL" {
+			return "container"
+		}
+		return ""
+	}
+	msi := func(exe string) update.Install {
+		in := install("windows", exe)
+		in.Env = func(k string) string {
+			if k == "LOCALAPPDATA" {
+				return `C:\Users\u\AppData\Local`
+			}
+			return ""
+		}
+		return in
+	}
+	for name, c := range map[string]struct {
+		in   update.Install
+		want string
+	}{
+		"container":                     {container, "container"},
+		"install.sh, default prefix":    {install("linux", "/home/u/.local/bin/pcb", "/home/u/.local/bin/pcb-ui"), "script"},
+		"install.sh, other prefix":      {install("linux", "/opt/pcb/bin/pcb"), "script"},
+		"install.sh on macOS":           {install("darwin", "/home/u/.local/bin/pcb"), "script"},
+		"MSI":                           {msi(`C:\Users\u\AppData\Local\Programs\pcb\pcb.exe`), "msi"},
+		"MSI, other case and slashes":   {msi(`c:/users/u/appdata/local/programs/PCB/pcb-ui.exe`), "msi"},
+		"Windows, elsewhere":            {msi(`C:\tools\pcb\pcb.exe`), "other"},
+		"Windows, under the MSI folder": {msi(`C:\Users\u\AppData\Local\Programs\pcb\old\pcb.exe`), "other"},
+		"Windows without LOCALAPPDATA":  {install("windows", `\Programs\pcb\pcb.exe`), "other"},
+		"Linux, not under a bin":        {install("linux", "/usr/local/lib/pcb/pcb"), "other"},
+		"no executable path":            {install("linux", ""), "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := update.InstallKind(c.in); got != c.want {
+				t.Errorf("InstallKind = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
