@@ -65,19 +65,32 @@ func Group(use, short string, subs ...*cobra.Command) *cobra.Command {
 		Annotations: map[string]string{groupKey: "true"},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return UsageError(fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath()))
+				return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath()),
+					Hint: commandsHint(cmd)}
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if JSONMode(cmd) {
-				return UsageError(fmt.Errorf("%q needs a command", cmd.CommandPath()))
+				return &exitcode.Error{Code: exitcode.Usage, Err: fmt.Errorf("%q needs a command", cmd.CommandPath()), Hint: commandsHint(cmd)}
 			}
 			return cmd.Help()
 		},
 	}
 	c.AddCommand(subs...)
 	return c
+}
+
+// commandsHint is the next step after a bad or missing subcommand of cmd:
+// its help, and the commands it has.
+func commandsHint(cmd *cobra.Command) string {
+	var names []string
+	for _, c := range cmd.Commands() {
+		if c.IsAvailableCommand() {
+			names = append(names, c.Name())
+		}
+	}
+	return "run " + cmd.CommandPath() + " --help; its commands: " + strings.Join(names, ", ")
 }
 
 // NoJSON hides the inherited --json from c's help, for a command that

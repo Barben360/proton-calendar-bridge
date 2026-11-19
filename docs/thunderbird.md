@@ -182,6 +182,8 @@ hostnames = ["pcb.lan"]        # names clients use; the first one is in the prin
 
 - A loopback address serves plain HTTP; any other one serves TLS 1.2+ only. With `tls_cert` and `tls_key`, every address serves TLS.
 - `0.0.0.0` listens on IPv4 only; `[::]` is dual stack.
+- `config.toml` refuses port `0`: the port would change at every start and break the URL saved in your client. `pcb serve --listen` still accepts it for a one-off run.
+- `pcb doctor` tries to bind the port while no daemon answers, and fails when another program holds it.
 
 After editing, restart pcb (`pcb service restart` for the service, "Restart bridge" in `pcb-ui`).
 

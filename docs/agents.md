@@ -223,6 +223,6 @@ Every tool call is one `mcp call` line in the daemon's log:
 Each line has the tool, how the agent came (`remote`, `relay`, `stdio`), the token name or profile, the accounts, calendars and event UID, the outcome and the duration; never a title, a description, a link or a secret.
 
 - `pcb status` shows `mcp: remote on|off; live sessions: ...` while a daemon runs.
-- `pcb doctor` lists expired tokens, and warns when remote is on with a non-loopback bind and no usable token.
+- `pcb doctor` lists expired tokens, and warns when remote is on and no usable token exists, whatever the bind.
 
 Why it works this way: [an MCP adapter over stdio and remote](../spec/decisions/0016-mcp-adapter.md), and the [MCP section of the design spec](../spec/SPEC.md#12-a4--mcp-adapter).

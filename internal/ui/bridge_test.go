@@ -59,8 +59,21 @@ func newLabWith(t *testing.T, o protontest.Options) *lab {
 		}
 		return ""
 	}}
-	l.writeConfig(t, "127.0.0.1:0")
+	l.writeConfig(t, freeAddr(t))
 	return l
+}
+
+// freeAddr is a loopback address with a port that was free a moment ago:
+// config.toml refuses port 0, so the labs name a real one.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
 }
 
 func (l *lab) writeConfig(t *testing.T, listen string) {
@@ -218,12 +231,7 @@ func TestRestartReadsTheConfig(t *testing.T) {
 	}
 	first := b.Info().Addr
 	// A free port the new config names.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := ln.Addr().String()
-	_ = ln.Close()
+	want := freeAddr(t)
 	l.writeConfig(t, want)
 	if err := b.Restart(t.Context()); err != nil {
 		t.Fatalf("Restart: %v", err)
@@ -462,8 +470,8 @@ func TestBridgeLogsTheCertificateWarning(t *testing.T) {
 		Now: func() time.Time { return time.Now().Add(-1000 * 24 * time.Hour) }}); err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = \"127.0.0.1:0\"\ntls_cert = %q\ntls_key = %q\n",
-		l.f.URL, filepath.Join(tlsDir, "cert.pem"), filepath.Join(tlsDir, "key.pem"))
+	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = %q\ntls_cert = %q\ntls_key = %q\n",
+		l.f.URL, freeAddr(t), filepath.Join(tlsDir, "cert.pem"), filepath.Join(tlsDir, "key.pem"))
 	if err := os.WriteFile(config.Path(l.dirs), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

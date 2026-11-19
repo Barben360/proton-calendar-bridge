@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
@@ -106,6 +107,29 @@ type ListenerCheck struct {
 	CalDAV config.CalDAV
 	Bind   *Bind // shared with CertificateCheck; nil: its own
 	Live   *Live // nil: no daemon answered
+	// Probe tries to bind a TCP address and releases it at once (nil:
+	// DefaultProbe). Tests give their own, so no real port is touched.
+	Probe func(addr string) error
+}
+
+// BindProbe is the real bind probe: it listens on addr and closes at once.
+func BindProbe(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return ln.Close()
+}
+
+// DefaultProbe is the probe of a ListenerCheck without one. Test binaries
+// that run the whole check list replace it, so they never depend on the
+// ports of the machine; production leaves it alone.
+var DefaultProbe = BindProbe
+
+// addrInUse says whether err is a bind refused because the address is
+// taken (EADDRINUSE; WSAEADDRINUSE, 10048, on Windows).
+func addrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.Errno(10048))
 }
 
 // Name implements Check.
@@ -129,6 +153,11 @@ func (c ListenerCheck) Run(ctx context.Context) Result {
 	}
 	ip, err := bindOf(c.Bind, c.CalDAV.Listen).IP(ctx)
 	r.Status = StatusOK
+	if err == nil {
+		if bad, ok := c.bindProblem(ip); ok {
+			return bad
+		}
+	}
 	switch {
 	case c.CalDAV.TLSCert != "":
 		r.Message = c.CalDAV.Listen + ", TLS with the certificate of caldav.tls_cert"
@@ -140,6 +169,35 @@ func (c ListenerCheck) Run(ctx context.Context) Result {
 		r.Message = c.CalDAV.Listen + ", plain HTTP (loopback only)"
 	}
 	return r
+}
+
+// bindProblem is the result for an address no daemon answers on, which pcb
+// serve would fail to bind: the port taken by another program is an error
+// (exit 20 as pcb serve's), any other refusal a warning (doctor may run
+// where the address is not this machine's). ok is false when the bind
+// works, or port 0 (any free port) leaves nothing to probe.
+func (c ListenerCheck) bindProblem(ip net.IP) (r Result, ok bool) {
+	_, port, err := net.SplitHostPort(c.CalDAV.Listen)
+	if err != nil || port == "0" {
+		return Result{}, false
+	}
+	probe := c.Probe
+	if probe == nil {
+		probe = DefaultProbe
+	}
+	addr := net.JoinHostPort(ip.String(), port)
+	err = probe(addr)
+	switch {
+	case err == nil:
+		return Result{}, false
+	case addrInUse(err):
+		return Result{Name: c.Name(), Status: StatusError, Transient: true,
+			Message: "port " + port + " is already in use: pcb serve could not bind " + c.CalDAV.Listen,
+			Fix:     "stop the program that holds port " + port + ", or set another port in [caldav] listen of config.toml"}, true
+	}
+	return Result{Name: c.Name(), Status: StatusWarn,
+		Message: "cannot bind " + c.CalDAV.Listen + " from here (" + err.Error() + "): pcb serve may fail the same way",
+		Fix:     "check that the address is one of this machine's and the port is allowed, or set another one in [caldav] listen"}, true
 }
 
 // CertificateCheck reports the certificate pcb serve presents: the user's

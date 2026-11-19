@@ -27,7 +27,7 @@ import (
 // is on.
 func TestBridgeServesRemoteMCP(t *testing.T) {
 	l := newLab(t)
-	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = \"127.0.0.1:0\"\n[mcp]\nremote = true\n", l.f.URL)
+	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = %q\n[mcp]\nremote = true\n", l.f.URL, freeAddr(t))
 	if err := os.WriteFile(config.Path(l.dirs), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

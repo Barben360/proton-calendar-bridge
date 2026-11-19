@@ -40,6 +40,9 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 	if err != nil { // ConfigCheck already reports it
 		return checks
 	}
+	if runtime.GOOS != "windows" {
+		checks = append(checks, SocketPathCheck{Path: dirs.Socket()})
+	}
 	layout, lerr := Accounts(dirs.State)
 	if layout.Sealer != "" { // the layout is readable
 		sc := SealerCheck{Sealer: layout.Sealer, Fresh: layout.Fresh, Backend: cfg.Secrets.Backend}
@@ -62,7 +65,7 @@ func Checks(env func(string) string, host install.Host, keyring service.Keyring,
 	checks = append(checks,
 		ListenerCheck{CalDAV: cfg.CalDAV, Bind: bind, Live: live},
 		CertificateCheck{CalDAV: cfg.CalDAV, TLSDir: filepath.Join(dirs.State, "tls"), Bind: bind, Live: live},
-		MCPTokensCheck{StateRoot: dirs.State, Remote: cfg.MCP.Remote, Listen: cfg.CalDAV.Listen, Bind: bind, Live: live})
+		MCPTokensCheck{StateRoot: dirs.State, Remote: cfg.MCP.Remote})
 	var layoutErr *LayoutError
 	switch {
 	case errors.As(lerr, &layoutErr):

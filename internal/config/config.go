@@ -161,10 +161,17 @@ func refuse(path string, err error) error {
 func describe(err error, data []byte) error {
 	var strict *toml.StrictMissingError
 	if errors.As(err, &strict) {
-		if len(strict.Errors) > 0 {
-			return fmt.Errorf("unknown key %s", strings.Join(strict.Errors[0].Key(), "."))
+		keys := make([]string, 0, len(strict.Errors))
+		for _, e := range strict.Errors {
+			keys = append(keys, strings.Join(e.Key(), "."))
 		}
-		return errors.New("unknown key")
+		switch len(keys) {
+		case 0:
+			return errors.New("unknown key")
+		case 1:
+			return fmt.Errorf("unknown key %s", keys[0])
+		}
+		return fmt.Errorf("unknown keys %s", strings.Join(keys, ", "))
 	}
 	var derr *toml.DecodeError
 	if errors.As(err, &derr) {
@@ -238,6 +245,12 @@ func (c CalDAV) validate() error {
 	if err := ValidateListen(c.Listen); err != nil {
 		return fmt.Errorf("caldav.listen %w", err)
 	}
+	// ValidateListen accepts port 0 (--listen and tests use it); a saved
+	// config must not: the port would change at every start and break the
+	// URL a client has stored.
+	if _, port, _ := net.SplitHostPort(c.Listen); strings.Trim(port, "0") == "" {
+		return errors.New("caldav.listen must not use port 0: the port would change at every start and break the URL saved in your CalDAV client; use a fixed port such as 1080")
+	}
 	if c.Hostnames != nil && len(c.Hostnames) == 0 {
 		return errors.New("caldav.hostnames must not be an empty list (leave the key out instead)")
 	}
@@ -262,7 +275,7 @@ func (c CalDAV) validate() error {
 // ValidateListen checks a listen address the way [caldav] listen is checked
 // (pcb serve --listen uses it too): HOST:PORT, the host an IP address or a
 // DNS name (never empty: 0.0.0.0 or [::] say "every interface"), the port
-// 0 to 65535 (0: any free port). The message never echoes the value.
+// 0 to 65535 (0: any free port, which config.toml alone refuses). The message never echoes the value.
 func ValidateListen(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {

@@ -3,25 +3,22 @@ package doctor
 import (
 	"context"
 	"fmt"
-	"net"
 	"path/filepath"
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/access"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/shellquote"
 )
 
 // MCPTokensCheck reports the MCP tokens of <StateRoot>/mcp-tokens.json
 // (design §5.8): an error when the file cannot be read, a warning per
-// expired token, and a warning when [mcp] remote serves /mcp on a
-// non-loopback bind and no token can use it. With no token and remote
-// off, MCP is not in use and it reports nothing.
+// expired token, and a warning when [mcp] remote serves /mcp and no token
+// can use it. With no token and remote off, MCP is not in use and it
+// reports nothing.
 type MCPTokensCheck struct {
 	StateRoot string
 	Remote    bool             // [mcp] remote
-	Listen    string           // [caldav] listen, when Bind is nil
-	Bind      *Bind            // shared with the CalDAV checks; nil: its own
-	Live      *Live            // the running daemon's listener (nil: none)
 	Now       func() time.Time // nil: time.Now
 }
 
@@ -69,30 +66,30 @@ func (c MCPTokensCheck) RunAll(ctx context.Context) []Result {
 		count = "1 token"
 	}
 	rs = append([]Result{{Name: c.Name(), Status: StatusOK, Message: count}}, rs...)
-	if c.Remote && usable == 0 && !c.loopback(ctx) {
+	if c.Remote && usable == 0 {
 		rs = append(rs, Result{Name: "mcp remote", Status: StatusWarn,
-			Message: "[mcp] remote serves /mcp on a non-loopback bind, but no token can use it",
+			Message: "[mcp] remote serves /mcp, but no token can use it: every request gets 401",
 			Fix:     "pcb mcp token add NAME --allow read, or set [mcp] remote = false"})
 	}
 	return rs
 }
 
-// loopback says whether the listener binds a loopback address: the running
-// daemon's, else what pcb serve would bind (one that cannot be resolved
-// counts as non-loopback, as for TLS).
-func (c MCPTokensCheck) loopback(ctx context.Context) bool {
-	var ip net.IP
-	if c.Live != nil {
-		host, _, err := net.SplitHostPort(c.Live.Addr)
-		if err != nil {
-			return false
-		}
-		ip = net.ParseIP(host)
-	} else {
-		var err error
-		if ip, err = bindOf(c.Bind, c.Listen).IP(ctx); err != nil {
-			return false
-		}
+// SocketPathCheck reports a control socket path longer than a Unix socket
+// address holds: pcb serve cannot create it (ctl.ErrPathTooLong), and pcb
+// status falls back to its offline view. Unix only: Windows' control
+// channel is a named pipe.
+type SocketPathCheck struct{ Path string }
+
+// Name implements Check.
+func (SocketPathCheck) Name() string { return "control socket path" }
+
+// Run implements Check.
+func (c SocketPathCheck) Run(context.Context) Result {
+	r := Result{Name: c.Name(), Status: StatusOK, Message: c.Path}
+	if n := len(c.Path); n > ctl.MaxSocketPath {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("%s is %d bytes: a Unix socket path holds %d at most, so pcb serve cannot create it", c.Path, n, ctl.MaxSocketPath)
+		r.Fix = "set PCB_STATE_DIR to a shorter absolute path"
 	}
-	return ip != nil && ip.IsLoopback()
+	return r
 }

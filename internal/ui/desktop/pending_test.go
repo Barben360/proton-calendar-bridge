@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -43,7 +44,13 @@ func bridgeLab(t *testing.T) (*fixture, *ui.Bridge, *protontest.Fake, string) {
 	if err := os.MkdirAll(dirs.Config, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = %q\n", pf.URL, "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0") // config.toml refuses port 0: name a port free a moment ago
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := ln.Addr().String()
+	_ = ln.Close()
+	body := fmt.Sprintf("[proton]\nbase_url = %q\n[caldav]\nlisten = %q\n", pf.URL, listen)
 	if err := os.WriteFile(config.Path(dirs), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
