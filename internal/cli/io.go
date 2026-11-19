@@ -78,6 +78,12 @@ type IO struct {
 	Now func() time.Time
 	// Sleep waits d, or until ctx ends with its error (nil: a timer).
 	Sleep func(ctx context.Context, d time.Duration) error
+	// ReportDSN is where crash reports go ("": buildinfo.ReportDSN, empty
+	// in a dev build, which keeps no report).
+	ReportDSN string
+	// StderrTerminal reports whether a person reads stderr (nil: whether
+	// Stderr is a terminal).
+	StderrTerminal func() bool
 }
 
 // osSignals is IO.Signals on the operating system's signals.
@@ -149,6 +155,13 @@ func (o IO) withDefaults() IO {
 	}
 	if o.Sleep == nil {
 		o.Sleep = sleep
+	}
+	if o.ReportDSN == "" {
+		o.ReportDSN = buildinfo.ReportDSN
+	}
+	if o.StderrTerminal == nil {
+		stderr := o.Stderr
+		o.StderrTerminal = func() bool { return isTerminalWriter(stderr) }
 	}
 	return o
 }

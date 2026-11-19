@@ -62,3 +62,35 @@ func Hint(in Install) string {
 	}
 	return installLine + " -s -- " + strings.Join(flags, " ")
 }
+
+// InstallKind names how pcb was installed, read as Hint reads it:
+// container (PCB_INSTALL=container), script (install.sh's layout on Linux
+// and macOS), msi (the Windows installer's folder,
+// %LOCALAPPDATA%\Programs\pcb), other for anything else.
+func InstallKind(in Install) string {
+	switch {
+	case in.Env != nil && in.Env("PCB_INSTALL") == "container":
+		return "container"
+	case strings.HasPrefix(Hint(in), installLine):
+		return "script"
+	case in.GOOS == "windows" && msiFolder(in):
+		return "msi"
+	}
+	return "other"
+}
+
+// msiFolder reports whether the binary sits in the folder the MSI installs
+// to (it refuses any other), compared as Windows compares paths.
+func msiFolder(in Install) bool {
+	if in.Env == nil || in.Exe == "" {
+		return false
+	}
+	base := in.Env("LOCALAPPDATA")
+	if base == "" {
+		return false
+	}
+	norm := func(p string) string { return strings.ToLower(strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`)) }
+	exe := norm(in.Exe)
+	dir := exe[:max(strings.LastIndex(exe, `\`), 0)]
+	return dir == norm(base)+`\programs\pcb`
+}

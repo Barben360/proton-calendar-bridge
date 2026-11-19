@@ -42,6 +42,7 @@ func TestDoctorTextOKOnWindows(t *testing.T) {
 		"–  service: no service on Windows: pcb-ui's Start at login runs it",
 		"–  daemon: not running: offline checks only",
 		"–  update: dev build",
+		"–  crash reports: this build has no crash report address",
 	}
 	if acl.Elevated() {
 		i := 10 // the elevated line

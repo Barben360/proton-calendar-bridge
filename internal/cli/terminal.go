@@ -92,3 +92,10 @@ func (t *osTerminal) ReadSecret(ctx context.Context, prompt string) (string, err
 	fmt.Fprintln(t.out)
 	return s, err
 }
+
+// isTerminalWriter reports whether w is a terminal (a file such as
+// os.Stderr on one).
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(interface{ Fd() uintptr })
+	return ok && isTerminalFD(int(f.Fd()))
+}
