@@ -309,6 +309,11 @@ jobs:
           msystem: UCRT64
           install: make mingw-w64-ucrt-x86_64-gcc
           path-type: inherit
+      # msys2 installs the repository's current packages: gcc cannot be
+      # pinned, so the compiler that built the release is logged.
+      - name: Record the compiler
+        shell: msys2 {0}
+        run: gcc --version | head -1
       - name: Build pcb-ui
         shell: msys2 {0}
         run: make ui VERSION="$GITHUB_REF_NAME"
@@ -479,6 +484,25 @@ jobs:
           path: dist/
           if-no-files-found: error
           overwrite: true
+      # The SBOM (SPDX) of the source the archives are built from: the Go
+      # modules of go.mod. It is attested to the archives by the release
+      # job; it is not a release file. Syft is pinned, not the action's
+      # default.
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom/pcb.spdx.json
+          syft-version: v1.55.0
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom/pcb.spdx.json
+          if-no-files-found: error
+          overwrite: true
 
   # The darwin archives are run before anything is published (§5.5):
   # install.sh installs the release's own archive, and its pcb must print
@@ -630,6 +654,10 @@ jobs:
         with:
           name: dist
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom
       - name: The files are the packaged ones
         run: |
           read -ra assets <<<"$ASSETS"
@@ -656,6 +684,12 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
+      # The SBOM, attested to the same files (gh attestation verify
+      # --predicate-type https://spdx.dev/Document/v2.3 FILE --owner ... shows it).
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/*
+          sbom-path: ${{ runner.temp }}/sbom/pcb.spdx.json
       - name: Create the draft
         run: |
           args=(--repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes)

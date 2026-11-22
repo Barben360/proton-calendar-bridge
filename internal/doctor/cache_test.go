@@ -126,3 +126,26 @@ func TestCacheCheckRefusesAVersionZeroFile(t *testing.T) {
 		t.Errorf("version 0: %+v", r)
 	}
 }
+
+// An interrupted check (Ctrl-C, a timeout) must not say the cache is damaged
+// nor tell the user to delete it.
+func TestCacheCheckInterrupted(t *testing.T) {
+	dir := t.TempDir()
+	c, err := cache.Open(cache.Path(dir), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ApplyDelta(context.Background(), "cal", "c", nil, nil, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := doctor.CacheCheck{StateDir: dir}.Run(ctx)
+	if r.Status != doctor.StatusWarn || !strings.Contains(r.Message, "interrupted") {
+		t.Errorf("result = %+v, want a warn saying interrupted", r)
+	}
+	if strings.Contains(r.Message, "damaged") || strings.Contains(r.Fix, "sync --full") || r.Fix != "" {
+		t.Errorf("an interrupted check blames the cache: %+v", r)
+	}
+}

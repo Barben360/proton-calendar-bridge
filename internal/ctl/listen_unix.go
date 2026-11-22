@@ -44,7 +44,7 @@ func Listen(path string) (net.Listener, error) {
 			return nil, fmt.Errorf("removing the stale control socket: %w", err)
 		}
 	}
-	ln, err := net.Listen("unix", path)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
 	if err != nil {
 		return nil, err
 	}

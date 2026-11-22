@@ -137,7 +137,7 @@ func TestOpenForAnotherAccountEmpties(t *testing.T) {
 	if err := other.db.QueryRowContext(bg, `SELECT value FROM meta WHERE key='account'`).Scan(&acct); err != nil || acct != "acct-2" {
 		t.Errorf("account = %q, %v", acct, err)
 	}
-	info, err := Inspect(path)
+	info, err := Inspect(context.Background(), path)
 	if err != nil || info.Account != "acct-2" {
 		t.Errorf("Inspect = %+v, %v", info, err)
 	}
@@ -414,9 +414,28 @@ func TestTwoProcessesReadWhileWriting(t *testing.T) {
 	}
 }
 
+// An ended context stops the queries and comes back as the error, never as
+// a QuickCheck verdict: the file was not found damaged.
+func TestInspectEndedContext(t *testing.T) {
+	path := Path(t.TempDir())
+	c := openAt(t, path, "acct-9")
+	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	info, err := Inspect(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if info.QuickCheck != "" {
+		t.Errorf("QuickCheck = %q, want none", info.QuickCheck)
+	}
+}
+
 func TestInspect(t *testing.T) {
 	path := Path(t.TempDir())
-	info, err := Inspect(path)
+	info, err := Inspect(context.Background(), path)
 	if err != nil || info.Exists {
 		t.Fatalf("absent: %+v, %v", info, err)
 	}
@@ -427,7 +446,7 @@ func TestInspect(t *testing.T) {
 	if _, err := c.ReplaceCalendar(bg, "cal", "c1", []Row{row("e1", 1)}, time.Unix(1, 0)); err != nil {
 		t.Fatal(err)
 	}
-	info, err = Inspect(path) // writer still open, WAL not checkpointed
+	info, err = Inspect(context.Background(), path) // writer still open, WAL not checkpointed
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +463,7 @@ func TestInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Inspect(path); err != nil {
+	if _, err := Inspect(context.Background(), path); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadDir(filepath.Dir(path))
@@ -459,7 +478,7 @@ func TestInspect(t *testing.T) {
 	if err := os.WriteFile(junk, []byte("this is not a sqlite database at all, just text padding padding padding"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	info, err = Inspect(junk)
+	info, err = Inspect(context.Background(), junk)
 	if err != nil || !info.Exists || info.QuickCheck == "ok" || info.QuickCheck == "" {
 		t.Errorf("junk: %+v, %v", info, err)
 	}

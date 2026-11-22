@@ -4,6 +4,7 @@ package dbustest
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,7 +50,9 @@ func Start(t testing.TB) (addr string) {
 	if err := os.WriteFile(cfg, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin, "--config-file="+cfg, "--print-address", "--nofork")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, bin, "--config-file="+cfg, "--print-address", "--nofork")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

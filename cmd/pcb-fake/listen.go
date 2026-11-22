@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -20,7 +21,7 @@ func listenLoopback(what, addr string) (net.Listener, error) {
 	if err != nil || !ip.IsLoopback() || ip.Zone() != "" {
 		return nil, fmt.Errorf("--%s %q: the fake listens on a loopback IP only (127.0.0.1 or ::1), never %q", what, addr, host)
 	}
-	l, err := net.Listen("tcp", net.JoinHostPort(ip.String(), port))
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", net.JoinHostPort(ip.String(), port))
 	if err != nil {
 		return nil, fmt.Errorf("--%s: %w", what, err)
 	}

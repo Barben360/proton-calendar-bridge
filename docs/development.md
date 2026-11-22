@@ -125,6 +125,14 @@ Release notes come from the pull request titles; edit them on GitHub afterwards 
 
 A refused tag that you keep still counts: a later run compares every `v*` tag to decide `latest` and `X.Y`, so a kept `v2.0.0` stops `v1.5.0` from taking them. Delete it.
 
+### Reproducible builds and what is pinned
+
+`make build` stamps the build date from `SOURCE_DATE_EPOCH`, else the commit's time (`git log -1 --format=%ct`), never the clock, and passes `-trimpath -buildvcs=false`: the same commit and toolchain give the same `pcb` bytes (`make build` twice on one tree gives one sha256), so a tagged release can be rebuilt and compared with its attested archive.
+
+- Pinned: the Go toolchain (`toolchain go1.27.4` in `go.mod`, read by every `setup-go`; the image's Go is pinned by the Dockerfile's `golang` digest and built with `GOTOOLCHAIN=local`, so it never downloads another toolchain: the image follows its digest and the release archives follow go.mod's `toolchain` line, and the two can differ by a patch release; bump the `toolchain` line by hand when a new Go patch is wanted), the modules (`go.sum`, `go mod verify` in the image build), every action (by commit SHA), WiX (7.0.1), go-winres, syft (the SBOM's generator).
+- Not pinned, only logged: the MSYS2 `gcc` that builds `pcb-ui.exe` (setup-msys2 installs the current packages; the release logs `gcc --version`), and Homebrew's `gnu-tar` on the macOS runners (the formula has no versioned variant). The runner images themselves (`ubuntu-latest`, `windows-latest`, `macos-latest`) move too. So `pcb-ui` and the Windows binaries are not reproducible bit for bit by someone else; `pcb` (static, no cgo) is.
+- The release attests every file's build provenance and an SPDX SBOM of the Go modules (`actions/attest-sbom`). The SBOM describes the source's Go modules (go.mod); it is not a scan of each archive. The image has provenance only: a BuildKit SBOM would turn the single-manifest image into an index with an attestation manifest, which the digest-based publish job does not handle.
+
 ### When a release run fails
 
 The run's jobs, in order: checks, the builds, the archives, macOS, `image`, `release`. What a failure leaves depends on where it happened:
@@ -161,7 +169,7 @@ make shellcheck      # shellcheck the shell scripts
 
 | Variable | Effect |
 |---|---|
-| `PCB_INSTALL_BASE_URL` | replaces `https://github.com/Barben360/proton-calendar-bridge/releases`; a `file://` URL works through curl |
+| `PCB_INSTALL_BASE_URL` | replaces `https://github.com/Barben360/proton-calendar-bridge/releases`; `https://` or `file://` only (a `file://` URL works through curl), anything else is refused |
 | `PCB_INSTALL_OS` | the system name, instead of `uname -s` |
 | `PCB_INSTALL_ARCH` | the architecture, instead of `uname -m` |
 | `PCB_TEST_SH` | the shell `install_test.sh` runs `install.sh` with, instead of `sh`: `PCB_TEST_SH=dash make install-test` |

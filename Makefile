@@ -1,7 +1,10 @@
 PKG     := github.com/Barben360/proton-calendar-bridge
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# DATE is reproducible for one commit: SOURCE_DATE_EPOCH, else the commit
+# time (as scripts/release/package.sh does), never the clock, so a rebuild of
+# a tag gives the attested archive's bytes. GNU date -d @N, BSD date -r N.
+DATE    ?= $(shell e=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct 2>/dev/null)}; if [ -n "$$e" ]; then date -u -d "@$$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$$e" +%Y-%m-%dT%H:%M:%SZ; else date -u +%Y-%m-%dT%H:%M:%SZ; fi)
 LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
@@ -30,7 +33,7 @@ export GOMAXPROCS := $(JOBS)
 .PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint vulncheck pcb-fake rehearse screenshots
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
 
 install: build
 	install -D -m 0755 $(OUT) $(DESTDIR)$(PREFIX)/bin/pcb$(EXE)
@@ -42,7 +45,7 @@ install: build
 UI_OUT ?= bin/pcb-ui$(EXE)
 
 ui: winres
-	CGO_ENABLED=1 go build -trimpath -ldflags "$(LDFLAGS)$(if $(filter windows,$(GOOS)), -H=windowsgui)" -o $(UI_OUT) ./cmd/pcb-ui
+	CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)$(if $(filter windows,$(GOOS)), -H=windowsgui)" -o $(UI_OUT) ./cmd/pcb-ui
 
 # The Windows resource of pcb-ui.exe: the icon (internal/ui/desktop/icons/app.svg
 # rendered at 256 px by cmd/pcb-ui/winres) and the version, written by the

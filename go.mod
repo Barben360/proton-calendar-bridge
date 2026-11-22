@@ -2,6 +2,8 @@ module github.com/Barben360/proton-calendar-bridge
 
 go 1.27
 
+toolchain go1.27.4
+
 require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/Microsoft/go-winio v0.6.4

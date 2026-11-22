@@ -96,6 +96,7 @@ mkdir -p "$tmp/evil"
 mkrelease "$tmp/evil" v6.6.6
 tools "$tmp/tools"
 tools "$tmp/tools-nodl" curl wget
+tools "$tmp/tools-nocurl" curl
 v1=$tmp/bins/v0.1.0/linux_amd64
 v2=$tmp/bins/v0.2.0/linux_amd64
 
@@ -112,6 +113,7 @@ new_case() {
   os=Linux arch=x86_64
   export GH_STUB_AUTH=0 GH_STUB_VERIFY=0 GH_STUB_OLD=0 GH_STUB_LOG="$c/gh.log"
   unset PCB_STUB_DAEMON_RC
+  base=
 }
 end_case() { [ "$case_failed" = 0 ] && echo "ok   $case_name"; }
 
@@ -141,7 +143,7 @@ exit 3'
 
 # run ARGS...: install.sh ARGS from $cwd; sets rc, writes $c/out and $c/err.
 run() {
-  (cd "$cwd" && env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="file://$c/rel" \
+  (cd "$cwd" && env HOME="$c/home" PATH="$run_path" PCB_INSTALL_BASE_URL="${base:-file://$c/rel}" \
     PCB_INSTALL_OS="$os" PCB_INSTALL_ARCH="$arch" "$SH" "$inst" "$@" >"$c/out" 2>"$c/err")
   rc=$?
 }
@@ -528,6 +530,46 @@ test_no_downloader() {
   end_case
 }
 
+# A release is fetched over https only: a plain-http (or other) base URL is
+# refused before any download, whatever the downloader.
+test_base_url_not_https() {
+  new_case base_url_not_https
+  # shellcheck disable=SC2016 # expanded by the stub
+  stub curl 'echo "$*" >>"$CALLS"; exit 1'
+  # shellcheck disable=SC2016 # expanded by the stub
+  stub wget 'echo "$*" >>"$CALLS"; exit 1'
+  export CALLS="$c/calls.log"
+  for base in http://example.invalid/releases ftp://example.invalid/releases example.invalid/releases; do
+    run --prefix "$p"
+    want_rc 1
+    has "$c/err" "https"
+    absent "$p" "$CALLS"
+  done
+  end_case
+}
+
+# wget gets --https-only, curl --proto =https, so a redirect cannot leave https.
+test_downloaders_https_only() {
+  new_case downloaders_https_only
+  base=https://example.invalid/releases
+  export CALLS="$c/calls.log"
+  # shellcheck disable=SC2016 # expanded by the stub
+  stub curl 'echo "$*" >>"$CALLS"; exit 1'
+  run --prefix "$p"
+  want_rc 1
+  has "$CALLS" "--proto =https"
+  has "$CALLS" "https://example.invalid/releases/latest/download/checksums.txt"
+  rm -f "$CALLS" "$c/stubs/curl"
+  run_path=$tmp/tools-nocurl
+  # shellcheck disable=SC2016 # expanded by the stub
+  stub wget 'echo "$*" >>"$CALLS"; exit 1'
+  run --prefix "$p"
+  want_rc 1
+  has "$CALLS" "--https-only"
+  has "$CALLS" "https://example.invalid/releases/latest/download/checksums.txt"
+  end_case
+}
+
 test_default_install
 test_default_prefix
 test_no_desktop
@@ -552,6 +594,8 @@ test_ldd_warning
 test_update_desktop_database
 test_truncated_script_does_nothing
 test_no_downloader
+test_base_url_not_https
+test_downloaders_https_only
 
 if [ "$failures" -gt 0 ]; then echo "$failures failed"; exit 1; fi
 echo PASS

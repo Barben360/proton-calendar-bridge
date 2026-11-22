@@ -114,7 +114,7 @@ type ListenerCheck struct {
 
 // BindProbe is the real bind probe: it listens on addr and closes at once.
 func BindProbe(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}

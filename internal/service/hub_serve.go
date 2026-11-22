@@ -253,12 +253,12 @@ func HoldServe(root, kind string) (func(), error) { return lockServe(root, kind)
 func ServeHeld(root string) error {
 	path := filepath.Join(root, serveLockName)
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		return nil //nolint:nilerr // no serve.lock, or one that cannot be stat'ed (EACCES): no holder is named; this is a pre-check, the real start takes the lock itself
 	}
 	unlock, ok, err := filelock.TryLock(path)
 	switch {
 	case err != nil:
-		return nil
+		return nil //nolint:nilerr // the lock cannot be tried (not openable, or no lock support on this platform): no holder is named; this is a pre-check, the real start takes the lock itself
 	case ok:
 		unlock()
 		return nil

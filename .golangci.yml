@@ -1,12 +1,25 @@
 version: "2"
 linters:
   enable:
+    - bodyclose
     - errorlint
     - gocritic
     - misspell
+    - nilerr
+    - noctx
     - revive
     - unconvert
     - unparam
+  # Tests (and their helpers, in _test.go files) use throwaway connections and
+  # requests that the test's own cleanup closes: the context, body and error
+  # swallowing rules would only add noise there.
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - nilerr
+          - noctx
   settings:
     errcheck:
       exclude-functions:
