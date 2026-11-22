@@ -87,6 +87,9 @@ func install(t *testing.T, store report.Store, dsn string) {
 // reportEvent is what the tests read of a pending report: its source tag,
 // its mechanism and its frames.
 type reportEvent struct {
+	Extra struct {
+		Count int `json:"count"`
+	} `json:"extra"`
 	Tags struct {
 		Source string `json:"source"`
 	} `json:"tags"`
@@ -143,6 +146,9 @@ func TestHandlerPanicAbortsAndRecords(t *testing.T) {
 	var ev reportEvent
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
+	}
+	if ev.Extra.Count != 1 {
+		t.Errorf("extra.count = %d, want 1: the panic was recorded more than once", ev.Extra.Count)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
 	checkLabels(t, ev, "go.http", false, "http-panic")
@@ -255,6 +261,9 @@ func TestGuardedPanicIsReported(t *testing.T) {
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
+	if ev.Extra.Count != 1 {
+		t.Errorf("extra.count = %d, want 1: the panic was recorded more than once", ev.Extra.Count)
+	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
 	checkLabels(t, ev, "go.recovered", true, "recovered")
 	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "daemon_test.serveMarkerHub.Serve") || !frames[len(frames)-1].InApp {
@@ -303,6 +312,9 @@ func TestControlHandlerPanicAbortsAndRecords(t *testing.T) {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
 	checkLabels(t, ev, "go.http", false, "http-panic")
+	if ev.Extra.Count != 1 {
+		t.Errorf("extra.count = %d, want 1: the panic was recorded more than once", ev.Extra.Count)
+	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
 	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "daemon_test.showUIWithMarker") || !frames[len(frames)-1].InApp {
 		t.Errorf("the last frame is not the in_app panicking function:\n%v", frames)

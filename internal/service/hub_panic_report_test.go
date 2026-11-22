@@ -55,6 +55,9 @@ func TestRecoveredAccountLoopPanicIsReported(t *testing.T) {
 		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
 	}
 	var ev struct {
+		Extra struct {
+			Count int `json:"count"`
+		} `json:"extra"`
 		Tags struct {
 			Source string `json:"source"`
 		} `json:"tags"`
@@ -72,6 +75,9 @@ func TestRecoveredAccountLoopPanicIsReported(t *testing.T) {
 	}
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
+	}
+	if ev.Extra.Count != 1 {
+		t.Errorf("extra.count = %d, want 1: the panic was recorded more than once", ev.Extra.Count)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
 

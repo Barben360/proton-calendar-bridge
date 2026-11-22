@@ -402,7 +402,12 @@ func guard(log *slog.Logger, what string, f func() error) (err error) {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
 			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(stack))
-			report.RecordRecovered(r, stack) // recovered, it never reaches the crash file
+			// Recovered, it never reaches the crash file; a panic of the
+			// reporting must not escape this recovery.
+			func() {
+				defer func() { _ = recover() }()
+				report.RecordRecovered(r, stack)
+			}()
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("internal error in %s", what),
 				Hint: "see the log for the stack, report the bug, then run pcb serve again"}
 		}
@@ -514,10 +519,10 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 
 // recordPanics logs a panic in h (CalDAV, remote MCP or the control
 // socket) at Error, keeps a crash report of it, then aborts the request as
-// net/http does for any handler panic: the connection is cut. The log line names the panic's Go
-// type and the last frame of pcb's code, never the panic's text or values
-// (logs carry IDs only); re-panicking http.ErrAbortHandler keeps net/http
-// from logging the text. http.ErrAbortHandler is the handler's own way of
+// net/http does for any handler panic: the connection is cut. The log line
+// names the panic's Go type and the last frame of pcb's code, never the
+// panic's text or values (logs carry IDs only); re-panicking
+// http.ErrAbortHandler keeps net/http from logging the text. http.ErrAbortHandler is the handler's own way of
 // aborting and is neither logged nor recorded.
 func recordPanics(h http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +531,10 @@ func recordPanics(h http.Handler, log *slog.Logger) http.Handler {
 				if err, ok := v.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
 					stack := debug.Stack()
 					log.Error("request handler panicked", "type", fmt.Sprintf("%T", v), "frame", report.PanicSite(stack))
-					report.RecordPanic(v, stack)
+					func() {
+						defer func() { _ = recover() }() // a panic of the reporting stays here
+						report.RecordPanic(v, stack)
+					}()
 				}
 				panic(http.ErrAbortHandler)
 			}

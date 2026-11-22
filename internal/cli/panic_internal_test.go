@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -108,6 +109,9 @@ func TestRecoveredCommandPanicIsReported(t *testing.T) {
 		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
 	}
 	var ev struct {
+		Extra struct {
+			Count int `json:"count"`
+		} `json:"extra"`
 		Tags struct {
 			Source string `json:"source"`
 		} `json:"tags"`
@@ -126,6 +130,9 @@ func TestRecoveredCommandPanicIsReported(t *testing.T) {
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
+	if ev.Extra.Count != 1 {
+		t.Errorf("extra.count = %d, want 1: the panic was recorded more than once", ev.Extra.Count)
+	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
 
 	if m := ev.Exception.Values[0].Mechanism; m.Type != "go.recovered" || m.Handled != true || ev.Tags.Source != "recovered" {
@@ -138,5 +145,39 @@ func TestRecoveredCommandPanicIsReported(t *testing.T) {
 		if strings.HasSuffix(f.Function, "cli.RunContext.func1") || strings.Contains(f.Function, "runtime/debug") || f.Function == "panic" {
 			t.Errorf("recovery frame %q in the report", f.Function)
 		}
+	}
+}
+
+// A panic in the reporting itself (here the recorder's clock) stays inside
+// RunContext's recovery: the command still ends as exit 20 with its one
+// envelope. Not parallel: the recorder is process-wide.
+func TestRecoveredPanicSurvivesAPanickingRecorder(t *testing.T) {
+	store := report.Store{StateDir: t.TempDir(), Env: func(string) string { return "" }, Now: func() time.Time { panic("the recorder broke") }}
+	report.Install(&report.Process{Store: store, Meta: report.Meta{Binary: "pcb", Command: "pcb boom", Install: "test", Version: "0"}, DSN: "http://k@127.0.0.1:1/1"})
+	t.Cleanup(report.Uninstall)
+	var out, errs bytes.Buffer
+	code := func() (code exitcode.Code) {
+		defer func() {
+			if v := recover(); v != nil {
+				t.Errorf("a panic escaped RunContext: %v", v)
+			}
+		}()
+		return Run(panickingRoot(), []string{"boom", "--json"}, &out, &errs)
+	}()
+	if code != exitcode.Blocked {
+		t.Fatalf("exit = %d, want %d", code, exitcode.Blocked)
+	}
+	dec := json.NewDecoder(&out)
+	var env struct {
+		OK    bool `json:"ok"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := dec.Decode(&env); err != nil || dec.More() || env.OK || env.Error == nil || env.Error.Code != 20 {
+		t.Errorf("stdout = %q (%v), want one envelope with error 20", out.String(), err)
+	}
+	if !strings.Contains(errs.String(), "goroutine") {
+		t.Errorf("stderr = %q, want the stack", errs.String())
 	}
 }

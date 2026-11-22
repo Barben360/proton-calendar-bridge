@@ -252,9 +252,13 @@ func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout,
 			return
 		}
 		stack := debug.Stack()
-		// Recovered, it never reaches the crash file: report it here.
-		report.RecordRecovered(r, stack)
 		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, stack)
+		// Recovered, it never reaches the crash file: report it here, and
+		// let no panic of the reporting escape this recovery.
+		func() {
+			defer func() { _ = recover() }()
+			report.RecordRecovered(r, stack)
+		}()
 		err := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error: pcb hit a bug while running this command"),
 			Hint: "report it with the stack printed on stderr (see docs/troubleshooting.md)"}
 		cmd, _, _ := root.Find(args)

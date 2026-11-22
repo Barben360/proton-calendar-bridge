@@ -497,7 +497,12 @@ func serveGuarded(log *slog.Logger, serve func() error) (err error) {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
 			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(stack))
-			report.RecordRecovered(r, stack) // recovered, it never reaches the crash file
+			// Recovered, it never reaches the crash file; a panic of the
+			// reporting must not escape this recovery.
+			func() {
+				defer func() { _ = recover() }()
+				report.RecordRecovered(r, stack)
+			}()
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error in the account's sync loop"),
 				Hint: "see the log for the stack, report the bug, then restart the account"}
 		}
