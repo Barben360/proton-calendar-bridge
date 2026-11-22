@@ -122,17 +122,28 @@ pick_downloader() {
   fi
 }
 
+# base_url: where the release files come from: https only (a plain-http base
+# would give the archive and its checksums.txt to whoever is on the path, and
+# the SHA-256 comes from the same place). file:// is for the tests and the
+# release's own smoke, which serve a local copy.
+base_url() {
+  base=${PCB_INSTALL_BASE_URL:-https://github.com/$REPO/releases}
+  case $base in
+  https://* | file://*) ;;
+  *) die "PCB_INSTALL_BASE_URL must start with https:// ($base): refusing to download over anything else" ;;
+  esac
+}
+
 # fetch FILE: downloads FILE of the release into the staging directory.
 fetch() {
-  base=${PCB_INSTALL_BASE_URL:-https://github.com/$REPO/releases}
   if [ -n "$tag" ]; then url=$base/download/$tag/$1; else url=$base/latest/download/$1; fi
   if [ "$dl" = curl ]; then
     case $url in
     https://*) curl -fsSL --proto '=https' --tlsv1.2 -o "$stage/$1" "$url" ;;
-    *) curl -fsSL -o "$stage/$1" "$url" ;;
+    *) curl -fsSL --proto '=file' -o "$stage/$1" "$url" ;;
     esac
   else
-    wget -q -O "$stage/$1" "$url"
+    wget -q --https-only -O "$stage/$1" "$url"
   fi || die "cannot download $1 of ${tag:-the latest release} ($url): no such release, or a network error"
 }
 
@@ -290,6 +301,7 @@ main() {
   check_prefix
   detect_platform
   pick_downloader
+  base_url
   stage=$(mktemp -d) || die "cannot create a temporary directory"
   trap cleanup EXIT
   trap 'exit 1' HUP INT TERM

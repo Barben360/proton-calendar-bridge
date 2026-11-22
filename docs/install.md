@@ -51,7 +51,7 @@ It installs:
 | the desktop entry | `PREFIX/share/applications/pcb-ui.desktop`, with `Exec=` set to the absolute path |
 | the icon | `PREFIX/share/icons/hicolor/scalable/apps/pcb-ui.svg` |
 
-What it checks: the archive's SHA-256 against the release's `checksums.txt`, and its attestation when `gh` 2.49 or later is installed and logged in (always with `--verify`). A failed check stops the install and leaves the previous files as they were. If `PREFIX/bin` is not on your `PATH`, or `pcb-ui` lacks a system library, it says so and names the fix.
+What it checks: the archive's SHA-256 against the release's `checksums.txt`, and its attestation when `gh` 2.49 or later is installed and logged in (always with `--verify`). Downloads use https only (a redirect to http is refused). The checksums come from the same release as the archive, so alone they guard against a corrupted download, not a tampered release; the attestation check is what proves the archive came from this repository's workflow, and it needs `gh`: without it (or logged out) the install goes ahead with a note, unless you pass `--verify`. A failed check stops the install and leaves the previous files as they were. If `PREFIX/bin` is not on your `PATH`, or `pcb-ui` lacks a system library, it says so and names the fix.
 
 It does not set up the service: next, run `pcb-ui`, or `pcb install` for a service, then `pcb login`.
 
