@@ -2,7 +2,7 @@
 
 How to run pcb as a systemd service, for your user or for a whole server, change its settings, and remove it. On a desktop you may prefer the [desktop app](desktop.md); in Docker, see [container](container.md).
 
-It needs systemd 252 or later (Debian 12 or 13) and `pcb` built from a clone ([install](install.md)).
+It needs systemd 252 or later (Debian 12 or 13) and `pcb` installed ([install](install.md)).
 
 ## Install the user service
 

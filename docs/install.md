@@ -197,6 +197,7 @@ Fyne, the toolkit of `pcb-ui`, draws with OpenGL on X11 and Wayland, so `make ui
 | Distribution | Command |
 |---|---|
 | Debian, Ubuntu | `sudo apt-get install libgl1-mesa-dev libwayland-dev libxkbcommon-dev xorg-dev` (what CI installs) |
+| Fedora | `sudo dnf install mesa-libGL-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel libxkbcommon-devel wayland-devel libXxf86vm-devel` (from Fyne's documented list, not run here) |
 | Arch | `sudo pacman -S libglvnd libxcursor libxrandr libxinerama libxi wayland libxkbcommon` (from Fyne's documented list, not run here) |
 
 Developers need them too: `make lint test` compiles `cmd/pcb-ui` ([development](development.md)).
