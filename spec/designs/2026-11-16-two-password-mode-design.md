@@ -111,7 +111,7 @@ Unattended relogin of a two-password account (author picked A):
 ### 5.7 Fake Proton and tests
 
 - `protontest.Options.MailboxPassword`: with `TwoPassword`, the user's keys are locked with the passphrase salted from it, not from the login password.
-- `cmd/pcb-fake`: an account gains an optional `mailbox_password` (two-password when set), so `make rehearse` (`scripts/rehearse.sh`) can rehearse the new live step offline before the live run, as `spec/HUMAN-CHECKS.md` step 0 requires [call].
+- `cmd/pcb-fake`: an account gains an optional `mailbox_password` (two-password when set), so `make rehearse` (`scripts/live/rehearse.sh`) can rehearse the new live step offline before the live run, as `spec/HUMAN-CHECKS.md` step 0 requires [call].
 - Tests (each must go red if the behaviour goes): two-password login with the mailbox password upfront; held then submitted; a wrong one then the right one (no second SRP: the fake counts `/auth/v4` calls); three wrong ones cancel and revoke; 2FA then mailbox password; a single-password account ignores an upfront mailbox password; `SubmitTOTP` and `SubmitMailboxPassword` refused on the wrong step; expiry; relogin with the sealed passphrase (succeeds; and needs-login after the fake changes the keys); nothing sealed contains the mailbox password; the CLI paths of §5.5 (prompt, variable, fd, held-by-daemon hint, no-daemon refusal, resume); loginflow steps and Cancel; the wizard screen; the login page step.
 
 ### 5.8 Docs and live check

@@ -119,7 +119,7 @@ With `pcb serve` running, `pcb status` shows its live state: the listener, each 
 
 `account-stopped`, `account-unreadable`, `needs-login`, `needs-captcha`, `human-verification`, `sync-stalled`, `calendar-keys-failed`, `write-gate-undecided`, `clients-file-unreadable`, `tls-certificate-expiring`, `tls-certificate-expired`.
 
-The keyring alerts `keyring-locked` and `keyring-unavailable` are in [security](security.md#the-desktop-keyring-secret-service).
+The keyring alerts `keyring-locked` and `keyring-unavailable` are in [security](security.md#the-desktop-keyring-secret-service); on Windows, `key-unavailable` (the sealing key cannot be unprotected in this session) is in [security](security.md#on-windows-dpapi).
 
 ## Writes from Thunderbird
 

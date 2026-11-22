@@ -175,7 +175,7 @@ Common rules [call, review]:
 ### 5.8 Audit and observability [call]
 
 - Every tool call is logged at `info` in the daemon log (M7 `logs/` file, journald for the service): tool, entry (`remote`/`relay`/`stdio`), token name or profile, account, calendar, event UID, outcome class, duration. Never arguments' free text, content, URLs with nonces or secrets.
-- `pcb status` shows, under the process: `mcp: remote on|off`, number of live MCP sessions per entry, the session daemon's kind. `pcb doctor`: `mcp tokens` check (file readable, expired tokens listed as warnings), and a warning when `[mcp] remote` is on with a non-loopback bind and no token exists.
+- `pcb status` shows, under the process: `mcp: remote on|off`, number of live MCP sessions per entry, the session daemon's kind. `pcb doctor`: `mcp tokens` check (file readable, expired tokens listed as warnings), and a warning when `[mcp] remote` is on, whatever the bind, and no token exists.
 - Metrics as for CalDAV if SPEC §15 counters exist for it: calls per tool and outcome class. *Built: none, as for CalDAV (no Prometheus endpoint, M5-Rpre11); `pcb status` shows the `mcp:` line only when a daemon answers (R17).*
 
 ### 5.9 Configuration and CLI [call]

@@ -199,7 +199,7 @@ The order of the session and each step's checks: [HUMAN-CHECKS.md](../spec/HUMAN
 |---|---|
 | [spec/SPEC.md](../spec/SPEC.md) | the specification |
 | [spec/decisions/](../spec/decisions/INDEX.md) | the decisions, one file each, with an index |
-| [spec/experiments/](../spec/experiments/) | experiments against Proton and its clients, and the live-session write-ups (`M5-live.md`, `M7-live.md`, `M8-live.md`) |
+| [spec/experiments/](../spec/experiments/) | experiments against Proton and its clients, and the live-session write-ups, one file per session |
 | [spec/mapping.md](../spec/mapping.md) | what the bridge does with each part of a CalDAV PUT (property mapping to Proton event rows) |
 | [spec/OPEN.md](../spec/OPEN.md) | open questions and parked items |
 | [spec/designs/](../spec/designs/), [spec/audits/](../spec/audits/) | designs, audits |

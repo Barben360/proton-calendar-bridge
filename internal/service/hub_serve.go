@@ -180,7 +180,8 @@ func (h *Hub) supervise(sv *hubServe) error {
 // process's PID and kind in it ("<pid> <kind>\n"; "<pid>\n" without a
 // kind); the release empties it. Held, it is Blocked naming the PID and
 // kind its holder wrote, with a hint for an agent session (kind mcp).
-// Off Unix there is no lock to take.
+// On a platform with no lock support (neither Unix nor Windows) there is no
+// lock to take.
 func lockServe(root, kind string) (func(), error) {
 	path := filepath.Join(root, serveLockName)
 	unlock, ok, err := filelock.TryLock(path)
@@ -244,12 +245,14 @@ func servingError(raw string) error {
 // kind: pcb uninstall --delete-data holds it while it deletes a state no
 // service runs (F10), so a pcb-ui, pcb serve or agent session serving that
 // state refuses it (Blocked, naming its PID and kind) and none starts
-// meanwhile. Off Unix there is no lock to take.
+// meanwhile. Where file locks are unsupported (neither Unix nor Windows)
+// there is no lock to take.
 func HoldServe(root, kind string) (func(), error) { return lockServe(root, kind) }
 
 // ServeHeld is the refusal a start would get on root (Blocked, naming the
 // holder of serve.lock), nil when none holds it. It creates nothing: no
-// serve.lock means no process ever served root. Off Unix it is nil.
+// serve.lock means no process ever served root. Where file locks are
+// unsupported (neither Unix nor Windows) it is nil.
 func ServeHeld(root string) error {
 	path := filepath.Join(root, serveLockName)
 	if _, err := os.Stat(path); err != nil {

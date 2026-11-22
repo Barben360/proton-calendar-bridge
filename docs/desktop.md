@@ -55,6 +55,9 @@ An account in Proton's two-password mode gets one more screen after the 2FA code
 - A login waiting for you (2FA code, mailbox password, CAPTCHA, or a Sign in in progress) is not dropped by accident: the Settings gear, another account or the + ask "Abandon this login?" first, and closing the window only hides it, leaving the login where it was. The wizard's own Cancel button cancels at once, even while a call to Proton hangs.
 - The account list shows `needs mailbox password` while the login waits.
 
+<img alt="pcb-ui's mailbox password screen" src="assets/ui/mailbox-password-light.png#gh-light-mode-only" width="720">
+<img alt="pcb-ui's mailbox password screen" src="assets/ui/mailbox-password-dark.png#gh-dark-mode-only" width="720">
+
 The window then shows the account's connection details. Copy them into Thunderbird as in [Thunderbird](thunderbird.md#connect-thunderbird).
 
 ## Connect an AI agent

@@ -2126,7 +2126,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
     `TestRemoteMCPServesTools`, `TestRunWithoutListenerOpensNoPort`; `make rehearse` steps 19 and 22].
   - `pcb doctor`: `mcp tokens` (ok with the count; an unreadable `mcp-tokens.json` is an error with the fix `fix or restore
     <path>`), one warning `mcp token NAME` per expired token (fix `pcb mcp token remove NAME`), and a warning `mcp remote`
-    when `[mcp] remote` is on with a non-loopback bind and no usable token; nothing at all when no token exists and remote is
+    when `[mcp] remote` is on, whatever the bind, and no usable token; nothing at all when no token exists and remote is
     off [verified: `TestDoctorWarnsRemoteWithoutToken`, `TestDoctorWarnsRemoteMCPWithoutToken`].
   - The audit line `mcp call` per tool call (§12) and, per session, the `pcb mcp` mode line on its stderr (`relaying to the
     daemon on the control socket` or `serving this agent session: kind mcp, no network listener`) [verified: `TestMCPStdioWritesNothingButProtocolOnStdout`]. No metrics for MCP:

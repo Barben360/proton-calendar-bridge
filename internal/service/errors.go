@@ -528,7 +528,7 @@ func (l *Local) stateWriteError(err error) error {
 }
 
 // acquireError maps what loginguard.Acquire returns: its own refusals are
-// already *exitcode.Error; the raw rest (no file locks off Unix, an
+// already *exitcode.Error; the raw rest (no file locks where unsupported, an
 // unwritable directory) becomes Blocked, naming the file-system cause (the
 // lock or the stamp that failed, and why) and no other error's text.
 func acquireError(err error, stateDir string) error {
