@@ -401,7 +401,8 @@ func guard(log *slog.Logger, what string, f func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
-			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(stack))
+			typ, msg := report.PanicSummary(r)
+			log.Error("a daemon goroutine panicked", "what", what, "panic_type", typ, "panic", msg, "stack", string(stack))
 			// Recovered, it never reaches the crash file; a panic of the
 			// reporting must not escape this recovery.
 			func() {

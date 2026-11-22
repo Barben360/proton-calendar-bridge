@@ -181,3 +181,41 @@ func TestRecoveredPanicSurvivesAPanickingRecorder(t *testing.T) {
 		t.Errorf("stderr = %q, want the stack", errs.String())
 	}
 }
+
+// A recovered panic's text never reaches stderr or the envelope: stderr
+// names its Go type and the stack, and a Go runtime error keeps its message.
+func TestRecoveredPanicTextStaysOutOfStderrAndEnvelope(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, want string
+		f          func()
+	}{
+		{"string", "panic: string: (text removed)", panicWithMarker},
+		{"runtime error", "panic: runtime.boundsError: runtime error: index out of range [5] with length 0", func() {
+			_ = at(nil, 5)
+		}},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			root := &cobra.Command{Use: "pcb", SilenceUsage: true, SilenceErrors: true}
+			root.PersistentFlags().Bool("json", false, "")
+			root.AddCommand(&cobra.Command{Use: "boom", RunE: func(*cobra.Command, []string) error { tc.f(); return nil }})
+			args := []string{"boom"}
+			if asJSON {
+				args = append(args, "--json")
+			}
+			var out, errs bytes.Buffer
+			if code := Run(root, args, &out, &errs); code != exitcode.Blocked {
+				t.Fatalf("%s: exit = %d, want %d", tc.name, code, exitcode.Blocked)
+			}
+			if !strings.Contains(errs.String(), tc.want) || !strings.Contains(errs.String(), "goroutine") {
+				t.Errorf("%s json=%v: stderr lacks %q and the stack:\n%s", tc.name, asJSON, tc.want, errs.String())
+			}
+			if strings.Contains(errs.String(), "MARKER-7f3a") || strings.Contains(out.String(), "MARKER-7f3a") {
+				t.Errorf("%s json=%v: the panic's text is in stderr or stdout:\n%s\n%s", tc.name, asJSON, errs.String(), out.String())
+			}
+		}
+	}
+}
+
+//go:noinline
+func at(s []int, i int) int { return s[i] }

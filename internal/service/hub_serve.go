@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -496,7 +495,8 @@ func serveGuarded(log *slog.Logger, serve func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
-			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(stack))
+			typ, msg := report.PanicSummary(r)
+			log.Error("the account's sync loop panicked", "panic_type", typ, "panic", msg, "stack", string(stack))
 			// Recovered, it never reaches the crash file; a panic of the
 			// reporting must not escape this recovery.
 			func() {

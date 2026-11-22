@@ -211,6 +211,6 @@ A command that is not `pcb crash-reports` never asks. While reports wait in `ask
 ## What never leaves pcb
 
 - Secrets never go in argv, logs or errors.
-- Logs carry IDs only. A refused write is logged with its code, calendar, href and reason, never the event's content.
+- Logs carry IDs only. A refused write is logged with its code, calendar, href and reason, never the event's content. A recovered crash logs its Go stack (function names, file lines, raw argument words, never string contents), its Go type and, for a Go runtime error, its message.
 - The MCP audit line never has a title, a description, a link or a secret ([agents](agents.md#audit)).
 - Crash reports carry none of that either, and leave only after you agree ([crash reports](#crash-reports)).

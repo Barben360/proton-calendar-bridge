@@ -152,16 +152,27 @@ func RecoveredEvent(v any, frames []Frame, m Meta, now time.Time) Event {
 	return newEvent("error", "recovered", panicException(v, mechanism{Type: mechRecovered, Handled: true}), frames, m, now)
 }
 
-// panicException is the exception of a recovered panic of value v.
-func panicException(v any, mech mechanism) exceptionValue {
-	ex := exceptionValue{Type: fmt.Sprintf("%T", v), Value: removed, Mechanism: mech}
+// PanicSummary is what may be said of a recovered panic's value v: its Go
+// type (%T) and its message only when v is a runtime.Error whose message is
+// one of the Go runtime's own, else "(text removed)". A panic value from a
+// library could carry data, so a log or a report never holds its text.
+func PanicSummary(v any) (typ, msg string) {
+	typ, msg = fmt.Sprintf("%T", v), removed
 	if re, ok := v.(runtime.Error); ok {
-		ex.Type = "runtime error"
-		if msg, ok := panicMessage(re.Error()); ok {
-			ex.Value = msg
+		if m, ok := panicMessage(re.Error()); ok {
+			msg = m
 		}
 	}
-	return ex
+	return typ, msg
+}
+
+// panicException is the exception of a recovered panic of value v.
+func panicException(v any, mech mechanism) exceptionValue {
+	typ, msg := PanicSummary(v)
+	if _, ok := v.(runtime.Error); ok {
+		typ = "runtime error"
+	}
+	return exceptionValue{Type: typ, Value: msg, Mechanism: mech}
 }
 
 func newEvent(level, source string, ex exceptionValue, frames []Frame, m Meta, now time.Time) Event {

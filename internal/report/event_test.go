@@ -353,3 +353,34 @@ type fakeFatal struct{}
 
 func (fakeFatal) Error() string { return "fatal error: concurrent map writes" }
 func (fakeFatal) RuntimeError() {}
+
+func TestPanicSummary(t *testing.T) {
+	t.Parallel()
+	var m map[string]int
+	nilMap := func() (v any) {
+		defer func() { v = recover() }()
+		m["x"] = 1
+		return nil
+	}()
+	idx := 5
+	oob := func() (v any) {
+		defer func() { v = recover() }()
+		_ = []int{1}[idx]
+		return nil
+	}()
+	tests := []struct {
+		name, typ, msg string
+		v              any
+	}{
+		{"string", "string", "(text removed)", "MARKER-7f3a"},
+		{"error", "*errors.errorString", "(text removed)", errors.New("MARKER-7f3a")},
+		{"nil map", "runtime.plainError", "assignment to entry in nil map", nilMap},
+		{"index", "runtime.boundsError", "runtime error: index out of range [5] with length 1", oob},
+	}
+	for _, tc := range tests {
+		typ, msg := report.PanicSummary(tc.v)
+		if typ != tc.typ || msg != tc.msg {
+			t.Errorf("%s: PanicSummary = (%q, %q), want (%q, %q)", tc.name, typ, msg, tc.typ, tc.msg)
+		}
+	}
+}

@@ -252,7 +252,8 @@ func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout,
 			return
 		}
 		stack := debug.Stack()
-		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, stack)
+		typ, msg := report.PanicSummary(r)
+		fmt.Fprintf(stderr, "panic: %s: %s\n\n%s", typ, msg, stack)
 		// Recovered, it never reaches the crash file: report it here, and
 		// let no panic of the reporting escape this recovery.
 		func() {

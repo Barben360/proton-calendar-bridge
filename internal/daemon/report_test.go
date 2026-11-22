@@ -533,3 +533,48 @@ func TestStartReportsCollectsTheCrashOfAPreviousSamePid(t *testing.T) {
 		t.Errorf("pending %v, %v; want the one crash", pend, err)
 	}
 }
+
+// guard logs a recovered panic's Go type and, for a runtime error, its
+// message, never another panic's text. Run through Hub.Serve panics.
+func TestGuardLogsNoPanicText(t *testing.T) {
+	for _, tc := range []struct {
+		name, typ, msg string
+		hub            func(*env) daemon.Hub
+	}{
+		{"string", "string", "(text removed)", func(e *env) daemon.Hub { return serveMarkerHub{e.hub} }},
+		{"runtime error", "runtime.boundsError", "runtime error: index out of range [5] with length 0", func(e *env) daemon.Hub { return serveBoundsHub{e.hub} }},
+	} {
+		e := newEnv(t)
+		var logs syncBuffer
+		err := daemon.Run(t.Context(), daemon.Options{Dirs: e.dirs, Config: e.cfg, Hub: tc.hub(e), Kind: "tester", WaitForLogin: true,
+			Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+		if exitcode.From(err) != exitcode.Blocked {
+			t.Fatalf("%s: Run = %v, want exit 20", tc.name, err)
+		}
+		found := false
+		for _, l := range strings.Split(logs.String(), "\n") {
+			var line map[string]any
+			if json.Unmarshal([]byte(l), &line) != nil || line["msg"] != "a daemon goroutine panicked" {
+				continue
+			}
+			found = true
+			if line["panic_type"] != tc.typ || line["panic"] != tc.msg {
+				t.Errorf("%s: panic_type = %v, panic = %v; want %q, %q", tc.name, line["panic_type"], line["panic"], tc.typ, tc.msg)
+			}
+		}
+		if !found || strings.Contains(logs.String(), marker) {
+			t.Errorf("%s: found = %v, or the log holds the panic's text:\n%s", tc.name, found, logs.String())
+		}
+	}
+}
+
+// serveBoundsHub is a Hub whose Serve indexes out of range.
+type serveBoundsHub struct{ *service.Hub }
+
+func (serveBoundsHub) Serve(context.Context, service.HubServeOptions) error {
+	_ = at(nil, 5)
+	return nil
+}
+
+//go:noinline
+func at(s []int, i int) int { return s[i] }

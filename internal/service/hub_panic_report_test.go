@@ -1,7 +1,9 @@
 package service_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -93,3 +95,37 @@ func TestRecoveredAccountLoopPanicIsReported(t *testing.T) {
 		}
 	}
 }
+
+// serveGuarded logs a recovered panic's Go type and, for a runtime error,
+// its message, never another panic's text.
+func TestServeGuardedLogsNoPanicText(t *testing.T) {
+	for _, tc := range []struct {
+		name, typ, msg string
+		f              func() error
+	}{
+		{"string", "string", "(text removed)", func() error { panicWithMarker(); return nil }},
+		{"runtime error", "runtime.boundsError", "runtime error: index out of range [5] with length 0", func() error {
+			_ = indexAt(nil, 5)
+			return nil
+		}},
+	} {
+		var buf bytes.Buffer
+		err := service.ServeGuarded(slog.New(slog.NewJSONHandler(&buf, nil)), tc.f)
+		if exitcode.From(err) != exitcode.Blocked {
+			t.Fatalf("%s: err = %v, want Blocked", tc.name, err)
+		}
+		var line map[string]any
+		if e := json.Unmarshal(buf.Bytes(), &line); e != nil {
+			t.Fatalf("%s: log is not one JSON line: %v\n%s", tc.name, e, buf.String())
+		}
+		if line["panic_type"] != tc.typ || line["panic"] != tc.msg {
+			t.Errorf("%s: panic_type = %v, panic = %v; want %q, %q", tc.name, line["panic_type"], line["panic"], tc.typ, tc.msg)
+		}
+		if strings.Contains(buf.String(), marker) {
+			t.Errorf("the log holds the panic's text:\n%s", buf.String())
+		}
+	}
+}
+
+//go:noinline
+func indexAt(s []int, i int) int { return s[i] }
