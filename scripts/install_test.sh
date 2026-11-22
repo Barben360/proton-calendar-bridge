@@ -530,7 +530,6 @@ test_no_downloader() {
   end_case
 }
 
-
 # A release is fetched over https only: a plain-http (or other) base URL is
 # refused before any download, whatever the downloader.
 test_base_url_not_https() {

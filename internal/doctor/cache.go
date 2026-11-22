@@ -31,6 +31,8 @@ func (c CacheCheck) Run(ctx context.Context) Result {
 		aclMsg, aclFix, checked = aclProblem(path, false)
 	}
 	switch {
+	case ctx.Err() != nil: // Ctrl-C or a timeout: the cache was not found damaged
+		r.Status, r.Message = StatusWarn, "the cache check was interrupted ("+ctx.Err().Error()+"): run pcb doctor again"
 	case err != nil:
 		r.Status, r.Message, r.Fix = StatusError, err.Error(), rebuild
 	case !info.Exists:

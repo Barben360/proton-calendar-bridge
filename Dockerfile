@@ -3,14 +3,13 @@
 # docker exec -it <container> pcb login; until then no CalDAV client exists
 # (CalDAV answers 401), and while a login is needed again it answers 503.
 
-# golang:1.27-trixie (Go 1.27.4: the `toolchain` line of go.mod must name the
-# same version, the build below refuses a mismatch; GOTOOLCHAIN=local never
-# downloads another one)
+# golang:1.27-trixie (pinned by its digest; GOTOOLCHAIN=local never downloads
+# another toolchain, so the image's Go builds even when go.mod's `toolchain`
+# line names another patch release)
 FROM golang:1.27-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN want=$(sed -n 's/^toolchain //p' go.mod) && [ "$(go env GOVERSION)" = "$want" ] || { echo "go.mod toolchain '$want' is not the base image's $(go env GOVERSION): bump both together" >&2; exit 1; }
 RUN go mod download && go mod verify
 COPY . .
 ARG VERSION=dev

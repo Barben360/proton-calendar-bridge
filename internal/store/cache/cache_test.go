@@ -414,8 +414,8 @@ func TestTwoProcessesReadWhileWriting(t *testing.T) {
 	}
 }
 
-// An ended context stops the queries: the check reports it instead of
-// reporting a healthy cache.
+// An ended context stops the queries and comes back as the error, never as
+// a QuickCheck verdict: the file was not found damaged.
 func TestInspectEndedContext(t *testing.T) {
 	path := Path(t.TempDir())
 	c := openAt(t, path, "acct-9")
@@ -425,11 +425,11 @@ func TestInspectEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	info, err := Inspect(ctx, path)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if info.QuickCheck == "ok" || !strings.Contains(info.QuickCheck, "context canceled") {
-		t.Errorf("QuickCheck = %q, want the context's error", info.QuickCheck)
+	if info.QuickCheck != "" {
+		t.Errorf("QuickCheck = %q, want none", info.QuickCheck)
 	}
 }
 
