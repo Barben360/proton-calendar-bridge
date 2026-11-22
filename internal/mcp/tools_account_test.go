@@ -342,6 +342,30 @@ func TestLoginToolAsksTheGuard(t *testing.T) {
 	}
 }
 
+// A login during Proton's recorded Retry-After is refused with the wait
+// before any page opens: the person would type the password for nothing.
+func TestLoginToolRefusesDuringARecordedRetryAfter(t *testing.T) {
+	for name, withWizard := range map[string]bool{"wizard": true, "page": false} {
+		t.Run(name, func(t *testing.T) {
+			s := &shown{}
+			hub := newHub()
+			hub.guardWait = 47 * time.Minute
+			r := newRigWith(t, hub, func(o *mcp.Options) {
+				if withWizard {
+					o.ShowLogin = s.show
+				}
+			})
+			terr := mustFail(t, r.connect(t, loginGrant, mcp.EntryStdio), "login", map[string]any{"username": "carol@example.com"}, "retry")
+			if terr.RetryAfterS != 47*60 {
+				t.Errorf("retry_after_s = %d, want %d", terr.RetryAfterS, 47*60)
+			}
+			if got := s.got(); len(got) != 0 {
+				t.Errorf("ShowLogin got %q during the Retry-After", got)
+			}
+		})
+	}
+}
+
 func TestLoginToolResultHasNoSecret(t *testing.T) {
 	t.Run("url in the text", func(t *testing.T) {
 		r := newRigWith(t, newHub(), nil)

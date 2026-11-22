@@ -42,6 +42,12 @@ type pendingLogin struct {
 	live       *api.Client // the client of the key calls; its tokens outlive p.Tokens after a refresh
 	expires    time.Time   // when it stops waiting (pendingTTL after Login), whatever the step
 	stop       func() bool // stops its expiry timer; nil until it waits
+	// notBefore is when a 2FA submit may reach Proton again after a 429 with a
+	// Retry-After on a call after SRP (the 2FA submit, the scope unlock, the
+	// user fetch). It is the login's own copy of the wait: the guard's record
+	// of it may be missing (another login holds the guard's lock) or may not
+	// cover the call. Zero when Proton asked nothing.
+	notBefore time.Time
 
 	// step is what the held login waits for: StateNeedsTOTP or
 	// StateNeedsMailboxPassword. Once it is the latter, the 2FA step is done
@@ -300,14 +306,20 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 		return LoginResult{}, usage(unattendedHint, "pass the otpauth:// URI instead of a one-time code")
 	}
 	pl := l.pending
-	// Proton's Retry-After (a 429 on a login call, here the 2FA submit's) is
-	// honoured for the held login too: refused with the wait, nothing sent;
-	// a wait past the login's life ends it.
-	if wait, err := loginguard.Remaining(l.o.GuardDir, l.o.Now(), l.log()); err != nil {
+	// Proton's Retry-After (a 429 on a login call, here the 2FA submit's, the
+	// scope unlock's or the user fetch's) is honoured for the held login too:
+	// refused with the wait, nothing sent; a wait past the login's life ends
+	// it. The wait is the longer of the guard's record and the login's own.
+	now := l.o.Now()
+	wait, err := loginguard.Remaining(l.o.GuardDir, now, l.log())
+	if err != nil {
 		return LoginResult{}, l.fail(err)
-	} else if wait > 0 {
-		if l.o.Now().Add(wait).After(pl.expires) {
+	}
+	wait = max(wait, pl.notBefore.Sub(now))
+	if wait > 0 {
+		if now.Add(wait).After(pl.expires) {
 			l.dropPending(ctx)
+			return LoginResult{}, waitCancelsLogin(now, wait)
 		}
 		return LoginResult{}, l.fail(&loginguard.TooSoon{Wait: wait})
 	}
@@ -316,6 +328,13 @@ func (l *Local) SubmitTOTP(ctx context.Context, code string) (LoginResult, error
 	}
 	l.unhold()
 	return l.finish(ctx, pl, totp, l.o.Now(), false)
+}
+
+// waitCancelsLogin is the error of a login ended because Proton asks to wait
+// longer than a login can be held: it says so and when to run pcb login.
+func waitCancelsLogin(now time.Time, wait time.Duration) error {
+	return mustAct("the login was cancelled: Proton asks to wait "+wait.Round(time.Second).String()+", longer than a login can be held",
+		"run pcb login after "+now.Add(wait).Format("15:04")+" (in "+wait.Round(time.Second).String()+")")
 }
 
 // SubmitMailboxPassword implements API. The password is tried against the
@@ -583,11 +602,12 @@ func (l *Local) finish(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, no
 		if errors.As(err, &ae) && ae.Status == http.StatusTooManyRequests && ae.RetryAfter > 0 {
 			// Proton's wait: nothing is sent before it is over (SubmitTOTP
 			// refuses), and a wait past the login's life ends it now.
-			if now.Add(ae.RetryAfter).After(pl.expires) {
+			if l.o.Now().Add(ae.RetryAfter).After(pl.expires) {
 				l.abort(ctx, pl)
 				pl.release()
-				return LoginResult{}, mapped
+				return LoginResult{}, waitCancelsLogin(l.o.Now(), ae.RetryAfter)
 			}
+			pl.notBefore = l.o.Now().Add(ae.RetryAfter)
 			hint = fmt.Sprintf("the login is kept: submit the 2FA code again in %s (%d tries left)",
 				ae.RetryAfter.Round(time.Second), maxRetries-pl.retries)
 		}
@@ -682,8 +702,13 @@ func (l *Local) passTOTP(ctx context.Context, pl *pendingLogin, totp *otp.TOTP, 
 // scope unlock, with the login password), the user and the addresses into
 // pl, for the derivation.
 func (l *Local) fetchKeys(ctx context.Context, pl *pendingLogin) error {
-	c := l.client(pl.p.Tokens)
-	pl.live = c
+	// A retry reuses the client of the first attempt: if that one refreshed
+	// on a 401, pl.p.Tokens hold the spent refresh token.
+	c := pl.live
+	if c == nil {
+		c = l.client(pl.p.Tokens)
+		pl.live = c
+	}
 	scope := auth.Scope{M: l.mgr, C: c, Username: pl.username, Password: pl.password}
 	salts, err := keys.FetchSalts(ctx, c, scope)
 	if err != nil {

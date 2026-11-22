@@ -132,7 +132,7 @@ Fixes from a review of the code, merged after v0.3.0:
 - Proton's `Retry-After` is honoured: a 429 on login or 2FA is remembered, and later logins are refused with the time left (pcb refuses, it does not wait); a 503's `Retry-After` is honoured for reads, up to 60 s; other 429s wait up to 60 s, at most 3 attempts.
 - Every MCP tool error has the same shape.
 - `pcb doctor` catches a CalDAV port that is already taken and a control-socket path that is too long.
-- `config.toml` refuses port 0, and every unknown key is reported, not only the first.
+- `config.toml` refuses port 0, and every unknown key is reported, not only the first. An existing `[caldav] listen` with port 0 must be edited to a fixed port, or pcb will not start.
 - An unknown subcommand names the next step.
 - Without a client that can ask you (form elicitation), `event_delete` and sign-out are refused unless the token (or `pcb mcp --allow`) includes `unconfirmed-delete`. Tokens created before this have to be re-created to get it ([agents](agents.md)).
 - A race that could reload an account's keys during logout is fixed.

@@ -33,6 +33,14 @@ type stubHub struct {
 	signOuts []string         // the accounts SignOut signed out
 	// login answers Login when set (a login page's steps).
 	login func(service.LoginRequest) (service.LoginResult, error)
+	// guardWait is the login guard's recorded wait LoginWait reports.
+	guardWait time.Duration
+}
+
+func (h *stubHub) LoginWait() (time.Duration, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.guardWait, nil
 }
 
 func noAccount(sel string) error {
