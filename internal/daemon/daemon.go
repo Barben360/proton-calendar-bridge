@@ -484,7 +484,8 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	if onWindows {
 		what = "control pipe"
 	}
-	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay}
+	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay,
+		Wrap: func(h http.Handler) http.Handler { return recordPanics(h, log) }}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -511,9 +512,9 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	}, nil
 }
 
-// recordPanics logs a panic in h (CalDAV or remote MCP) at Error, keeps a
-// crash report of it, then aborts the request as net/http does for any
-// handler panic: the connection is cut. The log line names the panic's Go
+// recordPanics logs a panic in h (CalDAV, remote MCP or the control
+// socket) at Error, keeps a crash report of it, then aborts the request as
+// net/http does for any handler panic: the connection is cut. The log line names the panic's Go
 // type and the last frame of pcb's code, never the panic's text or values
 // (logs carry IDs only); re-panicking http.ErrAbortHandler keeps net/http
 // from logging the text. http.ErrAbortHandler is the handler's own way of

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
@@ -264,6 +265,49 @@ func TestGuardedPanicIsReported(t *testing.T) {
 			t.Errorf("recovery frame %q in the report", f.Function)
 		}
 	}
+}
+
+//go:noinline
+func showUIWithMarker(string) error { panic(marker) }
+
+// A control socket handler panic is recorded like a CalDAV one: one
+// go.http report ending at the panicking function, no text, one log line
+// naming its type and frame, and the connection cut as net/http does.
+func TestControlHandlerPanicAbortsAndRecords(t *testing.T) {
+	e := newEnv(t)
+	store := reportStore(e)
+	install(t, store, "http://pubkey@127.0.0.1:1/7")
+	var logs syncBuffer
+	_ = e.start(t, e.hub, func(o *daemon.Options) {
+		o.ShowUI = showUIWithMarker
+		o.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	})
+	c, err := ctl.Dial(t.Context(), e.dirs.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.ShowUI(t.Context(), "acc1"); err == nil {
+		t.Fatal("ShowUI answered, want the aborted connection")
+	}
+
+	pend, err := store.Pending()
+	if err != nil || len(pend) != 1 {
+		t.Fatalf("pending = %d, %v; want exactly one report", len(pend), err)
+	}
+	if strings.Contains(string(pend[0].JSON), marker) {
+		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
+	}
+	var ev reportEvent
+	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
+		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
+	}
+	checkLabels(t, ev, "go.http", false, "http-panic")
+	frames := ev.Exception.Values[0].Stacktrace.Frames
+	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "daemon_test.showUIWithMarker") || !frames[len(frames)-1].InApp {
+		t.Errorf("the last frame is not the in_app panicking function:\n%v", frames)
+	}
+	checkPanicLogged(t, logs.String(), "daemon_test.showUIWithMarker")
 }
 
 func TestServeReadyWhileSenderHangs(t *testing.T) {
