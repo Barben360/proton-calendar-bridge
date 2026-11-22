@@ -496,7 +496,10 @@ jobs:
       # The SBOM (SPDX) of the source the archives are built from: the Go
       # modules of go.mod. It is attested to the archives by the release
       # job; it is not a release file. Syft is pinned, not the action's
-      # default.
+      # default. The action writes output-file without creating its
+      # directory (v0.24.3 failed with ENOENT on the v0.4.0-rc.1 run).
+      - name: The SBOM's directory exists
+        run: mkdir -p "$RUNNER_TEMP/sbom"
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: .
