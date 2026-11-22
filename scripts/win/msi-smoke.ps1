@@ -196,6 +196,13 @@ function Why-PropertyUnset([string] $name) {
 
 function Hash([string] $path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
 
+# Cleanup only: a removal that fails must not fail the smoke. Remove-Item
+# can throw past -ErrorAction (a NullReferenceException on a release run's
+# runner, v0.4.0-rc.2), so it is caught here.
+function Remove-Quietly([string] $path, [switch] $Recurse) {
+    try { Remove-Item -LiteralPath $path -Recurse:$Recurse -ErrorAction SilentlyContinue } catch { Write-Warning "cleanup left ${path}: $($_.Exception.Message)" }
+}
+
 # Why-MsiExes: pcb-ui.exe and pcb.exe in the install dir are the MSI's
 # (the bytes the default install put there, $msiHash).
 function Why-MsiExes {
@@ -575,16 +582,16 @@ try {
     }
     # What the zip check put in the install dir and an uninstall left.
     if ($script:zipPlaced -and (Test-Path -LiteralPath $InstallDir)) {
-        foreach ($n in @('pcb-ui.exe', 'pcb.exe', 'LICENSE', 'README.md')) { Remove-Item -LiteralPath (Join-Path $InstallDir $n) -ErrorAction SilentlyContinue }
-        Remove-Item -LiteralPath $InstallDir -ErrorAction SilentlyContinue
+        foreach ($n in @('pcb-ui.exe', 'pcb.exe', 'LICENSE', 'README.md')) { Remove-Quietly (Join-Path $InstallDir $n) }
+        Remove-Quietly $InstallDir
     }
     if ($saved) {
         Set-Value 'Environment' 'Path' $saved.Path
         Set-Value $RunKey 'pcb-ui' $saved.Run
-        foreach ($d in $Markers) { Remove-Item -LiteralPath (Join-Path $d 'msi-smoke.marker') -ErrorAction SilentlyContinue }
-        foreach ($d in $madeDirs) { Remove-Item -LiteralPath $d -ErrorAction SilentlyContinue }
+        foreach ($d in $Markers) { Remove-Quietly (Join-Path $d 'msi-smoke.marker') }
+        foreach ($d in $madeDirs) { Remove-Quietly $d }
     }
-    if ($exit -eq 0) { Remove-Item -LiteralPath $Work -Recurse -ErrorAction SilentlyContinue }
+    if ($exit -eq 0) { Remove-Quietly $Work -Recurse }
 }
 if ($exit -eq 0) { Write-Output 'PASS' } elseif (Test-Path -LiteralPath $Work) { Write-Output "logs: $Work" }
 exit $exit
