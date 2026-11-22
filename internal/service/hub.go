@@ -21,6 +21,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/atomicfile"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/store"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/cache"
 	"github.com/Barben360/proton-calendar-bridge/internal/store/seal"
@@ -827,6 +828,17 @@ func (h *Hub) Login(ctx context.Context, req LoginRequest) (LoginResult, error) 
 	h.loops()
 	h.notify(changed)
 	return res, err
+}
+
+// LoginWait is how long the login guard still refuses any login, a recorded
+// Proton Retry-After (0 when none): no Proton call, for a caller that would
+// otherwise start a login it must refuse.
+func (h *Hub) LoginWait() (time.Duration, error) {
+	wait, err := loginguard.Remaining(h.o.GuardDir, h.o.Now(), h.log())
+	if err != nil {
+		return 0, mapError(err, "")
+	}
+	return wait, nil
 }
 
 // Sealer is the name of what seals the state's secrets: SealerKeyFile,

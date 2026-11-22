@@ -191,6 +191,14 @@ func (ss *session) login(ctx context.Context, req *sdkmcp.CallToolRequest, in lo
 			return loginOut{}, "", nil, err
 		}
 	}
+	// Proton's recorded Retry-After: refused before any page opens, lest the
+	// person type the password to be told to wait.
+	if wait, err := ss.srv.o.Hub.LoginWait(); err != nil {
+		return loginOut{}, "", nil, err
+	} else if wait > 0 {
+		return loginOut{}, "", nil, &toolError{Class: classRetry, Message: "Proton asks to wait before another login: nothing was started",
+			Hint: "call login again after the wait, or the person runs: " + cli, RetryAfterS: int(math.Ceil(wait.Seconds()))}
+	}
 	if busy := ss.srv.o.LoginBusy; ss.srv.o.ShowLogin != nil && busy != nil && busy() {
 		return loginOut{}, "", nil, &toolError{Class: classRetry, Message: "a login is in progress in pcb-ui: nothing was started",
 			Hint: "the person finishes the login on screen (call status to follow it), then call login again if it is still needed"}

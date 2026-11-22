@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -15,7 +16,13 @@ import (
 // heldAtTOTP is an env whose login waits for its 2FA code.
 func heldAtTOTP(t *testing.T) *env {
 	t.Helper()
-	e := newEnv(t, protontest.Options{TwoFA: true})
+	return heldAtTOTPWith(t, protontest.Options{TwoFA: true})
+}
+
+// heldAtTOTPWith is heldAtTOTP over a fake built with o.
+func heldAtTOTPWith(t *testing.T, o protontest.Options) *env {
+	t.Helper()
+	e := newEnv(t, o)
 	if res := e.login(t, e.req()); res.State != service.StateNeedsTOTP {
 		t.Fatalf("Login = %+v, want needs-totp", res)
 	}
@@ -228,7 +235,7 @@ func TestTOTPRateLimitBeyondTheLoginLifeEndsTheLogin(t *testing.T) {
 	e := heldAtTOTP(t)
 	e.f.FailNext(http.MethodPost, "/auth/v4/2fa", http.StatusTooManyRequests, 85131, 400)
 	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
-	if ee := wantExit(t, err, exitcode.Blocked); !strings.Contains(ee.Hint, "6m40s") {
+	if ee := wantExit(t, err, exitcode.MustAct); !strings.Contains(ee.Hint, "6m40s") {
 		t.Fatalf("hint = %q, want it to name the 6m40s wait", ee.Hint)
 	}
 	if p := e.phase(t); p == string(service.StateNeedsTOTP) {
@@ -256,7 +263,122 @@ func TestReloginTOTPRateLimitExtendsTheGuard(t *testing.T) {
 	if ee := wantExit(t, err, exitcode.Blocked); ee.Hint != "retry in 3m59s" {
 		t.Fatalf("second request: hint %q, want retry in 3m59s", ee.Hint)
 	}
+	// The adapters' wait (MCP retry_after_s, CalDAV Retry-After) is the guard's.
+	if got := service.ProtonRetryAfter(err); got != 3*time.Minute+59*time.Second {
+		t.Fatalf("ProtonRetryAfter(relogin refused as too soon) = %v, want 3m59s", got)
+	}
 	if n := e.logins() - srp; n != 0 {
 		t.Fatalf("%d login(s) reached Proton inside the Retry-After", n)
+	}
+}
+
+// Any 429 with a Retry-After after the 2FA step (the scope unlock, the user
+// fetch) keeps the login held and refuses an immediate resubmit: the wait is
+// the login's own, not only the guard's.
+func TestHeldLoginRefusesResubmitInsideAnyRetryAfter(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, method, path string }{
+		{"unlock", http.MethodPut, "/core/v4/users/unlock"},
+		{"users over 60s", http.MethodGet, "/core/v4/users"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := heldAtTOTPWith(t, protontest.Options{TwoFA: true, LockedSalts: true})
+			wait := 45
+			if tc.method == http.MethodGet {
+				wait = 120
+			}
+			e.f.FailNext(tc.method, tc.path, http.StatusTooManyRequests, 85131, wait)
+			_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+			if err == nil {
+				t.Fatal("SubmitTOTP succeeded on a 429")
+			}
+			if p := e.phase(t); p != string(service.StateNeedsTOTP) {
+				t.Fatalf("phase = %q, want the login kept", p)
+			}
+			n := e.f.Calls(tc.method, tc.path)
+			e.clk.advance(5 * time.Second)
+			_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+			ee := wantExit(t, err, exitcode.Blocked)
+			if !strings.Contains(ee.Hint, "retry in") {
+				t.Fatalf("early resubmit: hint %q, want a retry in wording", ee.Hint)
+			}
+			if got := e.f.Calls(tc.method, tc.path); got != n {
+				t.Fatalf("%d %s %s after the resubmit, want %d: nothing inside the Retry-After", got, tc.method, tc.path, n)
+			}
+			if p := e.phase(t); p != string(service.StateNeedsTOTP) {
+				t.Fatalf("phase = %q after the refusal, want the login kept", p)
+			}
+			e.clk.advance(time.Duration(wait) * time.Second)
+			res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+			if err != nil || res.State != service.StateReady {
+				t.Fatalf("submit after the wait = %+v, %v; want ready", res, err)
+			}
+		})
+	}
+}
+
+// The wait is kept even when another login holds the guard's lock and the
+// guard cannot record it.
+func TestHeldLoginKeepsTheWaitWhenTheGuardLockIsHeld(t *testing.T) {
+	t.Parallel()
+	e := heldAtTOTPWith(t, protontest.Options{TwoFA: true, LockedSalts: true})
+	release, err := loginguard.Acquire(e.dirs.State, 0, e.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.f.FailNext(http.MethodPut, "/core/v4/users/unlock", http.StatusTooManyRequests, 85131, 45)
+	if _, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err == nil {
+		t.Fatal("SubmitTOTP succeeded on a 429")
+	}
+	release()
+	n := e.f.Calls(http.MethodPut, "/core/v4/users/unlock")
+	e.clk.advance(5 * time.Second)
+	_, err = e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	_ = wantExit(t, err, exitcode.Blocked)
+	if got := e.f.Calls(http.MethodPut, "/core/v4/users/unlock"); got != n {
+		t.Fatalf("%d unlock calls, want %d: the resubmit must be refused", got, n)
+	}
+}
+
+// A wait longer than the login can be held cancels it with a must-act error
+// that says so and when to run pcb login again.
+func TestRateLimitBeyondTheLoginLifeSaysTheLoginWasCancelled(t *testing.T) {
+	t.Parallel()
+	e := heldAtTOTP(t)
+	e.f.FailNext(http.MethodPost, "/auth/v4/2fa", http.StatusTooManyRequests, 85131, 400)
+	_, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	ee := wantExit(t, err, exitcode.MustAct)
+	if !strings.Contains(ee.Error(), "cancelled") || !strings.Contains(ee.Hint, "run pcb login after") {
+		t.Fatalf("error %q hint %q: want a cancelled login and a run pcb login after hint", ee.Error(), ee.Hint)
+	}
+}
+
+// A transient error after a refresh on a 401 keeps the refreshed client: the
+// retry must not start again from the refresh token SRP returned, which the
+// refresh spent, and ends the login with a session, not a dead end.
+func TestTransientRetryReusesTheRefreshedClient(t *testing.T) {
+	t.Parallel()
+	e := heldAtTOTP(t)
+	// The first key call answers 401 and refreshes the key client (the 2FA
+	// submit's own client is another one); then the user fetch fails.
+	e.f.FailNext(http.MethodGet, "/core/v4/keys/salts", http.StatusUnauthorized, 0, 0)
+	failUsers(e)
+	if _, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now())); err == nil {
+		t.Fatal("SubmitTOTP succeeded on a 502")
+	}
+	if n := e.f.Calls(http.MethodPost, "/auth/v4/refresh"); n != 1 {
+		t.Fatalf("%d refreshes after the first attempt, want 1", n)
+	}
+	if p := e.phase(t); p != string(service.StateNeedsTOTP) {
+		t.Fatalf("phase = %q, want the login kept", p)
+	}
+	e.clk.advance(31 * time.Second)
+	res, err := e.svc.SubmitTOTP(t.Context(), code(t, e.f.TOTPURI, e.clk.Now()))
+	if err != nil || res.State != service.StateReady {
+		t.Fatalf("retry = %+v, %v; want ready on the refreshed tokens", res, err)
+	}
+	if n := e.f.Calls(http.MethodPost, "/auth/v4/refresh"); n != 1 {
+		t.Fatalf("%d refreshes in all, want 1: the retry must not use the spent refresh token", n)
 	}
 }

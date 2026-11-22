@@ -41,6 +41,9 @@ type Hub interface {
 	SignOut(ctx context.Context, selector string, req service.LogoutRequest) (service.LogoutResult, error)
 	Remove(ctx context.Context, selector string, req service.LogoutRequest) (service.AccountInfo, error)
 	AbandonLogin(ctx context.Context, selector string) error
+	// LoginWait is the login guard's recorded wait (Proton's Retry-After),
+	// 0 when none; it makes no Proton call.
+	LoginWait() (time.Duration, error)
 }
 
 var _ Hub = (*service.Hub)(nil)

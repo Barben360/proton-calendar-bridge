@@ -242,8 +242,15 @@ func planError(err error) error {
 
 // ProtonRetryAfter is how long Proton asked to wait before the next
 // request, as err carries it (a 429's Retry-After), 0 when it says nothing:
-// for the adapter's Retry-After on a 503.
-func ProtonRetryAfter(err error) time.Duration { return retryAfter(err) }
+// for the adapter's Retry-After on a 503. A login the guard refused as too
+// soon (a relogin during a recorded Retry-After) gives the guard's wait.
+func ProtonRetryAfter(err error) time.Duration {
+	if d := retryAfter(err); d > 0 {
+		return d
+	}
+	d, _ := loginWait(err)
+	return d
+}
 
 // ObjectName is uid's canonical resource name: the UID when it is 1 to 200
 // bytes of [A-Za-z0-9._@-] (Thunderbird's own names, E08 §4.4), else "~"
