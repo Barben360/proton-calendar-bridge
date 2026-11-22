@@ -98,10 +98,11 @@ func (e Event) Fingerprint() []string { return slices.Clone(e.Grouping) }
 func (e Event) ID() string { return e.EventID }
 
 const (
-	// The mechanisms of the three kinds of report.
-	mechCrash = "go.crash"
-	mechError = "go.error"
-	mechHTTP  = "go.http"
+	// The mechanisms of the four kinds of report.
+	mechCrash     = "go.crash"
+	mechError     = "go.error"
+	mechHTTP      = "go.http"
+	mechRecovered = "go.recovered"
 
 	// maxChain is how many types of an error's chain a report keeps.
 	maxChain = 8
@@ -141,14 +142,26 @@ func ErrorEvent(err error, frames []Frame, m Meta, now time.Time) Event {
 // message is kept only when it is one of the runtime's own; frames is the
 // panicking goroutine's stack.
 func PanicEvent(v any, frames []Frame, m Meta, now time.Time) Event {
-	ex := exceptionValue{Type: fmt.Sprintf("%T", v), Value: removed, Mechanism: mechanism{Type: mechHTTP}}
+	return newEvent("error", "http-panic", panicException(v, mechanism{Type: mechHTTP}), frames, m, now)
+}
+
+// RecoveredEvent is PanicEvent for a panic pcb's own recover caught (a
+// command, an account's sync loop, a daemon goroutine): handled, since pcb
+// went on, and tagged recovered.
+func RecoveredEvent(v any, frames []Frame, m Meta, now time.Time) Event {
+	return newEvent("error", "recovered", panicException(v, mechanism{Type: mechRecovered, Handled: true}), frames, m, now)
+}
+
+// panicException is the exception of a recovered panic of value v.
+func panicException(v any, mech mechanism) exceptionValue {
+	ex := exceptionValue{Type: fmt.Sprintf("%T", v), Value: removed, Mechanism: mech}
 	if re, ok := v.(runtime.Error); ok {
 		ex.Type = "runtime error"
 		if msg, ok := panicMessage(re.Error()); ok {
 			ex.Value = msg
 		}
 	}
-	return newEvent("error", "http-panic", ex, frames, m, now)
+	return ex
 }
 
 func newEvent(level, source string, ex exceptionValue, frames []Frame, m Meta, now time.Time) Event {

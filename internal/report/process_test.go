@@ -25,12 +25,14 @@ func TestRecordErrorWithoutProcessIsNoop(t *testing.T) {
 	report.Uninstall()
 	report.RecordError(errors.New("x"))
 	report.RecordPanic("x", nil)
+	report.RecordRecovered("x", nil)
 	if report.Current() != nil {
 		t.Error("Current is not nil")
 	}
 	_, s := install(t, "") // a Process without DSN records nothing either
 	report.RecordError(errors.New("x"))
 	report.RecordPanic("x", nil)
+	report.RecordRecovered("x", nil)
 	if ids := pendingIDs(t, s); len(ids) != 0 {
 		t.Errorf("saved without a DSN: %v", ids)
 	}

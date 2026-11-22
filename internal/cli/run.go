@@ -243,7 +243,7 @@ func Run(root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.
 // (blocked) through the usual failure path, with an error naming an
 // internal error; the panic value and the stack go to stderr, never to
 // stdout. A crash report keeps the stack, never the value's text
-// (report.RecordPanic).
+// (report.RecordRecovered).
 func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout, stderr io.Writer) (code exitcode.Code) {
 	asJSON := jsonRequested(args)
 	defer func() {
@@ -253,7 +253,7 @@ func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout,
 		}
 		stack := debug.Stack()
 		// Recovered, it never reaches the crash file: report it here.
-		report.RecordPanic(r, stack)
+		report.RecordRecovered(r, stack)
 		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, stack)
 		err := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error: pcb hit a bug while running this command"),
 			Hint: "report it with the stack printed on stderr (see docs/troubleshooting.md)"}

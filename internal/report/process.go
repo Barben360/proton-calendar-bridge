@@ -115,17 +115,22 @@ func RecordError(err error) {
 	p.save(ErrorEvent(err, frames, p.Meta, p.now()))
 }
 
-// RecordPanic keeps a report of a recovered panic: an HTTP handler's, or
-// one pcb's own recover caught (a command, an account's sync loop, a
-// daemon goroutine), which never reaches the crash file. stack is
-// debug.Stack()'s text taken in the recovering deferred call. The report's
-// source is http-panic whichever recovered it (PanicEvent).
-func RecordPanic(v any, stack []byte) {
+// RecordPanic keeps a report of a panic an HTTP handler raised
+// (PanicEvent); stack is debug.Stack()'s text taken in the recovering
+// deferred call.
+func RecordPanic(v any, stack []byte) { recordPanic(PanicEvent, v, stack) }
+
+// RecordRecovered keeps a report of a panic pcb's own recover caught (a
+// command, an account's sync loop, a daemon goroutine), which never reaches
+// the crash file (RecoveredEvent); stack is as for RecordPanic.
+func RecordRecovered(v any, stack []byte) { recordPanic(RecoveredEvent, v, stack) }
+
+func recordPanic(event func(any, []Frame, Meta, time.Time) Event, v any, stack []byte) {
 	p := Current()
 	if p == nil || p.DSN == "" {
 		return
 	}
-	p.save(PanicEvent(v, endAtPanic(ParseStack(stack)), p.Meta, p.now()))
+	p.save(event(v, endAtPanic(ParseStack(stack)), p.Meta, p.now()))
 }
 
 // PanicSite is the function of the last frame of pcb's code in a recovered

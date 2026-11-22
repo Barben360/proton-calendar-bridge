@@ -83,6 +83,33 @@ func install(t *testing.T, store report.Store, dsn string) {
 	t.Cleanup(report.Uninstall)
 }
 
+// reportEvent is what the tests read of a pending report: its source tag,
+// its mechanism and its frames.
+type reportEvent struct {
+	Tags struct {
+		Source string `json:"source"`
+	} `json:"tags"`
+	Exception struct {
+		Values []struct {
+			Mechanism struct {
+				Type    string `json:"type"`
+				Handled bool   `json:"handled"`
+			} `json:"mechanism"`
+			Stacktrace struct {
+				Frames []report.Frame `json:"frames"`
+			} `json:"stacktrace"`
+		} `json:"values"`
+	} `json:"exception"`
+}
+
+// checkLabels checks ev's mechanism type, handled flag and source tag.
+func checkLabels(t *testing.T, ev reportEvent, mech string, handled bool, source string) {
+	t.Helper()
+	if m := ev.Exception.Values[0].Mechanism; m.Type != mech || m.Handled != handled || ev.Tags.Source != source {
+		t.Errorf("mechanism %+v, source %q; want %s (handled %v), %s", m, ev.Tags.Source, mech, handled, source)
+	}
+}
+
 func davURL(r *running, id string) string {
 	_, port, _ := net.SplitHostPort(r.info.Addr)
 	return "http://127.0.0.1:" + port + "/dav/" + id + "/"
@@ -112,19 +139,12 @@ func TestHandlerPanicAbortsAndRecords(t *testing.T) {
 	if strings.Contains(string(pend[0].JSON), marker) {
 		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
 	}
-	var ev struct {
-		Exception struct {
-			Values []struct {
-				Stacktrace struct {
-					Frames []report.Frame `json:"frames"`
-				} `json:"stacktrace"`
-			} `json:"values"`
-		} `json:"exception"`
-	}
+	var ev reportEvent
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
+	checkLabels(t, ev, "go.http", false, "http-panic")
 	// Outermost first (Sentry order), ending at the panicking handler: the
 	// recovery's own frames (runtime's panic, the middleware's deferred
 	// func, debug.Stack) are dropped.
@@ -230,19 +250,12 @@ func TestGuardedPanicIsReported(t *testing.T) {
 	if strings.Contains(string(pend[0].JSON), marker) {
 		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
 	}
-	var ev struct {
-		Exception struct {
-			Values []struct {
-				Stacktrace struct {
-					Frames []report.Frame `json:"frames"`
-				} `json:"stacktrace"`
-			} `json:"values"`
-		} `json:"exception"`
-	}
+	var ev reportEvent
 	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
+	checkLabels(t, ev, "go.recovered", true, "recovered")
 	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "daemon_test.serveMarkerHub.Serve") || !frames[len(frames)-1].InApp {
 		t.Errorf("the last frame is not the in_app panicking function:\n%v", frames)
 	}

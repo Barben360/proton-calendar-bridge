@@ -69,7 +69,7 @@ Standard library plus `internal/atomicfile`, `internal/filelock`, `internal/acl`
 
 - `internal/service/errors.go` `mapError`'s fall-through (`"unexpected error"`, today `blocked`) records a report: the error's type chain (`%T` of each `errors.Unwrap` / `Unwrap() []error` level, up to 8) and the stack where `mapError` was called (`runtime.Callers`). The error's text is never kept.
 - CalDAV and MCP HTTP handlers: `net/http` recovers a handler's panic and only logs it. A middleware around the daemon's handler (`internal/daemon/daemon.go`, `srv.Handler`) recovers, records a report from the panic value's type and `debug.Stack()`, then re-panics `http.ErrAbortHandler` so the client sees what it sees today.
-- Panics pcb recovers itself (a command in `cli.RunContext`, an account's sync loop in `service` `serveGuarded`, a daemon goroutine in `daemon` `guard`): recovered, they never reach the crash file, so each recover site records a report the same way (`report.RecordPanic` with `debug.Stack()`); what it does after is unchanged.
+- Panics pcb recovers itself (a command in `cli.RunContext`, an account's sync loop in `service` `serveGuarded`, a daemon goroutine in `daemon` `guard`): recovered, they never reach the crash file, so each recover site records a report from the panic value's type and `debug.Stack()` (`report.RecordRecovered`: mechanism `go.recovered`, handled, source `recovered`); what it does after is unchanged.
 - Not reported: anything `mapError` classifies (Proton down, rate limits, network, credentials, sealer), usage errors, rollbacks.
 - Same fingerprint (§5.4) more than once a day: kept once (a count is added to the pending file); this applies to crashes and errors alike [call].
 
@@ -84,13 +84,13 @@ A pending report is the exact JSON event that will be sent, `<state>/reports/pen
 | `level` | `fatal` (crash), `error` (§5.3) |
 | `release` | `pcb@<buildinfo.Version>` |
 | `environment` | `production` |
-| `tags` | `binary` (`pcb` / `pcb-ui`), `command` (the cobra command path, e.g. `pcb serve`; never its arguments), `install` (derived the way `internal/update/hint.go` reads an install: `container` from `PCB_INSTALL`, else `script` / `msi` / `other` from where the binary sits; no new marker is stamped by the installers [call]), `source` (`crash` / `error` / `http-panic`) |
+| `tags` | `binary` (`pcb` / `pcb-ui`), `command` (the cobra command path, e.g. `pcb serve`; never its arguments), `install` (derived the way `internal/update/hint.go` reads an install: `container` from `PCB_INSTALL`, else `script` / `msi` / `other` from where the binary sits; no new marker is stamped by the installers [call]), `source` (`crash` / `error` / `http-panic` / `recovered`) |
 | `fingerprint` | `[mechanism type, exception type, in-app function names of the top 5 in-app frames]`: the local dedup key too. Function names are pcb's own code and already in the frames, so it adds no information; it keeps Bugsink from folding every `"(text removed)"` panic into one issue [call]. The spike (§7) checks Bugsink honours it |
 | `contexts.os` | `name` = GOOS only; `contexts.runtime` = Go version; `contexts.device.arch` = GOARCH |
 | `exception.values[0].type` | crash: the runtime error kind (`runtime error`, `fatal error`, `signal SIGSEGV`) or `panic`; error: the outermost Go type |
 | `exception.values[0].value` | kept only when the line is a Go runtime message (`panic: runtime error: …`, `fatal error: …`, `[signal …]`); otherwise `"(text removed)"`. Error type chain for §5.3 |
 | `exception.values[0].stacktrace.frames` | function, module-relative file, line, `in_app` for this module. No argument words (the hex values after a function name are dropped). A path that is not module-relative or GOROOT-relative (a build without `-trimpath`) is cut to its last two elements |
-| `exception.values[0].mechanism` | `{type: "go.crash" / "go.error" / "go.http", handled: false/true}` |
+| `exception.values[0].mechanism` | `{type: "go.crash" / "go.error" / "go.http" / "go.recovered", handled: false/true}` (`handled` is true for `go.error` and `go.recovered`) |
 | `extra.count` | repeats folded into this report (§5.3) |
 
 Built: Bugsink 2.6.3 accepts this shape through `/api/<project>/envelope/` and keeps every field above (release, tags, fingerprint, contexts, `in_app`, `mechanism.handled: false`, `extra.count`); it honours `fingerprint` (same stack, other fingerprint = another issue; same fingerprint = one issue with two events). `make bugsink-check` re-runs the check.

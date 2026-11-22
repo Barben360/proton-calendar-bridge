@@ -108,8 +108,15 @@ func TestRecoveredCommandPanicIsReported(t *testing.T) {
 		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
 	}
 	var ev struct {
+		Tags struct {
+			Source string `json:"source"`
+		} `json:"tags"`
 		Exception struct {
 			Values []struct {
+				Mechanism struct {
+					Type    string `json:"type"`
+					Handled bool   `json:"handled"`
+				} `json:"mechanism"`
 				Stacktrace struct {
 					Frames []report.Frame `json:"frames"`
 				} `json:"stacktrace"`
@@ -120,6 +127,10 @@ func TestRecoveredCommandPanicIsReported(t *testing.T) {
 		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
 	}
 	frames := ev.Exception.Values[0].Stacktrace.Frames
+
+	if m := ev.Exception.Values[0].Mechanism; m.Type != "go.recovered" || m.Handled != true || ev.Tags.Source != "recovered" {
+		t.Errorf("mechanism %+v, source %q; want go.recovered (handled true), recovered", m, ev.Tags.Source)
+	}
 	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "internal/cli.panicWithMarker") || !frames[len(frames)-1].InApp {
 		t.Errorf("the last frame is not the in_app panicking function:\n%v", frames)
 	}

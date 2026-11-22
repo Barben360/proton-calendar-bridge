@@ -94,9 +94,10 @@ func TestCrashEventAllowList(t *testing.T) {
 	}
 	want := shape(t, golden)
 	events := map[string]report.Event{
-		"crash": report.CrashEvent(report.Crash{Kind: "runtime error", Message: "runtime error: x", Frames: someFrames()}, meta, t0),
-		"error": report.ErrorEvent(errors.New("x"), someFrames(), meta, t0),
-		"panic": report.PanicEvent("x", someFrames(), meta, t0),
+		"crash":     report.CrashEvent(report.Crash{Kind: "runtime error", Message: "runtime error: x", Frames: someFrames()}, meta, t0),
+		"error":     report.ErrorEvent(errors.New("x"), someFrames(), meta, t0),
+		"panic":     report.PanicEvent("x", someFrames(), meta, t0),
+		"recovered": report.RecoveredEvent("x", someFrames(), meta, t0),
 	}
 	for name, e := range events {
 		if got := shape(t, eventJSON(t, e)); !reflect.DeepEqual(got, want) {
@@ -125,6 +126,10 @@ func TestEventValues(t *testing.T) {
 		"panic": {
 			report.PanicEvent(42, someFrames(), meta, t0),
 			values{"error", "go.http", "http-panic", "int", "(text removed)", false},
+		},
+		"recovered": {
+			report.RecoveredEvent(42, someFrames(), meta, t0),
+			values{"error", "go.recovered", "recovered", "int", "(text removed)", true},
 		},
 	}
 	for name, tc := range cases {
@@ -227,6 +232,8 @@ func TestNoMarkerLeaks(t *testing.T) {
 		"own runtime.Error": {report.PanicEvent(fakeRuntimeError{}, nil, meta, t0), `"value":"(text removed)"`},
 		"crash Kind marker": {report.CrashEvent(report.Crash{Kind: "panic " + marker, Message: "(text removed)"}, meta, t0), `"type":"panic"`},
 		"fatal in a panic":  {report.PanicEvent(fakeFatal{}, nil, meta, t0), `"value":"(text removed)"`},
+		"recovered string":  {report.RecoveredEvent(marker, report.ParseStack(stack), meta, t0), `"filename":"a/b.go"`},
+		"recovered error":   {report.RecoveredEvent(wrapped, nil, meta, t0), `"value":"(text removed)"`},
 	}
 	for name, tc := range events {
 		b := string(eventJSON(t, tc.e))

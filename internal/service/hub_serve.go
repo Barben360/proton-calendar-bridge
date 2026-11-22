@@ -490,14 +490,14 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 // OnPass callbacks it calls) into a Blocked error, so one account's bug
 // parks that account and no other. The panic value and the stack go to the
 // log, and a crash report keeps the stack, never the value's text
-// (report.RecordPanic): the error, which the park shows to clients, names
+// (report.RecordRecovered): the error, which the park shows to clients, names
 // an internal error.
 func serveGuarded(log *slog.Logger, serve func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
 			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(stack))
-			report.RecordPanic(r, stack) // recovered, it never reaches the crash file
+			report.RecordRecovered(r, stack) // recovered, it never reaches the crash file
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error in the account's sync loop"),
 				Hint: "see the log for the stack, report the bug, then restart the account"}
 		}
