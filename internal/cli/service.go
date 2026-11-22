@@ -145,7 +145,7 @@ func (a *app) serviceLogs(cmd *cobra.Command, scope scopeFlags, follow bool) err
 	code, err := h.Run.Stream(ctx, out, cmd.ErrOrStderr(), argv[0], argv[1:]...)
 	switch {
 	case ctx.Err() != nil: // Ctrl-C ends a follow
-		return nil
+		return nil //nolint:nilerr // Ctrl-C ends a follow: the stream's error is its cancellation
 	case err != nil:
 		return &exitcode.Error{Code: exitcode.Blocked, Err: err, Hint: hint}
 	case code != 0:

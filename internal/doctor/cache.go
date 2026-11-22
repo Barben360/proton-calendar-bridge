@@ -20,10 +20,10 @@ type CacheCheck struct {
 func (CacheCheck) Name() string { return "cache" }
 
 // Run implements Check.
-func (c CacheCheck) Run(context.Context) Result {
+func (c CacheCheck) Run(ctx context.Context) Result {
 	r := Result{Name: c.Name()}
 	path := cache.Path(c.StateDir)
-	info, err := cache.Inspect(path)
+	info, err := cache.Inspect(ctx, path)
 	rebuild := "remove " + shellquote.Quote(path) + " (and its -wal and -shm files), then run `pcb sync --full`"
 	var aclMsg, aclFix string
 	checked := false // the access list is checked (Windows), not the mode

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -333,13 +334,13 @@ func buildM3File(t *testing.T, path string) {
 func TestMigratesAnM3File(t *testing.T) {
 	path := Path(t.TempDir())
 	buildM3File(t, path)
-	info, err := Inspect(path)
+	info, err := Inspect(context.Background(), path)
 	if err != nil || info.Schema != 1 || info.Account != "acct-1" {
 		t.Fatalf("setup: %+v, %v; want a version 1 file", info, err)
 	}
 
 	c := openAt(t, path, "acct-1")
-	if info, _ := Inspect(path); info.Schema != 2 {
+	if info, _ := Inspect(context.Background(), path); info.Schema != 2 {
 		t.Errorf("schema after open = %d, want 2", info.Schema)
 	}
 	got := ids(t, c, "cal")
@@ -382,7 +383,7 @@ func TestReadOnlyReadsAnM3File(t *testing.T) {
 	if byUID, byName := aliases(t, ro, "cal"); len(byUID) != 0 || len(byName) != 0 {
 		t.Errorf("aliases on an M3 file: %v %v", byUID, byName)
 	}
-	if info, _ := Inspect(path); info.Schema != 1 {
+	if info, _ := Inspect(context.Background(), path); info.Schema != 1 {
 		t.Errorf("the read-only open upgraded the file to %d", info.Schema)
 	}
 }

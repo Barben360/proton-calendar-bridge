@@ -825,7 +825,7 @@ func (f *Fake) backendCall(method, path string, hdr http.Header, body, out any) 
 		}
 		rd = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, f.backend.GetHostURL()+path, rd)
+	req, err := http.NewRequestWithContext(context.Background(), method, f.backend.GetHostURL()+path, rd)
 	if err != nil {
 		return 0, err
 	}
@@ -863,7 +863,7 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 		if len(bytes.TrimSpace(data)) > 0 {
 			if err := json.Unmarshal(data, &body); err != nil { // not JSON: leave it
 				resp.Body = io.NopCloser(bytes.NewReader(data))
-				return nil
+				return nil //nolint:nilerr // not JSON: the body is passed through as it came
 			}
 		}
 		if _, ok := body["Code"]; !ok { // Proton always sends one; the backend does not

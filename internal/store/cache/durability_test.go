@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -77,11 +78,11 @@ func TestMigrationStoppedHalfWayIsRedone(t *testing.T) {
 				_ = c.Close()
 				t.Fatal("Open went through the simulated crash")
 			}
-			if info, err := Inspect(path); err != nil || info.Schema != 1 {
+			if info, err := Inspect(context.Background(), path); err != nil || info.Schema != 1 {
 				t.Fatalf("after the crash: %+v, %v; want the version 1 file untouched", info, err)
 			}
 			c = openAt(t, path, "acct-1")
-			if info, _ := Inspect(path); info.Schema != schemaVersion {
+			if info, _ := Inspect(context.Background(), path); info.Schema != schemaVersion {
 				t.Errorf("schema after the next open = %d, want %d", info.Schema, schemaVersion)
 			}
 			got := pins(t, c, "cal", "a", "b")
@@ -175,7 +176,7 @@ func TestOpenBackfillsAnEmptyPinsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = c.Close()
-	if info, err := Inspect(path); err != nil || info.Schema != 2 {
+	if info, err := Inspect(context.Background(), path); err != nil || info.Schema != 2 {
 		t.Fatalf("setup: %+v, %v; want a version 2 file", info, err)
 	}
 

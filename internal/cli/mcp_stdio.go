@@ -123,7 +123,7 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 				case err != nil:
 					return err
 				case ctx.Err() != nil:
-					return nil
+					return nil //nolint:nilerr // a signal (ctx ended) while waiting is a normal end; the wait's error is its cancellation
 				case up:
 					waits = lockBackoff()
 					continue
@@ -157,7 +157,7 @@ func (a *app) runMCP(cmd *cobra.Command, g mcp.Grant) error {
 // end, as for pcb serve.
 func sessionEnd(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		return nil
+		return nil //nolint:nilerr // a signal (ctx ended) is a normal end of the session, whatever error it raised
 	}
 	return err
 }

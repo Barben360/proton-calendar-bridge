@@ -73,7 +73,7 @@ func NewStallFront(t TB, h http.Handler) *StallFront {
 // BlackHole is called: those are read and dropped. It returns the address.
 func (s *StallFront) relay(t TB, backend string) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("StallFront: %v", err)
 	}
@@ -93,7 +93,7 @@ func (s *StallFront) relay(t TB, backend string) string {
 			if err != nil {
 				return
 			}
-			b, err := net.Dial("tcp", backend) // in accept order: the server's first is the relay's first
+			b, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", backend) // in accept order: the server's first is the relay's first
 			if err != nil {
 				_ = c.Close()
 				continue

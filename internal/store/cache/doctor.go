@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io/fs"
@@ -20,8 +21,9 @@ type Info struct {
 
 // Inspect reads a cache file without ever creating or changing it. A file
 // that is not a usable database is reported through QuickCheck, not as an
-// error; an error means the file could not be examined at all.
-func Inspect(path string) (Info, error) {
+// error; an error means the file could not be examined at all. A ended ctx
+// stops the queries, which then report it through QuickCheck.
+func Inspect(ctx context.Context, path string) (Info, error) {
 	fi, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Info{}, nil
@@ -48,16 +50,16 @@ func Inspect(path string) (Info, error) {
 	}
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&info.Schema); err != nil {
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&info.Schema); err != nil {
 		info.QuickCheck = err.Error()
 		return info, nil
 	}
-	if err := db.QueryRow(`PRAGMA quick_check`).Scan(&info.QuickCheck); err != nil {
+	if err := db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&info.QuickCheck); err != nil {
 		info.QuickCheck = err.Error()
 		return info, nil
 	}
 	if info.Schema >= 1 && info.Schema <= schemaVersion {
-		err := db.QueryRow(`SELECT value FROM meta WHERE key = 'account'`).Scan(&info.Account)
+		err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'account'`).Scan(&info.Account)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			info.QuickCheck = err.Error()
 		}

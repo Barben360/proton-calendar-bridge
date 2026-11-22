@@ -253,12 +253,12 @@ func HoldServe(root, kind string) (func(), error) { return lockServe(root, kind)
 func ServeHeld(root string) error {
 	path := filepath.Join(root, serveLockName)
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		return nil //nolint:nilerr // no serve.lock (or none we can stat): no process ever served root, nothing holds it
 	}
 	unlock, ok, err := filelock.TryLock(path)
 	switch {
 	case err != nil:
-		return nil
+		return nil //nolint:nilerr // the lock cannot be tried here (off Unix, or not openable): no holder can be named, as documented
 	case ok:
 		unlock()
 		return nil
