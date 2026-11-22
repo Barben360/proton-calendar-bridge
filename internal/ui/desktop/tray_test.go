@@ -183,6 +183,28 @@ func TestNoTrayLineShownOnce(t *testing.T) {
 	}
 }
 
+// The background hint has its own memory: someone who saw the plain line
+// still gets the background one once at autostart.
+func TestNoTrayBackgroundHintIsShownOnceAfterThePlainLine(t *testing.T) {
+	f := newFixture(t)
+	if !f.w.HintNoTray() {
+		t.Fatal("the plain line must show first")
+	}
+	newW := func() *Window {
+		return NewWindow(f.app, f.act, f.set, func() WizardModel { return f.wiz }, func(*url.URL) error { return nil })
+	}
+	w2 := newW()
+	Attach(nil, w2, func() {}, true)
+	if !w2.notice.Visible() || w2.notice.Text != NoTrayBackgroundLine {
+		t.Fatalf("the background hint was not shown after the plain line: visible %v, %q", w2.notice.Visible(), w2.notice.Text)
+	}
+	w3 := newW()
+	Attach(nil, w3, func() {}, true)
+	if w3.notice.Visible() {
+		t.Fatal("the background hint was shown a second time")
+	}
+}
+
 // Ruling R14: with a tray host, closing the window hides it (Quit is in the
 // tray menu); with none, closing it quits (the tray Quit's drain), since a
 // hidden window with no tray could never be quit.

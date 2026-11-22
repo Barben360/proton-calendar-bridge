@@ -115,20 +115,25 @@ const NoTrayLine = "your desktop shows no tray icons; on GNOME install the AppIn
 // --background and no tray answers: closing the window hides it.
 const NoTrayBackgroundLine = NoTrayLine + "; closing this window hides it, run pcb-ui again to show it"
 
-const noTrayPref = "noTrayLineShown"
+// noTrayPref and noTrayBackgroundPref remember, apart, that the plain line
+// and the background line were shown.
+const (
+	noTrayPref           = "noTrayLineShown"
+	noTrayBackgroundPref = "noTrayBackgroundLineShown"
+)
 
 // HintNoTray shows NoTrayLine in the window, once: it reports whether it did
 // (the line is remembered in the Fyne preferences). Main goroutine.
 func (w *Window) HintNoTray() bool {
 	p := w.app.Preferences()
-	if p.Bool(noTrayPref) {
+	pref, text := noTrayPref, NoTrayLine
+	if w.noTrayText != "" {
+		pref, text = noTrayBackgroundPref, w.noTrayText
+	}
+	if p.Bool(pref) {
 		return false
 	}
-	p.SetBool(noTrayPref, true)
-	text := w.noTrayText
-	if text == "" {
-		text = NoTrayLine
-	}
+	p.SetBool(pref, true)
 	w.notice.SetText(text)
 	w.notice.Show()
 	return true
