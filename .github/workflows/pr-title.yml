@@ -18,6 +18,10 @@ jobs:
           if printf '%s' "$TITLE" | grep -qP '^(?:\p{Extended_Pictographic}[\x{FE0F}\x{200D}]*)+ \p{Lu}'; then
             echo "ok: $TITLE"
           else
-            echo "::error::PR title must be '<gitmoji> <Capitalised imperative subject>', e.g. '✨ Add free/busy export' (got: $TITLE)"
+            # The title is untrusted: printed on its own line, never inside
+            # the ::error:: command, where a "::" or a newline could inject
+            # another workflow command or annotation.
+            echo "got: $TITLE"
+            echo "::error::PR title must be '<gitmoji> <Capitalised imperative subject>', e.g. '✨ Add free/busy export' (see the got: line above)"
             exit 1
           fi

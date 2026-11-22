@@ -88,3 +88,6 @@ jobs:
       ref: ${{ needs.resolve.outputs.sha }}
       version: ${{ needs.resolve.outputs.tag }}
       tags: ${{ needs.resolve.outputs.tag }}
+      # Only the owner pushes sha-<12> tags: any writer can dispatch a run
+      # from a branch, and the build and publish jobs refuse everyone else.
+      owner-only: true
