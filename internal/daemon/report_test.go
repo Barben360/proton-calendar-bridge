@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
+	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
@@ -202,6 +203,54 @@ func TestHandlerAbortIsNotRecorded(t *testing.T) {
 		}
 	}()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+}
+
+// serveMarkerHub is a Hub whose Serve panics with marker.
+type serveMarkerHub struct{ *service.Hub }
+
+func (serveMarkerHub) Serve(context.Context, service.HubServeOptions) error { panic(marker) }
+
+// A panic the daemon's guard recovers never reaches the Go runtime, so it
+// never reaches the crash file: the guard keeps a report of it itself,
+// ending at the panicking function and without the panic's text, and Run
+// still ends as exit 20 naming an internal error.
+func TestGuardedPanicIsReported(t *testing.T) {
+	e := newEnv(t)
+	store := reportStore(e)
+	install(t, store, "http://pubkey@127.0.0.1:1/7")
+	err := daemon.Run(t.Context(), daemon.Options{Dirs: e.dirs, Config: e.cfg, Hub: serveMarkerHub{e.hub}, Kind: "tester", WaitForLogin: true})
+	if exitcode.From(err) != exitcode.Blocked || err == nil || !strings.Contains(err.Error(), "internal error") {
+		t.Fatalf("Run = %v (exit %d), want exit 20 naming an internal error", err, exitcode.From(err))
+	}
+
+	pend, err := store.Pending()
+	if err != nil || len(pend) != 1 {
+		t.Fatalf("pending = %d, %v; want exactly one report", len(pend), err)
+	}
+	if strings.Contains(string(pend[0].JSON), marker) {
+		t.Errorf("the report holds the panic's text:\n%s", pend[0].JSON)
+	}
+	var ev struct {
+		Exception struct {
+			Values []struct {
+				Stacktrace struct {
+					Frames []report.Frame `json:"frames"`
+				} `json:"stacktrace"`
+			} `json:"values"`
+		} `json:"exception"`
+	}
+	if err := json.Unmarshal(pend[0].JSON, &ev); err != nil || len(ev.Exception.Values) != 1 {
+		t.Fatalf("report JSON: %v\n%s", err, pend[0].JSON)
+	}
+	frames := ev.Exception.Values[0].Stacktrace.Frames
+	if len(frames) == 0 || !strings.HasSuffix(frames[len(frames)-1].Function, "daemon_test.serveMarkerHub.Serve") || !frames[len(frames)-1].InApp {
+		t.Errorf("the last frame is not the in_app panicking function:\n%v", frames)
+	}
+	for _, f := range frames {
+		if strings.HasSuffix(f.Function, "daemon.guard.func1") || strings.Contains(f.Function, "runtime/debug") || f.Function == "panic" {
+			t.Errorf("recovery frame %q in the report", f.Function)
+		}
+	}
 }
 
 func TestServeReadyWhileSenderHangs(t *testing.T) {

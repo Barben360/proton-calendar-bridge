@@ -16,6 +16,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 )
 
 // serveLockName is the root's lock of the serving process (design §4.1):
@@ -488,12 +489,15 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 // serveGuarded runs serve and turns a panic in it (or in the OnState and
 // OnPass callbacks it calls) into a Blocked error, so one account's bug
 // parks that account and no other. The panic value and the stack go to the
-// log only: the error, which the park shows to clients, names an internal
-// error.
+// log, and a crash report keeps the stack, never the value's text
+// (report.RecordPanic): the error, which the park shows to clients, names
+// an internal error.
 func serveGuarded(log *slog.Logger, serve func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			stack := debug.Stack()
+			log.Error("the account's sync loop panicked", "panic", fmt.Sprint(r), "stack", string(stack))
+			report.RecordPanic(r, stack) // recovered, it never reaches the crash file
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error in the account's sync loop"),
 				Hint: "see the log for the stack, report the bug, then restart the account"}
 		}

@@ -69,6 +69,7 @@ Standard library plus `internal/atomicfile`, `internal/filelock`, `internal/acl`
 
 - `internal/service/errors.go` `mapError`'s fall-through (`"unexpected error"`, today `blocked`) records a report: the error's type chain (`%T` of each `errors.Unwrap` / `Unwrap() []error` level, up to 8) and the stack where `mapError` was called (`runtime.Callers`). The error's text is never kept.
 - CalDAV and MCP HTTP handlers: `net/http` recovers a handler's panic and only logs it. A middleware around the daemon's handler (`internal/daemon/daemon.go`, `srv.Handler`) recovers, records a report from the panic value's type and `debug.Stack()`, then re-panics `http.ErrAbortHandler` so the client sees what it sees today.
+- Panics pcb recovers itself (a command in `cli.RunContext`, an account's sync loop in `service` `serveGuarded`, a daemon goroutine in `daemon` `guard`): recovered, they never reach the crash file, so each recover site records a report the same way (`report.RecordPanic` with `debug.Stack()`); what it does after is unchanged.
 - Not reported: anything `mapError` classifies (Proton down, rate limits, network, credentials, sealer), usage errors, rollbacks.
 - Same fingerprint (§5.4) more than once a day: kept once (a count is added to the pending file); this applies to crashes and errors alike [call].
 

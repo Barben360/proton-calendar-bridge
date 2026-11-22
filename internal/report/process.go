@@ -115,8 +115,11 @@ func RecordError(err error) {
 	p.save(ErrorEvent(err, frames, p.Meta, p.now()))
 }
 
-// RecordPanic keeps a report of a panic an HTTP handler raised; stack is
-// debug.Stack()'s text taken in the recovering deferred call.
+// RecordPanic keeps a report of a recovered panic: an HTTP handler's, or
+// one pcb's own recover caught (a command, an account's sync loop, a
+// daemon goroutine), which never reaches the crash file. stack is
+// debug.Stack()'s text taken in the recovering deferred call. The report's
+// source is http-panic whichever recovered it (PanicEvent).
 func RecordPanic(v any, stack []byte) {
 	p := Current()
 	if p == nil || p.DSN == "" {

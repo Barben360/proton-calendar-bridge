@@ -14,6 +14,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/output"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -241,7 +242,8 @@ func Run(root *cobra.Command, args []string, stdout, stderr io.Writer) exitcode.
 // A panic in a command is a bug, not a bad invocation: it ends as exit 20
 // (blocked) through the usual failure path, with an error naming an
 // internal error; the panic value and the stack go to stderr, never to
-// stdout.
+// stdout. A crash report keeps the stack, never the value's text
+// (report.RecordPanic).
 func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout, stderr io.Writer) (code exitcode.Code) {
 	asJSON := jsonRequested(args)
 	defer func() {
@@ -249,7 +251,10 @@ func RunContext(ctx context.Context, root *cobra.Command, args []string, stdout,
 		if r == nil {
 			return
 		}
-		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, debug.Stack())
+		stack := debug.Stack()
+		// Recovered, it never reaches the crash file: report it here.
+		report.RecordPanic(r, stack)
+		fmt.Fprintf(stderr, "panic: %v\n\n%s", r, stack)
 		err := &exitcode.Error{Code: exitcode.Blocked, Err: errors.New("internal error: pcb hit a bug while running this command"),
 			Hint: "report it with the stack printed on stderr (see docs/troubleshooting.md)"}
 		cmd, _, _ := root.Find(args)

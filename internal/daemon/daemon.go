@@ -395,11 +395,14 @@ func Run(ctx context.Context, o Options) error {
 // guard runs f and turns a panic in it into a Blocked error naming an
 // internal error in what, so Run ends through its normal stop instead of
 // the process dying with every account's cache write cut. The panic value
-// and the stack go to the log only.
+// and the stack go to the log; a crash report keeps the stack, never the
+// value's text (report.RecordPanic).
 func guard(log *slog.Logger, what string, f func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			stack := debug.Stack()
+			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(stack))
+			report.RecordPanic(r, stack) // recovered, it never reaches the crash file
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("internal error in %s", what),
 				Hint: "see the log for the stack, report the bug, then run pcb serve again"}
 		}
