@@ -7,7 +7,7 @@ What is built, how each part was tested, and which checks against a real Proton 
 ## What pcb is made of
 
 - **Core** (Go): accounts and login (as unattended as Proton allows), a sync engine on Proton's change feed, an encrypted local cache, an access policy, and an iCalendar-native event model (JSCalendar is deferred; [why](../spec/decisions/0012-icalendar-native-model.md)).
-- **Adapters:** CalDAV (Thunderbird first; read and write), MCP for AI agents (`pcb mcp` over stdio, or `/mcp` with a bearer token;, [design](../spec/decisions/0016-mcp-adapter.md)) and a CLI. A REST adapter is out of scope ([why](../spec/decisions/0007-scope-caldav-only.md)).
+- **Adapters:** CalDAV (Thunderbird first; read and write), MCP for AI agents (`pcb mcp` over stdio, or `/mcp` with a bearer token; [the decision](../spec/decisions/0016-mcp-adapter.md)) and a CLI. A REST adapter is out of scope ([why](../spec/decisions/0007-scope-caldav-only.md)).
 - **Runs** headless (systemd, Docker), one process for any number of Proton accounts. On a Linux or Windows desktop the same daemon runs inside `pcb-ui`, a tray icon and a window.
 - **Platforms:** Linux amd64 and arm64 are supported; macOS gets `pcb` only and is untested; Windows 10 and 11 (amd64) are supported, `pcb-ui` and `pcb`: built and tested in CI on Windows and checked live on a Windows 11 desktop from the zip; an installer, also checked live there, ships in each release since v0.2.0 ([install](install.md#macos-and-windows)).
 
@@ -128,19 +128,19 @@ What is built, how each part was tested, and which checks against a real Proton 
 
 Fixes from a review of the code, merged after v0.3.0:
 
-- A panic in a command or in one account's loop is caught and reported; it no longer kills the daemon.
-- Proton's `Retry-After` is honoured on 429 and 503 answers, 2FA included, so pcb waits as asked instead of retrying at once.
+- A panic in an account's loop parks that account instead of killing the daemon; a command that panics exits 20 with the stack on stderr.
+- Proton's `Retry-After` is honoured: a 429 on login or 2FA is remembered, and later logins are refused with the time left (pcb refuses, it does not wait); a 503's `Retry-After` is honoured for reads, up to 60 s; other 429s wait up to 60 s, at most 3 attempts.
 - Every MCP tool error has the same shape.
 - `pcb doctor` catches a CalDAV port that is already taken and a control-socket path that is too long.
 - `config.toml` refuses port 0, and every unknown key is reported, not only the first.
 - An unknown subcommand names the next step.
-- From an agent, `event_delete` and sign-out need an answer from you (form elicitation); a token with the `unconfirmed-delete` grant skips it ([agents](agents.md)).
+- Without a client that can ask you (form elicitation), `event_delete` and sign-out are refused unless the token (or `pcb mcp --allow`) includes `unconfirmed-delete`. Tokens created before this have to be re-created to get it ([agents](agents.md)).
 - A race that could reload an account's keys during logout is fixed.
-- Releases are reproducible, with an attested SBOM; `install.sh` accepts https only; a weekly vulnerability scan (`govulncheck`) runs in CI ([development](development.md#reproducible-builds-and-what-is-pinned)). It uses the Go toolchain named in `go.mod`, so an advisory against the standard library can fail the scan until that line is bumped.
+- Release archives are built reproducibly for a given commit from a pinned Go toolchain; from the next release, the release also attests an SBOM of the Go modules besides the provenance. `install.sh` takes a download base over https (or a local `file://` copy). A weekly vulnerability scan (`govulncheck`) runs in CI ([development](development.md#reproducible-builds-and-what-is-pinned)). It uses the Go toolchain named in `go.mod`, so an advisory against the standard library can fail the scan until that line is bumped.
 
 ## Still to check live
 
 - **Windows:** Thunderbird for Windows on the bridge (skipped in the live check; CalDAV itself was checked with `curl`); the installer's SmartScreen prompt on a real browser download ([above](#the-windows-installer)).
 - **Session lifetime:** a 14-day probe of one Proton session, running until 2026-11-26 (so far: the access token lasts 24 hours and both tokens change on every refresh).
-- **Two-password accounts:** the live check in [HUMAN-CHECKS.md](../spec/HUMAN-CHECKS.md) has not run; its write-up, `spec/experiments/M9-two-password-live.md`, does not exist yet.
+- **Two-password accounts:** the live check in [HUMAN-CHECKS.md](../spec/HUMAN-CHECKS.md) has not run; its write-up will be added under `spec/experiments/`.
 - **Write-ups** of the 2026-11-13 sessions other than the daemon one (login, sync, Thunderbird).

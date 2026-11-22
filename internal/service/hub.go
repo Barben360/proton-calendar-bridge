@@ -434,7 +434,8 @@ func DeleteSealingKey(ctx context.Context, root string, kr Keyring) error {
 }
 
 // tryLock takes dir/name without waiting; held, it is Blocked with msg and
-// hint. Off Unix there is no lock to take.
+// hint. Where file locks are unsupported (neither Unix nor Windows) there is
+// no lock to take.
 func tryLock(dir, name, msg, hint string) (func(), error) {
 	unlock, ok, err := filelock.TryLock(filepath.Join(dir, name))
 	switch {
