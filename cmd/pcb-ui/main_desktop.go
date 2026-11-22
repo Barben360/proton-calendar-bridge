@@ -33,6 +33,8 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/daemon"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/logfile"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
+	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui/desktop"
 	"github.com/Barben360/proton-calendar-bridge/internal/update"
@@ -74,6 +76,38 @@ func run(args []string) int {
 		showPreflightError(err)
 		return int(exitcode.From(err))
 	}
+	// The crash file comes first, before any other goroutine: a crash from
+	// here on is offered at the next start. Directories that do not resolve
+	// are reported by LoadConfig, in runApp.
+	return withReports(startReports, func(reports *ui.Reports) int { return runApp(opts, reports) })
+}
+
+// startReports keeps this pcb-ui's crash reports (ui.StartReports): nil
+// reports when they are off or the directories do not resolve.
+func startReports() (*ui.Reports, func()) {
+	dirs, err := daemon.ResolveDirs(os.Getenv)
+	if err != nil {
+		return nil, func() {}
+	}
+	return ui.StartReports(dirs.State, buildinfo.ReportDSN,
+		report.Meta{Binary: "pcb-ui", Command: "pcb-ui", Install: installKind(), Version: buildinfo.Version}, os.Getenv,
+		func() error { return service.CheckStateOwner(dirs.State, os.Geteuid(), nil) })
+}
+
+// withReports starts the crash reports, runs body with them and stops
+// them once body returns. Not deferred: a deferred stop would run while a
+// panic unwinds (every Fyne callback runs on this goroutine) and delete
+// the crash file before the runtime writes the traceback to it.
+func withReports(start func() (*ui.Reports, func()), body func(*ui.Reports) int) int {
+	reports, stop := start()
+	code := body(reports)
+	stop()
+	return code
+}
+
+// runApp is pcb-ui once its arguments are read and its crash reports
+// started (reports nil: off).
+func runApp(opts options, reports *ui.Reports) int {
 	a := app.NewWithID(appID)
 	a.SetIcon(desktop.AppIcon())
 	if code, failed := probe(a); failed {
@@ -101,11 +135,18 @@ func run(args []string) int {
 	showLogin := func(username string) { fyne.Do(func() { win.ShowLogin(username) }) }
 	// ended is closed at logoff or shutdown: the bridge's drain is then 2 s.
 	ended := make(chan struct{})
-	bridge := ui.NewBridge(ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended})
+	bo := ui.BridgeOptions{Env: os.Getenv, Logger: log, Level: level, ShowUI: show, ShowLogin: showLogin, SessionEnd: ended}
+	if reports != nil {
+		bo.Reports = &reports.Sender
+	}
+	bridge := ui.NewBridge(bo)
 	updates := newUpdates(a, dirs.State)
 	set := &settings{level: level, logsDir: filepath.Join(dirs.State, "logs"), configPath: config.Path(dirs), open: openPath(a.OpenURL), exe: executable,
-		updates: updates, poke: make(chan struct{}, 1)}
+		updates: updates, poke: make(chan struct{}, 1), reports: reports}
 	win = desktop.NewWindow(a, ui.NewActions(bridge), set, func() desktop.WizardModel { return ui.NewWizard(bridge) }, a.OpenURL)
+	if reports != nil {
+		win.SetReports(reports)
+	}
 	setWindowClass()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -159,6 +200,10 @@ func run(args []string) int {
 	go follow(ctx, bridge, win, tray, log)
 	go followUpdates(ctx, updates, set.poke, win, trayOrNil(tray), desktopNotifier{}, log)
 
+	if reports != nil {
+		askReports(ctx, reports, win, !opts.background)
+	}
+
 	a.Run()
 	cancel()
 	_ = bridge.Stop() // the loop ended some other way (a signal Fyne took)
@@ -171,6 +216,27 @@ const (
 	trayHostWait  = 15 * time.Second
 	trayHostEvery = 500 * time.Millisecond
 )
+
+// installKind is the install tag of a report (update.InstallKind).
+func installKind() string {
+	in := update.Install{GOOS: runtime.GOOS, Env: os.Getenv}
+	if exe, err := executable(); err == nil {
+		in.Exe = exe
+		in.Home, _ = os.UserHomeDir()
+	}
+	return update.InstallKind(in)
+}
+
+// askReports asks in a dialog, once the loop runs, about the reports kept
+// by an earlier run (mode ask only), and shows the panel for each report
+// saved from now on. A --background start (raise false) shows the dialog
+// only when the window is first shown.
+func askReports(ctx context.Context, r *ui.Reports, win *desktop.Window, raise bool) {
+	if n, _ := r.Pending(); n > 0 && r.Asking() {
+		go fyne.Do(func() { win.AskReports(raise) })
+	}
+	r.Watch(ctx, func() { fyne.Do(win.ShowReportPanel) })
+}
 
 // probe runs the single-instance check: a running pcb-ui is shown (exit 0),
 // a running pcb serve or agent session (pcb mcp) is a dialog and exit 20.

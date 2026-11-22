@@ -15,6 +15,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 	"github.com/Barben360/proton-calendar-bridge/internal/update"
 )
@@ -66,6 +67,9 @@ var childHook func() int
 func TestMain(m *testing.M) {
 	if os.Getenv("PCB_UI_TEST_RUN") == "1" {
 		os.Exit(run(strings.Fields(os.Getenv("PCB_UI_TEST_ARGS"))))
+	}
+	if how := os.Getenv(reportsChildEnv); how != "" {
+		os.Exit(reportsChild(how))
 	}
 	if childHook != nil && os.Getenv("PCB_UI_TEST_CLASS") == "1" {
 		os.Exit(childHook())
@@ -307,5 +311,54 @@ func TestAlertSenderLogsAFailureOnce(t *testing.T) {
 	s.sendAll(&n, note)
 	if got := strings.Count(buf.String(), "notification failed"); got != 2 {
 		t.Errorf("a new failure after a success logged %d lines in total, want 2", got)
+	}
+}
+
+func TestSettingsCrashReportsSwitch(t *testing.T) {
+	s, _ := newSettings(t)
+	if on, available, _ := s.CrashReports(); on || available {
+		t.Errorf("without reports: on %v, available %v", on, available)
+	}
+	if err := s.SetCrashReports(true); err == nil {
+		t.Error("the switch worked in a build without a report address")
+	}
+	store := report.Store{StateDir: t.TempDir(), Env: func(string) string { return "" }}
+	s.reports = &ui.Reports{Store: store}
+	if on, available, by := s.CrashReports(); on || !available || by != "" {
+		t.Errorf("mode ask: on %v, available %v", on, available)
+	}
+	if err := s.SetCrashReports(true); err != nil {
+		t.Fatal(err)
+	}
+	if store.Mode() != report.Always {
+		t.Errorf("mode %s after switching on, want always", store.Mode())
+	}
+	if on, _, _ := s.CrashReports(); !on {
+		t.Error("the switch is off in mode always")
+	}
+}
+
+// PCB_CRASH_REPORTS=always: the switch shows on, says why, and cannot be
+// turned off (the file would say ask while reports keep leaving).
+func TestSettingsCrashReportsSwitchSetByTheEnvironment(t *testing.T) {
+	s, _ := newSettings(t)
+	store := report.Store{StateDir: t.TempDir(), Env: func(k string) string {
+		if k == report.EnvSwitch {
+			return "always"
+		}
+		return ""
+	}}
+	s.reports = &ui.Reports{Store: store}
+	if on, available, by := s.CrashReports(); !on || !available || by != report.EnvSwitch {
+		t.Fatalf("on %v, available %v, set by %q; want on, available, set by %s", on, available, by, report.EnvSwitch)
+	}
+	if err := s.SetCrashReports(false); err == nil {
+		t.Error("switching off worked while PCB_CRASH_REPORTS=always")
+	}
+	if on, _, _ := s.CrashReports(); !on || store.Mode() != report.Always {
+		t.Errorf("after switching off: on %v, mode %s; want on, always", on, store.Mode())
+	}
+	if m := (report.Store{StateDir: store.StateDir, Env: func(string) string { return "" }}).Mode(); m != report.Ask {
+		t.Errorf("reports.json says %s, want it untouched (ask)", m)
 	}
 }

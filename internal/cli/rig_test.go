@@ -219,8 +219,12 @@ type rig struct {
 	// the host's users.
 	asRoot   bool
 	userName func(uid int) (string, error)
-	out      bytes.Buffer
-	errb     bytes.Buffer
+	// reportDSN is where crash reports go (IO.ReportDSN; "": none);
+	// stderrTerm makes stderr a terminal (IO.StderrTerminal).
+	reportDSN  string
+	stderrTerm bool
+	out        bytes.Buffer
+	errb       bytes.Buffer
 	// offset is how far the rig's clock (now) runs ahead of t0.
 	offset atomic.Int64
 	// slept records the command's own waits (IO.Sleep), which move the
@@ -377,6 +381,10 @@ func (r *rig) run(args ...string) exitcode.Code {
 		io.Host.UserName = r.userName
 	}
 	io.Update = r.upd
+	io.ReportDSN = r.reportDSN
+	if r.stderrTerm {
+		io.StderrTerminal = func() bool { return true }
+	}
 	if r.exe != "" {
 		io.Exe = func() (string, error) { return r.exe, nil }
 	}

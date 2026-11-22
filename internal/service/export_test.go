@@ -243,3 +243,6 @@ func (h *Hub) AlsoOnOpen(f func(l *Local)) {
 func ChooseSealerOn(goos, backend string, kr Keyring) (name, reason string, err error) {
 	return chooseSealerOn(goos, backend, kr)
 }
+
+// ServeGuarded exposes serveGuarded.
+var ServeGuarded = serveGuarded

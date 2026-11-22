@@ -5,10 +5,16 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 # time (as scripts/release/package.sh does), never the clock, so a rebuild of
 # a tag gives the attested archive's bytes. GNU date -d @N, BSD date -r N.
 DATE    ?= $(shell e=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct 2>/dev/null)}; if [ -n "$$e" ]; then date -u -d "@$$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$$e" +%Y-%m-%dT%H:%M:%SZ; else date -u +%Y-%m-%dT%H:%M:%SZ; fi)
+# Where approved crash reports go (a Sentry DSN). Empty, the build has no
+# address and keeps and sends no report: dev and source builds, and make
+# test and make lint, which never stamp it. Only make build, ui and image
+# take it, from the release workflows' secret PCB_REPORT_DSN.
+REPORT_DSN ?=
 LDFLAGS := -s -w \
 	-X $(PKG)/internal/buildinfo.Version=$(VERSION) \
 	-X $(PKG)/internal/buildinfo.Commit=$(COMMIT) \
-	-X $(PKG)/internal/buildinfo.Date=$(DATE)
+	-X $(PKG)/internal/buildinfo.Date=$(DATE) \
+	-X $(PKG)/internal/buildinfo.ReportDSN=$(REPORT_DSN)
 # GOOS=windows builds append .exe (make build ui GOOS=windows; pcb-ui only on
 # Windows itself: it needs cgo).
 GOOS    ?= $(shell go env GOOS)
@@ -30,7 +36,7 @@ PREFIX  ?= $(HOME)/.local
 JOBS    ?= $(shell n=$$(nproc 2>/dev/null || echo 4); [ "$$n" -lt 4 ] && echo "$$n" || echo 4)
 export GOMAXPROCS := $(JOBS)
 
-.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck actionlint vulncheck pcb-fake rehearse screenshots
+.PHONY: build install ui winres msi install-ui test lint image container-smoke systemd-smoke live-preflight live-preflight-test release-test install-test vmtest-test shellcheck bugsink-check actionlint vulncheck pcb-fake rehearse screenshots
 
 build:
 	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(OUT) ./cmd/pcb
@@ -123,7 +129,7 @@ IMAGE ?= pcb:local
 IMAGE_FLAGS ?=
 
 image:
-	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(IMAGE_FLAGS) .
+	docker build -t $(IMAGE) --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) $(if $(REPORT_DSN),--build-arg REPORT_DSN) $(IMAGE_FLAGS) .
 
 # Smoke tests in throwaway containers (M5-Rpre12): each prints PASS last.
 container-smoke:
@@ -145,6 +151,11 @@ live-preflight-test:
 vmtest-test:
 	bash scripts/win/vmtest_test.sh
 
+# Does Bugsink accept, group and keep the crash report shape (not in the gate;
+# needs docker): scripts/bugsink-check.sh.
+bugsink-check:
+	scripts/bugsink-check.sh
+
 # shellcheck of the live-session scripts, pinned by digest so CI and a
 # workstation run the same one (the runner's own v0.11.0 crashes on
 # preflight.sh: "Non-exhaustive patterns in function checkCmd").
@@ -156,7 +167,7 @@ shellcheck:
 		scripts/install.sh scripts/install_test.sh \
 		scripts/release/check.sh scripts/release/check_test.sh scripts/release/macos-smoke.sh \
 		scripts/release/package.sh scripts/release/package_test.sh scripts/release/licensertf_test.sh \
-		scripts/win/vmtest.sh scripts/win/vmtest_test.sh
+		scripts/win/vmtest.sh scripts/win/vmtest_test.sh scripts/bugsink-check.sh
 
 # The workflows, linted by actionlint (v1.7.12, 2026-03-30), pinned by digest.
 ACTIONLINT_IMAGE ?= rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

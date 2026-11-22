@@ -73,6 +73,9 @@ type Server struct {
 	// It runs behind the peer-UID check like every route, and its answers
 	// are its own, not envelopes. nil: /mcp is an unknown endpoint.
 	MCP http.Handler
+	// Wrap, when set, wraps Handler in what Serve serves (the daemon's
+	// panic reports: internal/ctl records nothing itself).
+	Wrap func(http.Handler) http.Handler
 
 	once, initOnce sync.Once
 	srv            *http.Server
@@ -130,8 +133,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) http() *http.Server {
 	s.once.Do(func() {
+		h := s.Handler()
+		if s.Wrap != nil {
+			h = s.Wrap(h)
+		}
 		s.srv = &http.Server{
-			Handler:           s.Handler(),
+			Handler:           h,
 			ConnContext:       s.ConnContext,
 			ReadHeaderTimeout: readHeaderTimeout,
 			ReadTimeout:       readTimeout,

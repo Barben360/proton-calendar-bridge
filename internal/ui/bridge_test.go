@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/filelock"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
 	"github.com/Barben360/proton-calendar-bridge/internal/proton/protontest"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -695,4 +697,34 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// A report saved while pcb-ui runs in mode always is sent by the bridge's
+// daemon: the sender and its wake-up reach daemon.Run.
+func TestBridgeSendsAReportSavedWhileRunning(t *testing.T) {
+	got := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { got <- struct{}{}; w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	dsn := "http://key@" + strings.TrimPrefix(srv.URL, "http://") + "/1"
+	l := newLab(t)
+	store := report.Store{StateDir: l.dirs.State, Env: l.env}
+	if err := os.MkdirAll(l.dirs.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMode(t.Context(), report.Always); err != nil {
+		t.Fatal(err)
+	}
+	report.Install(&report.Process{Store: store, Meta: report.Meta{Binary: "pcb-ui"}, DSN: dsn})
+	t.Cleanup(report.Uninstall)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, Reports: &report.Sender{DSN: dsn, Store: store}})
+	t.Cleanup(func() { _ = b.Stop() })
+	if err := b.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	report.RecordError(errors.New("a bug"))
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the report saved while running was not sent")
+	}
 }

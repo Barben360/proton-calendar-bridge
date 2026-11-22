@@ -16,6 +16,13 @@ Adding an account: the address and password first, then a 2FA code, the mailbox 
 <img alt="pcb-ui's add-account wizard: address and Proton password" src="assets/ui/add-account-dark.png#gh-dark-mode-only" width="720">
 </p>
 
+After a crash, `pcb-ui` asks whether to send the report that pcb kept (nothing is sent before you answer):
+
+<p align="center">
+<img alt="pcb-ui's crash report dialog: Show report, Send, Always send, Don't send" src="assets/ui/crash-report-light.png#gh-light-mode-only" width="720">
+<img alt="pcb-ui's crash report dialog: Show report, Send, Always send, Don't send" src="assets/ui/crash-report-dark.png#gh-dark-mode-only" width="720">
+</p>
+
 The window follows your desktop's light or dark theme.
 
 `pcb-ui` is the desktop face of the same bridge, in the spirit of Proton Mail Bridge. It is a separate binary that runs the daemon itself: no `pcb serve` is needed, and `pcb status`, `pcb client show` and Thunderbird work the same while it runs.
@@ -40,7 +47,8 @@ After `make install-ui` it is also in your applications menu. On Windows the ins
 | Add-account wizard | Password, 2FA code, mailbox password, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you, and one when a newer release is out. |
 | Update available | A panel at the top of the window when a newer stable release exists: "Open release page", "Copy update command" (the `install.sh` line, with the flags of this install), and "Later", which hides it for 48 hours. It comes back after, for the same version too: a fix only protects those who install it. The tray menu shows "Update available: vX.Y.Z" above "Open pcb" as long as one exists. The tray icon does not change. ([security](security.md#the-update-check)) |
-| Settings | "Start at login", "Check for updates", "Open config.toml", "Restart bridge", the log level. |
+| Crash report | After a crash or an unexpected error, a dialog at the next start ("pcb stopped unexpectedly", or "pcb ran into an unexpected error" when it was an error only) and, when a report is saved while `pcb-ui` runs, a panel at the top of the window in the style of the update panel. Both have "Show report" (the exact text that would be sent, read-only), "Send", "Always send" and "Don't send" (deletes it). Closing the dialog changes nothing: it asks again at the next start. Started with `--background`, the dialog waits until the window first opens. No report is sent before you answer. ([security](security.md#crash-reports)) |
+| Settings | "Start at login", "Check for updates", "Send crash reports" (on is `always`, off is `ask`; `never` is `pcb crash-reports never`; disabled, marked "set by PCB_CRASH_REPORTS", while that variable sets the mode), "Open config.toml", "Restart bridge", the log level. |
 
 Closing the window hides it; Quit in the tray menu stops the bridge. Without a tray, see [No tray icon on GNOME](#no-tray-icon-on-gnome) below: closing the window then quits `pcb-ui` started by hand, and only hides it when started with `--background`.
 

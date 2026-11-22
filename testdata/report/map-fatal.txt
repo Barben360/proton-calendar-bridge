@@ -1,0 +1,43 @@
+fatal error: concurrent map writes
+
+goroutine 11 [running]:
+internal/runtime/maps.fatal({0x486d03?, 0x0?})
+	runtime/panic.go:1197 +0x18
+github.com/Barben360/proton-calendar-bridge/internal/daemon.Race.func1()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:40 +0x2c
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.Race in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:38 +0x45
+
+goroutine 1 [sleep]:
+time.Sleep(0x2540be400)
+	runtime/time.go:368 +0x165
+github.com/Barben360/proton-calendar-bridge/internal/daemon.Race()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:44 +0xbe
+main.main()
+	github.com/Barben360/proton-calendar-bridge/cmd/pcb/main.go:18 +0x98
+
+goroutine 7 [runnable]:
+time.Sleep(0x34630b8a000)
+	runtime/time.go:343 +0x3d
+github.com/Barben360/proton-calendar-bridge/internal/daemon.idle()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:32 +0x1d
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.Race in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:35 +0x1e
+
+goroutine 8 [runnable]:
+github.com/Barben360/proton-calendar-bridge/internal/daemon.Race.func1()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:40 +0x2c
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.Race in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:38 +0x45
+
+goroutine 9 [runnable]:
+github.com/Barben360/proton-calendar-bridge/internal/daemon.Race.func1()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:40 +0x2c
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.Race in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:38 +0x45
+
+goroutine 10 [runnable]:
+github.com/Barben360/proton-calendar-bridge/internal/daemon.Race.func1()
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:38
+created by github.com/Barben360/proton-calendar-bridge/internal/daemon.Race in goroutine 1
+	github.com/Barben360/proton-calendar-bridge/internal/daemon/d.go:38 +0x45

@@ -44,6 +44,13 @@ type Settings interface {
 	// UpdateCheck is the "Check for updates" switch (update.json).
 	UpdateCheck() bool
 	SetUpdateCheck(on bool) error
+	// CrashReports is the "Send crash reports" switch: on is always send,
+	// off is ask. available is false in a build without a report address,
+	// which shows no switch. setBy names the environment variable that sets
+	// the mode in force, which the switch then shows but cannot change ("":
+	// none).
+	CrashReports() (on, available bool, setBy string)
+	SetCrashReports(on bool) error
 }
 
 // WizardModel is the add-account flow the window draws: *ui.Wizard.
@@ -104,16 +111,19 @@ type Window struct {
 	mode     paneKind
 	selected string // the account of the account pane
 
-	banner    *widget.Label
-	bannerBox fyne.CanvasObject
-	upd       *updatePanel
-	notice    *widget.Label // the one-time no-tray line
-	rows      []row
-	rowBox    *fyne.Container
-	right     *fyne.Container
-	addBtn    *widget.Button // the sidebar's +
-	gear      *widget.Button
-	listen    *textLine // under Settings: where the bridge listens
+	banner     *widget.Label
+	bannerBox  fyne.CanvasObject
+	upd        *updatePanel
+	reports    ReportsModel // nil: no crash reports in this build
+	repPanel   *reportPanel
+	askPending bool          // AskReports waits for the window to be shown
+	notice     *widget.Label // the one-time no-tray line
+	rows       []row
+	rowBox     *fyne.Container
+	right      *fyne.Container
+	addBtn     *widget.Button // the sidebar's +
+	gear       *widget.Button
+	listen     *textLine // under Settings: where the bridge listens
 
 	pane     *accountPane
 	wiz      *wizardPane
@@ -150,6 +160,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 	w.bannerBox = alertBox(w.banner)
 	w.bannerBox.Hide()
 	w.upd = newUpdatePanel(w)
+	w.repPanel = newReportPanel(w)
 	w.notice = widget.NewLabel("")
 	w.notice.Wrapping = fyne.TextWrapWord
 	w.notice.Importance = widget.LowImportance
@@ -172,7 +183,7 @@ func NewWindow(a fyne.App, act ui.Actions, set Settings, newWizard func() Wizard
 		newTextLine("Accounts", theme.ColorNameForeground, theme.SizeNameSubHeadingText, fyne.TextStyle{Bold: true})))
 	footer := vbox(4, widget.NewSeparator(), w.gear, pad(0, 0, 12, 0, w.listen))
 	sidebar := fixedWidth(250, newPanel(pad(14, 12, 10, 10, container.NewBorder(header, footer, nil, nil, container.NewVScroll(w.rowBox))), colorCard, "", 0, 0, 0))
-	top := pad(16, 0, 28, 28, vbox(8, w.bannerBox, w.upd.box, w.notice))
+	top := pad(16, 0, 28, 28, vbox(8, w.bannerBox, w.upd.box, w.repPanel.box, w.notice))
 	main := container.NewBorder(top, nil, nil, nil, w.right)
 	w.win.SetContent(container.NewStack(container.NewBorder(nil, nil, container.NewBorder(nil, nil, nil, widget.NewSeparator(), sidebar), nil, main), w.tips.box))
 	w.win.SetPadded(false) // the sidebar runs to the window's edges
@@ -536,7 +547,8 @@ func (w *Window) ShowLogin(username string) {
 	w.reveal()
 }
 
-// reveal shows the window, with the error that came while it was hidden.
+// reveal shows the window, with the error that came while it was hidden
+// and the crash reports waiting to be asked about.
 func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
@@ -544,6 +556,9 @@ func (w *Window) reveal() {
 	if err := w.pendingErr; err != nil {
 		w.pendingErr = nil
 		w.showErr(err)
+	}
+	if w.reports != nil {
+		w.presentReports()
 	}
 }
 

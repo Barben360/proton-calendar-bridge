@@ -1,0 +1,37 @@
+{
+  "event_id": "00000000000040008000000000000001",
+  "timestamp": "2026-11-19T10:00:00Z",
+  "platform": "go",
+  "level": "fatal",
+  "release": "pcb@1.2.3",
+  "environment": "production",
+  "tags": {
+    "binary": "pcb",
+    "command": "pcb serve",
+    "install": "container",
+    "source": "crash"
+  },
+  "fingerprint": ["go.crash", "runtime error", "serveLoop", "handleRequest"],
+  "contexts": {
+    "os": {"name": "linux"},
+    "runtime": {"name": "go", "version": "go1.24.0"},
+    "device": {"arch": "amd64"}
+  },
+  "exception": {
+    "values": [
+      {
+        "type": "runtime error",
+        "value": "runtime error: index out of range [3] with length 3",
+        "mechanism": {"type": "go.crash", "handled": false},
+        "stacktrace": {
+          "frames": [
+            {"function": "runtime.goexit", "filename": "runtime/asm_amd64.s", "lineno": 1700, "in_app": false},
+            {"function": "github.com/Barben360/proton-calendar-bridge/internal/daemon.serveLoop", "filename": "internal/daemon/serve.go", "lineno": 88, "in_app": true},
+            {"function": "github.com/Barben360/proton-calendar-bridge/internal/daemon.handleRequest", "filename": "internal/daemon/handler.go", "lineno": 142, "in_app": true}
+          ]
+        }
+      }
+    ]
+  },
+  "extra": {"count": 3}
+}

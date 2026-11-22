@@ -34,6 +34,7 @@ import (
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/mcp"
 	"github.com/Barben360/proton-calendar-bridge/internal/paths"
+	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/tlsutil"
 )
@@ -169,6 +170,12 @@ type Options struct {
 	// socket's handler goroutine and must return quickly, for example by
 	// posting to the UI loop.
 	ShowUI func(account string) error
+	// Reports sends the waiting crash reports in the background while
+	// Run serves, when the mode in force is always (report.Sender.Run).
+	// nil: nothing is sent. It never delays Ready.
+	Reports *report.Sender
+	// ReportPoke wakes Reports when a report is saved (nil: only at start).
+	ReportPoke <-chan struct{}
 }
 
 // Info describes the CalDAV listener.
@@ -258,6 +265,19 @@ func Run(ctx context.Context, o Options) error {
 		return finish(nil)
 	}
 
+	if o.Reports != nil {
+		sendCtx, stopSend := context.WithCancel(ctx)
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			o.Reports.Run(sendCtx, o.ReportPoke)
+		}()
+		defer func() {
+			stopSend()
+			<-sent
+		}()
+	}
+
 	remoteMCP := o.Config.MCP.Remote && o.MCP != nil && !o.NoListener
 	switch {
 	case o.Config.MCP.Remote && o.NoListener:
@@ -330,7 +350,7 @@ func Run(ctx context.Context, o Options) error {
 		handler = withMCP(handler, o.MCP.HTTPHandler(auth))
 	}
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           recordPanics(handler, log),
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -375,11 +395,20 @@ func Run(ctx context.Context, o Options) error {
 // guard runs f and turns a panic in it into a Blocked error naming an
 // internal error in what, so Run ends through its normal stop instead of
 // the process dying with every account's cache write cut. The panic value
-// and the stack go to the log only.
+// and the stack go to the log; a crash report keeps the stack, never the
+// value's text (report.RecordRecovered).
 func guard(log *slog.Logger, what string, f func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("a daemon goroutine panicked", "what", what, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			stack := debug.Stack()
+			typ, msg := report.PanicSummary(r)
+			log.Error("a daemon goroutine panicked", "what", what, "panic_type", typ, "panic", msg, "stack", string(stack))
+			// Recovered, it never reaches the crash file; a panic of the
+			// reporting must not escape this recovery.
+			func() {
+				defer func() { _ = recover() }()
+				report.RecordRecovered(r, stack)
+			}()
 			err = &exitcode.Error{Code: exitcode.Blocked, Err: fmt.Errorf("internal error in %s", what),
 				Hint: "see the log for the stack, report the bug, then run pcb serve again"}
 		}
@@ -461,7 +490,8 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 	if onWindows {
 		what = "control pipe"
 	}
-	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay}
+	srv := &ctl.Server{Hub: hub, Daemon: d, Listener: listener, Now: time.Now, Logger: log, ShowUI: showUI, MCPStatus: mcpStatus, MCP: relay,
+		Wrap: func(h http.Handler) http.Handler { return recordPanics(h, log) }}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -486,6 +516,32 @@ func startControl(log *slog.Logger, hub ctl.Hub, d ctl.Daemon, listener func() *
 			log.Info(what + " stopped")
 		})
 	}, nil
+}
+
+// recordPanics logs a panic in h (CalDAV, remote MCP or the control
+// socket) at Error, keeps a crash report of it, then aborts the request as
+// net/http does for any handler panic: the connection is cut. The log line
+// names the panic's Go type and the last frame of pcb's code, never the
+// panic's text or values (logs carry IDs only); re-panicking
+// http.ErrAbortHandler keeps net/http from logging the text. http.ErrAbortHandler is the handler's own way of
+// aborting and is neither logged nor recorded.
+func recordPanics(h http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				if err, ok := v.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
+					stack := debug.Stack()
+					log.Error("request handler panicked", "type", fmt.Sprintf("%T", v), "frame", report.PanicSite(stack))
+					func() {
+						defer func() { _ = recover() }() // a panic of the reporting stays here
+						report.RecordPanic(v, stack)
+					}()
+				}
+				panic(http.ErrAbortHandler)
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
 }
 
 // mcpPath is where the listener serves MCP when [mcp] remote is on.
