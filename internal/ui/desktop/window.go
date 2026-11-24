@@ -451,6 +451,7 @@ func (w *Window) setRight(o fyne.CanvasObject) {
 // Cancel waits for a call in flight).
 func (w *Window) leave(next paneKind) {
 	w.pane.pw.hide()
+	w.pane.showProgress(nil) // a moving bar out of sight would still animate; setAccount draws it again
 	if next != paneWizard {
 		w.closeWizard()
 	}
@@ -636,6 +637,7 @@ func (w *Window) Hide() {
 	w.visible = false
 	w.win.Hide()
 	w.pane.pw.hide()
+	w.pane.showProgress(nil) // no animation for a hidden window; the next Update draws it again
 	if w.mode == paneWizard && !w.waiting() {
 		w.closeWizard()
 		w.showDefault()

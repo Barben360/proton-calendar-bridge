@@ -54,6 +54,15 @@ func TestQuickPassShowsNoProgress(t *testing.T) {
 	if at.Accounts[0].Progress == nil {
 		t.Error("pass running for exactly ProgressDelay: no progress shown")
 	}
+	other := ready("b", 10*time.Second, 30)
+	busy := ready("a", 10*time.Second, 30)
+	busy.Health.Pass = &service.PassProgress{StartedAt: *ago(time.Second), Calendars: 1}
+	if two := ui.Build(status(busy, other), now); !two.PassRunning {
+		t.Error("a pass on the first of two accounts: no redraw every second")
+	}
+	if two := ui.Build(status(other, busy), now); !two.PassRunning {
+		t.Error("a pass on the second of two accounts: no redraw every second")
+	}
 	idle := ui.Build(status(ready("a", 10*time.Second, 30)), now)
 	if idle.PassRunning || idle.RefreshAfter() != 0 {
 		t.Errorf("no pass: running %v, refresh %v; want false, 0", idle.PassRunning, idle.RefreshAfter())

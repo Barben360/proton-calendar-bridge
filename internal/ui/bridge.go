@@ -232,10 +232,8 @@ func (b *Bridge) startRun(ctx context.Context) error {
 			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
 				ShowLogin: showLogin, LoginBusy: hub.LoginInProgress}),
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI, SessionEnd: b.o.SessionEnd,
-			OnState: func(string, service.ServeState) { b.poke() },
-			// The window then redraws every second while the pass runs
-			// (View.RefreshAfter), so its progress shows and moves.
-			OnPassStart: func(string) { b.poke() },
+			OnState:     func(string, service.ServeState) { b.poke() },
+			OnPassStart: b.passStarted,
 			// The same records as pcb serve's, for the same log file content.
 			OnPass: func(id string, p service.WatchPass) {
 				l := log.With("account", id)
@@ -276,6 +274,11 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+// passStarted pokes Changes as an account's pass starts: the window then
+// sees the pass and redraws every second while it runs (WaitRedraw), so its
+// progress shows and moves, whatever the 30 s tick.
+func (b *Bridge) passStarted(string) { b.poke() }
 
 // ticker pokes Changes every tick until r ends.
 func (b *Bridge) ticker(r *run) {

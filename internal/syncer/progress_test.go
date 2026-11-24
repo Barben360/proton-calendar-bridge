@@ -307,4 +307,34 @@ func TestProgressLeavesOutADeferredCalendar(t *testing.T) {
 			t.Errorf("deferred calendar: %+v, want nothing fetched or expected", p)
 		}
 	}
+	// Once the gap is over the listing is planned from the start.
+	got = progressOf(t, at(t0.Add(syncer.FallbackGap+time.Minute)), func(o syncer.Options) { pass(t, c, db, o) })
+	if got[0].Expected != 150 {
+		t.Errorf("after the gap, at the pass's start: %+v, want the cached 150 expected", got[0])
+	}
+	if last := got[len(got)-1]; last.Mode != syncer.ModeFull || last.Fetched != 150 || last.Expected != 150 {
+		t.Errorf("after the gap: %+v, want full, 150 of 150", last)
+	}
+}
+
+// Proton's Total replaces the cached count as soon as the listing announces
+// it, smaller too: rows deleted since the last pass.
+func TestProgressTakesTheAnnouncedTotalOverTheCachedCount(t *testing.T) {
+	t.Parallel()
+	f, c, db := setup(t)
+	a := f.AddCalendar(f.Username, protontest.Calendar{Name: "Perso"})
+	ids := addEvents(f, a, 150)
+	pass(t, c, db, at(t0))
+	for _, id := range ids[:40] {
+		f.DeleteEvent(a, id)
+	}
+	got := progressOf(t, at(t0.Add(25*time.Hour)), func(o syncer.Options) { pass(t, c, db, o) })
+	if got[0].Expected != 150 {
+		t.Errorf("before the listing: %+v, want the cached 150", got[0])
+	}
+	for _, p := range got {
+		if p.Fetched == 100 && p.Expected != 110 {
+			t.Errorf("after the first page: %+v, want Proton's 110 expected", p)
+		}
+	}
 }

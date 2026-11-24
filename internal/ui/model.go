@@ -226,13 +226,14 @@ func progressView(p *service.PassProgress, now time.Time) *ProgressView {
 }
 
 // lists reports whether the pass p lists calendars in full: it expects
-// events, has fetched some, or has no estimate yet for a calendar never
-// synced. Before it knows its calendars it says nothing.
+// events (the syncer keeps the estimate at least what was fetched), or has
+// no estimate yet for a calendar never synced. Before it knows its
+// calendars it says nothing.
 func lists(p *service.PassProgress) bool {
 	if p == nil || p.Calendars == 0 {
 		return false
 	}
-	return p.EventsExpected == nil || *p.EventsExpected > 0 || p.EventsFetched > 0
+	return p.EventsExpected == nil || *p.EventsExpected > 0
 }
 
 // stageText says what the pass does for its current calendar, and why a

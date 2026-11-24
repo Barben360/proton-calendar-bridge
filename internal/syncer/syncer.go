@@ -251,7 +251,6 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 			r.Err = &ResyncDeferredError{Cause: cause, Until: next}
 			return r
 		}
-		pg.listing(ModeFull)
 	}
 	if r.Mode != ModeIncremental {
 		pg.start(i, r.Mode, prev.FullAt, true)

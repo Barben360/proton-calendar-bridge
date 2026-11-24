@@ -467,18 +467,32 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 	if !f.has("An ambiguous gate") {
 		t.Error("a redraw with the same calendars closed the reason: the rows are the same")
 	}
-	// The progress block appearing moves the rows down: the reason would
-	// float where the icon was.
+	// What appears above the rows moves them down (the progress block, an
+	// alert): the reason follows its icon instead of floating where it was.
+	under := func(step string) {
+		t.Helper()
+		if !f.has("An ambiguous gate") || len(f.w.tips.box.Objects) != 1 {
+			t.Fatalf("%s: the reason is gone", step)
+		}
+		icon := fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0])
+		tip := f.w.tips.box.Objects[0].Position()
+		below := icon.Y + tips[0].Size().Height + 4
+		above := icon.Y - f.w.tips.box.Objects[0].Size().Height - 4
+		if tip.Y != below && tip.Y != above {
+			t.Errorf("%s: the reason is at y %v, its icon at y %v: want it right below (%v) or above (%v)", step, tip.Y, icon.Y, below, above)
+		}
+	}
+	before := fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0])
 	moved := twoAccounts()
 	moved.Accounts[0].Progress = &ui.ProgressView{Text: "Full sync · Personal (1/2) · 3 s", Fraction: 0.1}
 	f.w.Update(moved)
-	if f.has("An ambiguous gate") {
-		t.Error("the reason stays after the progress block moved its row")
+	if after := fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0]); after.Y <= before.Y {
+		t.Fatalf("the progress block did not move the icon (y %v then %v): the scenario needs it", before.Y, after.Y)
 	}
-	test.Tap(tips[0])
-	if !f.has("An ambiguous gate") {
-		t.Fatal("a tap on the info icon shows no reason")
-	}
+	under("progress block shown")
+	moved.Accounts[0].Alerts = append(moved.Accounts[0].Alerts, ctl.Alert{Code: "x", Severity: "warning", Message: "another alert", Fix: "do something"})
+	f.w.Update(moved)
+	under("an alert added")
 	v := twoAccounts()
 	v.Accounts[0].Calendars[0].LastSync = "synced just now"
 	f.w.Update(v)
@@ -1146,6 +1160,33 @@ func TestAccountPaneShowsThePassProgress(t *testing.T) {
 	}
 }
 
+// Leaving the account pane or hiding the window stops a moving bar: out of
+// sight it would still redraw the window every frame, and the end of the
+// pass would not reach it. Coming back draws it again.
+func TestMovingBarStopsOutOfSight(t *testing.T) {
+	f := newFixture(t)
+	v := twoAccounts()
+	v.Accounts[0].Progress = &ui.ProgressView{Text: "First sync · Personal (1/2) · 5 s", Fraction: -1}
+	f.w.Update(v)
+	f.w.Show("a1")
+	p := f.w.pane
+	if !animating(p.progWait) {
+		t.Fatal("the moving bar does not animate on the account pane (the scenario needs it)")
+	}
+	f.w.showSettings()
+	if animating(p.progWait) {
+		t.Error("after leaving for Settings, the moving bar still animates")
+	}
+	f.w.Show("a1")
+	if !animating(p.progWait) {
+		t.Error("back on the account, the moving bar does not animate again")
+	}
+	f.w.Hide()
+	if animating(p.progWait) {
+		t.Error("with the window hidden, the moving bar still animates")
+	}
+}
+
 // animating reads whether the moving bar's renderer runs its animation:
 // Fyne 2.8's infProgressRenderer.wasRunning, which Running() does not
 // reflect (Hide clears the flag Running reads, not the animation).
@@ -1182,6 +1223,31 @@ func TestSidebarRowsKeptAcrossRedraws(t *testing.T) {
 	if f.w.selected != "b2" || !f.w.rows[1].addr.Style.Bold || f.w.rows[0].addr.Style.Bold {
 		t.Errorf("tap on a kept row: selected %q, bold %v/%v; want b2, its address bold", f.w.selected, f.w.rows[0].addr.Style.Bold, f.w.rows[1].addr.Style.Bold)
 	}
+	attention := v
+	attention.Accounts = slices.Clone(v.Accounts)
+	attention.Accounts[0].Dot = ui.TrayAttention
+	f.w.Update(attention)
+	if f.w.rows[0].short.ColorName != theme.ColorNameWarning {
+		t.Errorf("an account needing attention: its line is %q, want the warning colour", f.w.rows[0].short.ColorName)
+	}
+	f.w.Update(v)
+	if f.w.rows[0].short.ColorName != theme.ColorNameDisabled {
+		t.Errorf("back to syncing: its line is %q, want the muted colour", f.w.rows[0].short.ColorName)
+	}
+
+	// The same number of accounts, in another order: new rows, each opening
+	// its own account.
+	swapped := v
+	swapped.Accounts = []ui.AccountView{v.Accounts[1], v.Accounts[0]}
+	f.w.Update(swapped)
+	if f.w.rows[0].id != "b2" || f.w.rows[1].btn == btn {
+		t.Fatalf("reordered accounts: rows %q, %q; want b2 then a1, rebuilt", f.w.rows[0].id, f.w.rows[1].id)
+	}
+	test.Tap(f.w.rows[1].btn)
+	if f.w.selected != "a1" {
+		t.Errorf("a tap on a1's row after the reorder selected %q", f.w.selected)
+	}
+
 	v.Accounts = v.Accounts[:1]
 	f.w.Update(v)
 	if len(f.w.rows) != 1 || f.w.rows[0].btn == btn {

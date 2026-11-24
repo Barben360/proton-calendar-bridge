@@ -177,10 +177,14 @@ func TestListDedupesAShiftedPage(t *testing.T) {
 			f.AddEventAt(cal, 0, protontest.Event{UID: "front", Start: 1, End: 2})
 		}
 	})
-	l, err := events.List(t.Context(), c, cal)
+	var reads []int
+	l, err := events.ListProgress(t.Context(), c, cal, func(read, _ int) { reads = append(reads, read) })
 	f.OnListPage(nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(reads) != 2 || reads[0] != 100 || reads[1] != 150 {
+		t.Errorf("progress %v, want [100 150]: unique rows, not the 151 served", reads)
 	}
 	seen := map[string]bool{}
 	for _, r := range l.Rows {

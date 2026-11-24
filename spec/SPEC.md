@@ -1838,12 +1838,14 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   so the tray's menu is not rebuilt at every page. The last pass counts as late past 1.5 intervals, not one: a pass ends a
   little more than an interval after the previous one, which flashed `syncing…` before. A redraw keeps the sidebar's rows and
   the calendar rows when the accounts and calendars are the same (updated in place: a click across a redraw still lands, an
-  open reason stays), and closes an open reason when the progress block or the alerts move the rows; the moving bar is stopped
-  before it is hidden (Fyne 2.8's `Hide` leaves its animation running). A notification that failed is tried again at most every
-  30 s. Issue #84 [verified: `TestStaleCheckHasAMargin`, `TestQuickPassShowsNoProgress`, `TestRunningPassProgress`,
-  `TestWaitRedraw`, `TestBridgeViewShowsARunningPass`, `TestAccountPaneShowsThePassProgress`, `TestSidebarRowsKeptAcrossRedraws`,
-  `TestReadOnlyReasonShowsOnHover`, `TestAlertSenderRetriesAtMostEvery30Seconds`, `TestServeReportsEachPassStart`,
-  `TestRunReportsPassStarts`, `TestProgressCountsACalendarThatComesDueDuringThePass`, `TestProgressOfARepeatedListingNeverGoesBack`].
+  open reason stays), and places an open reason under its icon again when something above moved it (the progress block, an
+  alert); the moving bar is stopped before it is hidden (Fyne 2.8's `Hide` leaves its animation running), and when the person
+  leaves the account pane or the window hides. A notification that failed is tried again at most every 30 s. Issue #84
+  [verified: `TestStaleCheckHasAMargin`, `TestQuickPassShowsNoProgress`, `TestRunningPassProgress`, `TestWaitRedraw`,
+  `TestPassStartWakesTheWindow`, `TestBridgeViewShowsARunningPass`, `TestAccountPaneShowsThePassProgress`,
+  `TestMovingBarStopsOutOfSight`, `TestSidebarRowsKeptAcrossRedraws`, `TestReadOnlyReasonShowsOnHover`,
+  `TestAlertSenderRetriesAtMostEvery30Seconds`, `TestServeReportsEachPassStart`, `TestRunReportsPassStarts`,
+  `TestHealthClearsAFailedPass`, `TestProgressCountsACalendarThatComesDueDuringThePass`, `TestProgressOfARepeatedListingNeverGoesBack`].
   What the window shows is a view model with no toolkit (`internal/ui`, the `cli` import rule, never `fyne.io`); the Fyne layer (`internal/ui/desktop`) only draws it and calls `ui.Actions` and `ui.Wizard`
   [verified: `TestUIArch`, `TestDesktopArch`, `TestTrayAttentionOnErrorAlert`, `TestTraySyncingBeforeFirstPass`, `TestTrayOK`, `TestShortTexts`, `TestAccountFields`, `TestCalendarBadgeFromGate`, `TestAccountListRendersView`,
   `TestTrayMenuFromView`, `TestTrayMenuWithoutAccounts`, `TestTrayIconFollowsState`, `TestTrayUpdateSkipsWhatDidNotChange` (the tray re-sets its icon and menu only when they change: live 2026-11-13, F4, OPEN.md), `TestIconsAreValidOwnArtwork`, `TestWindowSizeAndNoBranding`, `TestCloseHides`, `TestNoTrayLineShownOnce`; the real window, tray and Quit `[verified: live 2026-11-13, spec/experiments/M7-live.md]` (GNOME 48 with the AppIndicator extension; the tray without it, 9.2.4, not run)].

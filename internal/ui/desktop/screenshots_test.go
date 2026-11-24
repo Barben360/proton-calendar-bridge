@@ -36,6 +36,7 @@ func (f fixedVariant) Color(n fyne.ThemeColorName, _ fyne.ThemeVariant) color.Co
 // addresses, no real account, no secret.
 func screenshotView() ui.View {
 	synced := time.Date(2026, 11, 14, 9, 41, 0, 0, time.Local)
+	syncedBefore := synced.Add(-32 * time.Hour) // the syncing account's last pass, before the computer was off
 	return ui.View{
 		Tray:     ui.TrayAttention,
 		Listener: &ctl.Listener{Addr: "127.0.0.1:1080", URL: "http://127.0.0.1:1080/"},
@@ -52,7 +53,7 @@ func screenshotView() ui.View {
 			},
 			{
 				ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing,
-				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly, LastSync: &synced,
+				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly, LastSync: &syncedBefore,
 				URL: "http://127.0.0.1:1080/dav/5e6f7a8b/", Username: "team@example.org",
 				Progress: &ui.ProgressView{Fraction: 0.4,
 					Text: "Full sync (last one 32 h ago) · Team (1/2) · 412 of 1030 events · 1 min 12 s"},

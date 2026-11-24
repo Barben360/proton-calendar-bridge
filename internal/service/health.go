@@ -112,7 +112,10 @@ type PassHealth struct {
 // before this pass (nil: never). EventsFetched is how many events the
 // pass's full listings read so far, EventsExpected how many they should
 // read in all (nil: no estimate yet, a calendar never synced still to
-// list). A calendar read incrementally counts for neither.
+// list). A calendar read incrementally counts for neither. A relogin in the
+// middle of a pass runs it again from its first calendar: the counts start
+// over (StartedAt is kept), with the calendars already done now read
+// incrementally.
 type PassProgress struct {
 	StartedAt      time.Time  `json:"started_at"`
 	Calendar       int        `json:"calendar"`

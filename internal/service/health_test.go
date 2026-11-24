@@ -440,3 +440,34 @@ func TestHealthReportsTheRunningPass(t *testing.T) {
 		t.Fatalf("second pass: %v", pass.Err)
 	}
 }
+
+// A pass that fails ends like any other: no running pass is left behind
+// for the back-off (the window would show it syncing all along).
+func TestHealthClearsAFailedPass(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.signIn(t)
+	e.f.FailNext("GET", "/calendar/v1", 400, 2000, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	passes := make(chan service.WatchPass, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- e.svc.Serve(ctx, service.ServeOptions{OnPass: func(p service.WatchPass) {
+			passes <- p
+			<-ctx.Done()
+		}})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve after the cancel = %v, want nil", err)
+		}
+	})
+	if p := <-passes; p.Err == nil {
+		t.Fatal("the pass did not fail (the scenario needs it)")
+	}
+	if h := e.health(t); h.Pass != nil || h.LastPass == nil || h.LastPass.OK {
+		t.Errorf("after a failed pass: Pass %+v, LastPass %+v; want no running pass, the failure recorded", h.Pass, h.LastPass)
+	}
+}

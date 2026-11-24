@@ -92,18 +92,6 @@ func (t *tracker) start(i int, mode string, prevFull time.Time, lists bool) {
 	t.emit()
 }
 
-// listing marks the current calendar as listed in full (mode), as a
-// fallback of an incremental read too, with its listing starting over.
-func (t *tracker) listing(mode string) {
-	if t.send == nil || t.cur < 0 {
-		return
-	}
-	c := &t.cals[t.cur]
-	c.lists, c.fetched = true, 0
-	t.mode = mode
-	t.emit()
-}
-
 // page records a page of the current calendar's listing: read unique rows
 // so far, total announced (-1: none). A listing repeated because it was
 // unstable starts its count again: the calendar keeps the highest count

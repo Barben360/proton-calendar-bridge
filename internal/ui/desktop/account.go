@@ -129,7 +129,8 @@ type accountPane struct {
 	calendars          *fyne.Container
 	drawnCals          []ui.CalendarView // what calendars draws, for the account drawnID
 	drawnID            string
-	drawnAlerts        []ctl.Alert // what alertBox draws
+	drawnAlerts        []ctl.Alert // what alertBox draws, for the account alertsID
+	alertsID           string
 	alertBox           *fyne.Container
 	b                  *busy
 }
@@ -227,11 +228,6 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	p.status.SetText(av.Short + " · " + last)
 	p.statusDot.FillColor = dotColor(av.Dot)
 	p.statusDot.Refresh()
-	shifts := p.progress.Visible() != (av.Progress != nil) || !slices.Equal(av.Alerts, p.drawnAlerts)
-	if shifts && av.ID == p.drawnID {
-		// The rows below move: a reason shown stays where its icon was.
-		p.w.tips.hide(nil)
-	}
 	p.showProgress(av.Progress)
 	if av.SignedIn {
 		p.signBtn.SetText("Sign out")
@@ -260,16 +256,22 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 		p.fpRow.Hide()
 	}
 	p.drawCalendars(av)
-	alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
-	for _, a := range av.Alerts {
-		msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		msg.Wrapping = fyne.TextWrapWord
-		fix := wrapped("Fix: " + a.Fix)
-		alerts = append(alerts, alertBox(vbox(0, msg, fix)))
+	if av.ID != p.alertsID || !slices.Equal(av.Alerts, p.drawnAlerts) { // redrawn every second during a pass
+		alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
+		for _, a := range av.Alerts {
+			msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+			msg.Wrapping = fyne.TextWrapWord
+			fix := wrapped("Fix: " + a.Fix)
+			alerts = append(alerts, alertBox(vbox(0, msg, fix)))
+		}
+		p.alertBox.Objects = alerts
+		p.alertBox.Refresh()
+		p.alertsID, p.drawnAlerts = av.ID, slices.Clone(av.Alerts)
 	}
-	p.alertBox.Objects = alerts
-	p.alertBox.Refresh()
-	p.drawnAlerts = slices.Clone(av.Alerts)
+	// Whatever moved above it (the progress line, an alert, a group shown
+	// or hidden), an open reason stays under its icon.
+	p.root.Refresh()
+	p.w.tips.follow()
 }
 
 // showProgress draws the running pass pv, or hides the progress (nil): a
@@ -284,7 +286,7 @@ func (p *accountPane) showProgress(pv *ui.ProgressView) {
 	p.progText.SetText(pv.Text)
 	if pv.Fraction < 0 {
 		p.progBar.Hide()
-		p.progWait.Start() // Show alone does not restart a stopped animation
+		p.progWait.Start() // Show restarts it too (its Refresh), Start says so
 		p.progWait.Show()
 	} else {
 		p.stopWait()
