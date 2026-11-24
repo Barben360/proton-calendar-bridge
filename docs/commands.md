@@ -35,7 +35,7 @@ Details: [security](security.md#log-in).
 
 | Command | What it does |
 |---|---|
-| `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, alerts). |
+| `pcb status` | Every account's login; with pcb serving, its live state too (listener, per-calendar sync and write gate, the running pass with its calendar and the events listed so far, alerts). |
 | `pcb status --daemon` | Exits 20 when no daemon answers (the container's health check). |
 | `pcb doctor` | Every check (service, daemon, listener, certificate, clients included), with the fix. With no daemon running, the `caldav listener` line tries to bind the port and fails (exit 20) when another program holds it; `control socket path` fails when the state directory makes the socket path too long (107 bytes on Linux; set `PCB_STATE_DIR`). On Windows also the access lists, `elevated`, `dpapi key`, `time zone` and `start at login`; its `service` line says `no service on Windows: pcb-ui's Start at login runs it`. Exits 0 unless a check fails, 10 when you must act, 20 when only the daemon is unreachable. Its last line, `update`, warns when a newer stable release exists (the fix: its page and how to update), and is skipped when switched off, on a dev build or when github.com does not answer: it never changes the exit code. |
 

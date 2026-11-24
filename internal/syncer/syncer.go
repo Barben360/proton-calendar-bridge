@@ -103,6 +103,9 @@ type Options struct {
 	// pass's reads and applies of that calendar never interleave (ruling
 	// M4-R5). An error (ctx ended while waiting) ends the pass with it.
 	Lock func(ctx context.Context, calID string) (unlock func(), err error)
+	// Progress, when set, gets where the pass is (see Progress), on the
+	// pass's goroutine: it must return quickly.
+	Progress func(Progress)
 }
 
 // Report is what a pass did, one entry per listed calendar in API order.
@@ -169,12 +172,18 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 		}
 	}
 	rep := Report{Calendars: make([]CalendarReport, 0, len(cals))}
-	for _, cal := range cals {
+	names, prevs := make([]string, len(cals)), make([]cache.Calendar, len(cals))
+	for i, cal := range cals {
+		names[i], prevs[i] = cal.Name, prev[cal.ID]
+	}
+	pg := newTracker(o.Progress, names, prevs, o, o.Now())
+	for i, cal := range cals {
 		unlock, err := lockCalendar(ctx, o, cal.ID)
 		if err != nil {
 			return Report{}, err
 		}
-		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o)
+		r := syncCalendar(ctx, c, db, cal.ID, prev[cal.ID], o, pg, i)
+		pg.done()
 		unlock()
 		r.ID, r.Name = cal.ID, cal.Name
 		var se *StoreError
@@ -206,7 +215,8 @@ func Pass(ctx context.Context, c *api.Client, db *cache.Cache, o Options) (Repor
 
 // syncCalendar brings one calendar up to date; prev is its cached state
 // (zero for a calendar never seen). ID and Name are left to the caller.
-func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID string, prev cache.Calendar, o Options) CalendarReport {
+// pg tracks the pass's progress, calendar i being this one.
+func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID string, prev cache.Calendar, o Options, pg *tracker, i int) CalendarReport {
 	now := o.Now()
 	var r CalendarReport
 	next := prev.FullAt.Add(FallbackGap)
@@ -219,11 +229,13 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 		// A fallback listing is pending: the feed is not read again.
 		r.Mode = ModeFull
 		if now.Before(next) {
+			pg.start(i, ModeFull, prev.FullAt, false) // skipped until the gap ends: nothing is listed
 			r.Err = &ResyncDeferredError{Cause: prev.Resync, Until: next}
 			return r
 		}
 	default:
 		r.Mode = ModeIncremental
+		pg.start(i, ModeIncremental, prev.FullAt, false)
 		ch, cause, err := incremental(ctx, c, db, calID, prev.Cursor, now)
 		if cause == "" {
 			r.Changes, r.Err = ch, err
@@ -240,7 +252,10 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 			return r
 		}
 	}
-	r.Changes, r.Err = full(ctx, c, db, calID, now)
+	if r.Mode != ModeIncremental {
+		pg.start(i, r.Mode, prev.FullAt, true)
+	}
+	r.Changes, r.Err = full(ctx, c, db, calID, now, pg.page)
 	return r
 }
 
@@ -273,7 +288,9 @@ func (e *UnverifiedError) Error() string {
 // (gone: tombstoned; found: kept as read; unreadable: kept as cached, and
 // the result is an *UnverifiedError note with the changes stored). The
 // quiet case costs one listing and one extra head read.
-func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now time.Time) (cache.Changes, error) {
+//
+// progress gets each page of each listing (events.ListProgress).
+func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now time.Time, progress func(read, total int)) (cache.Changes, error) {
 	baseline, err := events.Latest(ctx, c, calID)
 	if err != nil {
 		return cache.Changes{}, err
@@ -285,7 +302,7 @@ func full(ctx context.Context, c *api.Client, db *cache.Cache, calID string, now
 		before = baseline
 	)
 	for range MaxListings {
-		l, err := events.List(ctx, c, calID)
+		l, err := events.ListProgress(ctx, c, calID, progress)
 		if err != nil {
 			return cache.Changes{}, err
 		}

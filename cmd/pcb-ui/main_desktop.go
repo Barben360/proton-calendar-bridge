@@ -270,40 +270,54 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 			}
 		})
 		sender.sendAll(&n, n.Next(v))
-		select {
-		case <-ctx.Done():
+		if !ui.WaitRedraw(ctx, v, b.Changes()) {
 			return
-		case <-b.Changes():
 		}
 	}
 }
 
 // alertSender sends alert notifications. A failed one is offered again at
-// the next view (Changes fires at least every 30 s), once the notification
-// daemon is up; its failure is logged once, not at every retry.
+// the next view, at most every notifyRetry (the window redraws every second
+// while a pass runs), until the notification daemon is up; its failure is
+// logged once, not at every retry.
 type alertSender struct {
-	log    *slog.Logger
-	send   func(ui.Notification) error
-	failed map[string]bool // alerts whose failure was logged, until one is sent
+	log     *slog.Logger
+	send    func(ui.Notification) error
+	now     func() time.Time     // nil: time.Now
+	failed  map[string]bool      // alerts whose failure was logged, until one is sent
+	retryAt map[string]time.Time // when a failed alert may be tried again
 }
+
+// notifyRetry is the least wait before a failed notification is tried again.
+const notifyRetry = 30 * time.Second
 
 func (s *alertSender) sendAll(n *ui.Notifier, notes []ui.Notification) {
 	if s.failed == nil {
-		s.failed = map[string]bool{}
+		s.failed, s.retryAt = map[string]bool{}, map[string]time.Time{}
+	}
+	now := time.Now
+	if s.now != nil {
+		now = s.now
 	}
 	var unsent []ui.Notification
 	for _, note := range notes {
 		key := note.Account + "\x00" + note.Code
+		if at, ok := s.retryAt[key]; ok && now().Before(at) {
+			unsent = append(unsent, note) // offered again at a later view
+			continue
+		}
 		err := s.send(note)
 		if err == nil {
 			s.log.Info("notification sent", "alert", note.Code, "account", note.Account)
 			delete(s.failed, key)
+			delete(s.retryAt, key)
 			continue
 		}
 		if !s.failed[key] {
 			s.log.Warn("notification failed", "alert", note.Code, "account", note.Account, "err", err)
 		}
 		s.failed[key] = true
+		s.retryAt[key] = now().Add(notifyRetry)
 		unsent = append(unsent, note)
 	}
 	n.Unsent(unsent)

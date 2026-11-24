@@ -40,6 +40,8 @@ type HubServeOptions struct {
 	ServeOptions
 	OnState func(accountID string, s ServeState)
 	OnPass  func(accountID string, p WatchPass)
+	// OnPassStart is ServeOptions.OnPassStart, per account.
+	OnPassStart func(accountID string)
 	// Kind is the serving process's kind ("serve", "ui", "mcp"), recorded
 	// in serve.lock beside its PID so a second start can say who serves.
 	// "": none recorded.
@@ -432,6 +434,11 @@ func (h *Hub) runLoop(ctx context.Context, sv *hubServe, a *hubAccount, run *acc
 		OnPass: func(p WatchPass) {
 			if o.OnPass != nil {
 				o.OnPass(a.id, p)
+			}
+		},
+		OnPassStart: func() {
+			if o.OnPassStart != nil {
+				o.OnPassStart(a.id)
 			}
 		},
 		OnState: func(s ServeState) { h.loopState(sv, a, s) },

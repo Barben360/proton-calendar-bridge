@@ -1829,6 +1829,24 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   and closing it quits through the same drain as the tray's Quit, since nothing could bring a hidden window back (ruling R14) [verified: `TestCloseQuitsOnlyWithoutATray`].
   A Restart (or Start) that fails, for example on a `config.toml` edited with an error, shows `bridge stopped: <error>` with the `attention` tray, the actions refuse with the hint `restart the bridge (Settings → Restart bridge), then try again`,
   and the right pane says the bridge is stopped instead of offering an add; a later good Restart clears it [verified: `TestFailedRestartShowsTheBridgeStopped`, `TestBridgeStoppedPaneDoesNotOfferAnAdd`, `TestActionsRefuseWhenTheBridgeIsNotRunning`].
+  A pass that runs for 2 s (`ui.ProgressDelay`) shows under the account's alerts: a bar of the events its full listings read of
+  those expected, or a moving bar while there is nothing to measure (a calendar never synced still to list, or only change feeds
+  read), and a line with the stage (first sync, full sync with the last one's age, checking for changes), the calendar (n/N),
+  the events and the elapsed time; the window redraws every second while a pass runs (`ui.WaitRedraw`, woken at the pass's start
+  by `OnPassStart`) and every 30 s otherwise. A shown pass that lists calendars turns the account and the tray to `syncing`, one
+  that only reads change feeds does not (no flip on a slow 2-3 s pass); the account's line says `syncing…` without a percentage,
+  so the tray's menu is not rebuilt at every page. The last pass counts as late past 1.5 intervals, not one: a pass ends a
+  little more than an interval after the previous one, which flashed `syncing…` before. A redraw keeps the sidebar's rows and
+  the calendar rows when the accounts and calendars are the same (updated in place: a click across a redraw still lands, an
+  open reason stays), and places an open reason under its icon again when something above moved it (the progress block, an
+  alert); the moving bar is stopped before it is hidden (Fyne 2.8's `Hide` leaves its animation running), and when the person
+  leaves the account pane or the window hides (it only runs in a shown window, the 1 s redraws going on while hidden). A
+  notification that failed is tried again at most every 30 s. Issue #84
+  [verified: `TestStaleCheckHasAMargin`, `TestQuickPassShowsNoProgress`, `TestRunningPassProgress`, `TestWaitRedraw`,
+  `TestLoopCallbacksWakeTheWindow`, `TestBridgeViewShowsARunningPass`, `TestAccountPaneShowsThePassProgress`,
+  `TestMovingBarStopsOutOfSight`, `TestSidebarRowsKeptAcrossRedraws`, `TestReadOnlyReasonShowsOnHover`,
+  `TestAlertSenderRetriesAtMostEvery30Seconds`, `TestServeReportsEachPassStart`, `TestRunReportsPassStarts`,
+  `TestHealthClearsAFailedPass`, `TestProgressCountsACalendarThatComesDueDuringThePass`, `TestProgressOfARepeatedListingNeverGoesBack`].
   What the window shows is a view model with no toolkit (`internal/ui`, the `cli` import rule, never `fyne.io`); the Fyne layer (`internal/ui/desktop`) only draws it and calls `ui.Actions` and `ui.Wizard`
   [verified: `TestUIArch`, `TestDesktopArch`, `TestTrayAttentionOnErrorAlert`, `TestTraySyncingBeforeFirstPass`, `TestTrayOK`, `TestShortTexts`, `TestAccountFields`, `TestCalendarBadgeFromGate`, `TestAccountListRendersView`,
   `TestTrayMenuFromView`, `TestTrayMenuWithoutAccounts`, `TestTrayIconFollowsState`, `TestTrayUpdateSkipsWhatDidNotChange` (the tray re-sets its icon and menu only when they change: live 2026-11-13, F4, OPEN.md), `TestIconsAreValidOwnArtwork`, `TestWindowSizeAndNoBranding`, `TestCloseHides`, `TestNoTrayLineShownOnce`; the real window, tray and Quit `[verified: live 2026-11-13, spec/experiments/M7-live.md]` (GNOME 48 with the AppIndicator extension; the tray without it, 9.2.4, not run)].
@@ -2053,10 +2071,11 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
   Ctrl-C at the 2FA prompt leaves the held login until it expires or is replaced (at most 5 minutes) [source: ruling
   M5-R12 (4); no test].
 - `pcb status` since M6 (schema 2): `daemon` (null offline), `listener` (the base URL, TLS, fingerprint, certificate end), `alerts` (the process's) and `accounts[]`, each with its
-  `AccountInfo` (`id`, `address`, `phase`, `pending`, `caldav`, `stopped`) flat, `login` (`service.Status`'s fields, which M5-P4 kept flat at the top level), `health` (serve state, `interval_seconds` (the next wait, which backs off), `cadence_seconds` (the wait after a good pass), `idle`, `last_pass`, per-calendar sync and write gate
+  `AccountInfo` (`id`, `address`, `phase`, `pending`, `caldav`, `stopped`) flat, `login` (`service.Status`'s fields, which M5-P4 kept flat at the top level), `health` (serve state, `interval_seconds` (the next wait, which backs off), `cadence_seconds` (the wait after a good pass), `idle`, `last_pass`, `pass` (the running pass, absent between passes: `started_at`, `calendar` of `calendars`, `calendar_name`, `mode`, `last_full_at`, `events_fetched` and `events_expected`, absent while a calendar never synced is still to list; issue #84, [verified: `TestHealthReportsTheRunningPass`]), per-calendar sync and write gate
   with its reason, render counters, human verification), `url` (its CalDAV URL while a listener is bound) and its own `alerts` [verified: `TestStatusListsEveryAccount`, `TestOneFailingAccountDoesNotFailTheStatus`, `TestVanishedAccountIsSkipped`].
   Text lines, once for the process then per account (the block starts at `account: <address> (<local-id>)`, marks `pending`, `CalDAV off`, `stopped`): first the login's own `key: value` lines (`phase:`, `secrets:`, `key_file:` (the configured path, followed by `(absent)` when no file is there, as after `pcb uninstall --delete-data`; never on a keyring state, whose `key_file` is empty; `--json`: `key_file_absent`), `unattended:`, `login_expires:`), then `daemon: serving since <t> (pid, version)` or `waiting for a login since <t>` (`waiting for the desktop keyring since <t>` when `health.waiting_for` is `keyring`, §7.3)
-  (offline: `daemon: not running (offline view)`), `listener:`, `url:`, one `calendar:` line
+  (offline: `daemon: not running (offline view)`), `listener:`, `url:`, `pass:` while a pass runs (since when, the calendar n of N
+  and its mode with its last full listing, the events listed of those expected; `TestPassTextAtEachStage`), one `calendar:` line
   each, `render:`, `alert:`. Without a daemon it is the offline view (no network call, `daemon` null). It exits 0 whatever
   the alerts; `--daemon` exits 20 when none answers (the container's HEALTHCHECK uses it, M5-P5), with a hint that fits the
   host: `pcb service start` where a unit is installed, the container's restart where `/.dockerenv` or `/run/.containerenv`

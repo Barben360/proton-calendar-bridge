@@ -33,6 +33,54 @@ type View struct {
 	Accounts []AccountView
 	Listener *ctl.Listener
 	Alerts   []ctl.Alert
+	// PassRunning is set while a pass of some account runs (shown or not
+	// yet): the window then redraws every ProgressTick (RefreshAfter).
+	PassRunning bool
+}
+
+// ProgressDelay is how long a pass runs before the window shows its
+// progress: a quick pass shows nothing.
+const ProgressDelay = 2 * time.Second
+
+// ProgressTick is how often the window redraws while a pass runs, so its
+// bar and elapsed time move.
+const ProgressTick = time.Second
+
+// RefreshAfter is how long the window may wait before it draws v again,
+// when nothing pokes it: ProgressTick while a pass runs, else 0 (until the
+// next change or tick).
+func (v View) RefreshAfter() time.Duration {
+	if v.PassRunning {
+		return ProgressTick
+	}
+	return 0
+}
+
+// WaitRedraw waits until the window should draw v again: a change on
+// changes, or RefreshAfter while a pass runs. It returns false once ctx
+// ends.
+func WaitRedraw(ctx context.Context, v View, changes <-chan struct{}) bool {
+	var tick <-chan time.Time // nil: only a change redraws
+	if d := v.RefreshAfter(); d > 0 {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		tick = t.C
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-changes:
+	case <-tick:
+	}
+	return true
+}
+
+// ProgressView is a running pass as the window shows it. Text says what it
+// does, where and for how long; Fraction is how far it is, from 0 to 1, or
+// -1 when unknown (an indeterminate bar).
+type ProgressView struct {
+	Text     string
+	Fraction float64
 }
 
 // AccountView is one account of the window. Short is its one-line state.
@@ -44,6 +92,7 @@ type AccountView struct {
 	CalDAV, MCP                bool            // the adapter switches
 	MCPMode                    service.MCPMode // the MCP switch in full: MCP is MCPMode != off
 	LastSync                   *time.Time
+	Progress                   *ProgressView // nil: no pass shown
 	Calendars                  []CalendarView
 	Alerts                     []ctl.Alert
 	URL, Username, Fingerprint string
@@ -63,12 +112,18 @@ type CalendarView struct {
 // how long it waits (the idle one: the longest).
 const fallbackInterval = service.IdleInterval
 
+// staleAfter is how long after the last pass an account counts as stale:
+// the interval plus half of it, as a pass ends a little more than one
+// interval after the previous one (the wait plus the pass's own time).
+func staleAfter(interval time.Duration) time.Duration { return interval + interval/2 }
+
 // Build turns the status into a View at now.
 func Build(s ctl.Status, now time.Time) View {
 	v := View{Tray: TrayOK, Listener: s.Listener, Alerts: s.Alerts, Accounts: []AccountView{}}
 	attention := hasError(s.Alerts)
 	syncing := false
 	for _, as := range s.Accounts {
+		v.PassRunning = v.PassRunning || (as.Health != nil && as.Health.Pass != nil)
 		a := accountView(as, s.Listener, now)
 		attention = attention || a.Dot == TrayAttention
 		syncing = syncing || a.Dot == TraySyncing
@@ -112,29 +167,103 @@ func accountView(as ctl.AccountStatus, ln *ctl.Listener, now time.Time) AccountV
 	if ln != nil && ln.TLS {
 		a.Fingerprint = ln.Fingerprint
 	}
-	stale := false
+	syncing := false // the last pass is late, or a full listing runs
 	if h := as.Health; h != nil {
 		interval := fallbackInterval
 		if h.IntervalSeconds > 0 {
 			interval = time.Duration(h.IntervalSeconds) * time.Second
 		}
-		stale = h.LastPass == nil || now.Sub(h.LastPass.At) > interval
+		syncing = h.LastPass == nil || now.Sub(h.LastPass.At) > staleAfter(interval)
 		a.LastSync = lastSync(h)
+		if a.SignedIn {
+			a.Progress = progressView(h.Pass, now)
+		}
+		// A shown pass that lists calendars in full is a sync the account
+		// waits on: the dot and the tray say syncing. One that only reads
+		// change feeds shows its progress in the pane alone, so a slow one
+		// does not flip the tray icon back and forth.
+		syncing = syncing || (a.Progress != nil && lists(h.Pass))
 		for _, c := range h.Calendars {
 			a.Calendars = append(a.Calendars, calendarView(c, now))
 		}
 	} else {
-		stale = true
+		syncing = true
 	}
 	a.Dot = TrayOK
 	switch {
 	case hasError(as.Alerts):
 		a.Dot = TrayAttention
-	case a.SignedIn && stale:
+	case a.SignedIn && syncing:
 		a.Dot = TraySyncing
 	}
-	a.Short = short(as, a, stale, now)
+	a.Short = short(as, a, syncing, now)
 	return a
+}
+
+// progressView is the running pass p as the window shows it at now: nil
+// when none runs or it started less than ProgressDelay ago.
+func progressView(p *service.PassProgress, now time.Time) *ProgressView {
+	if p == nil || now.Sub(p.StartedAt) < ProgressDelay {
+		return nil
+	}
+	parts := []string{stageText(p)}
+	switch {
+	case p.Calendar > 0 && p.CalendarName != "":
+		parts = append(parts, fmt.Sprintf("%s (%d/%d)", p.CalendarName, p.Calendar, p.Calendars))
+	case p.Calendar > 0:
+		parts = append(parts, fmt.Sprintf("calendar %d/%d", p.Calendar, p.Calendars))
+	}
+	v := &ProgressView{Fraction: -1}
+	if e := p.EventsExpected; e != nil && *e > 0 {
+		v.Fraction = min(float64(p.EventsFetched)/float64(*e), 1)
+		parts = append(parts, fmt.Sprintf("%d of %d events", min(p.EventsFetched, *e), *e))
+	} else if p.EventsFetched > 0 {
+		parts = append(parts, fmt.Sprintf("%d events", p.EventsFetched))
+	}
+	parts = append(parts, elapsed(now.Sub(p.StartedAt)))
+	v.Text = strings.Join(parts, " · ")
+	return v
+}
+
+// lists reports whether the pass p lists calendars in full: it expects
+// events (the syncer keeps the estimate at least what was fetched), or has
+// no estimate yet for a calendar never synced. Before it knows its
+// calendars it says nothing.
+func lists(p *service.PassProgress) bool {
+	if p == nil || p.Calendars == 0 {
+		return false
+	}
+	return p.EventsExpected == nil || *p.EventsExpected > 0
+}
+
+// stageText says what the pass does for its current calendar, and why a
+// full listing runs when that is known.
+func stageText(p *service.PassProgress) string {
+	switch p.Mode {
+	case "initial":
+		return "First sync"
+	case "full":
+		if p.LastFullAt != nil && p.StartedAt.Sub(*p.LastFullAt) >= time.Minute {
+			return "Full sync (last one " + ago(p.StartedAt.Sub(*p.LastFullAt)) + ")"
+		}
+		return "Full sync"
+	case "incremental":
+		return "Checking for changes"
+	}
+	return "Starting sync"
+}
+
+// elapsed is "<s> s", "<m> min <s> s" or "<h> h <m> min".
+func elapsed(d time.Duration) string {
+	s := int(d / time.Second)
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%d s", s)
+	case s < 3600:
+		return fmt.Sprintf("%d min %d s", s/60, s%60)
+	default:
+		return fmt.Sprintf("%d h %d min", s/3600, s%3600/60)
+	}
 }
 
 // lastSync is when the account last got through a pass: its last pass when
@@ -178,7 +307,7 @@ func ago(d time.Duration) string {
 }
 
 // short is the account's one-line state, the most pressing first.
-func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) string {
+func short(as ctl.AccountStatus, a AccountView, syncing bool, now time.Time) string {
 	switch {
 	case as.Stopped != nil:
 		return "stopped: " + as.Stopped.Message
@@ -204,7 +333,7 @@ func short(as ctl.AccountStatus, a AccountView, stale bool, now time.Time) strin
 		return "CalDAV and MCP off"
 	case !a.CalDAV:
 		return "CalDAV off"
-	case stale || a.LastSync == nil:
+	case syncing || a.LastSync == nil: // no percentage: the tray's menu would change with every page
 		return "syncing…"
 	}
 	return "synced " + ago(now.Sub(*a.LastSync))

@@ -35,8 +35,11 @@ const settingsRefresh = 10 * time.Minute
 type ServeOptions struct {
 	Interval time.Duration
 	OnPass   func(WatchPass)
-	Ready    func()
-	Logger   *slog.Logger
+	// OnPassStart, when set, is called as each pass starts, before it
+	// calls Proton (Health.Pass is set by then), from Serve's goroutine.
+	OnPassStart func()
+	Ready       func()
+	Logger      *slog.Logger
 	// WaitForLogin keeps Serve running while it has no ready login (logged
 	// out, or the session ended): it waits for one, checking every
 	// LoginPoll (0: DefaultLoginPoll) and at once when a login completes in
@@ -227,7 +230,11 @@ func (l *Local) serveOn(ctx context.Context, o ServeOptions, interval time.Durat
 	}
 	pace := watchPacing{next: func() time.Duration { return v.next(l.o.Now()) }, wake: v.wake}
 	err = l.watch(pctx, SyncRequest{}, interval, onPass, func(ctx context.Context, req SyncRequest) (SyncResult, error) {
-		res, err := l.syncPassOn(ctx, req, db, acc.ID)
+		v.beginPass(l.o.Now())
+		if o.OnPassStart != nil {
+			o.OnPassStart()
+		}
+		res, err := l.syncPassOn(ctx, req, db, acc.ID, v.noteProgress)
 		if err == nil || exitcode.From(err) == exitcode.Partial {
 			l.unlisted.CompareAndSwap(db, nil) // the calendars are listed: an unknown one is missing now
 			if cals, cerr := db.Calendars(ctx); cerr == nil {

@@ -246,10 +246,13 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 	// from the daemon.
 	r := stubRig(t, &stubAPI{statusPhase: "logged-out"})
 	since, synced, notAfter := daemonNow.Add(-time.Hour), daemonNow.Add(-time.Minute), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
-	lag := 60
+	lag, expected := 60, 1030
+	lastFull := daemonNow.Add(-32 * time.Hour)
 	api := &daemonAPI{
 		status: service.Status{Phase: "ready", Username: "alice", Secrets: "sealed"},
 		health: service.Health{Serve: service.ServeServing, Since: &since, IntervalSeconds: 30,
+			Pass: &service.PassProgress{StartedAt: daemonNow.Add(-72 * time.Second), Calendar: 1, Calendars: 2, CalendarName: "Work",
+				Mode: "full", LastFullAt: &lastFull, EventsFetched: 412, EventsExpected: &expected},
 			Calendars: []service.CalendarHealth{
 				{ID: "cal-1", Name: "Work", SyncedAt: &synced, LagSeconds: &lag, Gate: "closed", GateReason: "our member lacks the Write permission"},
 				{ID: "cal-2", Name: "Home", Gate: "undecided", GateReason: "the keys were not loaded yet", ErrorClass: "network", Error: "dial tcp: refused"},
@@ -264,7 +267,7 @@ func TestStatusShowsTheDaemon(t *testing.T) {
 		"phase: ready\n",
 		"daemon: running since 2026-11-12T10:00:00Z (pid 4242, version v1.2.3)\n",
 		"account: " + stubAccountID + "\nurl: https://pcb.lan:8443/dav/" + stubAccountID + "/\n",
-		"serve: serving since 2026-11-12T11:00:00Z\n",
+		"serve: serving since 2026-11-12T11:00:00Z\npass: running since 2026-11-12T11:58:48Z, calendar 1 of 2 Work (full, last full listing 2026-11-11T04:00:00Z), 412 of 1030 events listed\n",
 		"listener: https://pcb.lan:8443/ (TLS, certificate until 2027-01-01, fingerprint AB:CD)\n",
 		"calendar: Work (cal-1): synced 2026-11-12T11:59:00Z, lag 1m0s, write gate closed (our member lacks the Write permission)\n",
 		"calendar: Home (cal-2): synced never, write gate undecided (the keys were not loaded yet), last error network: dial tcp: refused\n",

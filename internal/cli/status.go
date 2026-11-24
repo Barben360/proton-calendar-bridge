@@ -192,6 +192,9 @@ func statusText(s ctl.Status) string {
 			if st := serveState(*h); st != "" {
 				line("serve: %s", st)
 			}
+			if h.Pass != nil {
+				line("pass: %s", passText(*h.Pass))
+			}
 			for _, c := range h.Calendars {
 				line("calendar: %s", calendarHealthText(c))
 			}
@@ -258,6 +261,35 @@ func serveState(h service.Health) string {
 		what += " since " + h.Since.Format(time.RFC3339)
 	}
 	return what
+}
+
+// passText is the running pass: since when, the calendar it syncs and how
+// (with the calendar's last full listing), and the events its listings read
+// of those expected.
+func passText(p service.PassProgress) string {
+	v := "running since " + p.StartedAt.Format(time.RFC3339)
+	if p.Calendar > 0 {
+		v += fmt.Sprintf(", calendar %d of %d", p.Calendar, p.Calendars)
+		if p.CalendarName != "" {
+			v += " " + p.CalendarName
+		}
+		if p.Mode != "" {
+			v += " (" + p.Mode
+			if p.LastFullAt != nil {
+				v += ", last full listing " + p.LastFullAt.Format(time.RFC3339)
+			}
+			v += ")"
+		}
+	} else if p.Calendars > 0 { // 0: the pass has not listed the calendars yet
+		v += fmt.Sprintf(", %d calendars to sync", p.Calendars)
+	}
+	switch {
+	case p.EventsExpected != nil && *p.EventsExpected > 0:
+		v += fmt.Sprintf(", %d of %d events listed", p.EventsFetched, *p.EventsExpected)
+	case p.EventsExpected == nil && p.EventsFetched > 0:
+		v += fmt.Sprintf(", %d events listed", p.EventsFetched)
+	}
+	return v
 }
 
 // calendarHealthText is one calendar's live state; a calendar never synced

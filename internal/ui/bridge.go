@@ -226,23 +226,15 @@ func (b *Bridge) startRun(ctx context.Context) error {
 	go func() {
 		defer cancel()
 		defer unsubscribe()
-		err := daemon.Run(runCtx, daemon.Options{
-			Reports: b.o.Reports, ReportPoke: reportPoke,
-			Dirs: dirs, Config: cfg, Hub: hub, Kind: kind, LogLevel: cfg.Log.Level,
-			MCP: mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
-				ShowLogin: showLogin, LoginBusy: hub.LoginInProgress}),
-			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI, SessionEnd: b.o.SessionEnd,
-			OnState: func(string, service.ServeState) { b.poke() },
-			// The same records as pcb serve's, for the same log file content.
-			OnPass: func(id string, p service.WatchPass) {
-				l := log.With("account", id)
-				daemon.LogPass(l, p)
-				counters.Log(l, p.Render)
-				b.poke()
-			},
-			Warn:  warnWriter{log},
-			Ready: func(i daemon.Info) { ready <- i },
-		})
+		o := b.loopCallbacks(log, &counters)
+		o.Reports, o.ReportPoke = b.o.Reports, reportPoke
+		o.Dirs, o.Config, o.Hub, o.Kind, o.LogLevel = dirs, cfg, hub, kind, cfg.Log.Level
+		o.MCP = mcp.NewServer(mcp.Options{Hub: hub, Zone: cfg.MCP.Location(), Logger: log, Version: buildinfo.Version,
+			ShowLogin: showLogin, LoginBusy: hub.LoginInProgress})
+		o.Logger, o.Listen, o.WaitForLogin, o.ShowUI, o.SessionEnd = log, b.o.Listen, true, showUI, b.o.SessionEnd
+		o.Warn = warnWriter{log}
+		o.Ready = func(i daemon.Info) { ready <- i }
+		err := daemon.Run(runCtx, o)
 		// The caller opened the Hub, so this goroutine closes it, whichever
 		// way Run ended (a failed Start included).
 		r.err = errors.Join(err, hub.Close())
@@ -271,6 +263,24 @@ func (b *Bridge) startRun(ctx context.Context) error {
 		cancel()
 		<-r.done
 		return ctx.Err()
+	}
+}
+
+// loopCallbacks are the daemon options through which the accounts' loops
+// keep the window current: each poke Changes. A pass's start wakes the
+// window at once, which then redraws every second while the pass runs
+// (WaitRedraw), whatever the 30 s tick; a pass's end is logged as pcb serve
+// logs it, for the same log file content.
+func (b *Bridge) loopCallbacks(log *slog.Logger, counters *daemon.RenderLog) daemon.Options {
+	return daemon.Options{
+		OnState:     func(string, service.ServeState) { b.poke() },
+		OnPassStart: func(string) { b.poke() },
+		OnPass: func(id string, p service.WatchPass) {
+			l := log.With("account", id)
+			daemon.LogPass(l, p)
+			counters.Log(l, p.Render)
+			b.poke()
+		},
 	}
 }
 

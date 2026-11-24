@@ -177,13 +177,14 @@ func watchError(err error) error {
 
 // syncPass runs one pass on the stored session, without the sync lock.
 func (l *Local) syncPass(ctx context.Context, req SyncRequest) (SyncResult, error) {
-	return l.syncPassOn(ctx, req, nil, "")
+	return l.syncPassOn(ctx, req, nil, "", nil)
 }
 
 // syncPassOn is syncPass on db, the cache Serve opened for account; with db
 // nil the pass opens the cache itself. A pass on db for another account
-// stops (the cache is the served account's).
-func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache, account string) (SyncResult, error) {
+// stops (the cache is the served account's). progress, when set, gets
+// where the pass is (syncer.Options.Progress).
+func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache, account string, progress func(syncer.Progress)) (SyncResult, error) {
 	var res SyncResult
 	err := l.withSession(ctx, func(ctx context.Context, c *api.Client, acc store.Account) error {
 		res = SyncResult{}
@@ -200,7 +201,8 @@ func (l *Local) syncPassOn(ctx context.Context, req SyncRequest, db *cache.Cache
 		}
 		describe := func(err error) string { return calendarError(ctx, err) }
 		rep, err := syncer.Pass(ctx, c, db, syncer.Options{Full: req.Full, Now: l.o.Now, Describe: describe,
-			Lock: func(ctx context.Context, calID string) (func(), error) { return l.cals.lock(ctx, calID, nil) }})
+			Lock:     func(ctx context.Context, calID string) (func(), error) { return l.cals.lock(ctx, calID, nil) },
+			Progress: progress})
 		l.noteSyncHuman(rep, err)
 		if err != nil {
 			return err

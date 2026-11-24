@@ -54,6 +54,14 @@ func (l *tipLayer) show(owner *infoTip) {
 	l.box.Refresh()
 }
 
+// follow places a shown tip under its icon again: a redraw may have moved
+// the icon (a progress line, an alert or a group shown above it).
+func (l *tipLayer) follow() {
+	if l.owner != nil {
+		l.show(l.owner)
+	}
+}
+
 // hide removes the tip when owner shows it; a nil owner removes any tip.
 func (l *tipLayer) hide(owner *infoTip) {
 	if l.owner == nil || (owner != nil && owner != l.owner) {

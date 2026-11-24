@@ -253,6 +253,44 @@ func health(t *testing.T, h *service.Hub, id string) service.Health {
 	return hl
 }
 
+// OnPassStart names the account of each pass, and comes before that pass's
+// OnPass.
+func TestServeReportsEachPassStart(t *testing.T) {
+	t.Parallel()
+	e := newServeEnv(t)
+	h := e.open(t)
+	a, b := e.loginBoth(t, h)
+	r := newServeRig(h)
+	var mu sync.Mutex
+	started := map[string]int{}
+	early := map[string]bool{} // an OnPass that came before its OnPassStart
+	o := r.options(false)
+	o.OnPassStart = func(id string) {
+		mu.Lock()
+		started[id]++
+		mu.Unlock()
+	}
+	pass := o.OnPass
+	o.OnPass = func(id string, p service.WatchPass) {
+		mu.Lock()
+		if started[id] <= r.passCount(id) {
+			early[id] = true
+		}
+		mu.Unlock()
+		pass(id, p)
+	}
+	r.serve(t, o)
+	r.waitPassed(t, a, 0)
+	r.waitPassed(t, b, 0)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, id := range []string{a, b} {
+		if started[id] < 1 || early[id] {
+			t.Errorf("account %s: %d pass starts, an OnPass before its start %v; want at least 1, none early", id, started[id], early[id])
+		}
+	}
+}
+
 func TestServeRunsEveryAccount(t *testing.T) {
 	t.Parallel()
 	e := newServeEnv(t)

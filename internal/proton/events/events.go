@@ -90,11 +90,19 @@ func ListAll(ctx context.Context, c *api.Client, calID string) ([]Row, error) {
 // make a later page repeat a row or skip one: the caller checks Total and
 // the feed head.
 func List(ctx context.Context, c *api.Client, calID string) (Listing, error) {
-	return list(ctx, c, calID, nil)
+	return list(ctx, c, calID, nil, nil)
 }
 
-// list is List with extra query parameters (UID= for ListByUID).
-func list(ctx context.Context, c *api.Client, calID string, extra url.Values) (Listing, error) {
+// ListProgress is List calling progress after each page it read, with the
+// unique rows read so far and the Total the first page announced (-1 when
+// it had none). progress runs on the caller's goroutine.
+func ListProgress(ctx context.Context, c *api.Client, calID string, progress func(read, total int)) (Listing, error) {
+	return list(ctx, c, calID, nil, progress)
+}
+
+// list is List with extra query parameters (UID= for ListByUID) and an
+// optional per-page progress callback.
+func list(ctx context.Context, c *api.Client, calID string, extra url.Values, progress func(read, total int)) (Listing, error) {
 	l := Listing{Total: -1}
 	at := map[string]int{} // ID -> index in l.Rows
 	served := 0
@@ -125,6 +133,9 @@ func list(ctx context.Context, c *api.Client, calID string, extra url.Values) (L
 			}
 			at[r.ID] = len(l.Rows)
 			l.Rows = append(l.Rows, r)
+		}
+		if progress != nil {
+			progress(len(l.Rows), l.Total)
 		}
 		if len(out.Events) < PageSize || (out.Total != nil && served >= *out.Total) {
 			return l, nil

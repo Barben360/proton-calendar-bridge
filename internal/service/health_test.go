@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -343,5 +344,130 @@ func TestSyncVerificationClearsOnAPartialPass(t *testing.T) {
 	h := r.health(t)
 	if len(h.HumanVerification) != 0 || h.LastPass == nil || !h.LastPass.OK {
 		t.Errorf("after a partial pass without a 9001: %+v, last pass %+v; want it cleared", h.HumanVerification, h.LastPass)
+	}
+}
+
+// While a pass runs, Health says where it is: the calendar, its mode and
+// the events its listing read of those announced; OnPassStart came first.
+// Between passes there is no running pass.
+func TestHealthReportsTheRunningPass(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	cal := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	for i := range 150 {
+		e.f.AddEvent(cal, protontest.Event{UID: fmt.Sprintf("u%d", i), Start: 1, End: 2})
+	}
+	e.signIn(t)
+	reached, release := make(chan int), make(chan struct{})
+	e.f.OnListPage(func(_ string, page int) {
+		reached <- page
+		<-release
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	starts := make(chan struct{}, 4)
+	passes := make(chan service.WatchPass, 4)
+	resume := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- e.svc.Serve(ctx, service.ServeOptions{
+			OnPassStart: func() { starts <- struct{}{} },
+			OnPass: func(p service.WatchPass) {
+				passes <- p
+				select {
+				case <-resume:
+				case <-ctx.Done():
+				}
+			},
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve after the cancel = %v, want nil", err)
+		}
+	})
+	wantPage := func(want int) service.PassProgress {
+		t.Helper()
+		if got := <-reached; got != want {
+			t.Fatalf("listing reached page %d, want %d", got, want)
+		}
+		h := e.health(t)
+		if h.Pass == nil {
+			t.Fatalf("page %d held: Health.Pass is nil, want the running pass", want)
+		}
+		return *h.Pass
+	}
+	p := wantPage(0)
+	if n := len(starts); n != 1 { // OnPassStart runs before the pass calls Proton
+		t.Errorf("OnPassStart called %d times before the first page, want 1", n)
+	}
+	if !p.StartedAt.Equal(t0) || p.Calendar != 1 || p.Calendars != 1 || p.CalendarName != "Work" || p.Mode != "initial" ||
+		p.LastFullAt != nil || p.EventsFetched != 0 || p.EventsExpected != nil {
+		t.Errorf("before the first page: %+v, want started at %v, calendar 1/1 Work, initial, never listed, 0 fetched, no estimate", p, t0)
+	}
+	release <- struct{}{}
+	p = wantPage(1)
+	if p.EventsFetched != 100 || p.EventsExpected == nil || *p.EventsExpected != 150 {
+		t.Errorf("before the second page: %+v, want 100 fetched of 150", p)
+	}
+	close(release)
+	e.f.OnListPage(nil)
+	if pass := <-passes; pass.Err != nil {
+		t.Fatalf("pass: %v", pass.Err)
+	}
+	if h := e.health(t); h.Pass != nil || h.LastPass == nil {
+		t.Errorf("after the pass: Pass %+v, LastPass %+v; want no running pass and the last one recorded", h.Pass, h.LastPass)
+	}
+
+	// A day later the calendar is listed again: the pass says so, with the
+	// last listing's time.
+	reached, release = make(chan int), make(chan struct{})
+	e.f.OnListPage(func(_ string, page int) {
+		if page == 0 {
+			reached <- page
+			<-release
+		}
+	})
+	e.clk.advance(25 * time.Hour)
+	resume <- struct{}{}
+	p = wantPage(0)
+	if p.Mode != "full" || p.LastFullAt == nil || !p.LastFullAt.Equal(t0) || p.EventsExpected == nil || *p.EventsExpected != 150 {
+		t.Errorf("the daily listing: %+v, want full, last listed at %v, the cached 150 expected", p, t0)
+	}
+	close(release)
+	e.f.OnListPage(nil)
+	if pass := <-passes; pass.Err != nil {
+		t.Fatalf("second pass: %v", pass.Err)
+	}
+}
+
+// A pass that fails ends like any other: no running pass is left behind
+// for the back-off (the window would show it syncing all along).
+func TestHealthClearsAFailedPass(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, protontest.Options{})
+	e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Work"})
+	e.signIn(t)
+	e.f.FailNext("GET", "/calendar/v1", 400, 2000, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	passes := make(chan service.WatchPass, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- e.svc.Serve(ctx, service.ServeOptions{OnPass: func(p service.WatchPass) {
+			passes <- p
+			<-ctx.Done()
+		}})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve after the cancel = %v, want nil", err)
+		}
+	})
+	if p := <-passes; p.Err == nil {
+		t.Fatal("the pass did not fail (the scenario needs it)")
+	}
+	if h := e.health(t); h.Pass != nil || h.LastPass == nil || h.LastPass.OK {
+		t.Errorf("after a failed pass: Pass %+v, LastPass %+v; want no running pass, the failure recorded", h.Pass, h.LastPass)
 	}
 }

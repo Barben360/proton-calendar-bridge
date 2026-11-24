@@ -155,6 +155,9 @@ type Options struct {
 	SessionEnd <-chan struct{}
 	OnState    func(accountID string, s service.ServeState)
 	OnPass     func(accountID string, p service.WatchPass)
+	// OnPassStart runs as each of an account's passes starts, on its loop
+	// goroutine, as OnPass.
+	OnPassStart func(accountID string)
 	// Ready is called once the control socket and the CalDAV listener are
 	// bound, before the listener accepts (NoListener: once the control
 	// socket is, with a zero Info).
@@ -235,9 +238,10 @@ func Run(ctx context.Context, o Options) error {
 					Logger:       log,
 					WaitForLogin: o.WaitForLogin,
 				},
-				OnState: o.OnState,
-				OnPass:  o.OnPass,
-				Kind:    o.Kind,
+				OnState:     o.OnState,
+				OnPass:      o.OnPass,
+				OnPassStart: o.OnPassStart,
+				Kind:        o.Kind,
 			})
 		})
 	}()

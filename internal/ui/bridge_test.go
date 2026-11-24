@@ -728,3 +728,50 @@ func TestBridgeSendsAReportSavedWhileRunning(t *testing.T) {
 		t.Fatal("the report saved while running was not sent")
 	}
 }
+
+// A pass held on a listing shows in the window's view once it has run for
+// ProgressDelay, with the calendar it lists, and asks for a redraw every
+// ProgressTick; once it ends, neither.
+func TestBridgeViewShowsARunningPass(t *testing.T) {
+	l := newLab(t)
+	cal := l.f.AddCalendar(l.f.Username, protontest.Calendar{Name: "Work"})
+	l.f.AddEvent(cal, protontest.Event{UID: "u", Start: 1, End: 2})
+	reached, release := make(chan struct{}, 1), make(chan struct{})
+	l.f.OnListPage(func(string, int) {
+		select {
+		case reached <- struct{}{}:
+			<-release
+		default:
+		}
+	})
+	b := l.start(t)
+	l.login(t, b)
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first pass never listed the calendar")
+	}
+	v := b.View(t.Context(), time.Now().Add(ui.ProgressDelay))
+	if len(v.Accounts) != 1 || v.Accounts[0].Progress == nil {
+		close(release)
+		t.Fatalf("pass held on its listing: view %+v, want the account with its progress", v.Accounts)
+	}
+	if p := v.Accounts[0].Progress; !strings.Contains(p.Text, "First sync · Work (1/1)") || v.RefreshAfter() != ui.ProgressTick {
+		t.Errorf("progress %q, refresh %v; want the first sync of Work (1/1), every %v", p.Text, v.RefreshAfter(), ui.ProgressTick)
+	}
+	close(release)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		v = b.View(t.Context(), time.Now())
+		if !v.PassRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the pass never ended")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if v.Accounts[0].Progress != nil || v.RefreshAfter() != 0 {
+		t.Errorf("after the pass: progress %+v, refresh %v; want none, 0", v.Accounts[0].Progress, v.RefreshAfter())
+	}
+}

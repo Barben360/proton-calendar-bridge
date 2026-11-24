@@ -91,6 +91,7 @@ const (
 type row struct {
 	id          string
 	btn         *widget.Button
+	av          *avatar
 	dot         *canvas.Circle
 	initial     *canvas.Text
 	addr, short *textLine
@@ -341,46 +342,80 @@ func (w *Window) account(id string) (ui.AccountView, bool) {
 	return ui.AccountView{}, false
 }
 
+// drawRows draws the sidebar's rows. When the accounts are the same, in
+// the same order, the rows are updated in place: the window redraws every
+// second while a pass runs, and new buttons would lose a click pressed
+// before a redraw and released after it, the hover and the focus.
 func (w *Window) drawRows() {
+	if !w.sameRows() {
+		w.buildRows()
+	}
+	for i, a := range w.view.Accounts {
+		r := &w.rows[i]
+		name := a.Address
+		if name == "" {
+			name = a.ID
+		}
+		selected := w.mode == paneAccount && a.ID == w.selected
+		r.av.set(initialOf(name), a.SignedIn)
+		r.addr.Text, r.addr.Style = name, fyne.TextStyle{Bold: selected}
+		r.addr.Refresh()
+		r.short.Text, r.short.ColorName = a.Short, theme.ColorNameDisabled
+		if a.Dot == ui.TrayAttention {
+			r.short.ColorName = theme.ColorNameWarning
+		}
+		r.short.Refresh()
+		r.dot.FillColor = dotColor(a.Dot)
+		r.dot.Refresh()
+		if selected {
+			r.sel.Show()
+		} else {
+			r.sel.Hide()
+		}
+	}
+	w.gear.Importance = widget.LowImportance
+	if w.mode == paneSettings {
+		w.gear.Importance = widget.MediumImportance
+	}
+	w.gear.Refresh()
+}
+
+// sameRows reports whether the rows drawn are the view's accounts, in order.
+func (w *Window) sameRows() bool {
+	if len(w.rows) != len(w.view.Accounts) {
+		return false
+	}
+	for i, a := range w.view.Accounts {
+		if w.rows[i].id != a.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// buildRows makes a row per account of the view; drawRows fills them.
+func (w *Window) buildRows() {
 	w.rows = w.rows[:0]
 	objs := make([]fyne.CanvasObject, 0, len(w.view.Accounts))
 	for _, a := range w.view.Accounts {
 		id := a.ID
-		name := a.Address
-		if name == "" {
-			name = id
-		}
-		selected := w.mode == paneAccount && id == w.selected
 		av := newAvatar()
-		av.set(initialOf(name), a.SignedIn)
-		addr := newTextLine(name, theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{Bold: selected})
+		addr := newTextLine("", theme.ColorNameForeground, theme.SizeNameText, fyne.TextStyle{})
 		addr.Truncate = true
-		shortColor := theme.ColorNameDisabled
-		if a.Dot == ui.TrayAttention {
-			shortColor = theme.ColorNameWarning
-		}
-		short := newTextLine(a.Short, shortColor, theme.SizeNameCaptionText, fyne.TextStyle{})
+		short := newTextLine("", theme.ColorNameDisabled, theme.SizeNameCaptionText, fyne.TextStyle{})
 		short.Truncate = true
 		d, dotObj := dot(dotColor(a.Dot), 7)
 		status := container.NewBorder(nil, nil, dotObj, nil, short)
 		text := container.NewVBox(layout.NewSpacer(), vbox(2, addr, status), layout.NewSpacer())
 		content := pad(6, 6, 8, 8, container.NewBorder(nil, nil, av, nil, pad(0, 0, 6, 0, text)))
 		sel := newPanel(nil, colorSelected, "", 10, 0, 0)
-		if !selected {
-			sel.Hide()
-		}
 		btn := widget.NewButton("", func() { w.selectAccount(id) })
 		btn.Importance = widget.LowImportance
-		w.rows = append(w.rows, row{id: id, btn: btn, dot: d, initial: av.text, addr: addr, short: short, sel: sel})
+		w.rows = append(w.rows, row{id: id, btn: btn, av: av, dot: d, initial: av.text, addr: addr, short: short, sel: sel})
 		objs = append(objs, container.NewStack(sel, btn, content))
 	}
 	w.rowBox.Objects = objs
 	w.rowBox.Refresh()
-	w.gear.Importance = widget.LowImportance
-	if w.mode == paneSettings {
-		w.gear.Importance = widget.MediumImportance
-	}
-	w.gear.Refresh()
 }
 
 // initialOf is the avatar's letter: the first of name, upper case.
@@ -416,6 +451,7 @@ func (w *Window) setRight(o fyne.CanvasObject) {
 // Cancel waits for a call in flight).
 func (w *Window) leave(next paneKind) {
 	w.pane.pw.hide()
+	w.pane.showProgress(nil) // a moving bar out of sight would still animate; setAccount draws it again
 	if next != paneWizard {
 		w.closeWizard()
 	}
@@ -552,6 +588,9 @@ func (w *Window) ShowLogin(username string) {
 func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
+	if av, ok := w.account(w.selected); ok && w.mode == paneAccount {
+		w.pane.showProgress(av.Progress) // its moving bar waited for the window
+	}
 	w.win.RequestFocus()
 	if err := w.pendingErr; err != nil {
 		w.pendingErr = nil
@@ -601,6 +640,7 @@ func (w *Window) Hide() {
 	w.visible = false
 	w.win.Hide()
 	w.pane.pw.hide()
+	w.pane.showProgress(nil) // no animation for a hidden window; reveal draws it again
 	if w.mode == paneWizard && !w.waiting() {
 		w.closeWizard()
 		w.showDefault()

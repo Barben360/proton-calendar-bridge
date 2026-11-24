@@ -625,3 +625,29 @@ func TestDaemonWithoutShowUIHasNoRoute(t *testing.T) {
 		t.Errorf("ShowUI = %v, want the unknown-endpoint refusal", err)
 	}
 }
+
+// OnPassStart reaches the account's loop: it names the account as its
+// passes start, before each OnPass.
+func TestRunReportsPassStarts(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	id, _ := e.login(t)
+	starts, passes := make(chan string, 8), make(chan string, 8)
+	e.start(t, e.hub, func(o *daemon.Options) {
+		o.OnPassStart = func(acc string) { starts <- acc }
+		o.OnPass = func(acc string, _ service.WatchPass) { passes <- acc }
+	})
+	select {
+	case acc := <-passes:
+		select {
+		case s := <-starts:
+			if s != id || acc != id {
+				t.Errorf("pass start for %q, pass for %q; want %q both", s, acc, id)
+			}
+		default:
+			t.Error("a pass ended with no OnPassStart before it")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no pass within 10 s")
+	}
+}

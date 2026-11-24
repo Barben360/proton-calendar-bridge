@@ -9,6 +9,13 @@ An account, with its adapters, the CalDAV connection to copy into Thunderbird, a
 <img alt="pcb-ui showing an account: its adapters, its CalDAV connection and its calendars" src="assets/ui/account-dark.png#gh-dark-mode-only" width="720">
 </p>
 
+A long sync, such as the daily full listing after the computer was off: a bar and what the pass does, under the account's name:
+
+<p align="center">
+<img alt="pcb-ui during a full sync: a progress bar at 40% and the line Full sync (last one 32 h ago), Team (1/2), 412 of 1030 events, 1 min 12 s" src="assets/ui/syncing-light.png#gh-light-mode-only" width="720">
+<img alt="pcb-ui during a full sync: a progress bar at 40% and the line Full sync (last one 32 h ago), Team (1/2), 412 of 1030 events, 1 min 12 s" src="assets/ui/syncing-dark.png#gh-dark-mode-only" width="720">
+</p>
+
 Adding an account: the address and password first, then a 2FA code, the mailbox password of a two-password account, or a CAPTCHA when Proton asks for one:
 
 <p align="center">
@@ -43,6 +50,7 @@ After `make install-ui` it is also in your applications menu. On Windows the ins
 | Part | What it does |
 |---|---|
 | Tray icon | Three states: ok, syncing, needs attention. Its menu has Quit. |
+| Sync progress | A pass that runs longer than 2 s shows under the account's name and alerts: a bar and what the pass does, for example `Full sync (last one 32 h ago) · Personal (1/4) · 412 of 1030 events · 1 min 12 s`. The bar fills as the events of the full listings come in. It moves back and forth instead when there is nothing to measure: a calendar never synced is still to be listed, or the pass only checks for changes. A pass that lists calendars shows the account as `syncing…` in the list and the tray; one that only checks for changes does not. Each calendar is listed in full again once a day, so the first pass after the computer was off for more than a day takes a while. |
 | Window | Your Proton accounts. Per account: the CalDAV switch, the MCP selector (Off, Read-only or Read-write: what AI agents may do with the account, with the Claude Code command to copy under it), its calendars (each with a dot of its Proton colour, and a `read-only` tag when pcb cannot write to it: hover the info icon next to the tag for the reason), and the connection to copy into Thunderbird (URL and username, each with Copy, and the password hidden behind Show and Copy). |
 | Add-account wizard | Password, 2FA code, mailbox password, CAPTCHA. |
 | Notifications | A desktop notification when an account needs you, and one when a newer release is out. |

@@ -45,6 +45,7 @@ type calendars struct {
 	clock    int64                        // fake timestamps issued (see tick)
 	feedPage int                          // SetFeedPageSize, 0: default
 	onList   func(calID string, page int) // OnListPage, nil: none
+	noTotal  bool                         // ListWithoutTotal
 	syncs    []syncRecord                 // every sync request, in order (SyncCalls)
 }
 
