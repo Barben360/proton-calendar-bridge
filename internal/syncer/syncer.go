@@ -229,13 +229,13 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 		// A fallback listing is pending: the feed is not read again.
 		r.Mode = ModeFull
 		if now.Before(next) {
-			pg.start(i, ModeIncremental, prev.FullAt) // skipped: nothing is listed
+			pg.start(i, ModeFull, prev.FullAt, false) // skipped until the gap ends: nothing is listed
 			r.Err = &ResyncDeferredError{Cause: prev.Resync, Until: next}
 			return r
 		}
 	default:
 		r.Mode = ModeIncremental
-		pg.start(i, ModeIncremental, prev.FullAt)
+		pg.start(i, ModeIncremental, prev.FullAt, false)
 		ch, cause, err := incremental(ctx, c, db, calID, prev.Cursor, now)
 		if cause == "" {
 			r.Changes, r.Err = ch, err
@@ -254,7 +254,7 @@ func syncCalendar(ctx context.Context, c *api.Client, db *cache.Cache, calID str
 		pg.listing(ModeFull)
 	}
 	if r.Mode != ModeIncremental {
-		pg.start(i, r.Mode, prev.FullAt)
+		pg.start(i, r.Mode, prev.FullAt, true)
 	}
 	r.Changes, r.Err = full(ctx, c, db, calID, now, pg.page)
 	return r

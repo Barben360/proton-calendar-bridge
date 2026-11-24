@@ -51,7 +51,7 @@ func screenshotView() ui.View {
 				},
 			},
 			{
-				ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing… 40%", Dot: ui.TraySyncing,
+				ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing,
 				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly, LastSync: &synced,
 				URL: "http://127.0.0.1:1080/dav/5e6f7a8b/", Username: "team@example.org",
 				Progress: &ui.ProgressView{Fraction: 0.4,

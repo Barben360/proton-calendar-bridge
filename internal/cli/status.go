@@ -280,7 +280,7 @@ func passText(p service.PassProgress) string {
 			}
 			v += ")"
 		}
-	} else {
+	} else if p.Calendars > 0 { // 0: the pass has not listed the calendars yet
 		v += fmt.Sprintf(", %d calendars to sync", p.Calendars)
 	}
 	switch {

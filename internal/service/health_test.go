@@ -366,11 +366,18 @@ func TestHealthReportsTheRunningPass(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	starts := make(chan struct{}, 4)
 	passes := make(chan service.WatchPass, 4)
+	resume := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		done <- e.svc.Serve(ctx, service.ServeOptions{
 			OnPassStart: func() { starts <- struct{}{} },
-			OnPass:      func(p service.WatchPass) { passes <- p; <-ctx.Done() },
+			OnPass: func(p service.WatchPass) {
+				passes <- p
+				select {
+				case <-resume:
+				case <-ctx.Done():
+				}
+			},
 		})
 	}()
 	t.Cleanup(func() {
@@ -410,5 +417,26 @@ func TestHealthReportsTheRunningPass(t *testing.T) {
 	}
 	if h := e.health(t); h.Pass != nil || h.LastPass == nil {
 		t.Errorf("after the pass: Pass %+v, LastPass %+v; want no running pass and the last one recorded", h.Pass, h.LastPass)
+	}
+
+	// A day later the calendar is listed again: the pass says so, with the
+	// last listing's time.
+	reached, release = make(chan int), make(chan struct{})
+	e.f.OnListPage(func(_ string, page int) {
+		if page == 0 {
+			reached <- page
+			<-release
+		}
+	})
+	e.clk.advance(25 * time.Hour)
+	resume <- struct{}{}
+	p = wantPage(0)
+	if p.Mode != "full" || p.LastFullAt == nil || !p.LastFullAt.Equal(t0) || p.EventsExpected == nil || *p.EventsExpected != 150 {
+		t.Errorf("the daily listing: %+v, want full, last listed at %v, the cached 150 expected", p, t0)
+	}
+	close(release)
+	e.f.OnListPage(nil)
+	if pass := <-passes; pass.Err != nil {
+		t.Fatalf("second pass: %v", pass.Err)
 	}
 }

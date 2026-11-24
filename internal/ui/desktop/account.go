@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
 )
@@ -128,6 +129,7 @@ type accountPane struct {
 	calendars          *fyne.Container
 	drawnCals          []ui.CalendarView // what calendars draws, for the account drawnID
 	drawnID            string
+	drawnAlerts        []ctl.Alert // what alertBox draws
 	alertBox           *fyne.Container
 	b                  *busy
 }
@@ -206,7 +208,7 @@ func newAccountPane(w *Window) *accountPane {
 		divided(pad(2, 2, 4, 4, p.newPw)),
 	)
 	p.calGroup = group("CALENDARS", p.calendars)
-	body := vbox(18, header, p.progress, p.b.label, p.alertBox, adapters, p.conn, p.calGroup)
+	body := vbox(18, header, p.b.label, p.alertBox, p.progress, adapters, p.conn, p.calGroup)
 	p.root = container.NewStack(container.NewVScroll(pad(4, 24, 28, 28, body)))
 	return p
 }
@@ -225,6 +227,11 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	p.status.SetText(av.Short + " · " + last)
 	p.statusDot.FillColor = dotColor(av.Dot)
 	p.statusDot.Refresh()
+	shifts := p.progress.Visible() != (av.Progress != nil) || !slices.Equal(av.Alerts, p.drawnAlerts)
+	if shifts && av.ID == p.drawnID {
+		// The rows below move: a reason shown stays where its icon was.
+		p.w.tips.hide(nil)
+	}
 	p.showProgress(av.Progress)
 	if av.SignedIn {
 		p.signBtn.SetText("Sign out")
@@ -262,6 +269,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	}
 	p.alertBox.Objects = alerts
 	p.alertBox.Refresh()
+	p.drawnAlerts = slices.Clone(av.Alerts)
 }
 
 // showProgress draws the running pass pv, or hides the progress (nil): a
@@ -269,20 +277,29 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 // it does under it.
 func (p *accountPane) showProgress(pv *ui.ProgressView) {
 	if pv == nil {
-		p.progWait.Hide() // stops its animation
+		p.stopWait()
 		p.progress.Hide()
 		return
 	}
 	p.progText.SetText(pv.Text)
 	if pv.Fraction < 0 {
 		p.progBar.Hide()
+		p.progWait.Start() // Show alone does not restart a stopped animation
 		p.progWait.Show()
 	} else {
-		p.progWait.Hide()
+		p.stopWait()
 		p.progBar.SetValue(pv.Fraction)
 		p.progBar.Show()
 	}
 	p.progress.Show()
+}
+
+// stopWait stops and hides the moving bar. Stop first: Fyne's Hide clears
+// the running flag without a refresh, so the renderer would go on
+// animating, and redrawing the window, while hidden.
+func (p *accountPane) stopWait() {
+	p.progWait.Stop()
+	p.progWait.Hide()
 }
 
 // drawCalendars draws av's calendars, unless the pane already shows these

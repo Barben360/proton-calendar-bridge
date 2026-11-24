@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/acl/acltest"
 	"github.com/Barben360/proton-calendar-bridge/internal/buildinfo"
+	"github.com/Barben360/proton-calendar-bridge/internal/ctl"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
 	"github.com/Barben360/proton-calendar-bridge/internal/report"
 	"github.com/Barben360/proton-calendar-bridge/internal/ui"
@@ -289,7 +291,8 @@ func TestAlertSenderLogsAFailureOnce(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	var n ui.Notifier
 	down := true
-	s := &alertSender{log: log, send: func(ui.Notification) error {
+	clock := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	s := &alertSender{log: log, now: func() time.Time { return clock }, send: func(ui.Notification) error {
 		if down {
 			return errors.New("no notification server")
 		}
@@ -298,6 +301,7 @@ func TestAlertSenderLogsAFailureOnce(t *testing.T) {
 	note := []ui.Notification{{Account: "a1", Code: "needs-login"}}
 	for range 4 {
 		s.sendAll(&n, note)
+		clock = clock.Add(notifyRetry)
 	}
 	if got := strings.Count(buf.String(), "notification failed"); got != 1 {
 		t.Errorf("%d failure lines over 4 retries, want 1:\n%s", got, buf.String())
@@ -311,6 +315,32 @@ func TestAlertSenderLogsAFailureOnce(t *testing.T) {
 	s.sendAll(&n, note)
 	if got := strings.Count(buf.String(), "notification failed"); got != 2 {
 		t.Errorf("a new failure after a success logged %d lines in total, want 2", got)
+	}
+}
+
+// A failed notification is tried again at most every notifyRetry, however
+// often the window redraws (every second while a pass runs), and is still
+// offered at the next views meanwhile.
+func TestAlertSenderRetriesAtMostEvery30Seconds(t *testing.T) {
+	var n ui.Notifier
+	clock := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	tries := 0
+	s := &alertSender{log: slog.New(slog.DiscardHandler), now: func() time.Time { return clock }, send: func(ui.Notification) error {
+		tries++
+		return errors.New("no notification server")
+	}}
+	v := ui.View{Accounts: []ui.AccountView{{ID: "a1", Alerts: []ctl.Alert{{Account: "a1", Code: "needs-login", Severity: ctl.SeverityError}}}}}
+	for range 29 { // a redraw a second for 29 s
+		s.sendAll(&n, n.Next(v))
+		clock = clock.Add(time.Second)
+	}
+	if tries != 1 {
+		t.Errorf("%d sends in 29 s, want 1", tries)
+	}
+	clock = clock.Add(time.Second) // 30 s after the first try
+	s.sendAll(&n, n.Next(v))
+	if tries != 2 {
+		t.Errorf("%d sends after 30 s, want 2 (the alert is still offered)", tries)
 	}
 }
 

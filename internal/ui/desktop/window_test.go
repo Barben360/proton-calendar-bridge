@@ -467,6 +467,18 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 	if !f.has("An ambiguous gate") {
 		t.Error("a redraw with the same calendars closed the reason: the rows are the same")
 	}
+	// The progress block appearing moves the rows down: the reason would
+	// float where the icon was.
+	moved := twoAccounts()
+	moved.Accounts[0].Progress = &ui.ProgressView{Text: "Full sync · Personal (1/2) · 3 s", Fraction: 0.1}
+	f.w.Update(moved)
+	if f.has("An ambiguous gate") {
+		t.Error("the reason stays after the progress block moved its row")
+	}
+	test.Tap(tips[0])
+	if !f.has("An ambiguous gate") {
+		t.Fatal("a tap on the info icon shows no reason")
+	}
 	v := twoAccounts()
 	v.Accounts[0].Calendars[0].LastSync = "synced just now"
 	f.w.Update(v)
@@ -1115,9 +1127,64 @@ func TestAccountPaneShowsThePassProgress(t *testing.T) {
 		t.Errorf("no estimate: bar %v, moving bar %v running %v; want only the moving bar, running", f.visible(p.progBar), f.visible(p.progWait), p.progWait.Running())
 	}
 
+	if !animating(p.progWait) {
+		t.Error("no estimate: the moving bar's animation does not run")
+	}
+
 	v.Accounts[0].Progress = nil
 	f.w.Update(v)
 	if f.visible(p.progress) || p.progWait.Running() || f.has("First sync · Personal (1/2) · 5 s") {
 		t.Errorf("no pass: progress shown %v, moving bar running %v; want neither", f.visible(p.progress), p.progWait.Running())
+	}
+	if animating(p.progWait) {
+		t.Error("no pass: the hidden moving bar still animates (and redraws the window every frame)")
+	}
+	v.Accounts[0].Progress = &ui.ProgressView{Text: "First sync · Personal (2/2) · 9 s", Fraction: -1}
+	f.w.Update(v)
+	if !animating(p.progWait) {
+		t.Error("a second pass without an estimate: the moving bar does not animate again")
+	}
+}
+
+// animating reads whether the moving bar's renderer runs its animation:
+// Fyne 2.8's infProgressRenderer.wasRunning, which Running() does not
+// reflect (Hide clears the flag Running reads, not the animation).
+func animating(b *widget.ProgressBarInfinite) bool {
+	r := reflect.ValueOf(test.WidgetRenderer(b))
+	if r.Kind() == reflect.Pointer {
+		r = r.Elem()
+	}
+	f := r.FieldByName("wasRunning")
+	if !f.IsValid() {
+		panic("Fyne's infinite progress renderer has no wasRunning field: update animating for this Fyne version")
+	}
+	return f.Bool()
+}
+
+// A redraw with the same accounts keeps the sidebar's rows, updated in
+// place: a click pressed before it and released after it still lands. A
+// change of the accounts rebuilds them.
+func TestSidebarRowsKeptAcrossRedraws(t *testing.T) {
+	f := newFixture(t)
+	v := twoAccounts()
+	f.w.Update(v)
+	btn, short := f.w.rows[0].btn, f.w.rows[0].short
+	v.Accounts[0].Short, v.Accounts[0].Dot = "syncing…", ui.TraySyncing
+	v.Accounts[1].Address = "robert@example.org"
+	f.w.Update(v)
+	if f.w.rows[0].btn != btn || f.w.rows[0].short != short {
+		t.Fatal("a redraw with the same accounts rebuilt the rows")
+	}
+	if f.w.rows[0].short.Text != "syncing…" || f.w.rows[0].dot.FillColor != dotColor(ui.TraySyncing) || f.w.rows[1].addr.Text != "robert@example.org" {
+		t.Errorf("rows not updated in place: %q, dot %v, %q", f.w.rows[0].short.Text, f.w.rows[0].dot.FillColor, f.w.rows[1].addr.Text)
+	}
+	test.Tap(f.w.rows[1].btn)
+	if f.w.selected != "b2" || !f.w.rows[1].addr.Style.Bold || f.w.rows[0].addr.Style.Bold {
+		t.Errorf("tap on a kept row: selected %q, bold %v/%v; want b2, its address bold", f.w.selected, f.w.rows[0].addr.Style.Bold, f.w.rows[1].addr.Style.Bold)
+	}
+	v.Accounts = v.Accounts[:1]
+	f.w.Update(v)
+	if len(f.w.rows) != 1 || f.w.rows[0].btn == btn {
+		t.Errorf("an account gone: %d rows, same button %v; want 1 new row", len(f.w.rows), f.w.rows[0].btn == btn)
 	}
 }

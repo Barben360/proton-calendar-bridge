@@ -41,6 +41,7 @@ type calProgress struct {
 	lists    bool // listed in full, or expected to be
 	expected int  // rows its listing should read; -1: unknown
 	fetched  int  // rows its listing read so far
+	counted  bool // a listing announced a Total: the cached estimate is replaced
 }
 
 // newTracker plans the pass over cals: which calendars will be listed (the
@@ -77,12 +78,17 @@ func willList(prev cache.Calendar, o Options, now time.Time) bool {
 	return false
 }
 
-// start marks calendar i as the current one, in mode.
-func (t *tracker) start(i int, mode string, prevFull time.Time) {
+// start marks calendar i as the current one, in mode; lists says whether
+// it is listed now. A listed calendar counts from now on, planned or not:
+// the plan read the clock at the pass's start, and a calendar can come due
+// while the ones before it list. One that is not (read incrementally, or
+// skipped while its fallback listing waits) counts for nothing.
+func (t *tracker) start(i int, mode string, prevFull time.Time, lists bool) {
 	if t.send == nil {
 		return
 	}
 	t.cur, t.mode, t.prev = i, mode, prevFull
+	t.cals[i].lists = lists
 	t.emit()
 }
 
@@ -99,15 +105,21 @@ func (t *tracker) listing(mode string) {
 }
 
 // page records a page of the current calendar's listing: read unique rows
-// so far, total announced (-1: none).
+// so far, total announced (-1: none). A listing repeated because it was
+// unstable starts its count again: the calendar keeps the highest count
+// and estimate, so the progress never goes back.
 func (t *tracker) page(read, total int) {
 	if t.send == nil || t.cur < 0 {
 		return
 	}
 	c := &t.cals[t.cur]
-	c.fetched = read
-	if total >= 0 {
-		c.expected = total
+	c.fetched = max(c.fetched, read)
+	switch {
+	case total < 0:
+	case !c.counted: // Proton's count replaces the cached one, larger or not
+		c.expected, c.counted = total, true
+	default:
+		c.expected = max(c.expected, total)
 	}
 	t.emit()
 }
