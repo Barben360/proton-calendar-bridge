@@ -129,8 +129,7 @@ type accountPane struct {
 	calendars          *fyne.Container
 	drawnCals          []ui.CalendarView // what calendars draws, for the account drawnID
 	drawnID            string
-	drawnAlerts        []ctl.Alert // what alertBox draws, for the account alertsID
-	alertsID           string
+	drawnAlerts        []ctl.Alert // what alertBox draws
 	alertBox           *fyne.Container
 	b                  *busy
 }
@@ -256,7 +255,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 		p.fpRow.Hide()
 	}
 	p.drawCalendars(av)
-	if av.ID != p.alertsID || !slices.Equal(av.Alerts, p.drawnAlerts) { // redrawn every second during a pass
+	if !slices.Equal(av.Alerts, p.drawnAlerts) { // the same alerts draw the same, whatever the account
 		alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
 		for _, a := range av.Alerts {
 			msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -266,7 +265,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 		}
 		p.alertBox.Objects = alerts
 		p.alertBox.Refresh()
-		p.alertsID, p.drawnAlerts = av.ID, slices.Clone(av.Alerts)
+		p.drawnAlerts = slices.Clone(av.Alerts)
 	}
 	// Whatever moved above it (the progress line, an alert, a group shown
 	// or hidden), an open reason stays under its icon.
@@ -284,11 +283,17 @@ func (p *accountPane) showProgress(pv *ui.ProgressView) {
 		return
 	}
 	p.progText.SetText(pv.Text)
-	if pv.Fraction < 0 {
+	switch {
+	case pv.Fraction < 0 && !p.w.visible:
+		// The window redraws every second during a pass, shown or not:
+		// a hidden one animates nothing. reveal draws the bar again.
+		p.progBar.Hide()
+		p.stopWait()
+	case pv.Fraction < 0:
 		p.progBar.Hide()
 		p.progWait.Start() // Show restarts it too (its Refresh), Start says so
 		p.progWait.Show()
-	} else {
+	default:
 		p.stopWait()
 		p.progBar.SetValue(pv.Fraction)
 		p.progBar.Show()

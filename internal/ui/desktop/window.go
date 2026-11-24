@@ -588,6 +588,9 @@ func (w *Window) ShowLogin(username string) {
 func (w *Window) reveal() {
 	w.visible = true
 	w.win.Show()
+	if av, ok := w.account(w.selected); ok && w.mode == paneAccount {
+		w.pane.showProgress(av.Progress) // its moving bar waited for the window
+	}
 	w.win.RequestFocus()
 	if err := w.pendingErr; err != nil {
 		w.pendingErr = nil
@@ -637,7 +640,7 @@ func (w *Window) Hide() {
 	w.visible = false
 	w.win.Hide()
 	w.pane.pw.hide()
-	w.pane.showProgress(nil) // no animation for a hidden window; the next Update draws it again
+	w.pane.showProgress(nil) // no animation for a hidden window; reveal draws it again
 	if w.mode == paneWizard && !w.waiting() {
 		w.closeWizard()
 		w.showDefault()

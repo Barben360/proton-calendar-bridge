@@ -490,9 +490,18 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 		t.Fatalf("the progress block did not move the icon (y %v then %v): the scenario needs it", before.Y, after.Y)
 	}
 	under("progress block shown")
+	before = fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0])
 	moved.Accounts[0].Alerts = append(moved.Accounts[0].Alerts, ctl.Alert{Code: "x", Severity: "warning", Message: "another alert", Fix: "do something"})
 	f.w.Update(moved)
+	if after := fyne.CurrentApp().Driver().AbsolutePositionForObject(tips[0]); !f.has("another alert") || after.Y <= before.Y {
+		t.Fatalf("an alert added to the same account: shown %v, icon y %v then %v; want it drawn above the rows", f.has("another alert"), before.Y, after.Y)
+	}
 	under("an alert added")
+	kept := f.w.pane.alertBox.Objects[0]
+	f.w.Update(moved)
+	if f.w.pane.alertBox.Objects[0] != kept {
+		t.Error("a redraw with the same alerts rebuilt them")
+	}
 	v := twoAccounts()
 	v.Accounts[0].Calendars[0].LastSync = "synced just now"
 	f.w.Update(v)
@@ -1184,6 +1193,14 @@ func TestMovingBarStopsOutOfSight(t *testing.T) {
 	f.w.Hide()
 	if animating(p.progWait) {
 		t.Error("with the window hidden, the moving bar still animates")
+	}
+	f.w.Update(v) // the 1 s redraws go on while hidden
+	if animating(p.progWait) {
+		t.Error("a redraw of the hidden window started the moving bar again")
+	}
+	f.w.Show("")
+	if !animating(p.progWait) {
+		t.Error("the window shown again: the moving bar does not animate")
 	}
 }
 
