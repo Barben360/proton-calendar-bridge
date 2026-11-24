@@ -193,3 +193,41 @@ func TestListDedupesAShiftedPage(t *testing.T) {
 		t.Errorf("%d unique rows, Total %d; want 150, 150 (the inserted row is not listed)", len(l.Rows), l.Total)
 	}
 }
+
+// ListProgress reports each page as it is read: the unique rows so far and
+// the announced Total, or -1 when the answer has none.
+func TestListProgressReportsEachPage(t *testing.T) {
+	t.Parallel()
+	f, c, cal := setup(t)
+	for i := range 250 {
+		f.AddEvent(cal, protontest.Event{UID: "uid" + strconv.Itoa(i), Start: 1, End: 2})
+	}
+	type step struct{ read, total int }
+	for _, tc := range []struct {
+		name    string
+		noTotal bool
+		want    []step
+	}{
+		{"with Total", false, []step{{100, 250}, {200, 250}, {250, 250}}},
+		{"without Total", true, []step{{100, -1}, {200, -1}, {250, -1}}},
+	} {
+		f.ListWithoutTotal(tc.noTotal)
+		var got []step
+		l, err := events.ListProgress(t.Context(), c, cal, func(read, total int) { got = append(got, step{read, total}) })
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(l.Rows) != 250 {
+			t.Errorf("%s: %d rows, want 250", tc.name, len(l.Rows))
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: progress %v, want %v", tc.name, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: progress %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+}

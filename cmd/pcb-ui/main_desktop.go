@@ -270,10 +270,15 @@ func follow(ctx context.Context, b *ui.Bridge, win *desktop.Window, tray *deskto
 			}
 		})
 		sender.sendAll(&n, n.Next(v))
+		var redraw <-chan time.Time // nil: wait for a change
+		if d := v.RefreshAfter(); d > 0 {
+			redraw = time.After(d) // a pass runs: its progress moves
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-b.Changes():
+		case <-redraw:
 		}
 	}
 }

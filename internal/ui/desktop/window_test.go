@@ -464,6 +464,12 @@ func TestReadOnlyReasonShowsOnHover(t *testing.T) {
 		t.Error("a tap on the info icon shows no reason")
 	}
 	f.w.Update(twoAccounts())
+	if !f.has("An ambiguous gate") {
+		t.Error("a redraw with the same calendars closed the reason: the rows are the same")
+	}
+	v := twoAccounts()
+	v.Accounts[0].Calendars[0].LastSync = "synced just now"
+	f.w.Update(v)
 	if f.has("An ambiguous gate") {
 		t.Error("the reason outlives the row that showed it")
 	}
@@ -1084,5 +1090,34 @@ func TestErrorsOnAHiddenWindowShowOnceAtTheNextShow(t *testing.T) {
 	f.w.Show("")
 	if f.w.win.Canvas().Overlays().Top() != nil {
 		t.Error("the error is shown again at a later Show")
+	}
+}
+
+// A running pass shows under the account's header: a bar of its fraction,
+// or a moving bar while it has no estimate, with what it does; between
+// passes neither shows and the moving bar does not run.
+func TestAccountPaneShowsThePassProgress(t *testing.T) {
+	f := newFixture(t)
+	v := twoAccounts()
+	text := "Full sync (last one 32 h ago) · Personal (1/2) · 400 of 1000 events · 1 min 12 s"
+	v.Accounts[0].Progress = &ui.ProgressView{Text: text, Fraction: 0.4}
+	f.w.Update(v)
+	f.w.Show("a1")
+	p := f.w.pane
+	if !f.has(text) || !f.visible(p.progBar) || f.visible(p.progWait) || p.progBar.Value != 0.4 {
+		t.Errorf("known fraction: text shown %v, bar %v (value %v), moving bar %v; want the text, the bar at 0.4, no moving bar",
+			f.has(text), f.visible(p.progBar), p.progBar.Value, f.visible(p.progWait))
+	}
+
+	v.Accounts[0].Progress = &ui.ProgressView{Text: "First sync · Personal (1/2) · 5 s", Fraction: -1}
+	f.w.Update(v)
+	if !f.has("First sync · Personal (1/2) · 5 s") || f.visible(p.progBar) || !f.visible(p.progWait) || !p.progWait.Running() {
+		t.Errorf("no estimate: bar %v, moving bar %v running %v; want only the moving bar, running", f.visible(p.progBar), f.visible(p.progWait), p.progWait.Running())
+	}
+
+	v.Accounts[0].Progress = nil
+	f.w.Update(v)
+	if f.visible(p.progress) || p.progWait.Running() || f.has("First sync · Personal (1/2) · 5 s") {
+		t.Errorf("no pass: progress shown %v, moving bar running %v; want neither", f.visible(p.progress), p.progWait.Running())
 	}
 }

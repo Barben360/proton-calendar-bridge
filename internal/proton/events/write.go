@@ -18,7 +18,7 @@ func ListByUID(ctx context.Context, c *api.Client, calID, uid string) ([]Row, er
 	if uid == "" {
 		return nil, errors.New("listing events by UID: empty UID")
 	}
-	l, err := list(ctx, c, calID, url.Values{"UID": {uid}})
+	l, err := list(ctx, c, calID, url.Values{"UID": {uid}}, nil)
 	return l.Rows, err
 }
 

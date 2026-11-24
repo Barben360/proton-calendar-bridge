@@ -86,6 +86,8 @@ type Health struct {
 	// Idle: no client was authenticated for IdleAfter (see ActiveInterval).
 	Idle     bool        `json:"idle"`
 	LastPass *PassHealth `json:"last_pass,omitempty"`
+	// Pass is the pass running now, nil between passes.
+	Pass *PassProgress `json:"pass,omitempty"`
 	// Calendars are the cached calendars, in cache order.
 	Calendars []CalendarHealth `json:"calendars"`
 	Render    RenderCounts     `json:"render"`
@@ -102,6 +104,24 @@ type PassHealth struct {
 	OK         bool      `json:"ok"`
 	ErrorClass string    `json:"error_class,omitempty"`
 	Error      string    `json:"error,omitempty"`
+}
+
+// PassProgress is where the running pass is. Calendar is the calendar
+// being synced, 1-based (0: none started yet), of Calendars; Mode is its
+// mode (initial, incremental or full) and LastFullAt its last full listing
+// before this pass (nil: never). EventsFetched is how many events the
+// pass's full listings read so far, EventsExpected how many they should
+// read in all (nil: no estimate yet, a calendar never synced still to
+// list). A calendar read incrementally counts for neither.
+type PassProgress struct {
+	StartedAt      time.Time  `json:"started_at"`
+	Calendar       int        `json:"calendar"`
+	Calendars      int        `json:"calendars"`
+	CalendarName   string     `json:"calendar_name,omitempty"`
+	Mode           string     `json:"mode,omitempty"`
+	LastFullAt     *time.Time `json:"last_full_at,omitempty"`
+	EventsFetched  int        `json:"events_fetched"`
+	EventsExpected *int       `json:"events_expected,omitempty"`
 }
 
 // CalendarHealth is one cached calendar. SyncedAt is its last successful
@@ -230,6 +250,7 @@ type live struct {
 	cadence  time.Duration // the wait after a good pass, as of the last pass (not moved by a wake before the woken pass ends)
 	activity time.Time     // the last authenticated request; zero: none yet
 	last     *PassHealth
+	pass     *PassProgress     // the running pass, nil between passes
 	classes  map[string]string // calendar ID → error class, as of its last pass
 	wake     chan struct{}     // wakes an idle loop (capacity 1)
 	wakes    atomic.Int64      // wakes asked for (tests)
@@ -260,10 +281,39 @@ func (v *live) next(now time.Time) time.Duration {
 	return v.active
 }
 
-// notePass records a pass's outcome, its wait and each calendar's class.
+// beginPass records that a pass starts at at.
+func (v *live) beginPass(at time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.pass = &PassProgress{StartedAt: at}
+}
+
+// noteProgress records where the running pass is (syncer.Options.Progress).
+func (v *live) noteProgress(p syncer.Progress) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.pass == nil {
+		return // the pass ended meanwhile
+	}
+	np := &PassProgress{StartedAt: v.pass.StartedAt, Calendar: p.Calendar, Calendars: p.Calendars,
+		CalendarName: p.Name, Mode: p.Mode, EventsFetched: p.Fetched}
+	if !p.PrevFullAt.IsZero() {
+		t := p.PrevFullAt
+		np.LastFullAt = &t
+	}
+	if p.Expected >= 0 {
+		e := p.Expected
+		np.EventsExpected = &e
+	}
+	v.pass = np
+}
+
+// notePass records a pass's outcome, its wait and each calendar's class;
+// the pass no longer runs.
 func (v *live) notePass(at time.Time, p WatchPass) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.pass = nil
 	ph := &PassHealth{At: at, OK: p.Err == nil || exitcode.From(p.Err) == exitcode.Partial}
 	if !ph.OK {
 		ph.ErrorClass, ph.Error = errorClass(p.Err), p.Err.Error()
@@ -364,6 +414,10 @@ func (l *Local) Health(ctx context.Context) (Health, error) {
 	if v.last != nil {
 		last := *v.last
 		h.LastPass = &last
+	}
+	if v.pass != nil {
+		cur := *v.pass // noteProgress replaces it whole: its pointers are never written again
+		h.Pass = &cur
 	}
 	classes := maps.Clone(v.classes)
 	v.mu.Unlock()

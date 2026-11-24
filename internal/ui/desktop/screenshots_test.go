@@ -50,7 +50,17 @@ func screenshotView() ui.View {
 					{Name: "Holidays in France", Color: "#5ABEB4", ReadOnly: true, Info: "not a normal calendar (subscribed or holidays)"},
 				},
 			},
-			{ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing…", Dot: ui.TraySyncing, SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly},
+			{
+				ID: "5e6f7a8b", Address: "team@example.org", Short: "syncing… 40%", Dot: ui.TraySyncing,
+				SignedIn: true, CalDAV: true, MCP: true, MCPMode: service.MCPReadOnly, LastSync: &synced,
+				URL: "http://127.0.0.1:1080/dav/5e6f7a8b/", Username: "team@example.org",
+				Progress: &ui.ProgressView{Fraction: 0.4,
+					Text: "Full sync (last one 32 h ago) · Team (1/2) · 412 of 1030 events · 1 min 12 s"},
+				Calendars: []ui.CalendarView{
+					{Name: "Team", Color: "#3F51B5", LastSync: "synced 32 h ago"},
+					{Name: "On call", Color: "#DB3251", LastSync: "synced 32 h ago"},
+				},
+			},
 			{ID: "9c0d1e2f", Address: "bob@example.org", Short: "needs login", Dot: ui.TrayAttention, SignedIn: false, MCPMode: service.MCPOff},
 		},
 	}
@@ -78,6 +88,11 @@ func TestScreenshots(t *testing.T) {
 			if tips := f.infoTips(); len(tips) != 1 {
 				t.Fatalf("%d info icons in the account picture, want 1", len(tips))
 			}
+		}},
+		// A long pass: its bar and what it does under the account's name.
+		{"syncing", func(f *fixture) {
+			f.w.win.Resize(fyne.NewSize(880, 720))
+			f.w.selectAccount("5e6f7a8b")
 		}},
 		// A report saved while pcb-ui runs: the panel over the account.
 		{"crash-report", func(f *fixture) {

@@ -300,6 +300,14 @@ func (f *Fake) OnListPage(fn func(calID string, page int)) {
 	f.cal.onList = fn
 }
 
+// ListWithoutTotal makes the event listings leave out Total, as an answer
+// that does not announce its row count (on), or carry it again (off).
+func (f *Fake) ListWithoutTotal(on bool) {
+	f.cal.mu.Lock()
+	defer f.cal.mu.Unlock()
+	f.cal.noTotal = on
+}
+
 func (f *Fake) feedPageSize() int {
 	if f.cal.feedPage > 0 {
 		return f.cal.feedPage
@@ -399,7 +407,11 @@ func (f *Fake) listEvents(w http.ResponseWriter, q url.Values, cal *calendarRec,
 		fn(cal.id, page)
 		f.cal.mu.Lock()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"Code": 1000, "Events": rows, "Total": total, "More": more})
+	answer := map[string]any{"Code": 1000, "Events": rows, "Total": total, "More": more}
+	if f.cal.noTotal {
+		delete(answer, "Total")
+	}
+	writeJSON(w, http.StatusOK, answer)
 }
 
 func (f *Fake) feedPage(w http.ResponseWriter, s *eventState, cursor string) {

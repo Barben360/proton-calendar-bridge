@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"slices"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -119,8 +120,14 @@ type accountPane struct {
 	fpRow              *fyne.Container
 	pw                 *pwBox
 	newPw              *widget.Button
+	progress           *fyne.Container // the running pass: a bar and what it does, hidden between passes
+	progBar            *widget.ProgressBar
+	progWait           *widget.ProgressBarInfinite // in place of progBar while the pass has no estimate
+	progText           *widget.Label
 	calGroup           *fyne.Container
 	calendars          *fyne.Container
+	drawnCals          []ui.CalendarView // what calendars draws, for the account drawnID
+	drawnID            string
 	alertBox           *fyne.Container
 	b                  *busy
 }
@@ -175,6 +182,12 @@ func newAccountPane(w *Window) *accountPane {
 	p.b = newBusy(p.signBtn, p.removeBtn, p.caldav, p.mcp, p.newPw, p.pw.showBtn, p.pw.copyBtn)
 	p.pw.b = p.b
 	p.calendars, p.alertBox = vbox(0), vbox(8)
+	p.progBar, p.progWait = widget.NewProgressBar(), widget.NewProgressBarInfinite()
+	p.progText = wrapped("")
+	p.progText.Importance = widget.LowImportance
+	p.progText.SizeName = theme.SizeNameCaptionText
+	p.progress = vbox(2, container.NewStack(p.progBar, p.progWait), p.progText)
+	p.showProgress(nil)
 
 	header := container.NewBorder(nil, nil, nil, vcenter(container.NewHBox(p.signBtn, p.removeBtn)),
 		vbox(0, p.addr, container.NewBorder(nil, nil, pad(0, 0, 8, 0, dotObj), nil, p.status)))
@@ -193,7 +206,7 @@ func newAccountPane(w *Window) *accountPane {
 		divided(pad(2, 2, 4, 4, p.newPw)),
 	)
 	p.calGroup = group("CALENDARS", p.calendars)
-	body := vbox(18, header, p.b.label, p.alertBox, adapters, p.conn, p.calGroup)
+	body := vbox(18, header, p.progress, p.b.label, p.alertBox, adapters, p.conn, p.calGroup)
 	p.root = container.NewStack(container.NewVScroll(pad(4, 24, 28, 28, body)))
 	return p
 }
@@ -212,6 +225,7 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	p.status.SetText(av.Short + " · " + last)
 	p.statusDot.FillColor = dotColor(av.Dot)
 	p.statusDot.Refresh()
+	p.showProgress(av.Progress)
 	if av.SignedIn {
 		p.signBtn.SetText("Sign out")
 		p.signBtn.Importance = widget.MediumImportance
@@ -238,6 +252,47 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	} else {
 		p.fpRow.Hide()
 	}
+	p.drawCalendars(av)
+	alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
+	for _, a := range av.Alerts {
+		msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		msg.Wrapping = fyne.TextWrapWord
+		fix := wrapped("Fix: " + a.Fix)
+		alerts = append(alerts, alertBox(vbox(0, msg, fix)))
+	}
+	p.alertBox.Objects = alerts
+	p.alertBox.Refresh()
+}
+
+// showProgress draws the running pass pv, or hides the progress (nil): a
+// bar of its fraction, or a moving one while it has no estimate, and what
+// it does under it.
+func (p *accountPane) showProgress(pv *ui.ProgressView) {
+	if pv == nil {
+		p.progWait.Hide() // stops its animation
+		p.progress.Hide()
+		return
+	}
+	p.progText.SetText(pv.Text)
+	if pv.Fraction < 0 {
+		p.progBar.Hide()
+		p.progWait.Show()
+	} else {
+		p.progWait.Hide()
+		p.progBar.SetValue(pv.Fraction)
+		p.progBar.Show()
+	}
+	p.progress.Show()
+}
+
+// drawCalendars draws av's calendars, unless the pane already shows these
+// for this account: the window redraws every second while a pass runs, and
+// rebuilding the rows would close a reason the person is reading.
+func (p *accountPane) drawCalendars(av ui.AccountView) {
+	if av.ID == p.drawnID && slices.Equal(av.Calendars, p.drawnCals) {
+		return
+	}
+	p.drawnID, p.drawnCals = av.ID, slices.Clone(av.Calendars)
 	p.w.tips.hide(nil) // its icon goes with the rows
 	cals := make([]fyne.CanvasObject, 0, len(av.Calendars))
 	for i, c := range av.Calendars {
@@ -269,15 +324,6 @@ func (p *accountPane) setAccount(av ui.AccountView) {
 	} else {
 		p.calGroup.Show()
 	}
-	alerts := make([]fyne.CanvasObject, 0, len(av.Alerts))
-	for _, a := range av.Alerts {
-		msg := widget.NewLabelWithStyle(a.Message, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		msg.Wrapping = fyne.TextWrapWord
-		fix := wrapped("Fix: " + a.Fix)
-		alerts = append(alerts, alertBox(vbox(0, msg, fix)))
-	}
-	p.alertBox.Objects = alerts
-	p.alertBox.Refresh()
 }
 
 func (p *accountPane) setCalDAV(on bool) { p.flip(p.caldav, p.w.act.SetCalDAV, on) }

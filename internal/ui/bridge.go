@@ -233,6 +233,9 @@ func (b *Bridge) startRun(ctx context.Context) error {
 				ShowLogin: showLogin, LoginBusy: hub.LoginInProgress}),
 			Logger: log, Listen: b.o.Listen, WaitForLogin: true, ShowUI: showUI, SessionEnd: b.o.SessionEnd,
 			OnState: func(string, service.ServeState) { b.poke() },
+			// The window then redraws every second while the pass runs
+			// (View.RefreshAfter), so its progress shows and moves.
+			OnPassStart: func(string) { b.poke() },
 			// The same records as pcb serve's, for the same log file content.
 			OnPass: func(id string, p service.WatchPass) {
 				l := log.With("account", id)
