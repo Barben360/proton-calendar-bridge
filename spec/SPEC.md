@@ -1840,7 +1840,8 @@ M7 behaviour (decision 0015; `cmd/pcb-ui`, `internal/ui`, `internal/ui/desktop`,
   the calendar rows when the accounts and calendars are the same (updated in place: a click across a redraw still lands, an
   open reason stays), and places an open reason under its icon again when something above moved it (the progress block, an
   alert); the moving bar is stopped before it is hidden (Fyne 2.8's `Hide` leaves its animation running), and when the person
-  leaves the account pane or the window hides (it only runs in a shown window, the 1 s redraws going on while hidden). A notification that failed is tried again at most every 30 s. Issue #84
+  leaves the account pane or the window hides (it only runs in a shown window, the 1 s redraws going on while hidden). A
+  notification that failed is tried again at most every 30 s. Issue #84
   [verified: `TestStaleCheckHasAMargin`, `TestQuickPassShowsNoProgress`, `TestRunningPassProgress`, `TestWaitRedraw`,
   `TestLoopCallbacksWakeTheWindow`, `TestBridgeViewShowsARunningPass`, `TestAccountPaneShowsThePassProgress`,
   `TestMovingBarStopsOutOfSight`, `TestSidebarRowsKeptAcrossRedraws`, `TestReadOnlyReasonShowsOnHover`,
