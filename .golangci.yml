@@ -6,6 +6,7 @@ linters:
     - exhaustive
     - forcetypeassert
     - gocritic
+    - gosec
     - misspell
     - nilerr
     - noctx
@@ -25,6 +26,13 @@ linters:
           - nilerr
           - noctx
           - forcetypeassert
+      # gosec in tests: fixtures are written and read in t.TempDir() with
+      # whatever mode the test wants, subprocesses and servers are the test's
+      # own, and the secret-looking names are fakes. The production code is
+      # what gosec guards.
+      - path: _test\.go
+        linters:
+          - gosec
   settings:
     errcheck:
       exclude-functions:
@@ -37,6 +45,17 @@ linters:
     # default must name every constant.
     exhaustive:
       default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # G304 (file inclusion via variable): every path pcb opens comes from
+        # its own configuration, state directory or the person's command line
+        # (a calendar, a config file, a state root): by design, never from a
+        # remote peer. The remaining rules stay on.
+        - G304
+        # G103 (unsafe): only the Windows code uses it, to hand a struct or
+        # buffer to a Win32 call (syscall.Proc.Call, the x/sys/windows
+        # signatures), which cannot be written without unsafe.Pointer.
+        - G103
     revive:
       rules:
         - name: exported

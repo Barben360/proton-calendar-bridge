@@ -70,7 +70,7 @@ func (e *RunError) Unwrap() error { return e.Err }
 
 // Run implements Runner.
 func (r *ExecRunner) Run(ctx context.Context, args []string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := exec.CommandContext(ctx, r.Bin, args...) //nolint:gosec // G204: the lab tool runs the pcb binary its operator named
 	cmd.Env = r.environ()
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

@@ -112,7 +112,7 @@ func (r *Recorder) Save(name string, e Exchange) (string, error) {
 			return "", errForbidden
 		}
 	}
-	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil { //nolint:gosec // G301: a recordings directory holds redacted output, shareable by design
 		return "", err
 	}
 	path := filepath.Join(r.Dir, name+".json")
@@ -120,7 +120,7 @@ func (r *Recorder) Save(name string, e Exchange) (string, error) {
 		return "", err
 	}
 	// Recordings are redacted: readable, unlike secrets.
-	if err := os.Chmod(path, 0o644); err != nil {
+	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // G302: a redacted recording, readable by design (never a secret)
 		return "", err
 	}
 	return path, nil

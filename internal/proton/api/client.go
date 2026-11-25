@@ -427,7 +427,7 @@ func decode(where string, data []byte, out any) error {
 // backoff is 1 s, 2 s, 4 s… for attempt 1, 2, 3… with ±20 % jitter.
 func backoff(attempt int) time.Duration {
 	base := time.Second << (attempt - 1)
-	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64()))
+	return time.Duration(float64(base) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // G404: a retry jitter, not a secret
 }
 
 func sleep(ctx context.Context, d time.Duration) error {

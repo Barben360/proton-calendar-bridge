@@ -164,7 +164,7 @@ func (v *view) Pins(ids []string) (map[string]Pin, error) {
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	rows, err := v.tx.QueryContext(v.ctx, `SELECT id, shared, calendar, address FROM pins WHERE calendar_id = ? AND id IN (?`+
+	rows, err := v.tx.QueryContext(v.ctx, `SELECT id, shared, calendar, address FROM pins WHERE calendar_id = ? AND id IN (?`+ //nolint:gosec // G202: only "?" placeholders are concatenated; every value is bound
 		strings.Repeat(", ?", len(ids)-1)+`)`, args...)
 	if err != nil {
 		return nil, v.c.classify(err)

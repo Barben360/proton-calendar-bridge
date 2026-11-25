@@ -85,7 +85,7 @@ func userName(uid int) (string, error) {
 type osRunner struct{}
 
 func (osRunner) Output(ctx context.Context, name string, args ...string) ([]byte, int, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: the install plan, built by this program, names the command; no peer input
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	code, err := exitCode(cmd.Run())
@@ -93,7 +93,7 @@ func (osRunner) Output(ctx context.Context, name string, args ...string) ([]byte
 }
 
 func (osRunner) Stream(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) (int, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: the install plan, built by this program, names the command; no peer input
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return exitCode(cmd.Run())

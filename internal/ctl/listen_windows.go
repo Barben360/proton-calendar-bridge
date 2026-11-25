@@ -204,7 +204,7 @@ func pipeName(dir string) (string, error) {
 	defer func() { _ = windows.CloseHandle(h) }()
 	buf := make([]uint16, windows.MAX_PATH)
 	for {
-		n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0)
+		n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0) //nolint:gosec // G115: the length of a MAX_PATH buffer
 		if err != nil {
 			return "", &os.PathError{Op: "GetFinalPathNameByHandle", Path: dir, Err: err}
 		}

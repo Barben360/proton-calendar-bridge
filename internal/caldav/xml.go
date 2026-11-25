@@ -283,7 +283,7 @@ const xmlType = "application/xml; charset=utf-8"
 // The DAV:error bodies, exactly. A 403 never carries an empty DAV:error:
 // Thunderbird reads that as rate limiting (E08 §3.3).
 const (
-	errValidSyncToken  = `<D:error xmlns:D="DAV:"><D:valid-sync-token/></D:error>`
+	errValidSyncToken  = `<D:error xmlns:D="DAV:"><D:valid-sync-token/></D:error>` //nolint:gosec // G101: a WebDAV error body, not a credential
 	errSupportedReport = `<D:error xmlns:D="DAV:"><D:supported-report/></D:error>`
 	errFiniteDepth     = `<D:error xmlns:D="DAV:"><D:propfind-finite-depth/></D:error>`
 )

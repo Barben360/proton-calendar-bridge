@@ -292,7 +292,7 @@ func reminders(v string) []string {
 // ids (s001, s002, ...): timed, all-day, series, then text cases. The same
 // Dataset always expands to the same entries.
 func (ds Dataset) Expand() []Entry {
-	r := rand.New(rand.NewPCG(ds.Seed, ds.Seed))
+	r := rand.New(rand.NewPCG(ds.Seed, ds.Seed)) //nolint:gosec // G404: a seeded, reproducible dataset, not a secret
 	from, _ := time.Parse(dateLayout, ds.Range.From)
 	to, _ := time.Parse(dateLayout, ds.Range.To)
 	days := int(to.Sub(from).Hours()/24) + 1

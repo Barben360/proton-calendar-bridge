@@ -144,7 +144,7 @@ func parseHexColor(s string) (color.NRGBA, bool) {
 	if err != nil {
 		return color.NRGBA{}, false
 	}
-	return color.NRGBA{R: uint8(v >> 16), G: uint8(v >> 8), B: uint8(v), A: 0xFF}, true
+	return color.NRGBA{R: uint8(v >> 16), G: uint8(v >> 8), B: uint8(v), A: 0xFF}, true //nolint:gosec // G115: a 24-bit colour parsed from 6 hex digits, each byte is cut out on purpose
 }
 
 // sentence is s with its first letter capitalised (the gate's reasons are

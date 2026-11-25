@@ -140,7 +140,7 @@ func (w *watcher) loop(ready chan<- error) {
 	var m msg
 	for {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
-		if int32(r) <= 0 { // WM_QUIT, or an error
+		if int32(r) <= 0 { //nolint:gosec // G115: GetMessageW returns a Win32 BOOL (-1, 0 or non-zero) in a register (WM_QUIT, or an error)
 			return
 		}
 		_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))

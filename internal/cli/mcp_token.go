@@ -315,7 +315,7 @@ func (a *app) newMCPTokenList() *cobra.Command {
 }
 
 // noTokenText is pcb mcp token list with no token.
-const noTokenText = "No MCP token yet.\nHint: run pcb mcp token add NAME --allow read"
+const noTokenText = "No MCP token yet.\nHint: run pcb mcp token add NAME --allow read" //nolint:gosec // G101: a hint text, not a credential
 
 func tokenTable(list []tokenEntry) string {
 	if len(list) == 0 {

@@ -166,7 +166,7 @@ func writeFile(h Host, s Step) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // G301: parent directories of an installed file (/etc, /usr/lib/systemd) must be traversable by everyone
 		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(p), ".pcb-install-*")

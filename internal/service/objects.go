@@ -24,7 +24,7 @@ import (
 // the keys, once per process and calendar (ensureKeys), plus Serve's
 // settings refresh (serve.go).
 
-const syncTokenPrefix = "urn:pcb:sync:1:"
+const syncTokenPrefix = "urn:pcb:sync:1:" //nolint:gosec // G101: a sync-token prefix, not a credential
 
 // syncToken is "urn:pcb:sync:1:<epoch>:<seq>:<gen>": position seq of the
 // cache's life epoch, under the render inputs of generation gen (ruling

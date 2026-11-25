@@ -25,7 +25,7 @@ type dynamicTimeZoneInformation struct {
 func Key() (string, bool) {
 	var info dynamicTimeZoneInformation
 	r, _, _ := procGetDynamicTimeZoneInformation.Call(uintptr(unsafe.Pointer(&info)))
-	if uint32(r) == 0xFFFFFFFF { // TIME_ZONE_ID_INVALID
+	if uint32(r) == 0xFFFFFFFF { //nolint:gosec // G115: GetDynamicTimeZoneInformation returns a DWORD in a register (TIME_ZONE_ID_INVALID)
 		return "", false
 	}
 	key := syscall.UTF16ToString(info.TimeZoneKeyName[:])

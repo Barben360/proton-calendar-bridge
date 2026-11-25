@@ -292,7 +292,7 @@ const SecretsUnsupported = "unsupported"
 // whose desktop keyring does not answer (no Secret Service on the session
 // bus, or no session bus): the session is intact, the phase is kept
 // (ruling R15).
-const SecretsKeyringUnavailable = "keyring-unavailable"
+const SecretsKeyringUnavailable = "keyring-unavailable" //nolint:gosec // G101: a state name, not a credential
 
 // SecretsKeyUnavailable is Status.Secrets for a dpapi state whose key
 // Windows cannot unprotect in this session (a logon without the password):

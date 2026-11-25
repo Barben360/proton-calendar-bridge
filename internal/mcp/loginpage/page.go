@@ -363,7 +363,7 @@ func (p *page) claimNow(w http.ResponseWriter) bool {
 		return false
 	}
 	p.claim = v
-	http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: v, Path: p.path, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: v, Path: p.path, HttpOnly: true, SameSite: http.SameSiteStrictMode}) //nolint:gosec // G124: the page is served over loopback http, where a Secure cookie is dropped by some browsers; HttpOnly and SameSite=Strict are set
 	return true
 }
 

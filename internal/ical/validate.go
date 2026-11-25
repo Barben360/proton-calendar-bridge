@@ -58,7 +58,7 @@ const (
 	noteTentative = "STATUS:TENTATIVE dropped"
 	noteColor     = "client COLOR ignored"
 	noteOurs      = "X-PCB-* or X-PM-SESSION-KEY dropped"
-	noteToken     = "X-PM-TOKEN dropped from ATTENDEE"
+	noteToken     = "X-PM-TOKEN dropped from ATTENDEE" //nolint:gosec // G101: a note text, not a credential
 	noteDuration  = "DURATION converted to DTEND"
 	noteMozilla   = "Mozilla TZID mapped to its IANA name"
 	noteFaked     = "Thunderbird's faked master dropped"

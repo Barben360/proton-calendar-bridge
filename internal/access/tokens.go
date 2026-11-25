@@ -43,8 +43,8 @@ const TokenPrefix = "pcbm_"
 var TokenCaps = []string{"freebusy", "read", "write", "delete", "unconfirmed-delete"}
 
 const (
-	tokenFile        = "mcp-tokens.json"
-	tokenLock        = "mcp-tokens.lock"
+	tokenFile        = "mcp-tokens.json" //nolint:gosec // G101: a file name, not a credential
+	tokenLock        = "mcp-tokens.lock" //nolint:gosec // G101: a file name, not a credential
 	tokenFileVersion = 1
 	tokenBytes       = 32 // of entropy: 43 base64url characters
 )

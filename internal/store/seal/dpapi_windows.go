@@ -71,7 +71,7 @@ func blobOf(b []byte) *windows.DataBlob {
 	if len(b) == 0 {
 		return &windows.DataBlob{}
 	}
-	return &windows.DataBlob{Size: uint32(len(b)), Data: &b[0]}
+	return &windows.DataBlob{Size: uint32(len(b)), Data: &b[0]} //nolint:gosec // G115: the length of a sealed secret, far under 4 GiB
 }
 
 // takeBlob copies what DPAPI allocated into Go memory, wipes it and frees

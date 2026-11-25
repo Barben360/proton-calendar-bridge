@@ -260,7 +260,7 @@ func generate(o Options, now time.Time) (Result, error) {
 	if err := acl.MkdirAll(o.Dir); err != nil {
 		return Result{}, fmt.Errorf("create %s: %w", o.Dir, err)
 	}
-	if err := os.Chmod(o.Dir, 0o700); err != nil { // an older directory, or the umask
+	if err := os.Chmod(o.Dir, 0o700); err != nil { //nolint:gosec // G302: a directory, tightened to 0700 (an older one, or the umask)
 		return Result{}, fmt.Errorf("restrict %s: %w", o.Dir, err)
 	}
 	// The key first: a certificate never sits next to a key it does not match
