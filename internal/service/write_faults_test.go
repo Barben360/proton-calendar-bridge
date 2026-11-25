@@ -51,17 +51,19 @@ func wantAnotherAccount(t *testing.T, err error) {
 // the first one's cache is refused at the UID listing, and nothing is sent.
 func TestWriteAfterAnAccountSwitchIsRefused(t *testing.T) {
 	t.Parallel()
-	r := newRig(t, protontest.Options{}, nil).start(t)
-	unlock, err := r.svc.LockCalendar(t.Context(), r.cal)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newRig(t, protontest.Options{}, nil)
+	var unlock func()
 	// The write has passed the cache's account check and waits for the
 	// calendar's lock: switch there, then let it go on.
 	r.svc.OnWriteWait(func(string) {
 		r.switchAccount(t)
 		unlock()
 	})
+	r.start(t)
+	unlock, err := r.svc.LockCalendar(t.Context(), r.cal)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
 	wantAnotherAccount(t, err)
 	if n := r.sendCalls(); n != 0 {

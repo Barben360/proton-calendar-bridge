@@ -296,18 +296,17 @@ func TestCreateOnceInAReadOnlyDirectory(t *testing.T) {
 
 // A link that fails for another reason, or a directory that vanishes before
 // the in-place create, ends in an error wrapped as a key creation failure,
-// with no key left. The temporary file's cleanup is checked by the "link
-// fails" case, the only one whose directory survives.
+// with no key left. The directory's content is checked where it survives and
+// is readable: the "link fails" case and the long-name case below.
 func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		link  func(dir string) func(o, n string) error
 		cause error
-		gone  bool // the directory no longer exists: nothing may recreate it
 	}{
 		{"link fails", func(string) func(o, n string) error {
 			return func(o, n string) error { return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EIO} }
-		}, syscall.EIO, false},
+		}, syscall.EIO},
 		{"in-place create fails", func(dir string) func(o, n string) error {
 			return func(o, n string) error {
 				if err := os.RemoveAll(dir); err != nil { // the directory is gone when the fallback opens the key
@@ -315,7 +314,7 @@ func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 				}
 				return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EPERM}
 			}
-		}, fs.ErrNotExist, true},
+		}, fs.ErrNotExist},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := keyPath(t)
@@ -325,14 +324,8 @@ func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 			if err == nil || !errors.Is(err, tc.cause) || !strings.Contains(err.Error(), "creating key file") {
 				t.Fatalf("err = %v, want %v wrapped as a key creation failure", err, tc.cause)
 			}
-			if _, statErr := os.Stat(path); statErr == nil {
-				t.Fatal("a key was created despite the error")
-			}
-			if tc.gone {
-				if _, statErr := os.Stat(dir); !errors.Is(statErr, fs.ErrNotExist) {
-					t.Fatalf("the directory was recreated: %v", statErr)
-				}
-				return
+			if errors.Is(tc.cause, fs.ErrNotExist) {
+				return // the directory is gone: nothing left to read
 			}
 			entries, readErr := os.ReadDir(dir)
 			if readErr != nil {
@@ -342,6 +335,34 @@ func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 				t.Fatalf("left in the directory: %v", entries)
 			}
 		})
+	}
+}
+
+// An in-place create that fails with the directory still there (a key file
+// name over the filesystem's limit) ends in a key creation failure and leaves
+// nothing behind: the shared cleanup removes the temporary file.
+func TestCreateOnceInPlaceFailureLeavesNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("name limits differ on Windows")
+	}
+	dir := filepath.Dir(keyPath(t))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, strings.Repeat("k", 300))
+	defer seal.SetLink(func(o, n string) error {
+		return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EPERM}
+	})()
+	err := seal.CreateOnce(path, make([]byte, 32))
+	if err == nil || !errors.Is(err, syscall.ENAMETOOLONG) || !strings.Contains(err.Error(), "creating key file") {
+		t.Fatalf("err = %v, want a name too long wrapped as a key creation failure", err)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("left in the directory: %v", entries)
 	}
 }
 

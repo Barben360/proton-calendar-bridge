@@ -186,7 +186,7 @@ func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	// land at an unknown moment. Barrier instead: with the person's login
 	// over, a second agent login is let through and raises the wizard; the
 	// refused call's goroutine was started well before this one's, so it
-	// would show first (or beside it) in the list.
+	// would almost surely have shown by then.
 	res, err = cs.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: "login", Arguments: map[string]any{"username": "dave@example.org"}})
 	if err != nil || res.IsError {
 		t.Fatalf("control: the login once the person's is over: %v %+v", err, res)

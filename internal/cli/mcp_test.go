@@ -119,6 +119,12 @@ func (m *mcpRun) waitStderr(sub string) {
 		if time.Now().After(deadline) {
 			m.t.Fatalf("pcb mcp never logged %q\nstderr: %s", sub, m.errb.String())
 		}
+		select {
+		case c := <-m.code:
+			m.code <- c // the cleanup reads it again
+			m.t.Fatalf("pcb mcp exited %d before logging %q\nstderr: %s", c, sub, m.errb.String())
+		default:
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
