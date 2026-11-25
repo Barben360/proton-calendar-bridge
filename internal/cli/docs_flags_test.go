@@ -201,7 +201,9 @@ var (
 func commandRows(doc string) []docRow {
 	var rows []docRow
 	in := false
-	for _, line := range strings.Split(doc, "\n") {
+	// A Windows checkout has CRLF line endings; a stray "\r" would break the
+	// heading comparison below.
+	for _, line := range strings.Split(strings.ReplaceAll(doc, "\r\n", "\n"), "\n") {
 		switch {
 		case strings.HasPrefix(line, "## "):
 			in = line == "## The commands"
@@ -310,4 +312,29 @@ func resolveSpan(root *cobra.Command, span string) ([]*cobra.Command, []docFlag,
 		rest++
 	}
 	return targets, flagsIn(strings.Join(words[rest:], " ")), nil
+}
+
+// TestCommandRowsReadACRLFCopyOfTheDoc guards the Windows checkout, where git
+// writes docs/commands.md with CRLF line endings: the rows and the verdict
+// must be those of the LF file.
+func TestCommandRowsReadACRLFCopyOfTheDoc(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("../../docs/commands.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lf := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+
+	want := commandRows(lf)
+	if len(want) == 0 {
+		t.Fatal("the LF doc has no command rows: the test would prove nothing")
+	}
+	got := commandRows(crlf)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("CRLF doc gives %d rows, LF doc %d; rows differ", len(got), len(want))
+	}
+	for _, p := range checkFlagTables(cli.NewRoot(), crlf) {
+		t.Error(p)
+	}
 }
