@@ -33,6 +33,14 @@ linters:
       - path: _test\.go
         linters:
           - gosec
+      # G103 (unsafe): only the Windows code uses it, to hand a struct or
+      # buffer to a Win32 call (syscall.Proc.Call, the x/sys/windows
+      # signatures), which cannot be written without unsafe.Pointer. Scoped to
+      # the Windows files so unsafe elsewhere is still flagged.
+      - path: _windows\.go
+        linters:
+          - gosec
+        text: G103
   settings:
     errcheck:
       exclude-functions:
@@ -40,9 +48,9 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
     # A switch over an enum with a default is exhaustive: the code base states
-    # the fallback of a state there, and listing every constant
-    # of a state it handles alike would only add dead cases. A switch with no
-    # default must name every constant.
+    # the fallback of a state there, and listing every constant of a state it
+    # handles alike would only add dead cases. A switch with no default must
+    # name every constant.
     exhaustive:
       default-signifies-exhaustive: true
     gosec:
@@ -52,10 +60,6 @@ linters:
         # (a calendar, a config file, a state root): by design, never from a
         # remote peer. The remaining rules stay on.
         - G304
-        # G103 (unsafe): only the Windows code uses it, to hand a struct or
-        # buffer to a Win32 call (syscall.Proc.Call, the x/sys/windows
-        # signatures), which cannot be written without unsafe.Pointer.
-        - G103
     revive:
       rules:
         - name: exported

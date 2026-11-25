@@ -1,8 +1,11 @@
 # Code owners: GitHub requests a review from the owner of every path a pull
-# request touches. The workflows and the release scripts decide what CI and
-# releases do with the repository's permissions, so changes to them are always
+# request touches. The workflows, the release scripts, the installer users
+# download and run, and the Dockerfile that builds the published image decide
+# what CI and releases do or what users execute, so changes to them are always
 # routed to the maintainer. The main ruleset does not require code-owner
 # approval (a sole owner cannot approve their own pull request): this file is
 # a request, not a gate.
 /.github/         @Barben360
 /scripts/release/ @Barben360
+/scripts/install.sh @Barben360
+/Dockerfile       @Barben360
