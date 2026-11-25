@@ -29,7 +29,8 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 	timed := func(unix int64) *service.EventTime { return &service.EventTime{At: at(unix)} }
 	// An endless weekly series from base has endless occurrences in the
 	// window; the last of them starts at lastWeekly.
-	endless := (now + int64(service.DropHorizon/time.Second) - base + week - 1) / week
+	horizon := now + int64(service.DropHorizon/time.Second)
+	endless := (horizon - base + week - 1) / week
 	lastWeekly := base + (endless-1)*week
 	// A weekly series in Paris from 2027-03-15 09:00, between the US and the
 	// EU daylight saving dates: New York's 09:00 is five hours later then,
@@ -82,6 +83,23 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		{name: "counted start six days later", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{Start: timed(base + 6*day)}},
 		{name: "other weekday, same count and end", start: base, rrule: "FREQ=WEEKLY;BYDAY=FR,MO;UNTIL=" + stamp(base+5*week),
 			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;BYDAY=FR,TU;UNTIL=" + stamp(base+5*week))}},
+		// A start moved earlier is allowed for by one period at most: moved
+		// a year earlier, a denser series ending sooner still drops.
+		{name: "start a year earlier, denser and ending sooner", start: base, rrule: "FREQ=WEEKLY;COUNT=40",
+			f: service.EventFields{Start: timed(base - 52*week), RRule: ptr("FREQ=DAILY;UNTIL=" + stamp(base+40*day))}, want: 33},
+		{name: "start three years earlier, ending an endless series", start: base, rrule: "FREQ=WEEKLY",
+			f: service.EventFields{Start: timed(base - 157*week), RRule: ptr("FREQ=DAILY;UNTIL=" + stamp(now+120*day))}, want: service.DroppedUnknown},
+		// Past the horizon, an end that comes sooner cannot be counted.
+		{name: "endless ending a week after the horizon", start: base, rrule: "FREQ=WEEKLY",
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(horizon+week))}, want: service.DroppedUnknown},
+		{name: "start three years earlier, ending a day before the horizon", start: base, rrule: "FREQ=WEEKLY",
+			f: service.EventFields{Start: timed(base - 157*week), RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(horizon-day))}, want: service.DroppedUnknown},
+		{name: "series after the horizon, rule removed", start: horizon + 10*day, rrule: "FREQ=WEEKLY", f: service.EventFields{RRule: ptr("")}, want: service.DroppedUnknown},
+		{name: "counted series after the horizon, shortened", start: horizon + 10*day, rrule: "FREQ=WEEKLY;COUNT=10",
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=4")}, want: service.DroppedUnknown},
+		{name: "until series past the horizon, extended", start: horizon - 2*week, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(horizon+5*week),
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(horizon+9*week))}},
+		{name: "endless series moved a week earlier", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{Start: timed(base - week)}},
 		{name: "zoned series shortened", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"), f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=4")}, want: 6},
 		{name: "zoned series moved to another zone", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"),
 			f: service.EventFields{Start: &service.EventTime{At: time.Date(2027, 3, 15, 9, 0, 0, 0, newYork), TZID: "America/New_York"}}},

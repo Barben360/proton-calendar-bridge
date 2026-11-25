@@ -32,16 +32,18 @@ const DroppedUnknown = -1
 //     original's last one on. Dropped is then the original occurrences
 //     after the edited series' last one (the larger of the two counts
 //     wins: both are occurrences that go); or
-//   - the original has an occurrence after the horizon and the edited
-//     series none: DroppedUnknown, as what goes cannot be counted.
+//   - the original runs past the horizon and the edited series ends sooner:
+//     the original is endless and the edited series is not, or the edited
+//     series has no occurrence from the original's last one on.
+//     DroppedUnknown, as what goes cannot be counted.
 //
-// A start moved later is allowed for: the window's end, and the end the
-// edited series must reach, follow it by at most one period of the
-// original (the gap between its last two occurrences there, none for a
-// single one), so a small move is not a drop but a postponement past an
-// occurrence is. A start moved earlier needs no allowance. Each bound has a
-// slack of zoneSlackDrop, for a change of zone whose offset moves with
-// daylight saving dates of its own.
+// A moved start is allowed for: the window's end, and the end the edited
+// series must reach, follow it by at most one period of the original (the
+// gap between its last two occurrences there, none for a single one),
+// later or earlier, so a small move is not a drop but a postponement past
+// an occurrence is, and moving the start back gives no room to end sooner.
+// Each bound has a slack of zoneSlackDrop, for a change of zone whose
+// offset moves with daylight saving dates of its own.
 //
 // Only a series change of a recurring event can drop occurrences: an
 // occurrence change moves or alters one, as an edit of a single event does.
@@ -86,11 +88,23 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 	if n := len(ends); n >= 2 {
 		period = ends[n-1].Sub(ends[n-2])
 	}
-	late := min(max(shift, 0)+zoneSlackDrop, period) // how much later the edited series may end
-	early := min(shift, late) - zoneSlackDrop        // how much earlier it may end
+	late := min(max(shift, 0)+zoneSlackDrop, period)        // how much later the edited series may end
+	early := max(min(shift, late), -period) - zoneSlackDrop // how much earlier it may end
 	if beyond != nil {
-		reach, ok := firstStartFrom(am, ao, horizon.Add(early))
-		if !ok || reach == nil {
+		// The original runs past the horizon: the edited series must end
+		// no sooner, endless if it was.
+		last, endless, ok := lastStart(bm, bo, *beyond)
+		if !ok {
+			return DroppedUnknown
+		}
+		if endless {
+			endless, ok = isEndless(am, ao)
+		} else {
+			var reach *time.Time
+			reach, ok = firstStartFrom(am, ao, last.Add(early))
+			endless = reach != nil
+		}
+		if !ok || !endless {
 			return DroppedUnknown
 		}
 	}
@@ -121,6 +135,40 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 		}
 	}
 	return dropped
+}
+
+// endlessProbe is where a series that still has an occurrence is taken
+// as endless: no rule pcb writes ends that late (UNTIL is at most 2037).
+var endlessProbe = time.Date(8000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// isEndless: the series still has an occurrence at endlessProbe.
+func isEndless(master ical.Component, overrides []ical.Component) (bool, bool) {
+	first, ok := firstStartFrom(master, overrides, endlessProbe)
+	return first != nil, ok
+}
+
+// lastStart is the last start of the occurrences of master and overrides,
+// first being one of them, or endless: it bisects on firstStartFrom (whole
+// seconds, as iCalendar times are), so it reads the series only through
+// Expand.
+func lastStart(master ical.Component, overrides []ical.Component, first time.Time) (last time.Time, endless, ok bool) {
+	if endless, ok = isEndless(master, overrides); endless || !ok {
+		return time.Time{}, endless, ok
+	}
+	lo, hi := first.Unix(), endlessProbe.Unix() // a start at lo, none from hi on
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		next, ok := firstStartFrom(master, overrides, time.Unix(mid, 0))
+		if !ok {
+			return time.Time{}, false, false
+		}
+		if next == nil {
+			hi = mid
+		} else {
+			lo = next.Unix()
+		}
+	}
+	return time.Unix(lo, 0), false, true
 }
 
 // zoneSlackDrop is the slack of droppedOccurrences' bounds: two hours, the

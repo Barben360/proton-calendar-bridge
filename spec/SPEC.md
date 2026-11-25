@@ -1541,9 +1541,10 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   starting after now is held to a delete's rules. The agenda's dry run decides (`UpdateResult.Dropped`, with the
   expansion `events_list` uses). It drops when fewer occurrences start in the window (from now to the original's last
   occurrence within two years, `DropHorizon`), or when the edited series ends before the original (it then counts the
-  original's occurrences after the edited series' last one, the larger count winning), or when the original has an
-  occurrence after the horizon and the edited series none (`DroppedUnknown`). A start moved later is allowed for by at
-  most one period of the original (the gap between its last two occurrences, the first after the horizon included;
+  original's occurrences after the edited series' last one, the larger count winning), or when the original runs past
+  the horizon and the edited series ends sooner: an endless original gets an end, or a finite one's last occurrence
+  (found by bisecting on `ical.Expand`) is not reached (`DroppedUnknown`). A moved start, later or earlier, is allowed
+  for by at most one period of the original (the gap between its last two occurrences, the first after the horizon included;
   none for a single one), each bound with two hours of slack for a zone change across differing daylight saving dates,
   so a postponement past an occurrence drops it. An occurrence change never drops; a series that cannot be expanded,
   or whose expansion the cap cuts, counts as dropping. Floating and all-day times are read in UTC. Such an update needs
