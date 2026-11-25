@@ -32,10 +32,8 @@ const DroppedUnknown = -1
 //     original's last one on. Dropped is then the original occurrences
 //     after the edited series' last one (the larger of the two counts
 //     wins: both are occurrences that go); or
-//   - the original runs past the horizon and the edited series ends sooner:
-//     the original is endless and the edited series is not, or the edited
-//     series has no occurrence from the original's last one on.
-//     DroppedUnknown, as what goes cannot be counted.
+//   - the original runs past the horizon and the edited series ends sooner
+//     there (endsNoSooner): DroppedUnknown, as what goes cannot be counted.
 //
 // A moved start is allowed for: the window's end, and the end the edited
 // series must reach, follow it by at most one period of the original (the
@@ -90,23 +88,8 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 	}
 	late := min(max(shift, 0)+zoneSlackDrop, period)        // how much later the edited series may end
 	early := max(min(shift, late), -period) - zoneSlackDrop // how much earlier it may end
-	if beyond != nil {
-		// The original runs past the horizon: the edited series must end
-		// no sooner, endless if it was.
-		last, endless, ok := lastStart(bm, bo, *beyond)
-		if !ok {
-			return DroppedUnknown
-		}
-		if endless {
-			endless, ok = isEndless(am, ao)
-		} else {
-			var reach *time.Time
-			reach, ok = firstStartFrom(am, ao, last.Add(early))
-			endless = reach != nil
-		}
-		if !ok || !endless {
-			return DroppedUnknown
-		}
+	if beyond != nil && !endsNoSooner(bm, bo, am, ao, *beyond, early) {
+		return DroppedUnknown
 	}
 	if len(old) == 0 {
 		return 0
@@ -137,39 +120,36 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 	return dropped
 }
 
-// endlessProbe is where a series that still has an occurrence is taken
-// as endless: no rule pcb writes ends that late (UNTIL is at most 2037).
+// endsNoSooner: the original series (bm, bo), whose occurrences go on
+// past the horizon from beyond, is matched by the edited one (am, ao), at
+// most early sooner (early ≤ 0 is how much sooner). One capped expansion
+// of each from beyond to endlessProbe decides: an original with more than
+// the cap there (endless, or as good as) needs an edited series with more
+// than the cap too; a shorter one, an edited occurrence from its last one
+// (moved by early) on. The cap keeps the cost to that of a page of
+// events_list, whatever a stored COUNT says.
+func endsNoSooner(bm ical.Component, bo []ical.Component, am ical.Component, ao []ical.Component, beyond time.Time, early time.Duration) bool {
+	orig, cut, ok := startsCapped(bm, bo, beyond, endlessProbe)
+	if !ok || len(orig) == 0 {
+		return false
+	}
+	from := orig[len(orig)-1].Add(early)
+	if cut {
+		from = beyond.Add(early)
+	}
+	edited, editedCut, ok := startsCapped(am, ao, from, endlessProbe)
+	if !ok {
+		return false
+	}
+	if cut {
+		return editedCut
+	}
+	return len(edited) > 0 || editedCut
+}
+
+// endlessProbe ends the expansions after the horizon: no rule pcb writes
+// ends that late (UNTIL is at most 2037).
 var endlessProbe = time.Date(8000, 1, 1, 0, 0, 0, 0, time.UTC)
-
-// isEndless: the series still has an occurrence at endlessProbe.
-func isEndless(master ical.Component, overrides []ical.Component) (bool, bool) {
-	first, ok := firstStartFrom(master, overrides, endlessProbe)
-	return first != nil, ok
-}
-
-// lastStart is the last start of the occurrences of master and overrides,
-// first being one of them, or endless: it bisects on firstStartFrom (whole
-// seconds, as iCalendar times are), so it reads the series only through
-// Expand.
-func lastStart(master ical.Component, overrides []ical.Component, first time.Time) (last time.Time, endless, ok bool) {
-	if endless, ok = isEndless(master, overrides); endless || !ok {
-		return time.Time{}, endless, ok
-	}
-	lo, hi := first.Unix(), endlessProbe.Unix() // a start at lo, none from hi on
-	for hi-lo > 1 {
-		mid := lo + (hi-lo)/2
-		next, ok := firstStartFrom(master, overrides, time.Unix(mid, 0))
-		if !ok {
-			return time.Time{}, false, false
-		}
-		if next == nil {
-			hi = mid
-		} else {
-			lo = next.Unix()
-		}
-	}
-	return time.Unix(lo, 0), false, true
-}
 
 // zoneSlackDrop is the slack of droppedOccurrences' bounds: two hours, the
 // largest daylight saving change.
@@ -199,16 +179,24 @@ func firstStartFrom(master ical.Component, overrides []ical.Component, from time
 // start in [from, to), in order; ok is false when they cannot be expanded
 // or the series' cap cut them.
 func startsFrom(master ical.Component, overrides []ical.Component, from, to time.Time) (starts []time.Time, ok bool) {
+	starts, cut, ok := startsCapped(master, overrides, from, to)
+	return starts, ok && !cut
+}
+
+// startsCapped is startsFrom that reports a cut (more than
+// MaxSeriesOccurrences in the range) instead of failing; ok is false when
+// they cannot be expanded.
+func startsCapped(master ical.Component, overrides []ical.Component, from, to time.Time) (starts []time.Time, cut, ok bool) {
 	occ, truncated, err := ical.Expand(master, overrides, from, to, time.UTC, MaxSeriesOccurrences)
-	if err != nil || truncated {
-		return nil, false
+	if err != nil {
+		return nil, false, false
 	}
 	for _, o := range occ {
 		if !o.Start.Before(from) && o.Start.Before(to) {
 			starts = append(starts, o.Start)
 		}
 	}
-	return starts, true
+	return starts, truncated, true
 }
 
 // startShift is how far the change moves the series' start.

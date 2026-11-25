@@ -137,3 +137,76 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		})
 	}
 }
+
+// A stored rule may have any COUNT (an invitation's), and a COUNT rule is
+// walked from its start: renaming such a series must cost about what
+// listing it costs and drop nothing. The bound is 3 s: the dry run walks
+// the series a few times, 3 and 36 ms here (20 and 230 ms under -race), so
+// a slow or busy CI runner has a margin of ten; bisecting for the last
+// occurrence took 5 and 22 s without -race, so the test still tells them
+// apart.
+func TestUpdateDryRunCostIsBoundedForAHugeCount(t *testing.T) {
+	t.Parallel()
+	from := func(year int) int64 { return time.Date(year, 1, 1, 9, 0, 0, 0, time.UTC).Unix() }
+	for _, tc := range []struct {
+		name  string
+		start int64
+		card  string
+	}{
+		{"daily, a million from 2020", from(2020), card("s@x", "Series", from(2020), "RRULE:FREQ=DAILY;COUNT=1000000")},
+		{"daily in Paris, two million from 1900", from(1900), eventCard("s@x", "DTSTART;TZID=Europe/Paris:19000101T100000",
+			"DTEND;TZID=Europe/Paris:19000101T110000", "SUMMARY:Series", "RRULE:FREQ=DAILY;COUNT=2000000")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+				f.AddEvent(cal, protontest.Event{UID: "s@x", Start: tc.start, End: tc.start + 3600, Color: green, Card: tc.card})
+			}).start(t)
+			obj := r.object(t, "s@x")
+			began := time.Now()
+			res, err := r.svc.UpdateEvent(t.Context(), service.EventRef{CalendarID: r.cal, UID: "s@x"}, obj.ETag, service.ScopeSeries,
+				service.EventFields{Summary: ptr("Renamed")}, true)
+			took := time.Since(began)
+			if err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if took > 3*time.Second {
+				t.Errorf("the dry run took %v, want well under 3 s", took)
+			}
+			if res.Dropped != 0 {
+				t.Errorf("Dropped = %d for a new title, want 0", res.Dropped)
+			}
+		})
+	}
+}
+
+// Past the horizon the series' real last occurrence counts, not its
+// UNTIL: an UNTIL brought back to that occurrence drops nothing, one a
+// second before it drops it (uncountable there).
+func TestUpdateDryRunComparesTheLastOccurrencePastTheHorizon(t *testing.T) {
+	t.Parallel()
+	const week = 7 * day
+	horizon := t0.Unix() + int64(service.DropHorizon/time.Second)
+	last := base + ((horizon-base)/week+4)*week // an occurrence four weeks past the horizon
+	for _, tc := range []struct {
+		until int64
+		want  int
+	}{
+		{last, 0},
+		{last - 1, service.DroppedUnknown},
+	} {
+		r := newRig(t, protontest.Options{}, func(f *protontest.Fake, cal string) {
+			rule := "FREQ=WEEKLY;UNTIL=" + stamp(last+3*day)
+			f.AddEvent(cal, protontest.Event{UID: "s@x", Start: base, End: base + 3600, RRule: rule, Color: green, Card: card("s@x", "Series", base, "RRULE:"+rule)})
+		}).start(t)
+		obj := r.object(t, "s@x")
+		res, err := r.svc.UpdateEvent(t.Context(), service.EventRef{CalendarID: r.cal, UID: "s@x"}, obj.ETag, service.ScopeSeries,
+			service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(tc.until))}, true)
+		if err != nil {
+			t.Fatalf("UNTIL %s: %v", stamp(tc.until), err)
+		}
+		if res.Dropped != tc.want {
+			t.Errorf("UNTIL %s (last occurrence %s): Dropped = %d, want %d", stamp(tc.until), stamp(last), res.Dropped, tc.want)
+		}
+	}
+}
