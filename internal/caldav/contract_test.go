@@ -31,6 +31,7 @@ import (
 
 	"github.com/Barben360/proton-calendar-bridge/internal/caldav"
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -1808,6 +1809,30 @@ func testAvoid403OutsideGenuineRefusals(t *testing.T, b urlBase) {
 	} {
 		if rec.Code != http.StatusForbidden || rec.Body.Len() == 0 || rec.Body.String() == rateLimitBody {
 			t.Errorf("refusal %d with body %q: want a 403 with a precondition", rec.Code, rec.Body)
+		}
+	}
+}
+
+// A read whose relogin the login guard refused as too soon is a 503 whose
+// Retry-After is the guard's wait in seconds, not the default 30: the
+// adapter takes it from service.ProtonRetryAfter.
+func TestUnavailableCarriesTheLoginGuardsWait(t *testing.T) {
+	forBases(t, testUnavailableCarriesTheLoginGuardsWait)
+}
+
+func testUnavailableCarriesTheLoginGuardsWait(t *testing.T, b urlBase) {
+	t.Parallel()
+	s := newStub()
+	s.readErr = svcErr(exitcode.Blocked, &loginguard.TooSoon{Wait: 137 * time.Second})
+	h := handler(s, caldav.Options{})
+	for _, tc := range []struct{ method, path, body, depth string }{
+		{"GET", b.objPath(workID, plainUID), "", ""},
+		{"REPORT", b.calPath(workID), tbSync(""), "1"},
+	} {
+		rec := do(h, tc.method, tc.path, tc.body, "Depth", tc.depth)
+		wantStatus(t, rec, http.StatusServiceUnavailable)
+		if got := rec.Header().Get("Retry-After"); got != "137" {
+			t.Errorf("%s %s: Retry-After %q, want 137 (the guard's wait, not 30)", tc.method, tc.path, got)
 		}
 	}
 }

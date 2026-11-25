@@ -12,6 +12,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
+	"github.com/Barben360/proton-calendar-bridge/internal/loginguard"
 	"github.com/Barben360/proton-calendar-bridge/internal/service"
 )
 
@@ -83,6 +84,17 @@ func TestErrorClasses(t *testing.T) {
 	}
 	if len(seen) != 5 || !seen["must-act"] || !seen["retry"] || !seen["refused"] || !seen["conflict"] || !seen["not-found"] {
 		t.Errorf("classes %v", seen)
+	}
+}
+
+// A relogin the login guard refused as too soon is a retry whose
+// retry_after_s is the guard's wait, through the real retryAfterOf (the
+// service's), not a stub and not a default.
+func TestToolErrorCarriesTheLoginGuardsWait(t *testing.T) {
+	err := &exitcode.Error{Code: exitcode.Blocked, Err: &loginguard.TooSoon{Wait: 137 * time.Second}, Hint: "retry in 2m17s"}
+	got := toToolError(err)
+	if got.Class != classRetry || got.RetryAfterS != 137 {
+		t.Errorf("a login refused as too soon: %+v, want a retry after 137 s", *got)
 	}
 }
 
