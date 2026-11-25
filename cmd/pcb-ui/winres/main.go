@@ -46,7 +46,7 @@ func write(svgPath, out string, size int) error {
 	if err := png.Encode(&buf, img); err != nil {
 		return err
 	}
-	return os.WriteFile(out, buf.Bytes(), 0o644)
+	return os.WriteFile(out, buf.Bytes(), 0o644) //nolint:gosec // G306: a build-time PNG icon, public
 }
 
 // render draws svg, scaled to fill size×size, on a transparent image.

@@ -18,7 +18,7 @@ const (
 )
 
 func hex(v uint32) color.NRGBA {
-	return color.NRGBA{R: uint8(v >> 16), G: uint8(v >> 8), B: uint8(v), A: 0xff}
+	return color.NRGBA{R: uint8(v >> 16), G: uint8(v >> 8), B: uint8(v), A: 0xff} //nolint:gosec // G115: a 24-bit colour, each byte is cut out on purpose
 }
 
 func alpha(c color.NRGBA, a uint8) color.NRGBA {

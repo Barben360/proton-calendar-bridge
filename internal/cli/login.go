@@ -294,8 +294,9 @@ func stepAt(phase string) (heldStep, bool) {
 		return totpStep, true
 	case service.StateNeedsMailboxPassword:
 		return mailboxStep, true
+	default: // no step: a ready, CAPTCHA or other login waits for none here
+		return heldStep{}, false
 	}
-	return heldStep{}, false
 }
 
 // submit sends secret to the login waiting at s.

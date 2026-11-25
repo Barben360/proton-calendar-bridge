@@ -612,8 +612,15 @@ func unsign(out map[string]any, part Part) error {
 	if loc.i >= len(parts) {
 		return fmt.Errorf("protontest: the row has no part %d to unsign", part)
 	}
-	m := parts[loc.i].(map[string]any)
-	m["Type"] = m["Type"].(int) &^ 2
+	m, ok := parts[loc.i].(map[string]any)
+	if !ok {
+		return fmt.Errorf("protontest: part %d of the row is not an object", part)
+	}
+	typ, ok := m["Type"].(int)
+	if !ok {
+		return fmt.Errorf("protontest: part %d of the row has no integer Type", part)
+	}
+	m["Type"] = typ &^ 2
 	delete(m, "Signature")
 	return nil
 }

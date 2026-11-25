@@ -69,6 +69,7 @@ func Worst(results []Result) Status {
 			return StatusError
 		case StatusWarn:
 			worst = StatusWarn
+		case StatusOK, StatusSkip: // never worse than ok
 		}
 	}
 	return worst

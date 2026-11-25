@@ -453,7 +453,7 @@ const keyFix = "the key file must be readable by the user pcb runs as, 32 bytes,
 
 // dpapiKeyFix is keyFix's for the DPAPI key file (Windows only), which holds
 // the blob Windows protects, not a 32-byte key.
-const dpapiKeyFix = "the DPAPI key file must be readable by the user pcb runs as, no other account in its access list (pcb doctor)"
+const dpapiKeyFix = "the DPAPI key file must be readable by the user pcb runs as, no other account in its access list (pcb doctor)" //nolint:gosec // G101: a hint text, not a credential
 
 // keyFixFor is the hint for a key that cannot be used, by where it lives:
 // keyFile is the key file, seal.DPAPIKeyName's, or keyringRef.

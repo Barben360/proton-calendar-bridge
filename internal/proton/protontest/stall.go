@@ -141,15 +141,21 @@ func (s *StallFront) Stall() { s.stalled.Store(true) }
 // either direction.
 func (s *StallFront) BlackHole() { s.holed.Store(true) }
 
+// serverTransport is the transport httptest gave the TLS server's client,
+// always an *http.Transport.
+func (s *StallFront) serverTransport() *http.Transport {
+	return s.srv.Client().Transport.(*http.Transport) //nolint:forcetypeassert // httptest.Server.Client always returns one; a test helper
+}
+
 // Trust makes tr trust the server's certificate.
 func (s *StallFront) Trust(tr *http.Transport) {
-	tr.TLSClientConfig = s.srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tr.TLSClientConfig = s.serverTransport().TLSClientConfig.Clone()
 }
 
 // Transport is a transport that trusts the server's certificate and speaks
 // HTTP/2 to it; it shares nothing with another call's.
 func (s *StallFront) Transport() *http.Transport {
-	tr := s.srv.Client().Transport.(*http.Transport).Clone()
+	tr := s.serverTransport().Clone()
 	tr.ForceAttemptHTTP2 = true
 	return tr
 }

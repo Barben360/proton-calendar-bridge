@@ -178,7 +178,9 @@ var zones sync.Map // TZID → *time.Location
 // zoneOf is the location of an IANA TZID, nil if unknown.
 func zoneOf(tzid string) *time.Location {
 	if v, ok := zones.Load(tzid); ok {
-		return v.(*time.Location)
+		if loc, ok := v.(*time.Location); ok {
+			return loc
+		}
 	}
 	loc, err := time.LoadLocation(tzid)
 	if err != nil {

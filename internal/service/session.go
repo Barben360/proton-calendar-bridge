@@ -62,6 +62,7 @@ func phaseError(st store.State) error {
 			reason = sessionEnded
 		}
 		return loginNeeded(reason, "run pcb login")
+	case store.PhaseLoggedOut: // as any phase unknown: not logged in
 	}
 	return loginNeeded("not logged in to Proton", "run pcb login")
 }

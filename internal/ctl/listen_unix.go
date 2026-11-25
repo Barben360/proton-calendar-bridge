@@ -48,7 +48,12 @@ func Listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	ln.(*net.UnixListener).SetUnlinkOnClose(true)
+	ul, ok := ln.(*net.UnixListener)
+	if !ok { // a "unix" listener always is one; never panic on it
+		_ = ln.Close()
+		return nil, errors.New("the control socket listener is not a unix listener")
+	}
+	ul.SetUnlinkOnClose(true)
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("restricting the control socket: %w", err)

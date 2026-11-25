@@ -74,10 +74,16 @@ func ipKey(remote string) string {
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
+// windowOf is the window an element of l.order holds: the list takes only
+// the *window values this file pushes, so the assertion cannot fail.
+func windowOf(e *list.Element) *window {
+	return e.Value.(*window) //nolint:forcetypeassert // l.order only ever holds *window (Fail)
+}
+
 // prune drops the windows that ended, oldest first.
 func (l *Limiter) prune(now time.Time) {
 	for e := l.order.Front(); e != nil; e = l.order.Front() {
-		w := e.Value.(*window)
+		w := windowOf(e)
 		if now.Before(w.start.Add(Window)) {
 			return
 		}
@@ -94,7 +100,7 @@ func (l *Limiter) Allow(remote string) (ok bool, retryAfter time.Duration) {
 	defer l.mu.Unlock()
 	l.prune(now)
 	if e := l.entries[ipKey(remote)]; e != nil {
-		if w := e.Value.(*window); w.n >= MaxFailures {
+		if w := windowOf(e); w.n >= MaxFailures {
 			return false, w.start.Add(Window).Sub(now)
 		}
 	}
@@ -109,12 +115,12 @@ func (l *Limiter) Fail(remote string) {
 	l.prune(now)
 	key := ipKey(remote)
 	if e := l.entries[key]; e != nil {
-		e.Value.(*window).n++
+		windowOf(e).n++
 		return
 	}
 	if len(l.entries) >= maxTracked {
 		oldest := l.order.Front()
-		delete(l.entries, oldest.Value.(*window).key)
+		delete(l.entries, windowOf(oldest).key)
 		l.order.Remove(oldest)
 	}
 	l.entries[key] = l.order.PushBack(&window{key: key, start: now, n: 1})

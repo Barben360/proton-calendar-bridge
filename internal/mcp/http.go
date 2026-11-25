@@ -33,7 +33,7 @@ const (
 	// SDK reads the request: the secret never reaches a tool's
 	// RequestExtra, and the SDK's bearer middleware, which alone can bind
 	// a session to its caller, gets a token to pass to our verifier.
-	boundBearer = "Bearer pcb-authorised"
+	boundBearer = "Bearer pcb-authorised" //nolint:gosec // G101: a fixed placeholder put in place of the caller's token after it is verified, not a credential
 )
 
 // Auth decides a request's grant: (grant, entry, token name) or an error

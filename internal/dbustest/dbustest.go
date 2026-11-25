@@ -52,7 +52,7 @@ func Start(t testing.TB) (addr string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, bin, "--config-file="+cfg, "--print-address", "--nofork")
+	cmd := exec.CommandContext(ctx, bin, "--config-file="+cfg, "--print-address", "--nofork") //nolint:gosec // G204: a test helper launching the dbus-daemon its caller found on PATH
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

@@ -165,7 +165,12 @@ func Open(ctx context.Context, o Options) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostPort := "127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok { // a tcp4 listener always has one; never panic on it
+		_ = ln.Close()
+		return nil, errors.New("loginpage: the listener has no TCP address")
+	}
+	hostPort := "127.0.0.1:" + strconv.Itoa(addr.Port)
 	hub := o.Hub
 	p := &page{
 		o:        o,
@@ -335,6 +340,7 @@ func (p *page) post(w http.ResponseWriter, r *http.Request) {
 			clear(mb)
 		case loginflow.StepCaptcha:
 			_ = p.flow.CaptchaSolved(ctx)
+		case loginflow.StepDone: // nothing to submit
 		}
 	}
 	step := p.flow.Step()
@@ -357,7 +363,7 @@ func (p *page) claimNow(w http.ResponseWriter) bool {
 		return false
 	}
 	p.claim = v
-	http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: v, Path: p.path, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: claimCookie, Value: v, Path: p.path, HttpOnly: true, SameSite: http.SameSiteStrictMode}) //nolint:gosec // G124: the page is served over loopback http, where a Secure cookie is dropped by some browsers; HttpOnly and SameSite=Strict are set
 	return true
 }
 

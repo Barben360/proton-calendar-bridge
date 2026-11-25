@@ -254,7 +254,7 @@ func (c *Cache) init(ctx context.Context, path, account string) error {
 		}
 		if got != "" {
 			for _, t := range []string{"pins", "aliases", "tombstones", "events", "calendars", "meta"} {
-				if _, err := tx.ExecContext(ctx, `DELETE FROM `+t); err != nil {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM `+t); err != nil { //nolint:gosec // G202: t ranges over a fixed list of table names
 					return err
 				}
 			}

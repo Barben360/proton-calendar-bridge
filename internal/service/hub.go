@@ -264,6 +264,7 @@ func OpenHub(o HubOptions) (*Hub, error) {
 			continue
 		case dirSkip:
 			continue
+		case dirOpen: // opened below
 		}
 		l, err := h.newLocal(dir)
 		if err != nil {
@@ -428,7 +429,11 @@ func DeleteSealingKey(ctx context.Context, root string, kr Keyring) error {
 	if err != nil {
 		return err
 	}
-	if err := s.(*seal.SecretService).DeleteKey(ctx); err != nil {
+	ss, ok := s.(*seal.SecretService)
+	if !ok {
+		return errors.New("the sealer is not the Secret Service one")
+	}
+	if err := ss.DeleteKey(ctx); err != nil {
 		return mapError(err, keyringRef)
 	}
 	return nil
@@ -876,6 +881,7 @@ func (h *Hub) logOutcome(msg string, args []any, id string, res LoginResult, err
 			outcome = "needs-2fa"
 		case StateNeedsMailboxPassword:
 			outcome = "needs-mailbox-password"
+		case StateReady, StateNeedsCaptcha: // the state's own name
 		}
 		args = append(args, "outcome", outcome)
 	} else if d, ok := loginWait(err); ok {

@@ -15,7 +15,7 @@ import (
 )
 
 // DPAPIKeyName is the DPAPI key's file name, in the state directory.
-const DPAPIKeyName = "secrets.key.dpapi"
+const DPAPIKeyName = "secrets.key.dpapi" //nolint:gosec // G101: a file name, not a credential
 
 // ErrNoDPAPI is a DPAPI sealer used off Windows: there is no DPAPI there.
 var ErrNoDPAPI = errors.New("DPAPI is Windows only")

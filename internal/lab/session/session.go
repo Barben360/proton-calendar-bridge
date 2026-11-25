@@ -378,7 +378,7 @@ func saveRotation(dir string, st *stored, a proton.Auth) error {
 }
 
 func save(dir string, st stored) error {
-	b, err := json.MarshalIndent(st, "", "  ")
+	b, err := json.MarshalIndent(st, "", "  ") //nolint:gosec // G117: the session file is the lab login by design, written 0600 by atomicfile.Write in a 0700 directory
 	if err != nil {
 		return err
 	}
@@ -407,7 +407,7 @@ func ensureDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700) // tighten a directory that already existed
+	return os.Chmod(dir, 0o700) //nolint:gosec // G302: a directory, tightened to 0700 (one that already existed)
 }
 
 // RedactID shortens an identifier for display: the first four characters

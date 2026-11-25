@@ -296,7 +296,7 @@ func SetAutostart(on bool, exe string) error {
 	}
 	content := "[Desktop Entry]\nType=Application\nName=pcb\nComment=Proton calendar bridge\n" +
 		"Exec=" + execArg(exe) + " --background\nIcon=pcb-ui\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
-	return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(path, []byte(content), 0o644) //nolint:gosec // G306: an XDG autostart entry, read by the session manager, holds no secret
 }
 
 // Autostart reports whether the autostart entry exists and starts exe (this

@@ -122,9 +122,9 @@ func posixRename(from, to string) error {
 	buf := make([]uint64, (size+7)/8) // zeroed, aligned for the handle field
 	info := (*renameInfo)(unsafe.Pointer(&buf[0]))
 	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
-	info.FileNameLength = uint32((len(name) - 1) * 2) // bytes, without the NUL
+	info.FileNameLength = uint32((len(name) - 1) * 2) //nolint:gosec // G115: a file name of at most MAX_PATH wide characters (bytes, without the NUL)
 	copy(unsafe.Slice(&info.FileName[0], len(name)), name)
-	err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, (*byte)(unsafe.Pointer(&buf[0])), uint32(size))
+	err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, (*byte)(unsafe.Pointer(&buf[0])), uint32(size)) //nolint:gosec // G115: the size of a rename record, a file name at most
 	runtime.KeepAlive(buf)
 	return err
 }

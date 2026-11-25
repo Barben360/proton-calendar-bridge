@@ -18,7 +18,7 @@ import (
 
 const (
 	User = "lab"
-	Pass = "lab-pass-not-a-secret"
+	Pass = "lab-pass-not-a-secret" //nolint:gosec // G101: a fake credential for the loopback test front
 )
 
 // Reply is a canned answer for one "METHOD /path".
