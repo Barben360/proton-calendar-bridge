@@ -72,14 +72,28 @@ func (h *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // logBuffer collects the write log.
 type logBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	onLine func(line string) // set by onWrite; runs on the logging goroutine
 }
 
 func (b *logBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
+	n, err := b.buf.Write(p)
+	fn := b.onLine
+	b.mu.Unlock()
+	if fn != nil {
+		fn(string(p)) // the handler writes one record per call
+	}
+	return n, err
+}
+
+// onWrite makes fn run on each log record as it is written, on the goroutine
+// that logs it: before the logging code goes on.
+func (b *logBuffer) onWrite(fn func(line string)) {
+	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	b.onLine = fn
 }
 
 func (b *logBuffer) String() string {

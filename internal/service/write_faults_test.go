@@ -75,15 +75,63 @@ func TestWriteAfterAnAccountSwitchIsRefused(t *testing.T) {
 	}
 }
 
-// The account check at the Sync call is the last one: a write whose session
-// ended on the Sync call, while another process logged in to another Proton
-// account, finds that account's session when it renews its own. It is
-// refused as an account switch, not sent with the other account's session,
-// and not reported as a renewal the person could retry past.
-//
-// The switch happens on the Sync call because the cache steps between the
-// UID listing and the send check the stored account themselves: a switch
-// any earlier is refused there, as pcb serve not running for the account.
+// The account check at the Sync call is the last one before a write leaves
+// pcb: a login moved to another Proton account after the write's last cache
+// step (here at the plan's "write normalised" log line, which a client
+// COLOR triggers, past every check of the cache) is refused there, and no
+// Sync call leaves pcb on the other account's session.
+func TestWriteAfterAnAccountSwitchAtTheSendIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil)
+	r.start(t)
+	var (
+		mu       sync.Mutex
+		switched bool
+		syncs    int
+	)
+	r.logs.onWrite(func(line string) {
+		if !strings.Contains(line, "write normalised") {
+			return
+		}
+		mu.Lock()
+		first := !switched
+		switched = true
+		mu.Unlock()
+		if first {
+			r.switchAccount(t)
+		}
+	})
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		if r.isSync(req) {
+			mu.Lock()
+			syncs++
+			mu.Unlock()
+		}
+		return send()
+	})
+	body := vcal([]string{"UID:n@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600), "SUMMARY:New", "COLOR:red"})
+	_, err := r.put(t, "n@x.ics", body, service.Precondition{IfNoneMatchAny: true})
+	mu.Lock()
+	seen, n := switched, syncs
+	mu.Unlock()
+	if !seen {
+		t.Fatalf("the write never logged \"write normalised\": the switch point moved (err %v)", err)
+	}
+	if n != 0 {
+		t.Errorf("%d Sync calls left pcb on the other account's session", n)
+	}
+	if n := len(r.proton(t, "n@x")); n != 0 {
+		t.Errorf("Proton holds %d rows", n)
+	}
+	wantAnotherAccount(t, err)
+}
+
+// The same check on its second run: a write whose session ended on the Sync
+// call, while another process logged in to another Proton account, finds
+// that account's session when it renews its own. It is refused as an account
+// switch, not reported as a renewal the person could retry past, and the
+// renewed session sends nothing. The hook answers every Sync itself, so the
+// Sync calls are counted where they leave pcb.
 func TestWriteWhoseSessionRenewsIntoAnotherAccountIsRefused(t *testing.T) {
 	t.Parallel()
 	r := newRig(t, protontest.Options{}, nil)
@@ -118,12 +166,6 @@ func TestWriteWhoseSessionRenewsIntoAnotherAccountIsRefused(t *testing.T) {
 	mu.Unlock()
 	if n != 2 { // the call, and its one resend after the token refresh
 		t.Errorf("%d Sync calls left pcb, want 2: the renewed session must not send", n)
-	}
-	if n := r.sendCalls(); n != 0 {
-		t.Errorf("%d requests reached the sync endpoint", n)
-	}
-	if n := len(r.proton(t, "n@x")); n != 0 {
-		t.Errorf("Proton holds %d rows", n)
 	}
 }
 
