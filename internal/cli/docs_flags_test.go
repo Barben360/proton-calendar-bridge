@@ -25,16 +25,20 @@ import (
 //     documented once for every command (JSON output, Choose the account, the
 //     login row), never per command, so they are skipped per command and
 //     checked to be mentioned in the page at all;
-//   - a command with subcommands has no row of its own required (account,
-//     calendar, event, client, service and mcp token are only groups), and its
-//     own flags count as documented when a row of any command below it names
-//     them (service's --system and --user);
+//   - a pure group (cli.IsGroup: account, calendar, event, client, service,
+//     mcp token) has no row of its own required; every other command does,
+//     including login and mcp, which have subcommands but run;
+//   - a group's persistent flag counts as documented when a row of a command
+//     below it names it (service's --system and --user): the flags are the
+//     same object, never matched by name across commands;
 //   - the flags in undocumentedOnPurpose, each with its reason;
 //   - hidden commands and hidden flags are not documented by design;
 //   - cobra adds help and completion only when it executes, so the tree built
 //     here has none to skip.
 //
-// Flags named in a second column only count as documented; a first-column flag
+// The doc's style needs the second column: flags named there in code spans
+// count as documented for the row's command, as prose does in every row of
+// mcp token add. Flags named in a second column only count as documented; a first-column flag
 // that does not exist on its command is an error.
 func TestDocsCommandsFlagTablesMatchTheCommands(t *testing.T) {
 	t.Parallel()
@@ -53,23 +57,18 @@ func TestDocsCommandsFlagTablesMatchTheCommands(t *testing.T) {
 // checkFlagTables returns one message per drift between root's tree and doc.
 func checkFlagTables(root *cobra.Command, doc string) []string {
 	var problems []string
-	globals := map[string]bool{}
 	root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
-		globals[f.Name] = true
 		if !strings.Contains(doc, "--"+f.Name) {
 			problems = append(problems, fmt.Sprintf("global flag --%s is not documented anywhere in docs/commands.md", f.Name))
 		}
 	})
 
 	rows := commandRows(doc)
-	documented := map[*cobra.Command]map[string]bool{} // coverage: first and second column
+	// documented is keyed by the flag itself, so a same-named flag of another
+	// command never credits this one; a group's persistent flag is the very
+	// object its subcommands inherit.
+	documented := map[*pflag.Flag]bool{}
 	hasRow := map[*cobra.Command]bool{}
-	note := func(c *cobra.Command, name string) {
-		if documented[c] == nil {
-			documented[c] = map[string]bool{}
-		}
-		documented[c][name] = true
-	}
 	for _, row := range rows {
 		for _, span := range row.commands {
 			targets, flags, err := resolveSpan(root, span)
@@ -81,14 +80,11 @@ func checkFlagTables(root *cobra.Command, doc string) []string {
 				hasRow[c] = true
 			}
 			for _, fl := range flags {
-				if globals[fl.name] && fl.isLong {
-					continue
-				}
 				found := false
 				for _, c := range targets {
 					if f := lookupFlag(c, fl); f != nil {
 						found = true
-						note(c, f.Name)
+						documented[f] = true
 					}
 				}
 				if !found {
@@ -99,7 +95,7 @@ func checkFlagTables(root *cobra.Command, doc string) []string {
 			for _, fl := range row.descFlags {
 				for _, c := range targets {
 					if f := lookupFlag(c, fl); f != nil {
-						note(c, f.Name)
+						documented[f] = true
 					}
 				}
 			}
@@ -113,14 +109,14 @@ func checkFlagTables(root *cobra.Command, doc string) []string {
 		}
 		if c != root {
 			name := strings.TrimPrefix(c.CommandPath(), root.Name()+" ")
-			if len(c.Commands()) == 0 && c.Runnable() && !hasRow[c] {
+			if c.Runnable() && !cli.IsGroup(c) && !hasRow[c] {
 				problems = append(problems, fmt.Sprintf("command %q has no row in docs/commands.md", name))
 			}
 			c.LocalFlags().VisitAll(func(f *pflag.Flag) {
-				if _, ok := undocumentedOnPurpose[c.CommandPath()][f.Name]; ok || f.Hidden || f.Name == "help" || globals[f.Name] && root.PersistentFlags().Lookup(f.Name) == f {
+				if _, ok := undocumentedOnPurpose[c.CommandPath()][f.Name]; ok || f.Hidden || f.Name == "help" || isRootFlag(root, f) {
 					return
 				}
-				if !documentedBelow(c, f.Name, documented) {
+				if !documented[f] {
 					problems = append(problems, fmt.Sprintf("command %q: flag --%s is not in the docs/commands.md table", name, f.Name))
 				}
 			})
@@ -134,18 +130,10 @@ func checkFlagTables(root *cobra.Command, doc string) []string {
 	return problems
 }
 
-// documentedBelow reports whether flag name is documented for c, or for a
-// command below c when c is a group.
-func documentedBelow(c *cobra.Command, name string, documented map[*cobra.Command]map[string]bool) bool {
-	if documented[c][name] {
-		return true
-	}
-	for _, sub := range c.Commands() {
-		if documentedBelow(sub, name, documented) {
-			return true
-		}
-	}
-	return false
+// isRootFlag reports whether f is one of root's persistent flags, as opposed
+// to a flag of the same name a command declares for itself (mcp's --account).
+func isRootFlag(root *cobra.Command, f *pflag.Flag) bool {
+	return root.PersistentFlags().Lookup(f.Name) == f
 }
 
 func pathOf(cs []*cobra.Command) string {
