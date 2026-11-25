@@ -204,6 +204,135 @@ func TestKeyCreationReportsOtherLinkErrors(t *testing.T) {
 	}
 }
 
+// leftover lists what createOnce leaves in dir besides the key file: its
+// temporary files.
+func leftover(t *testing.T, dir, key string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.Name() != filepath.Base(key) {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// The first creator wins: a key written where one stands already, by the
+// hard link or by the exclusive create of a filesystem without links, keeps
+// the first's bytes, reports no error and leaves no temporary file.
+func TestCreateOnceKeepsTheFirstKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		link func(o, n string) error // nil: the real hard link
+	}{
+		{"hard link", nil},
+		{"without hard links", func(o, n string) error { return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EPERM} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.link != nil {
+				defer seal.SetLink(tc.link)()
+			}
+			path := keyPath(t)
+			first, second := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+			if err := seal.CreateOnce(path, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := seal.CreateOnce(path, second); err != nil {
+				t.Fatalf("a second creation = %v, want nil: the first key stands", err)
+			}
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, first) {
+				t.Fatalf("key = %x, %v, want the first creator's", got, err)
+			}
+			if left := leftover(t, filepath.Dir(path), path); len(left) != 0 {
+				t.Fatalf("left in the directory: %v", left)
+			}
+		})
+	}
+}
+
+// A key whose directory cannot be made (a file stands where it should be)
+// is an error, and the file in the way is left alone.
+func TestCreateOnceRefusesAnUnmakeableDirectory(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "cfg")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(blocker, "secrets.key")
+	if err := seal.CreateOnce(path, make([]byte, 32)); err == nil {
+		t.Fatal("a key was created under a file")
+	}
+	if got, err := os.ReadFile(blocker); err != nil || string(got) != "not a directory" {
+		t.Fatalf("the file in the way = %q, %v, want it untouched", got, err)
+	}
+}
+
+// A directory that cannot take a new file (read-only) is an error and no key
+// is written.
+func TestCreateOnceInAReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions that bind the user")
+	}
+	path := keyPath(t)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err := seal.CreateOnce(path, make([]byte, 32)); err == nil || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("err = %v, want a permission error", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("a key was created in a read-only directory")
+	}
+}
+
+// A link that fails for another reason, or a directory that vanishes before
+// the in-place create, ends in an error wrapped as a key creation failure, with no key
+// and no temporary file left.
+func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		link  func(dir string) func(o, n string) error
+		cause error
+	}{
+		{"link fails", func(string) func(o, n string) error {
+			return func(o, n string) error { return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EIO} }
+		}, syscall.EIO},
+		{"in-place create fails", func(dir string) func(o, n string) error {
+			return func(o, n string) error {
+				if err := os.RemoveAll(dir); err != nil { // the directory is gone when the fallback opens the key
+					t.Error(err)
+				}
+				return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EPERM}
+			}
+		}, fs.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := keyPath(t)
+			dir := filepath.Dir(path)
+			defer seal.SetLink(tc.link(dir))()
+			err := seal.CreateOnce(path, make([]byte, 32))
+			if err == nil || !errors.Is(err, tc.cause) || !strings.Contains(err.Error(), "creating key file") {
+				t.Fatalf("err = %v, want %v wrapped as a key creation failure", err, tc.cause)
+			}
+			if _, statErr := os.Stat(path); statErr == nil {
+				t.Fatal("a key was created despite the error")
+			}
+			if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) != 0 {
+				t.Fatalf("left in the directory: %v", entries)
+			}
+		})
+	}
+}
+
 // Check reads the key as Seal and Open do, without creating it: a usable
 // file is nil, a missing one is fs.ErrNotExist and stays missing, a loose
 // mode and a wrong size are refused.
