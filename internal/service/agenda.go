@@ -141,6 +141,10 @@ type EventDetail struct {
 type UpdateResult struct {
 	ETag          string
 	Before, After EventData
+	// Dropped (a dry run only) counts the occurrences starting after now
+	// that the change removes from the series, DroppedUnknown when they
+	// cannot be counted (see droppedOccurrences).
+	Dropped int
 }
 
 // Agenda is the per-account API of the MCP tools. Errors are
@@ -168,7 +172,8 @@ type Agenda interface {
 	CreateEvent(ctx context.Context, calID string, f EventFields) (EventRef, string, error)
 	// UpdateEvent applies f to the event (scope series) or to the
 	// occurrence ref.RecurrenceID names (scope occurrence), if its ETag is
-	// still etag. dryRun writes nothing and returns the before and after.
+	// still etag. dryRun writes nothing and returns the before and after,
+	// and how many occurrences after now the change removes (Dropped).
 	UpdateEvent(ctx context.Context, ref EventRef, etag string, scope EditScope, f EventFields, dryRun bool) (UpdateResult, error)
 	// DeleteEvent deletes the event (scope series) or the occurrence
 	// ref.RecurrenceID names (scope occurrence: an EXDATE), if its ETag is
@@ -774,7 +779,7 @@ func (l *Local) UpdateEvent(ctx context.Context, ref EventRef, etag string, scop
 		if err != nil {
 			return UpdateResult{}, unreadable(err)
 		}
-		return UpdateResult{ETag: etag, Before: before, After: after}, nil
+		return UpdateResult{ETag: etag, Before: before, After: after, Dropped: droppedOccurrences(obj.Data, body, scope, l.o.Now())}, nil
 	}
 	if _, err := l.PutObject(ctx, ref.CalendarID, obj.Name, body, Precondition{IfMatch: etag}); err != nil {
 		return UpdateResult{}, writeError(err)

@@ -1435,7 +1435,8 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   says only `the call failed` (built: a JSON text, not structured content, which would have to match the success
   schema) [verified: `TestErrorClasses`].
 - **Grants.** Capabilities `freebusy` < `read` < `write`, plus `delete` (needs `write`: refused otherwise),
-  `unconfirmed-delete` (brings `delete`; a delete or sign-out nobody can confirm is refused without it, 2026-11-19),
+  `unconfirmed-delete` (brings `delete`; a delete or sign-out nobody can confirm is refused without it, 2026-11-19, and so
+  is an update removing occurrences, 2026-11-25),
   `login` and `manage` (stdio only, refused on tokens); `read` brings `freebusy`, `write` brings `read`
   [verified: `TestParseCapsAppliesImplications`, `TestMCPTokenRefusesLoginCap`, `TestMCPTokenRefusesDeleteWithoutWrite`].
   stdio profiles: `full` (all six, the default since 2026-11-14) and `read-only` (`read` + `login`); `--allow` replaces
@@ -1536,6 +1537,34 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   `TestDeleteStillAsksWithOptIn`, `TestRemoteTokenWithoutOptInRefusesUnconfirmedDelete`, `TestRelayCarriesAConfirmation`]. Claude Code 2.1.325
   declares form elicitation and asked exactly `Delete the event on 2026-11-15 10:00 Europe/Paris: «pcb-m8 renamed»?`
   (decline: refused, nothing deleted; accept: deleted) `[verified: live 2026-11-14, spec/experiments/M8-live.md]`; what other clients declare is not known.
+- **An update that removes occurrences** (2026-11-25). A series change of `event_update` that removes occurrences
+  starting after now is held to a delete's rules. The agenda's dry run decides (`UpdateResult.Dropped`, with the
+  expansion `events_list` uses). It drops when fewer occurrences start in the window (from now to the original's last
+  occurrence within two years, `DropHorizon`), or when the edited series ends before the original (it then counts the
+  original's occurrences after the edited series' last one, the larger count winning), or when the original runs past
+  the horizon and the edited series ends sooner or thins out there (`DroppedUnknown` when the window counts none).
+  There the rules' own COUNT and UNTIL (`ical.EndOfRule`) decide what an expansion cannot see: an endless original
+  (neither) needs an endless edited rule, so one given an end, however far, or removed drops, and as many edited
+  occurrences as the original's over its capped expansion from the horizon on, so a sparser rule or a postponement
+  there drops; a bounded original past the cap of one capped `ical.Expand` from the horizon on (a huge stored COUNT, an
+  UNTIL far ahead) needs its COUNT and UNTIL unchanged, and for a COUNT no earlier start, so a new title keeps it and a
+  moved start, which shifts UNTIL or the COUNT's end, drops; a shorter one needs an edited occurrence from its last one on. A stored
+  COUNT of any size so costs about a page of `events_list`. A moved start, later or earlier, is allowed
+  for by at most one period of the original (the gap between its last two occurrences, the first after the horizon included;
+  none for a single one), each bound with two hours of slack for a zone change across differing daylight saving dates,
+  so a postponement past an occurrence drops it. An occurrence change never drops; a series that cannot be expanded,
+  or whose expansion in the window the cap cuts, counts as dropping. Floating and all-day times are read in UTC. Such an update needs
+  `delete` (else `refused`, reason `pcb:needs-delete`), then asks `Change the series starting on <date> so that <n> of
+  its future occurrences are removed: «<summary>»?` when the client declares form elicitation (decline or cancel:
+  `refused`, nothing written), else is `refused` with reason `pcb:unconfirmed-delete` unless the grant holds
+  `unconfirmed-delete`. The write carries the etag, scope and fields the dry run counted. A change that removes nothing
+  after now needs `write` alone and asks nothing; a dry run asks nothing and returns `dropped_occurrences`
+  [verified: `TestUpdateDryRunCountsDroppedOccurrences`, `TestDroppedOccurrencesFailsClosed`,
+  `TestDroppedOccurrencesCutByTheCapFailsClosed`, `TestUpdateDroppingOccurrencesUnconfirmedRefused`,
+  `TestUpdateDroppingOccurrencesNeedsDeleteGrant`, `TestUpdateDroppingOccurrencesAsks`,
+  `TestUpdateDroppingUncountedOccurrencesFailsClosed`, `TestUpdatePreviewIsTheWrite`,
+  `TestUpdateKeepingOccurrencesNeedsWriteAlone`, `TestMCPUpdateEndingASeriesEarlyWritesNothing`,
+  `TestUpdateDryRunCostIsBoundedForAHugeCount`, `TestUpdateDryRunComparesTheLastOccurrencePastTheHorizon`].
 - **Login and logout** (stdio and relay only). `login(username)` takes no secret (the schema refuses
   any other argument; the username must look like an address, so no shell, page or log can misread it). The
   process that owns the accounts acts:

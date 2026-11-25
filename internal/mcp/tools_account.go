@@ -343,7 +343,7 @@ func addLogout(ss *session) {
 // logout runs once, or twice when the person is asked (E19): the run that
 // asks changes nothing.
 func (ss *session) logout(ctx context.Context, req *sdkmcp.CallToolRequest, in logoutIn) (logoutOut, *sdkmcp.ElicitParams, error) {
-	if err := ss.mayActUnasked(req, "sign-out"); err != nil {
+	if err := ss.mayActUnasked(req, "sign-out", "sign-outs"); err != nil {
 		return logoutOut{}, nil, err
 	}
 	if in.Account == "" {

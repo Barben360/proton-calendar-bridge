@@ -19,8 +19,8 @@ const (
 	CapFreeBusy          Capability = "freebusy"           // status, calendars_list, free_busy
 	CapRead              Capability = "read"               // events_list, event_get, events_search; implies freebusy
 	CapWrite             Capability = "write"              // event_create, event_update; implies read
-	CapDelete            Capability = "delete"             // event_delete; needs write
-	CapUnconfirmedDelete Capability = "unconfirmed-delete" // event_delete and logout without the person's confirmation; implies delete
+	CapDelete            Capability = "delete"             // event_delete, and an event_update that removes occurrences after now; needs write
+	CapUnconfirmedDelete Capability = "unconfirmed-delete" // those and logout without the person's confirmation; implies delete
 	CapLogin             Capability = "login"              // login (stdio only)
 	CapManage            Capability = "manage"             // logout (stdio only)
 )

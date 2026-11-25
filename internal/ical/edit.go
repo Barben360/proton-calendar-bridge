@@ -872,6 +872,23 @@ func sameRule(a, b string) bool {
 	return key(a) == key(b)
 }
 
+// RuleEnd is how an RRULE ends, as written: its COUNT and UNTIL values,
+// both "" for an endless rule.
+type RuleEnd struct{ Count, Until string }
+
+// Endless is true for a rule with neither COUNT nor UNTIL.
+func (e RuleEnd) Endless() bool { return e.Count == "" && e.Until == "" }
+
+// EndOfRule reads rule's end (an "RRULE:" prefix allowed); a rule
+// rruleParts refuses is that *Refusal.
+func EndOfRule(rule string) (RuleEnd, error) {
+	parts, _, r := rruleParts(normalRule(rule))
+	if r != nil {
+		return RuleEnd{}, r
+	}
+	return RuleEnd{Count: parts["COUNT"], Until: parts["UNTIL"]}, nil
+}
+
 // replaceAlarms replaces every VALARM the view shows as an Alarm (a whole
 // number of minutes relative to the start) by one alarm per entry: an
 // existing one at those minutes is kept as it is (its ACTION, an e-mail

@@ -71,8 +71,9 @@ func (a *app) newMCPTokenAdd() *cobra.Command {
 		Use:   "add NAME",
 		Short: "Create an MCP token for one remote agent, shown once",
 		Long: "Create a bearer token for one remote agent of /mcp. --allow names what it may do: freebusy, read, " +
-			"write, delete, unconfirmed-delete (comma-separated; login and manage are stdio only). A delete is refused when the agent's " +
-			"client cannot ask you to confirm it, unless the token has unconfirmed-delete. --account limits it to accounts " +
+			"write, delete, unconfirmed-delete (comma-separated; login and manage are stdio only). A delete, or a series change that removes " +
+			"future occurrences (which needs delete too), is refused when the agent's client cannot ask you to confirm it, " +
+			"unless the token has unconfirmed-delete. --account limits it to accounts " +
 			"(address or local ID, repeatable; none: every account, including ones added later), --calendar to " +
 			"calendar IDs (repeatable; none: every calendar), --expires to a lifetime such as 30d or 12h. The token " +
 			"is printed once: pcb keeps only a salted hash, so a lost token is removed and added again. NAME is 1 " +
@@ -109,7 +110,7 @@ func (a *app) newMCPTokenAdd() *cobra.Command {
 			return Finish(cmd, tokenAddData{Token: added, Secret: secret}, tokenAddText(added, secret), nil)
 		},
 	}), "NAME")
-	c.Flags().StringVar(&allow, "allow", "", "what the token may do: `CAPS` comma-separated among freebusy, read, write, delete, unconfirmed-delete (delete without asking you, when the client cannot ask)")
+	c.Flags().StringVar(&allow, "allow", "", "what the token may do: `CAPS` comma-separated among freebusy, read, write, delete, unconfirmed-delete (delete, or remove a series' future occurrences, without asking you, when the client cannot ask)")
 	// --account here is the command's own (repeatable: the token's scope),
 	// in place of the root's selector; selecting lets it past the root's check.
 	c.Flags().StringArrayVar(&accounts, "account", nil, "an `ACCOUNT` the token may reach, by address or local ID (repeatable; none: every account)")

@@ -135,6 +135,7 @@ Fixes from a review of the code, merged after v0.3.0:
 - `config.toml` refuses port 0, and every unknown key is reported, not only the first. An existing `[caldav] listen` with port 0 must be edited to a fixed port, or pcb will not start.
 - An unknown subcommand names the next step.
 - Without a client that can ask you (form elicitation), `event_delete` and sign-out are refused unless the token (or `pcb mcp --allow`) includes `unconfirmed-delete`. Tokens created before this have to be re-created to get it ([agents](agents.md)).
+- An `event_update` that removes future occurrences of a series (an earlier end, fewer occurrences, a sparser rule, the rule removed) is handled like a delete: it needs `delete`, and you are asked to confirm it, or the grant must include `unconfirmed-delete` ([agents](agents.md#deletes-and-sign-outs-ask-you)). A token with `write` but not `delete` is now refused such a change; re-create it with `delete` in `--allow` to allow it.
 - A race that could reload an account's keys during logout is fixed.
 - Release archives are built reproducibly for a given commit from a pinned Go toolchain; from the next release, the release also attests an SBOM of the Go modules besides the provenance. `install.sh` takes a download base over https (or a local `file://` copy). A weekly vulnerability scan (`govulncheck`) runs in CI ([development](development.md#reproducible-builds-and-what-is-pinned)). It uses the Go toolchain named in `go.mod`, so an advisory against the standard library can fail the scan until that line is bumped.
 

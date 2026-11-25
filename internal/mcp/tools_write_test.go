@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ type writeStub struct {
 	err     error // a write fails with it, once the ETag matched
 	// A dry run's before and after; the stored event when nil.
 	before, after *service.EventData
+	dropped       int // a dry run's count of occurrences the change removes
 }
 
 func stale() error {
@@ -107,7 +109,7 @@ func (a *stubAgenda) UpdateEvent(_ context.Context, ref service.EventRef, etag s
 		return service.UpdateResult{}, err
 	}
 	if dryRun {
-		res := service.UpdateResult{ETag: etag, Before: d.Data, After: d.Data}
+		res := service.UpdateResult{ETag: etag, Before: d.Data, After: d.Data, Dropped: a.w.dropped}
 		if a.w.before != nil {
 			res.Before = *a.w.before
 		}
@@ -977,4 +979,217 @@ func TestReadOnlyAccountRefusesChanges(t *testing.T) {
 	if w := hub.agendas["a1"].writes(); len(w.creates) != 1 {
 		t.Errorf("alice's creates after read-write %+v, want one", w.creates)
 	}
+}
+
+// ---- an update that removes occurrences ----
+
+// dropping makes alice's standup a daily series whose changes, as the
+// agenda counts them in a dry run, remove n occurrences after now.
+func dropping(hub *stubHub, n int) *stubAgenda {
+	alice := hub.agendas["a1"]
+	d := alice.events["cal-a|standup@x"]
+	d.Data.RRule = "FREQ=DAILY"
+	alice.events["cal-a|standup@x"] = d
+	alice.w.dropped = n
+	return alice
+}
+
+// shortening is a series change that ends the series early. Whether a
+// change drops occurrences is the agenda's count (the service's tests);
+// here the stub's dry run gives it.
+var shortening = map[string]any{"rrule": "FREQ=DAILY;COUNT=3"}
+
+func updateArgs(changes map[string]any) map[string]any {
+	return map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series", "changes": changes}
+}
+
+// unchanged fails the test when the stub wrote anything or the standup is
+// no longer as seeded.
+func unchanged(t *testing.T, alice *stubAgenda, what string) {
+	t.Helper()
+	if w := alice.writes(); w.written != 0 {
+		t.Errorf("%s: %d writes", what, w.written)
+	}
+	alice.mu.Lock()
+	d := alice.events["cal-a|standup@x"]
+	alice.mu.Unlock()
+	if d.ETag != `"standup@x-1"` || d.Data.Summary != "Standup" {
+		t.Errorf("%s: the event changed: %q %+v", what, d.ETag, d.Data)
+	}
+}
+
+// Without a client that can ask, an update that removes occurrences is
+// refused as a delete nobody can confirm is (same class, reason and ways
+// out), even with the delete grant; unconfirmed-delete lets it through.
+func TestUpdateDroppingOccurrencesUnconfirmedRefused(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, 3)
+	r := newRig(t, hub)
+	terr := mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(shortening), "refused")
+	if terr.Reason != "pcb:unconfirmed-delete" {
+		t.Errorf("reason %q, want the unconfirmed delete's", terr.Reason)
+	}
+	for _, want := range []string{"3 future occurrences", "confirm", "unconfirmed-delete", "elicitation", "nothing was changed"} {
+		if !strings.Contains(terr.Message+" "+terr.Hint, want) {
+			t.Errorf("refusal %+v does not mention %q", *terr, want)
+		}
+	}
+	unchanged(t, alice, "unconfirmed")
+
+	out := mustCall(t, r.connect(t, unconfirmedGrant, mcp.EntryRemote), "event_update", updateArgs(shortening))
+	if out["etag"] != `"standup@x-1+"` {
+		t.Errorf("opted-in update = %v", out)
+	}
+	if w := alice.writes(); w.written != 1 || w.updates[len(w.updates)-1].dryRun {
+		t.Errorf("opted-in writes %+v", w)
+	}
+}
+
+// The write is the change its preview counted: the same event, etag,
+// scope and fields (times already in the event's zone).
+func TestUpdatePreviewIsTheWrite(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, 0)
+	r := newRig(t, hub)
+	mustCall(t, r.connect(t, writeGrant, mcp.EntryRemote), "event_update",
+		updateArgs(map[string]any{"rrule": "FREQ=WEEKLY", "start": "2026-11-17T10:00", "summary": "Weekly", "alarms": nil}))
+	w := alice.writes()
+	if len(w.updates) != 2 || !w.updates[0].dryRun || w.updates[1].dryRun {
+		t.Fatalf("updates %+v, want a dry run then the write", w.updates)
+	}
+	preview, write := w.updates[0], w.updates[1]
+	preview.dryRun = false
+	if !reflect.DeepEqual(preview, write) {
+		t.Errorf("preview %+v\nwrite   %+v", preview, write)
+	}
+	if write.etag != `"standup@x-1"` || write.scope != service.ScopeSeries || write.f.Start == nil || write.f.Start.TZID != "Europe/Paris" {
+		t.Errorf("write %+v", write)
+	}
+}
+
+// A grant without delete may not remove occurrences, asked or not: the
+// person is not asked and nothing is written.
+func TestUpdateDroppingOccurrencesNeedsDeleteGrant(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, 2)
+	r := newRig(t, hub)
+	asking, asked := r.connectAsking(t, writeGrant, "2025-11-25", "accept")
+	for _, cs := range []*sdkmcp.ClientSession{r.connect(t, writeGrant, mcp.EntryRemote), asking} {
+		terr := mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
+		if terr.Reason != "pcb:needs-delete" || !strings.Contains(terr.Message, "2 future occurrences") ||
+			!strings.Contains(terr.Hint, "--allow ...,delete") {
+			t.Errorf("refusal %+v, want one naming the delete grant", *terr)
+		}
+	}
+	if got := asked(); len(got) != 0 {
+		t.Errorf("asked %q under a grant that may not delete", got)
+	}
+	unchanged(t, alice, "write grant")
+}
+
+// With a client that can ask, the person is asked, opt-in or not, naming
+// the series and how many occurrences go: declined writes nothing,
+// accepted writes. Each call is one audit line; the run that only asked
+// writes none.
+func TestUpdateDroppingOccurrencesAsks(t *testing.T) {
+	const prompt = "Change the series starting on 2026-11-16 09:00 Europe/Paris so that 3 of its future occurrences are removed: «Standup»?"
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		for i, g := range []mcp.Grant{deleteGrant, unconfirmedGrant} {
+			t.Run(fmt.Sprintf("%s/%s", version, []string{"delete", "unconfirmed-delete"}[i]), func(t *testing.T) {
+				hub := newHub()
+				alice := dropping(hub, 3)
+				r := newRig(t, hub)
+				for _, answer := range []string{"decline", "cancel"} {
+					cs, asked := r.connectAsking(t, g, version, answer)
+					terr := mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
+					if !strings.Contains(terr.Message, "not confirmed") || !strings.Contains(terr.Message, "nothing was changed") {
+						t.Errorf("%s: %+v", answer, *terr)
+					}
+					if got := asked(); len(got) != 1 || got[0] != prompt {
+						t.Errorf("%s: asked %q, want %q", answer, got, prompt)
+					}
+					unchanged(t, alice, answer)
+				}
+				// A stale etag is a conflict before the person is asked.
+				cs, asked := r.connectAsking(t, g, version, "accept")
+				mustFail(t, cs, "event_update", with(updateArgs(shortening), "etag", `"standup@x-0"`), "conflict")
+				if got := asked(); len(got) != 0 {
+					t.Errorf("asked %q about a stale event", got)
+				}
+				out := mustCall(t, cs, "event_update", updateArgs(shortening))
+				if out["etag"] != `"standup@x-1+"` || len(asked()) != 1 {
+					t.Errorf("accepted: %v, asked %q", out, asked())
+				}
+				if w := alice.writes(); w.written != 1 || w.updates[len(w.updates)-1].dryRun {
+					t.Errorf("accepted: writes %+v", w)
+				}
+				lines := toolLines(t, r, "event_update")
+				if len(lines) != 4 {
+					t.Fatalf("%d audit lines for 4 updates:\n%s", len(lines), r.log.String())
+				}
+				for i, want := range []string{"refused", "refused", "conflict", "ok"} {
+					if lines[i]["outcome"] != want || lines[i]["uid"] != "standup@x" {
+						t.Errorf("line %d: %v, want outcome %s", i, lines[i], want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// A change whose occurrences cannot be counted is taken as removing some:
+// asked, saying so, or refused when nobody can be asked.
+func TestUpdateDroppingUncountedOccurrencesFailsClosed(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, service.DroppedUnknown)
+	r := newRig(t, hub)
+	mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(shortening), "refused")
+	cs, asked := r.connectAsking(t, deleteGrant, "2025-11-25", "decline")
+	mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
+	want := "Change the series starting on 2026-11-16 09:00 Europe/Paris, which removes future occurrences pcb cannot count: «Standup»?"
+	if got := asked(); len(got) != 1 || got[0] != want {
+		t.Errorf("asked %q, want %q", got, want)
+	}
+	unchanged(t, alice, "uncounted")
+}
+
+// A change that removes no occurrence after now (a later UNTIL, a moved
+// start, a new title, a single event) needs write alone: nobody is asked.
+// A dry run never asks either, and says what the change would remove.
+func TestUpdateKeepingOccurrencesNeedsWriteAlone(t *testing.T) {
+	for _, recurring := range []bool{true, false} {
+		for _, changes := range []map[string]any{
+			{"rrule": "FREQ=DAILY;UNTIL=20271120T080000Z"},
+			{"start": "2026-11-16T10:00"},
+			{"summary": "Daily standup"},
+		} {
+			hub := newHub()
+			alice := hub.agendas["a1"]
+			if recurring {
+				alice = dropping(hub, 0)
+			}
+			r := newRig(t, hub)
+			cs, asked := r.connectAsking(t, writeGrant, "2025-11-25", "decline")
+			for _, c := range []*sdkmcp.ClientSession{r.connect(t, writeGrant, mcp.EntryRemote), cs} {
+				etag := alice.writes().written
+				args := with(updateArgs(changes), "etag", `"standup@x-1`+strings.Repeat("+", etag)+`"`)
+				mustCall(t, c, "event_update", args)
+			}
+			if got := asked(); len(got) != 0 {
+				t.Errorf("recurring %v, %v: asked %q", recurring, changes, got)
+			}
+			if w := alice.writes(); w.written != 2 {
+				t.Errorf("recurring %v, %v: %d writes, want 2", recurring, changes, w.written)
+			}
+		}
+	}
+
+	hub := newHub()
+	alice := dropping(hub, 3)
+	r := newRig(t, hub)
+	out := mustCall(t, r.connect(t, writeGrant, mcp.EntryRemote), "event_update", with(updateArgs(shortening), "dry_run", true))
+	if out["dry_run"] != true || out["dropped_occurrences"] != float64(3) {
+		t.Errorf("dry run %v, want dropped_occurrences 3", out)
+	}
+	unchanged(t, alice, "dry run")
 }
