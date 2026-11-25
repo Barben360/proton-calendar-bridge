@@ -388,12 +388,20 @@ type toolErr struct {
 // call calls a tool and returns its structured content, or its error.
 func call(t *testing.T, cs *sdkmcp.ClientSession, name string, args map[string]any) (map[string]any, *toolErr) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	if args == nil {
 		args = map[string]any{}
 	}
-	res, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{Name: name, Arguments: args})
+	return callWith(t, cs, &sdkmcp.CallToolParams{Name: name, Arguments: args})
+}
+
+// callWith is call with the whole of a call's params (an answer and its
+// request state among them).
+func callWith(t *testing.T, cs *sdkmcp.ClientSession, p *sdkmcp.CallToolParams) (map[string]any, *toolErr) {
+	t.Helper()
+	name := p.Name
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, p)
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}

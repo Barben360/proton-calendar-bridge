@@ -51,6 +51,10 @@ type writeStub struct {
 	// A dry run's before and after; the stored event when nil.
 	before, after *service.EventData
 	dropped       int // a dry run's count of occurrences the change removes
+	// The real write (an update that is no dry run, a delete) fails with it
+	// after the read and the dry run passed: Proton's etag moved, the
+	// cache's not yet.
+	failWrite error
 }
 
 func stale() error {
@@ -118,6 +122,9 @@ func (a *stubAgenda) UpdateEvent(_ context.Context, ref service.EventRef, etag s
 		}
 		return res, nil
 	}
+	if a.w.failWrite != nil {
+		return service.UpdateResult{}, a.w.failWrite
+	}
 	if f.Summary != nil {
 		d.Data.Summary = *f.Summary
 	}
@@ -136,6 +143,9 @@ func (a *stubAgenda) DeleteEvent(_ context.Context, ref service.EventRef, etag s
 	a.w.deletes = append(a.w.deletes, deleteCall{ref, etag, scope})
 	if _, err := a.target(ref, etag); err != nil {
 		return err
+	}
+	if a.w.failWrite != nil {
+		return a.w.failWrite
 	}
 	delete(a.events, ref.CalendarID+"|"+ref.UID)
 	a.w.written++
@@ -186,6 +196,14 @@ var standupID = eventID("a1", "cal-a", "standup@x")
 // messages it was shown.
 func (r *rig) connectAsking(t *testing.T, g mcp.Grant, version, answer string) (*sdkmcp.ClientSession, func() []string) {
 	t.Helper()
+	return r.connectAskingDuring(t, g, version, answer, nil)
+}
+
+// connectAskingDuring is connectAsking whose client runs during (when not
+// nil) once shown a question, before it answers: what the person was asked
+// about can change while they are asked.
+func (r *rig) connectAskingDuring(t *testing.T, g mcp.Grant, version, answer string, during func()) (*sdkmcp.ClientSession, func() []string) {
+	t.Helper()
 	var (
 		mu    sync.Mutex
 		asked []string
@@ -201,6 +219,9 @@ func (r *rig) connectAsking(t *testing.T, g mcp.Grant, version, answer string) (
 			mu.Lock()
 			asked = append(asked, req.Params.Message)
 			mu.Unlock()
+			if during != nil {
+				during()
+			}
 			return &sdkmcp.ElicitResult{Action: answer, Content: map[string]any{}}, nil
 		},
 	})
@@ -1192,4 +1213,305 @@ func TestUpdateKeepingOccurrencesNeedsWriteAlone(t *testing.T) {
 		t.Errorf("dry run %v, want dropped_occurrences 3", out)
 	}
 	unchanged(t, alice, "dry run")
+}
+
+// ---- the answer is bound to the question ----
+
+// changedSinceAsked fails the test unless terr is the refusal of an answer
+// to another question than the one the call now asks: a conflict, its
+// reason, saying the event or the call changed, naming no event text.
+func changedSinceAsked(t *testing.T, terr *toolErr, what string) {
+	t.Helper()
+	if terr.Class != "conflict" || terr.Reason != "pcb:changed-since-asked" {
+		t.Errorf("%s: error %+v, want a conflict with reason pcb:changed-since-asked", what, *terr)
+	}
+	if !strings.Contains(terr.Message, "while the person was asked") || !strings.Contains(terr.Message, "nothing was") {
+		t.Errorf("%s: message %q does not say the event changed while the person was asked", what, terr.Message)
+	}
+	if strings.Contains(terr.Message+terr.Hint, "Standup") {
+		t.Errorf("%s: error %+v quotes the event", what, *terr)
+	}
+}
+
+// set changes alice's standup as the agenda stores it.
+func set(a *stubAgenda, change func(*service.EventDetail)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	d := a.events["cal-a|standup@x"]
+	change(&d)
+	a.events["cal-a|standup@x"] = d
+}
+
+// noUpdateWritten fails the test when the stub was asked to write an
+// update (dry runs aside) or wrote anything.
+func noUpdateWritten(t *testing.T, alice *stubAgenda, what string) {
+	t.Helper()
+	w := alice.writes()
+	for _, u := range w.updates {
+		if !u.dryRun {
+			t.Errorf("%s: an update was written: %+v", what, u)
+		}
+	}
+	if w.written != 0 {
+		t.Errorf("%s: %d writes", what, w.written)
+	}
+}
+
+// An event that changes while the person is asked is not written, after
+// "accept" too: the person said yes to the version they were shown. The
+// call is refused as changed since asked, and asks again when retried.
+func TestChangedWhileAskedRefused(t *testing.T) {
+	bumped := func(d *service.EventDetail) { d.ETag, d.Data.Summary = `"standup@x-2"`, "Standup moved" }
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		t.Run(version+"/update", func(t *testing.T) {
+			hub := newHub()
+			alice := dropping(hub, 3)
+			r := newRig(t, hub)
+			cs, asked := r.connectAskingDuring(t, deleteGrant, version, "accept", func() { set(alice, bumped) })
+			changedSinceAsked(t, mustFail(t, cs, "event_update", updateArgs(shortening), "conflict"), "update")
+			if got := asked(); len(got) != 1 {
+				t.Errorf("asked %q, want one question", got)
+			}
+			noUpdateWritten(t, alice, "update")
+			if d := alice.events["cal-a|standup@x"]; d.ETag != `"standup@x-2"` {
+				t.Errorf("the event is now %q, want it as changed while asked", d.ETag)
+			}
+		})
+		t.Run(version+"/delete", func(t *testing.T) {
+			hub := newHub()
+			alice := hub.agendas["a1"]
+			r := newRig(t, hub)
+			cs, asked := r.connectAskingDuring(t, deleteGrant, version, "accept", func() { set(alice, bumped) })
+			args := map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+			changedSinceAsked(t, mustFail(t, cs, "event_delete", args, "conflict"), "delete")
+			if got := asked(); len(got) != 1 {
+				t.Errorf("asked %q, want one question", got)
+			}
+			if w := alice.writes(); len(w.deletes) != 0 || w.written != 0 {
+				t.Errorf("deleted %+v", w)
+			}
+			if _, ok := alice.events["cal-a|standup@x"]; !ok {
+				t.Error("the event is gone")
+			}
+		})
+	}
+}
+
+// An event that changes on Proton while the person is asked, before pcb
+// synced it, is caught only by the write: that conflict is refused as
+// changed since asked too, nothing written.
+func TestChangedOnProtonWhileAskedRefused(t *testing.T) {
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		for _, tool := range []string{"event_update", "event_delete"} {
+			t.Run(version+"/"+tool, func(t *testing.T) {
+				hub := newHub()
+				alice := dropping(hub, 3)
+				r := newRig(t, hub)
+				cs, asked := r.connectAskingDuring(t, deleteGrant, version, "accept", func() {
+					alice.mu.Lock()
+					alice.w.failWrite = stale()
+					alice.mu.Unlock()
+				})
+				args := updateArgs(shortening)
+				if tool == "event_delete" {
+					args = map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+				}
+				changedSinceAsked(t, mustFail(t, cs, tool, args, "conflict"), tool)
+				if got := asked(); len(got) != 1 {
+					t.Errorf("asked %q, want one question", got)
+				}
+				unchanged(t, alice, tool)
+			})
+		}
+	}
+}
+
+// A person who declined is told so, whether or not the event changed
+// meanwhile: nothing invites the agent to ask them again.
+func TestDeclinedWhileChangedRefusedAsDeclined(t *testing.T) {
+	bumped := func(d *service.EventDetail) { d.ETag = `"standup@x-2"` }
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		hub := newHub()
+		alice := dropping(hub, 3)
+		r := newRig(t, hub)
+		cs, _ := r.connectAskingDuring(t, deleteGrant, version, "decline", func() { set(alice, bumped) })
+		if terr := mustFail(t, cs, "event_update", updateArgs(shortening), "refused"); !strings.Contains(terr.Message, "not confirmed") {
+			t.Errorf("%s: update %+v, want it not confirmed", version, *terr)
+		}
+		set(alice, func(d *service.EventDetail) { d.ETag = `"standup@x-1"` })
+		args := map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+		if terr := mustFail(t, cs, "event_delete", args, "refused"); !strings.Contains(terr.Message, "not confirmed") {
+			t.Errorf("%s: delete %+v, want it not confirmed", version, *terr)
+		}
+		if w := alice.writes(); w.written != 0 || len(w.deletes) != 0 {
+			t.Errorf("%s: writes %+v", version, w)
+		}
+	}
+}
+
+// The count the person was told is the count written: when it is another
+// one on the run that writes (the same version of the event, read later:
+// occurrences passed meanwhile), the update is refused, none left to
+// remove included. The same count goes through.
+func TestUpdateCountChangedWhileAskedRefused(t *testing.T) {
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		for _, now := range []int{2, 0, 3} {
+			t.Run(fmt.Sprintf("%s/%d", version, now), func(t *testing.T) {
+				hub := newHub()
+				alice := dropping(hub, 3)
+				r := newRig(t, hub)
+				cs, asked := r.connectAskingDuring(t, deleteGrant, version, "accept", func() {
+					alice.mu.Lock()
+					alice.w.dropped = now
+					alice.mu.Unlock()
+				})
+				out, terr := call(t, cs, "event_update", updateArgs(shortening))
+				if got := asked(); len(got) != 1 || !strings.Contains(got[0], "3 of its future occurrences") {
+					t.Errorf("asked %q, want one question about 3 occurrences", got)
+				}
+				if now == 3 {
+					if terr != nil || out["etag"] != `"standup@x-1+"` {
+						t.Errorf("the same count: %v %+v, want it written", out, terr)
+					}
+					return
+				}
+				if terr == nil {
+					t.Fatalf("a count of %d after asking about 3 = %v, want a refusal", now, out)
+				}
+				changedSinceAsked(t, terr, fmt.Sprintf("count %d", now))
+				noUpdateWritten(t, alice, fmt.Sprintf("count %d", now))
+			})
+		}
+	}
+}
+
+// connectManual connects a client on the newest protocol that declares
+// form elicitation but answers nothing itself: the test sends the retry,
+// with the arguments, the answer and the request state it chooses.
+func (r *rig) connectManual(t *testing.T, g mcp.Grant) *sdkmcp.ClientSession {
+	t.Helper()
+	st, ct := sdkmcp.NewInMemoryTransports()
+	ss, err := r.srv.Session(g, mcp.EntryStdio).Connect(t.Context(), st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test", Version: "0"}, &sdkmcp.ClientOptions{
+		ElicitationHandler: func(context.Context, *sdkmcp.ElicitRequest) (*sdkmcp.ElicitResult, error) {
+			t.Error("the manual client was asked through its handler")
+			return &sdkmcp.ElicitResult{Action: "decline"}, nil
+		},
+		MultiRoundTrip: &sdkmcp.MultiRoundTripOptions{Disabled: true},
+	})
+	cs, err := client.Connect(t.Context(), ct, &sdkmcp.ClientSessionOptions{ProtocolVersion: "2026-07-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+// askState calls name, which must ask the question key, and returns the
+// request state its answer has to bring back.
+func askState(t *testing.T, cs *sdkmcp.ClientSession, name string, args map[string]any, key string) string {
+	t.Helper()
+	res, err := cs.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if !res.NeedsInput() || res.InputRequests[key] == nil {
+		t.Fatalf("%s = %+v, want the question %s", name, res, key)
+	}
+	if res.RequestState == "" || strings.Contains(res.RequestState, "Standup") {
+		t.Errorf("request state %q: want one, naming no event text", res.RequestState)
+	}
+	return res.RequestState
+}
+
+// answered retries name with args, the person's "accept" to key and state.
+func answered(t *testing.T, cs *sdkmcp.ClientSession, name string, args map[string]any, key, state string) (map[string]any, *toolErr) {
+	t.Helper()
+	return callWith(t, cs, &sdkmcp.CallToolParams{Name: name, Arguments: args, RequestState: state,
+		InputResponses: sdkmcp.InputResponseMap{key: &sdkmcp.ElicitResult{Action: "accept", Content: map[string]any{}}}})
+}
+
+// The accepted update is the one asked about: a retry that brings the
+// answer with other arguments, another state or none is refused and writes
+// nothing; the same call writes.
+func TestUpdateAnswerBoundToItsCall(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, 3)
+	r := newRig(t, hub)
+	cs := r.connectManual(t, deleteGrant)
+	args := updateArgs(shortening)
+	rid := alice.events["cal-a|standup@x"].Data.Start.At.AddDate(0, 0, 3)
+	occID := base64.RawURLEncoding.EncodeToString([]byte("a1\x00cal-a\x00standup@x\x00" + rid.UTC().Format(time.RFC3339)))
+	state := askState(t, cs, "event_update", args, "confirm_update")
+	for _, tc := range []struct {
+		name  string
+		args  map[string]any
+		state string
+	}{
+		{"other changes", updateArgs(map[string]any{"rrule": "FREQ=DAILY;COUNT=2"}), state},
+		{"a field cleared too", updateArgs(map[string]any{"rrule": "FREQ=DAILY;COUNT=3", "location": nil}), state},
+		{"another zone", with(args, "tz", "UTC"), state},
+		{"one occurrence", with(args, "event_id", occID, "scope", "occurrence"), state},
+		{"another etag", with(args, "etag", `"standup@x-0"`), state},
+		{"no state", args, ""},
+		{"another state", args, state + "0"},
+	} {
+		out, terr := answered(t, cs, "event_update", tc.args, "confirm_update", tc.state)
+		if terr == nil {
+			t.Fatalf("%s: %v, want a refusal", tc.name, out)
+		}
+		changedSinceAsked(t, terr, tc.name)
+		noUpdateWritten(t, alice, tc.name)
+	}
+	out, terr := answered(t, cs, "event_update", args, "confirm_update", state)
+	if terr != nil || out["etag"] != `"standup@x-1+"` {
+		t.Errorf("the call asked about: %v %+v, want it written", out, terr)
+	}
+}
+
+// The accepted delete is the one asked about: deleting one occurrence is
+// not deleting the series, nor another event; an answer without the
+// question's state deletes nothing. The same call deletes.
+func TestDeleteAnswerBoundToItsCall(t *testing.T) {
+	hub := newHub()
+	alice := hub.agendas["a1"]
+	set(alice, func(d *service.EventDetail) { d.Data.RRule = "FREQ=DAILY" })
+	review := alice.events["cal-a|standup@x"]
+	review.ETag, review.Data.UID, review.Data.Summary = `"review@x-1"`, "review@x", "Review"
+	alice.events["cal-a|review@x"] = review
+	r := newRig(t, hub)
+	cs := r.connectManual(t, deleteGrant)
+	rid := alice.events["cal-a|standup@x"].Data.Start.At.AddDate(0, 0, 3)
+	occID := base64.RawURLEncoding.EncodeToString([]byte("a1\x00cal-a\x00standup@x\x00" + rid.UTC().Format(time.RFC3339)))
+	args := map[string]any{"event_id": occID, "etag": `"standup@x-1"`, "scope": "occurrence"}
+	state := askState(t, cs, "event_delete", args, "confirm_delete")
+	for _, tc := range []struct {
+		name  string
+		args  map[string]any
+		state string
+	}{
+		{"the whole series", with(args, "scope", "series"), state},
+		{"another event", map[string]any{"event_id": eventID("a1", "cal-a", "review@x"), "etag": `"review@x-1"`, "scope": "series"}, state},
+		{"no state", args, ""},
+	} {
+		out, terr := answered(t, cs, "event_delete", tc.args, "confirm_delete", tc.state)
+		if terr == nil {
+			t.Fatalf("%s: %v, want a refusal", tc.name, out)
+		}
+		changedSinceAsked(t, terr, tc.name)
+		if w := alice.writes(); len(w.deletes) != 0 || w.written != 0 {
+			t.Fatalf("%s: deleted %+v", tc.name, w.deletes)
+		}
+	}
+	out, terr := answered(t, cs, "event_delete", args, "confirm_delete", state)
+	if terr != nil || out["deleted"] != true || out["scope"] != "occurrence" {
+		t.Errorf("the call asked about: %v %+v, want it deleted", out, terr)
+	}
+	if w := alice.writes(); len(w.deletes) != 1 || w.deletes[0].scope != service.ScopeOccurrence || w.deletes[0].ref.UID != "standup@x" {
+		t.Errorf("deletes %+v, want the occurrence asked about", w.deletes)
+	}
 }

@@ -3,9 +3,12 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -28,7 +31,10 @@ import (
 // it is refused. An update that removes occurrences after now from a
 // series (an earlier UNTIL, a smaller COUNT, a sparser rule, the rule
 // removed, an earlier end, a start moved too far: the agenda counts them) is a
-// delete too: it needs the delete grant and the same confirmation.
+// delete too: it needs the delete grant and the same confirmation. The
+// person's answer is bound to the question: it comes back with the digest
+// of what was asked, and the run that writes refuses unless its own digest
+// is the same.
 
 func writeTools() []toolDef {
 	return []toolDef{
@@ -39,7 +45,10 @@ func writeTools() []toolDef {
 }
 
 // writing are the annotations of a write tool: destructive only for a
-// delete (design §5.7).
+// delete (design §5.7). event_update is not, though it can remove
+// occurrences of a series: the hint is per tool, so a client that honours it
+// would ask before every update, a rename too and after the person said yes,
+// while pcb itself asks for exactly the updates that remove occurrences.
 func writing(title string, destructive bool) *sdkmcp.ToolAnnotations {
 	return &sdkmcp.ToolAnnotations{Title: title, DestructiveHint: &destructive}
 }
@@ -474,7 +483,7 @@ func addEventUpdate(ss *session) {
 		case err != nil:
 			return nil, updateOut{}, toToolError(err)
 		case ask != nil:
-			return &sdkmcp.CallToolResult{InputRequests: sdkmcp.InputRequestMap{confirmUpdateKey: ask}}, updateOut{}, nil
+			return ask.result(confirmUpdateKey), updateOut{}, nil
 		}
 		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: text}}}, out, nil
 	})
@@ -482,8 +491,10 @@ func addEventUpdate(ss *session) {
 
 // updateEvent runs once, or twice when the person is asked (E19), as
 // deleteEvent does: an update the agenda's dry run finds removing
-// occurrences after now is held to a delete's rules before it writes.
-func (ss *session) updateEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn) (updateOut, string, *sdkmcp.ElicitParams, error) {
+// occurrences after now is held to a delete's rules before it writes. The
+// run that brings the answer writes only the change asked about: the same
+// call, version of the event and count.
+func (ss *session) updateEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn) (updateOut, string, *question, error) {
 	tgt, err := ss.event(ctx, in.EventID)
 	if err != nil {
 		return updateOut{}, "", nil, err
@@ -533,17 +544,24 @@ func (ss *session) updateEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 		// holds the same etag, so it writes what was counted or nothing.
 		preview, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, true)
 		if err != nil {
-			return updateOut{}, "", nil, writeError(err, in.EventID)
+			return updateOut{}, "", nil, sinceAsked(req, confirmUpdateKey, writeError(err, in.EventID), notConfirmedUpdate())
 		}
-		if preview.Dropped != 0 {
-			if ask, err := ss.mayDrop(req, d.Data, preview.Dropped); ask != nil || err != nil {
+		if _, answered := req.Params.InputResponses[confirmUpdateKey]; preview.Dropped != 0 || answered {
+			nulls := slices.Sorted(maps.Keys(in.Changes.nulls))
+			state, err := digest("event_update", in, nulls, d.ETag, preview.Dropped)
+			if err != nil {
+				return updateOut{}, "", nil, err
+			}
+			if ask, err := ss.mayDrop(req, d.Data, preview.Dropped, state); ask != nil || err != nil {
 				return updateOut{}, "", ask, err
 			}
 		}
 	}
 	res, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, in.DryRun)
 	if err != nil {
-		return updateOut{}, "", nil, writeError(err, in.EventID)
+		// Proton's etag, which only the write sees, may have moved while
+		// the person was asked, before pcb synced it.
+		return updateOut{}, "", nil, sinceAsked(req, confirmUpdateKey, writeError(err, in.EventID), notConfirmedUpdate())
 	}
 	out := updateOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, ETag: res.ETag, Zone: zoneLabel(loc, ss.srv.o.Now()),
 		EventZone: kept, DryRun: in.DryRun}
@@ -570,9 +588,13 @@ const reasonNeedsDelete = "pcb:needs-delete"
 // mayDrop holds an update that removes dropped occurrences after now from
 // the series d (service.DroppedUnknown: some) to a delete's rules: the
 // grant must hold delete; then the person confirms it when the client can
-// ask (the question, or nil once accepted), else the grant must opt in
-// with unconfirmed-delete.
-func (ss *session) mayDrop(req *sdkmcp.CallToolRequest, d service.EventData, dropped int) (*sdkmcp.ElicitParams, error) {
+// ask (the question, or nil once accepted for what state digests), else
+// the grant must opt in with unconfirmed-delete. A run that brings an
+// answer although it removes none was asked about other occurrences.
+func (ss *session) mayDrop(req *sdkmcp.CallToolRequest, d service.EventData, dropped int, state string) (*question, error) {
+	if dropped == 0 {
+		return nil, sinceAsked(req, confirmUpdateKey, changedSinceAsked(), notConfirmedUpdate())
+	}
 	removes := "removes future occurrences of the series (how many cannot be counted)"
 	switch {
 	case dropped == 1:
@@ -592,19 +614,12 @@ func (ss *session) mayDrop(req *sdkmcp.CallToolRequest, d service.EventData, dro
 	if !asksForm(req) {
 		return nil, nil
 	}
-	answer, asked := req.Params.InputResponses[confirmUpdateKey]
-	if !asked {
-		return &sdkmcp.ElicitParams{
-			Mode:            "form",
-			Message:         dropPrompt(d, dropped),
-			RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-		}, nil
-	}
-	if r, ok := answer.(*sdkmcp.ElicitResult); !ok || r.Action != "accept" {
-		return nil, refusedErr("the change was not confirmed: nothing was changed",
-			"the person declined it; do not retry unless they ask for it again")
-	}
-	return nil, nil
+	return confirmed(req, confirmUpdateKey, dropPrompt(d, dropped), state, notConfirmedUpdate())
+}
+
+func notConfirmedUpdate() error {
+	return refusedErr("the change was not confirmed: nothing was changed",
+		"the person declined it; do not retry unless they ask for it again")
 }
 
 // dropPrompt is the question about an update that removes occurrences: the
@@ -725,7 +740,7 @@ func addEventDelete(ss *session) {
 		case err != nil:
 			return nil, deleteOut{}, toToolError(err)
 		case ask != nil:
-			return &sdkmcp.CallToolResult{InputRequests: sdkmcp.InputRequestMap{confirmKey: ask}}, deleteOut{}, nil
+			return ask.result(confirmKey), deleteOut{}, nil
 		}
 		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "event deleted (" + out.Scope + ")"}}}, out, nil
 	})
@@ -762,8 +777,9 @@ const reasonUnconfirmed = "pcb:unconfirmed-delete"
 
 // deleteEvent runs once, or twice when the person is asked (E19): the run
 // that asks only reads, and the answer is read on the next run, which
-// checks everything again before it deletes.
-func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (deleteOut, *sdkmcp.ElicitParams, error) {
+// checks everything again before it deletes, and deletes only what was
+// asked about: the same call and version of the event.
+func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (deleteOut, *question, error) {
 	if err := ss.mayActUnasked(req, "delete", "deletes"); err != nil {
 		return deleteOut{}, nil, err
 	}
@@ -781,31 +797,104 @@ func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 	if err != nil {
 		return deleteOut{}, nil, err
 	}
+	declined := refusedErr("the deletion was not confirmed: nothing was deleted",
+		"the person declined it; do not retry unless they ask for it again")
 	if asksForm(req) {
 		d, err := tgt.ag.Event(ctx, tgt.ref)
 		if err != nil {
 			return deleteOut{}, nil, writeError(err, in.EventID)
 		}
 		if d.ETag != in.ETag {
-			return deleteOut{}, nil, writeError(&toolError{Class: classConflict}, in.EventID)
+			return deleteOut{}, nil, sinceAsked(req, confirmKey, writeError(&toolError{Class: classConflict}, in.EventID), declined)
 		}
-		answer, asked := req.Params.InputResponses[confirmKey]
-		if !asked {
-			return deleteOut{}, &sdkmcp.ElicitParams{
-				Mode:            "form",
-				Message:         deletePrompt(d.Data, tgt.ref, scope),
-				RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			}, nil
+		state, err := digest("event_delete", in, d.ETag)
+		if err != nil {
+			return deleteOut{}, nil, err
 		}
-		if r, ok := answer.(*sdkmcp.ElicitResult); !ok || r.Action != "accept" {
-			return deleteOut{}, nil, refusedErr("the deletion was not confirmed: nothing was deleted",
-				"the person declined it; do not retry unless they ask for it again")
+		ask, err := confirmed(req, confirmKey, deletePrompt(d.Data, tgt.ref, scope), state, declined)
+		if ask != nil || err != nil {
+			return deleteOut{}, ask, err
 		}
 	}
 	if err := tgt.ag.DeleteEvent(ctx, tgt.ref, in.ETag, scope); err != nil {
-		return deleteOut{}, nil, writeError(err, in.EventID)
+		// Only the write sees Proton's etag (as event_update's write).
+		return deleteOut{}, nil, sinceAsked(req, confirmKey, writeError(err, in.EventID), declined)
 	}
 	return deleteOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, Scope: string(scope), Deleted: true}, nil, nil
+}
+
+// question is a form the person is asked, and state, the digest of what it
+// asks about: the client brings it back with the answer.
+type question struct {
+	form  *sdkmcp.ElicitParams
+	state string
+}
+
+// result is the tool result that asks q under key.
+func (q *question) result(key string) *sdkmcp.CallToolResult {
+	return &sdkmcp.CallToolResult{InputRequests: sdkmcp.InputRequestMap{key: q.form}, RequestState: q.state}
+}
+
+// digest hashes what a question is about: the call's arguments and what
+// the run read for it (the event's etag, a count). The request state
+// carries it: neither the event's text nor anything the agent did not send
+// leaves pcb in it. It is not signed: it is never trusted, only recomputed
+// and compared, and whoever could forge it is the client that answers the
+// question anyway.
+func digest(parts ...any) (string, error) {
+	b, err := json.Marshal(parts)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return "pcb-asked-1:" + hex.EncodeToString(sum[:]), nil
+}
+
+// confirmed reads the person's answer to the question key: the question
+// (prompt, about what state digests) on the run that has no answer yet;
+// declined when it is not "accept"; changedSinceAsked when it comes back
+// with another state, or none: this run is not the one the person
+// answered (the event, its count or the call differ); nil once accepted.
+func confirmed(req *sdkmcp.CallToolRequest, key, prompt, state string, declined error) (*question, error) {
+	answer, asked := req.Params.InputResponses[key]
+	if !asked {
+		return &question{state: state, form: &sdkmcp.ElicitParams{
+			Mode:            "form",
+			Message:         prompt,
+			RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		}}, nil
+	}
+	if r, ok := answer.(*sdkmcp.ElicitResult); !ok || r.Action != "accept" {
+		return nil, declined
+	}
+	if req.Params.RequestState != state {
+		return nil, changedSinceAsked()
+	}
+	return nil, nil
+}
+
+// sinceAsked is a conflict err on a run that brings the answer to key: the
+// event changed while the person was asked (changedSinceAsked), or, when
+// they declined, declined. Any other err is itself.
+func sinceAsked(req *sdkmcp.CallToolRequest, key string, err, declined error) error {
+	answer, asked := req.Params.InputResponses[key]
+	if !asked || toToolError(err).Class != classConflict {
+		return err
+	}
+	if r, ok := answer.(*sdkmcp.ElicitResult); !ok || r.Action != "accept" {
+		return declined
+	}
+	return changedSinceAsked()
+}
+
+// reasonChangedSinceAsked is the refusal of an answer that is not about
+// what the run would write.
+const reasonChangedSinceAsked = "pcb:changed-since-asked"
+
+func changedSinceAsked() error {
+	return &toolError{Class: classConflict, Reason: reasonChangedSinceAsked,
+		Message: "the event changed while the person was asked, or this call is not the one they answered: nothing was written",
+		Hint:    "read the event again with event_get for its current etag, check the change still applies, then call again: the person is asked again"}
 }
 
 // deletePrompt is the question shown to the person. What goes (the event,
