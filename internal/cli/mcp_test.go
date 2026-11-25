@@ -253,8 +253,11 @@ func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The daemon counts a relay session: its handler has read the request's
-	// headers, admitted the grant and opened the session that reads the body
-	// (the MCP SDK opens it before reading), so the request is in flight.
+	// headers, admitted the grant and opened the session that reads the body,
+	// so the request is in flight. This relies on go-sdk v1.8.0's order: its
+	// streamable handler registers the session (connectStreamable, which
+	// LiveSessions counts) before the session's transport reads the body. An
+	// SDK that read first would hang this wait until its guard, never pass it.
 	deadline := time.Now().Add(30 * time.Second)
 	for st := socketStatus(t, r); st.MCP == nil || st.MCP.Sessions["relay"] != 1; st = socketStatus(t, r) {
 		if time.Now().After(deadline) { // a hang guard, not a deadline of the test
