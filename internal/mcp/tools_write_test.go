@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -993,14 +994,10 @@ func dropping(hub *stubHub, n int) *stubAgenda {
 	return alice
 }
 
-// shortenings are the series changes that can end a series early: an
-// earlier UNTIL, a smaller COUNT, a sparser rule, no rule.
-var shortenings = []map[string]any{
-	{"rrule": "FREQ=DAILY;UNTIL=20261120T080000Z"},
-	{"rrule": "FREQ=DAILY;COUNT=3"},
-	{"rrule": "FREQ=WEEKLY"},
-	{"rrule": nil},
-}
+// shortening is a series change that ends the series early. Whether a
+// change drops occurrences is the agenda's count (the service's tests);
+// here the stub's dry run gives it.
+var shortening = map[string]any{"rrule": "FREQ=DAILY;COUNT=3"}
 
 func updateArgs(changes map[string]any) map[string]any {
 	return map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series", "changes": changes}
@@ -1025,28 +1022,48 @@ func unchanged(t *testing.T, alice *stubAgenda, what string) {
 // refused as a delete nobody can confirm is (same class, reason and ways
 // out), even with the delete grant; unconfirmed-delete lets it through.
 func TestUpdateDroppingOccurrencesUnconfirmedRefused(t *testing.T) {
-	for _, changes := range shortenings {
-		hub := newHub()
-		alice := dropping(hub, 3)
-		r := newRig(t, hub)
-		terr := mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(changes), "refused")
-		if terr.Reason != "pcb:unconfirmed-delete" {
-			t.Errorf("%v: reason %q, want the unconfirmed delete's", changes, terr.Reason)
+	hub := newHub()
+	alice := dropping(hub, 3)
+	r := newRig(t, hub)
+	terr := mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(shortening), "refused")
+	if terr.Reason != "pcb:unconfirmed-delete" {
+		t.Errorf("reason %q, want the unconfirmed delete's", terr.Reason)
+	}
+	for _, want := range []string{"3 future occurrences", "confirm", "unconfirmed-delete", "elicitation", "nothing was changed"} {
+		if !strings.Contains(terr.Message+" "+terr.Hint, want) {
+			t.Errorf("refusal %+v does not mention %q", *terr, want)
 		}
-		for _, want := range []string{"3 future occurrences", "confirm", "unconfirmed-delete", "elicitation", "nothing was changed"} {
-			if !strings.Contains(terr.Message+" "+terr.Hint, want) {
-				t.Errorf("%v: refusal %+v does not mention %q", changes, *terr, want)
-			}
-		}
-		unchanged(t, alice, fmt.Sprint(changes))
+	}
+	unchanged(t, alice, "unconfirmed")
 
-		out := mustCall(t, r.connect(t, unconfirmedGrant, mcp.EntryRemote), "event_update", updateArgs(changes))
-		if out["etag"] != `"standup@x-1+"` {
-			t.Errorf("%v: opted-in update = %v", changes, out)
-		}
-		if w := alice.writes(); w.written != 1 || w.updates[len(w.updates)-1].dryRun {
-			t.Errorf("%v: opted-in writes %+v", changes, w)
-		}
+	out := mustCall(t, r.connect(t, unconfirmedGrant, mcp.EntryRemote), "event_update", updateArgs(shortening))
+	if out["etag"] != `"standup@x-1+"` {
+		t.Errorf("opted-in update = %v", out)
+	}
+	if w := alice.writes(); w.written != 1 || w.updates[len(w.updates)-1].dryRun {
+		t.Errorf("opted-in writes %+v", w)
+	}
+}
+
+// The write is the change its preview counted: the same event, etag,
+// scope and fields (times already in the event's zone).
+func TestUpdatePreviewIsTheWrite(t *testing.T) {
+	hub := newHub()
+	alice := dropping(hub, 0)
+	r := newRig(t, hub)
+	mustCall(t, r.connect(t, writeGrant, mcp.EntryRemote), "event_update",
+		updateArgs(map[string]any{"rrule": "FREQ=WEEKLY", "start": "2026-11-17T10:00", "summary": "Weekly", "alarms": nil}))
+	w := alice.writes()
+	if len(w.updates) != 2 || !w.updates[0].dryRun || w.updates[1].dryRun {
+		t.Fatalf("updates %+v, want a dry run then the write", w.updates)
+	}
+	preview, write := w.updates[0], w.updates[1]
+	preview.dryRun = false
+	if !reflect.DeepEqual(preview, write) {
+		t.Errorf("preview %+v\nwrite   %+v", preview, write)
+	}
+	if write.etag != `"standup@x-1"` || write.scope != service.ScopeSeries || write.f.Start == nil || write.f.Start.TZID != "Europe/Paris" {
+		t.Errorf("write %+v", write)
 	}
 }
 
@@ -1058,7 +1075,7 @@ func TestUpdateDroppingOccurrencesNeedsDeleteGrant(t *testing.T) {
 	r := newRig(t, hub)
 	asking, asked := r.connectAsking(t, writeGrant, "2025-11-25", "accept")
 	for _, cs := range []*sdkmcp.ClientSession{r.connect(t, writeGrant, mcp.EntryRemote), asking} {
-		terr := mustFail(t, cs, "event_update", updateArgs(shortenings[1]), "refused")
+		terr := mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
 		if terr.Reason != "pcb:needs-delete" || !strings.Contains(terr.Message, "2 future occurrences") ||
 			!strings.Contains(terr.Hint, "--allow ...,delete") {
 			t.Errorf("refusal %+v, want one naming the delete grant", *terr)
@@ -1084,7 +1101,7 @@ func TestUpdateDroppingOccurrencesAsks(t *testing.T) {
 				r := newRig(t, hub)
 				for _, answer := range []string{"decline", "cancel"} {
 					cs, asked := r.connectAsking(t, g, version, answer)
-					terr := mustFail(t, cs, "event_update", updateArgs(shortenings[0]), "refused")
+					terr := mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
 					if !strings.Contains(terr.Message, "not confirmed") || !strings.Contains(terr.Message, "nothing was changed") {
 						t.Errorf("%s: %+v", answer, *terr)
 					}
@@ -1095,11 +1112,11 @@ func TestUpdateDroppingOccurrencesAsks(t *testing.T) {
 				}
 				// A stale etag is a conflict before the person is asked.
 				cs, asked := r.connectAsking(t, g, version, "accept")
-				mustFail(t, cs, "event_update", with(updateArgs(shortenings[0]), "etag", `"standup@x-0"`), "conflict")
+				mustFail(t, cs, "event_update", with(updateArgs(shortening), "etag", `"standup@x-0"`), "conflict")
 				if got := asked(); len(got) != 0 {
 					t.Errorf("asked %q about a stale event", got)
 				}
-				out := mustCall(t, cs, "event_update", updateArgs(shortenings[0]))
+				out := mustCall(t, cs, "event_update", updateArgs(shortening))
 				if out["etag"] != `"standup@x-1+"` || len(asked()) != 1 {
 					t.Errorf("accepted: %v, asked %q", out, asked())
 				}
@@ -1126,9 +1143,9 @@ func TestUpdateDroppingUncountedOccurrencesFailsClosed(t *testing.T) {
 	hub := newHub()
 	alice := dropping(hub, service.DroppedUnknown)
 	r := newRig(t, hub)
-	mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(shortenings[2]), "refused")
+	mustFail(t, r.connect(t, deleteGrant, mcp.EntryRemote), "event_update", updateArgs(shortening), "refused")
 	cs, asked := r.connectAsking(t, deleteGrant, "2025-11-25", "decline")
-	mustFail(t, cs, "event_update", updateArgs(shortenings[2]), "refused")
+	mustFail(t, cs, "event_update", updateArgs(shortening), "refused")
 	want := "Change the series starting on 2026-11-16 09:00 Europe/Paris, which removes future occurrences pcb cannot count: «Standup»?"
 	if got := asked(); len(got) != 1 || got[0] != want {
 		t.Errorf("asked %q, want %q", got, want)
@@ -1170,7 +1187,7 @@ func TestUpdateKeepingOccurrencesNeedsWriteAlone(t *testing.T) {
 	hub := newHub()
 	alice := dropping(hub, 3)
 	r := newRig(t, hub)
-	out := mustCall(t, r.connect(t, writeGrant, mcp.EntryRemote), "event_update", with(updateArgs(shortenings[1]), "dry_run", true))
+	out := mustCall(t, r.connect(t, writeGrant, mcp.EntryRemote), "event_update", with(updateArgs(shortening), "dry_run", true))
 	if out["dry_run"] != true || out["dropped_occurrences"] != float64(3) {
 		t.Errorf("dry run %v, want dropped_occurrences 3", out)
 	}

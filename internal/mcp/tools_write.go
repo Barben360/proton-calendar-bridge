@@ -27,8 +27,8 @@ import (
 // declares one; otherwise the grant must opt in (unconfirmed-delete), else
 // it is refused. An update that removes occurrences after now from a
 // series (an earlier UNTIL, a smaller COUNT, a sparser rule, the rule
-// removed: the agenda counts them) is a delete too: it needs the delete
-// grant and the same confirmation.
+// removed, an earlier end, a postponed start: the agenda counts them) is a
+// delete too: it needs the delete grant and the same confirmation.
 
 func writeTools() []toolDef {
 	return []toolDef{
@@ -461,7 +461,8 @@ func addEventUpdate(ss *session) {
 		Name: "event_update",
 		Description: "Change an event, its whole series or one occurrence, if it is still as read (etag; else a conflict and nothing is written). " +
 			"A series change that would orphan its exceptions is refused. A series change that removes occurrences after now (an earlier UNTIL, " +
-			"a smaller COUNT, a sparser rule, rrule null) is a delete: it needs the delete grant, and the person may be asked to confirm it; " +
+			"a smaller COUNT, a sparser rule, rrule null, a series ending earlier, a start postponed past an occurrence) is a delete: " +
+			"it needs the delete grant, and the person may be asked to confirm it; " +
 			"declined, nothing is written. dry_run shows the change without writing.",
 		Annotations: writing("Update an event", false),
 	}

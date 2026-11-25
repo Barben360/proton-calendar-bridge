@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -10,9 +11,11 @@ import (
 
 // A dry run counts the occurrences starting after now (the rig's clock,
 // t0) that a series change removes: an earlier UNTIL, a smaller COUNT, a
-// sparser rule or no rule at all remove some; a later UNTIL, a denser rule,
-// a moved start, a new title, a single event or a series already over
-// remove none.
+// sparser rule, no rule, a series that ends earlier however dense, or a
+// start postponed past an occurrence remove some; a later UNTIL, a denser
+// rule ending as late, a start moved within one period (to another zone
+// too), another weekday with the same count and end, a new title, a single
+// event or a series already over remove none.
 func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 	t.Parallel()
 	const week = 7 * day
@@ -24,10 +27,24 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 	daily := (now + int64(service.DropHorizon/time.Second) - base + day - 1) / day
 	weekly := (daily-1)/7 + 1
 	timed := func(unix int64) *service.EventTime { return &service.EventTime{At: at(unix)} }
+	// An endless weekly series from base has endless occurrences in the
+	// window; the last of them starts at lastWeekly.
+	endless := (now + int64(service.DropHorizon/time.Second) - base + week - 1) / week
+	lastWeekly := base + (endless-1)*week
+	// A weekly series in Paris from 2027-03-15 09:00, between the US and the
+	// EU daylight saving dates: New York's 09:00 is five hours later then,
+	// six hours later from 2027-03-28 on.
+	paris, _ := time.LoadLocation("Europe/Paris")
+	newYork, _ := time.LoadLocation("America/New_York")
+	zoned := time.Date(2027, 3, 15, 9, 0, 0, 0, paris).Unix()
+	parisLines := func(rule string) []string {
+		return []string{"DTSTART;TZID=Europe/Paris:20270315T090000", "DTEND;TZID=Europe/Paris:20270315T100000", "SUMMARY:Zoned", "RRULE:" + rule}
+	}
 	for _, tc := range []struct {
 		name  string
 		start int64
 		rrule string
+		lines []string // the card's lines instead of card's, when set
 		scope service.EditScope
 		rid   *service.EventTime
 		f     service.EventFields
@@ -41,7 +58,9 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		{name: "only those after now", start: straddling, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=5")}, want: 5},
 		{name: "later until", start: base, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(base+2*week), f: service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(base+9*week))}},
 		{name: "larger count", start: base, rrule: "FREQ=WEEKLY;COUNT=4", f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=10")}},
-		{name: "denser rule", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{RRule: ptr("FREQ=DAILY;COUNT=10")}},
+		{name: "denser rule", start: base, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(base+9*week), f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + stamp(base+9*week))}},
+		{name: "denser endless rule", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{RRule: ptr("FREQ=DAILY")}},
+		{name: "denser with the same count, ending earlier", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{RRule: ptr("FREQ=DAILY;COUNT=10")}, want: 8},
 		{name: "endless start an hour later", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{Start: timed(base + 3600)}},
 		{name: "counted start a day later", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{Start: timed(base + day)}},
 		{name: "until start a day earlier", start: base, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(base+9*week), f: service.EventFields{Start: timed(base - day)}},
@@ -50,6 +69,22 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		{name: "series already over", start: over, rrule: "FREQ=WEEKLY;COUNT=5", f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=2")}},
 		{name: "one occurrence moved to the past", start: base, rrule: "FREQ=WEEKLY", scope: service.ScopeOccurrence,
 			rid: &service.EventTime{At: at(base + week)}, f: service.EventFields{Start: timed(now - week)}},
+		// Denser but ending earlier: fewer occurrences go by count, but the
+		// series ends before the original.
+		{name: "denser and counted, ending earlier", start: base, rrule: "FREQ=WEEKLY;COUNT=40", f: service.EventFields{RRule: ptr("FREQ=DAILY;COUNT=49")}, want: 33},
+		{name: "denser until, ending an endless series", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + stamp(base+100*day))}, want: service.DroppedUnknown},
+		{name: "denser until, ending earlier", start: base, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(base+20*week), f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + stamp(base+5*week))}, want: 15},
+		// Every occurrence in the window is kept, but none after it.
+		{name: "ending at the horizon", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(lastWeekly))}, want: service.DroppedUnknown},
+		// A start moved later by more than one period removes what it skips.
+		{name: "endless start postponed to 2036", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{Start: timed(time.Date(2036, 1, 4, 8, 0, 0, 0, time.UTC).Unix())}, want: int(endless)},
+		{name: "counted start postponed past an occurrence", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{Start: timed(base + 8*day)}, want: 1},
+		{name: "counted start six days later", start: base, rrule: "FREQ=WEEKLY;COUNT=10", f: service.EventFields{Start: timed(base + 6*day)}},
+		{name: "other weekday, same count and end", start: base, rrule: "FREQ=WEEKLY;BYDAY=FR,MO;UNTIL=" + stamp(base+5*week),
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;BYDAY=FR,TU;UNTIL=" + stamp(base+5*week))}},
+		{name: "zoned series shortened", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"), f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=4")}, want: 6},
+		{name: "zoned series moved to another zone", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"),
+			f: service.EventFields{Start: &service.EventTime{At: time.Date(2027, 3, 15, 9, 0, 0, 0, newYork), TZID: "America/New_York"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -58,8 +93,12 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 				if tc.rrule != "" {
 					extra = append(extra, "RRULE:"+tc.rrule)
 				}
-				f.AddEvent(cal, protontest.Event{UID: "s@x", Start: tc.start, End: tc.start + 3600, RRule: tc.rrule, Color: green,
-					Card: card("s@x", "Series", tc.start, extra...)})
+				c := card("s@x", "Series", tc.start, extra...)
+				rule := tc.rrule
+				if tc.lines != nil {
+					c, rule = eventCard("s@x", tc.lines...), strings.TrimPrefix(tc.lines[len(tc.lines)-1], "RRULE:")
+				}
+				f.AddEvent(cal, protontest.Event{UID: "s@x", Start: tc.start, End: tc.start + 3600, RRule: rule, Color: green, Card: c})
 			}).start(t)
 			obj := r.object(t, "s@x")
 			scope := tc.scope

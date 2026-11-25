@@ -35,3 +35,23 @@ func TestDroppedOccurrencesFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// An expansion the series cap cuts cannot be counted: more occurrences
+// than MaxSeriesOccurrences in the window (overrides at times of their own,
+// besides a daily rule) make even a new title DroppedUnknown.
+func TestDroppedOccurrencesCutByTheCapFailsClosed(t *testing.T) {
+	now := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	lines := []string{"BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//test//EN",
+		"BEGIN:VEVENT", "UID:s@x", "DTSTAMP:20261101T080000Z", "DTSTART:20261201T080000Z", "DTEND:20261201T090000Z", "SUMMARY:Series", "RRULE:FREQ=DAILY", "END:VEVENT"}
+	first := time.Date(2026, 12, 1, 8, 0, 0, 0, time.UTC)
+	for i := range MaxSeriesOccurrences {
+		day := first.AddDate(0, 0, i%700)
+		rid, at := day.Format("20060102T150405Z"), day.Add(time.Duration(4+i/700)*time.Hour).Format("20060102T150405Z")
+		lines = append(lines, "BEGIN:VEVENT", "UID:s@x", "DTSTAMP:20261101T080000Z", "RECURRENCE-ID:"+rid,
+			"DTSTART:"+at, "DTEND:"+at, "SUMMARY:Moved", "END:VEVENT")
+	}
+	obj := []byte(strings.Join(append(lines, "END:VCALENDAR", ""), "\r\n"))
+	if got := droppedOccurrences(obj, obj, ScopeSeries, now); got != DroppedUnknown {
+		t.Errorf("%d, want DroppedUnknown", got)
+	}
+}
