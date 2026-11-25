@@ -559,7 +559,9 @@ func (ss *session) updateEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 	}
 	res, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, in.DryRun)
 	if err != nil {
-		return updateOut{}, "", nil, writeError(err, in.EventID)
+		// Proton's etag, which only the write sees, may have moved while
+		// the person was asked, before pcb synced it.
+		return updateOut{}, "", nil, sinceAsked(req, confirmUpdateKey, writeError(err, in.EventID), notConfirmedUpdate())
 	}
 	out := updateOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, ETag: res.ETag, Zone: zoneLabel(loc, ss.srv.o.Now()),
 		EventZone: kept, DryRun: in.DryRun}
@@ -795,9 +797,9 @@ func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 	if err != nil {
 		return deleteOut{}, nil, err
 	}
+	declined := refusedErr("the deletion was not confirmed: nothing was deleted",
+		"the person declined it; do not retry unless they ask for it again")
 	if asksForm(req) {
-		declined := refusedErr("the deletion was not confirmed: nothing was deleted",
-			"the person declined it; do not retry unless they ask for it again")
 		d, err := tgt.ag.Event(ctx, tgt.ref)
 		if err != nil {
 			return deleteOut{}, nil, writeError(err, in.EventID)
@@ -815,7 +817,8 @@ func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest,
 		}
 	}
 	if err := tgt.ag.DeleteEvent(ctx, tgt.ref, in.ETag, scope); err != nil {
-		return deleteOut{}, nil, writeError(err, in.EventID)
+		// Only the write sees Proton's etag (as event_update's write).
+		return deleteOut{}, nil, sinceAsked(req, confirmKey, writeError(err, in.EventID), declined)
 	}
 	return deleteOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, Scope: string(scope), Deleted: true}, nil, nil
 }
@@ -835,7 +838,9 @@ func (q *question) result(key string) *sdkmcp.CallToolResult {
 // digest hashes what a question is about: the call's arguments and what
 // the run read for it (the event's etag, a count). The request state
 // carries it: neither the event's text nor anything the agent did not send
-// leaves pcb in it.
+// leaves pcb in it. It is not signed: it is never trusted, only recomputed
+// and compared, and whoever could forge it is the client that answers the
+// question anyway.
 func digest(parts ...any) (string, error) {
 	b, err := json.Marshal(parts)
 	if err != nil {

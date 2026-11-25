@@ -51,6 +51,10 @@ type writeStub struct {
 	// A dry run's before and after; the stored event when nil.
 	before, after *service.EventData
 	dropped       int // a dry run's count of occurrences the change removes
+	// The real write (an update that is no dry run, a delete) fails with it
+	// after the read and the dry run passed: Proton's etag moved, the
+	// cache's not yet.
+	failWrite error
 }
 
 func stale() error {
@@ -118,6 +122,9 @@ func (a *stubAgenda) UpdateEvent(_ context.Context, ref service.EventRef, etag s
 		}
 		return res, nil
 	}
+	if a.w.failWrite != nil {
+		return service.UpdateResult{}, a.w.failWrite
+	}
 	if f.Summary != nil {
 		d.Data.Summary = *f.Summary
 	}
@@ -136,6 +143,9 @@ func (a *stubAgenda) DeleteEvent(_ context.Context, ref service.EventRef, etag s
 	a.w.deletes = append(a.w.deletes, deleteCall{ref, etag, scope})
 	if _, err := a.target(ref, etag); err != nil {
 		return err
+	}
+	if a.w.failWrite != nil {
+		return a.w.failWrite
 	}
 	delete(a.events, ref.CalendarID+"|"+ref.UID)
 	a.w.written++
@@ -1287,6 +1297,35 @@ func TestChangedWhileAskedRefused(t *testing.T) {
 	}
 }
 
+// An event that changes on Proton while the person is asked, before pcb
+// synced it, is caught only by the write: that conflict is refused as
+// changed since asked too, nothing written.
+func TestChangedOnProtonWhileAskedRefused(t *testing.T) {
+	for _, version := range []string{"2026-07-28", "2025-11-25"} {
+		for _, tool := range []string{"event_update", "event_delete"} {
+			t.Run(version+"/"+tool, func(t *testing.T) {
+				hub := newHub()
+				alice := dropping(hub, 3)
+				r := newRig(t, hub)
+				cs, asked := r.connectAskingDuring(t, deleteGrant, version, "accept", func() {
+					alice.mu.Lock()
+					alice.w.failWrite = stale()
+					alice.mu.Unlock()
+				})
+				args := updateArgs(shortening)
+				if tool == "event_delete" {
+					args = map[string]any{"event_id": standupID, "etag": `"standup@x-1"`, "scope": "series"}
+				}
+				changedSinceAsked(t, mustFail(t, cs, tool, args, "conflict"), tool)
+				if got := asked(); len(got) != 1 {
+					t.Errorf("asked %q, want one question", got)
+				}
+				unchanged(t, alice, tool)
+			})
+		}
+	}
+}
+
 // A person who declined is told so, whether or not the event changed
 // meanwhile: nothing invites the agent to ask them again.
 func TestDeclinedWhileChangedRefusedAsDeclined(t *testing.T) {
@@ -1405,6 +1444,8 @@ func TestUpdateAnswerBoundToItsCall(t *testing.T) {
 	r := newRig(t, hub)
 	cs := r.connectManual(t, deleteGrant)
 	args := updateArgs(shortening)
+	rid := alice.events["cal-a|standup@x"].Data.Start.At.AddDate(0, 0, 3)
+	occID := base64.RawURLEncoding.EncodeToString([]byte("a1\x00cal-a\x00standup@x\x00" + rid.UTC().Format(time.RFC3339)))
 	state := askState(t, cs, "event_update", args, "confirm_update")
 	for _, tc := range []struct {
 		name  string
@@ -1414,6 +1455,8 @@ func TestUpdateAnswerBoundToItsCall(t *testing.T) {
 		{"other changes", updateArgs(map[string]any{"rrule": "FREQ=DAILY;COUNT=2"}), state},
 		{"a field cleared too", updateArgs(map[string]any{"rrule": "FREQ=DAILY;COUNT=3", "location": nil}), state},
 		{"another zone", with(args, "tz", "UTC"), state},
+		{"one occurrence", with(args, "event_id", occID, "scope", "occurrence"), state},
+		{"another etag", with(args, "etag", `"standup@x-0"`), state},
 		{"no state", args, ""},
 		{"another state", args, state + "0"},
 	} {
