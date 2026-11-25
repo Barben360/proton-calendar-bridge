@@ -975,3 +975,29 @@ func TestApplyEditSeriesStartAloneShiftsTheSeriesAndItsExceptions(t *testing.T) 
 		t.Errorf("overrides %+v, want RECURRENCE-ID 2026-11-30 09:30", d.Overrides)
 	}
 }
+
+// EndOfRule reads COUNT and UNTIL as written, whatever their case or the
+// parts' order; a rule with neither is endless; a malformed one is refused.
+func TestEndOfRule(t *testing.T) {
+	for _, tc := range []struct {
+		rule    string
+		want    RuleEnd
+		endless bool
+	}{
+		{"FREQ=DAILY", RuleEnd{}, true},
+		{"RRULE:FREQ=WEEKLY;BYDAY=MO,WE", RuleEnd{}, true},
+		{"FREQ=DAILY;COUNT=10", RuleEnd{Count: "10"}, false},
+		{"until=20371230T080000Z;freq=weekly", RuleEnd{Until: "20371230T080000Z"}, false},
+	} {
+		got, err := EndOfRule(tc.rule)
+		if err != nil || got != tc.want || got.Endless() != tc.endless {
+			t.Errorf("EndOfRule(%q) = %+v (endless %v), %v; want %+v (endless %v)", tc.rule, got, got.Endless(), err, tc.want, tc.endless)
+		}
+	}
+	for _, rule := range []string{"", "COUNT=3", "FREQ=DAILY;COUNT", "FREQ=HOURLY"} {
+		var r *Refusal
+		if _, err := EndOfRule(rule); !errors.As(err, &r) {
+			t.Errorf("EndOfRule(%q) = %v, want a refusal", rule, err)
+		}
+	}
+}

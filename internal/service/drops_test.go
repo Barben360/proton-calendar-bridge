@@ -27,6 +27,7 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 	daily := (now + int64(service.DropHorizon/time.Second) - base + day - 1) / day
 	weekly := (daily-1)/7 + 1
 	timed := func(unix int64) *service.EventTime { return &service.EventTime{At: at(unix)} }
+	until := func(y int, m time.Month, d int) string { return stamp(time.Date(y, m, d, 8, 0, 0, 0, time.UTC).Unix()) }
 	// An endless weekly series from base has endless occurrences in the
 	// window; the last of them starts at lastWeekly.
 	horizon := now + int64(service.DropHorizon/time.Second)
@@ -100,6 +101,22 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		{name: "until series past the horizon, extended", start: horizon - 2*week, rrule: "FREQ=WEEKLY;UNTIL=" + stamp(horizon+5*week),
 			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;UNTIL=" + stamp(horizon+9*week))}},
 		{name: "endless series moved a week earlier", start: base, rrule: "FREQ=WEEKLY", f: service.EventFields{Start: timed(base - week)}},
+		// Past the horizon, an endless rule given an end, or a far-reaching
+		// one whose COUNT or UNTIL changes, ends sooner however dense: what
+		// goes cannot be counted. A new title of such a series drops none.
+		{name: "endless daily ending in 2037", start: base, rrule: "FREQ=DAILY", f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + until(2037, 12, 30))}, want: service.DroppedUnknown},
+		{name: "endless daily ending in 2033", start: base, rrule: "FREQ=DAILY", f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + until(2033, 11, 11))}, want: service.DroppedUnknown},
+		{name: "endless daily ending in 2031", start: base, rrule: "FREQ=DAILY", f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + until(2031, 12, 1))}, want: service.DroppedUnknown},
+		{name: "endless weekdays ending in 2037", start: base, rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;UNTIL=" + until(2037, 12, 30))}, want: service.DroppedUnknown},
+		{name: "endless three days a week ending in 2037", start: base, rrule: "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+			f: service.EventFields{RRule: ptr("FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=" + until(2037, 12, 30))}, want: service.DroppedUnknown},
+		{name: "daily until 2100 ending in 2037", start: base, rrule: "FREQ=DAILY;UNTIL=" + until(2100, 1, 1),
+			f: service.EventFields{RRule: ptr("FREQ=DAILY;UNTIL=" + until(2037, 12, 30))}, want: service.DroppedUnknown},
+		{name: "endless daily renamed", start: base, rrule: "FREQ=DAILY", f: service.EventFields{Summary: ptr("Renamed")}},
+		{name: "endless yearly renamed", start: base, rrule: "FREQ=YEARLY", f: service.EventFields{Summary: ptr("Renamed")}},
+		{name: "endless every ten years renamed", start: base, rrule: "FREQ=YEARLY;INTERVAL=10", f: service.EventFields{Summary: ptr("Renamed")}},
+		{name: "daily until 2100 renamed", start: base, rrule: "FREQ=DAILY;UNTIL=" + until(2100, 1, 1), f: service.EventFields{Summary: ptr("Renamed")}},
 		{name: "zoned series shortened", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"), f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=4")}, want: 6},
 		{name: "zoned series moved to another zone", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"),
 			f: service.EventFields{Start: &service.EventTime{At: time.Date(2027, 3, 15, 9, 0, 0, 0, newYork), TZID: "America/New_York"}}},

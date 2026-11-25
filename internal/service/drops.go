@@ -33,7 +33,9 @@ const DroppedUnknown = -1
 //     after the edited series' last one (the larger of the two counts
 //     wins: both are occurrences that go); or
 //   - the original runs past the horizon and the edited series ends sooner
-//     there (endsNoSooner): DroppedUnknown, as what goes cannot be counted.
+//     there (endsNoSooner: an endless rule given an end or removed, a
+//     far-reaching one whose COUNT or UNTIL changes, or a nearer end past
+//     the horizon): DroppedUnknown, as what goes cannot be counted.
 //
 // A moved start is allowed for: the window's end, and the end the edited
 // series must reach, follow it by at most one period of the original (the
@@ -121,30 +123,52 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 }
 
 // endsNoSooner: the original series (bm, bo), whose occurrences go on
-// past the horizon from beyond, is matched by the edited one (am, ao), at
-// most early sooner (early ≤ 0 is how much sooner). One capped expansion
-// of each from beyond to endlessProbe decides: an original with more than
-// the cap there (endless, or as good as) needs an edited series with more
-// than the cap too; a shorter one, an edited occurrence from its last one
-// (moved by early) on. The cap keeps the cost to that of a page of
+// past the horizon from beyond, is matched there by the edited one (am,
+// ao), at most early sooner (early ≤ 0 is how much sooner). The rules'
+// own COUNT and UNTIL decide what an expansion cannot see:
+//
+//   - an endless original (neither COUNT nor UNTIL) needs an endless
+//     edited rule: one given an end, or removed, ends sooner however dense;
+//   - a bounded original with more than the cap from beyond to
+//     endlessProbe (a huge stored COUNT, an UNTIL far ahead) needs the
+//     edited rule's COUNT and UNTIL unchanged, so a new title keeps it;
+//   - a shorter one needs an edited occurrence from its last one (moved
+//     by early) on.
+//
+// At most one capped expansion of each decides: the cost of a page of
 // events_list, whatever a stored COUNT says.
 func endsNoSooner(bm ical.Component, bo []ical.Component, am ical.Component, ao []ical.Component, beyond time.Time, early time.Duration) bool {
+	be, _, ok := ruleEnd(bm)
+	if !ok {
+		return false
+	}
+	ae, recurring, ok := ruleEnd(am)
+	if !ok {
+		return false
+	}
+	if be.Endless() {
+		return recurring && ae.Endless()
+	}
 	orig, cut, ok := startsCapped(bm, bo, beyond, endlessProbe)
 	if !ok || len(orig) == 0 {
 		return false
 	}
-	from := orig[len(orig)-1].Add(early)
 	if cut {
-		from = beyond.Add(early)
+		return recurring && ae == be
 	}
-	edited, editedCut, ok := startsCapped(am, ao, from, endlessProbe)
-	if !ok {
-		return false
+	edited, editedCut, ok := startsCapped(am, ao, orig[len(orig)-1].Add(early), endlessProbe)
+	return ok && (len(edited) > 0 || editedCut)
+}
+
+// ruleEnd is the end of master's RRULE; recurring is false when it has
+// none, ok false when the rule does not parse.
+func ruleEnd(master ical.Component) (end ical.RuleEnd, recurring, ok bool) {
+	p, has := master.Get("RRULE")
+	if !has || p.Value == "" {
+		return ical.RuleEnd{}, false, true
 	}
-	if cut {
-		return editedCut
-	}
-	return len(edited) > 0 || editedCut
+	end, err := ical.EndOfRule(p.Value)
+	return end, true, err == nil
 }
 
 // endlessProbe ends the expansions after the horizon: no rule pcb writes

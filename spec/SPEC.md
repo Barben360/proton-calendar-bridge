@@ -1542,9 +1542,12 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   expansion `events_list` uses). It drops when fewer occurrences start in the window (from now to the original's last
   occurrence within two years, `DropHorizon`), or when the edited series ends before the original (it then counts the
   original's occurrences after the edited series' last one, the larger count winning), or when the original runs past
-  the horizon and the edited series ends sooner: one capped `ical.Expand` of each from the horizon on decides (an
-  original past the cap needs an edited series past it too; a shorter one, an edited occurrence from its last one on),
-  so a stored COUNT of any size costs about a page of `events_list` (`DroppedUnknown`). A moved start, later or earlier, is allowed
+  the horizon and the edited series ends sooner (`DroppedUnknown`). There the rules' own COUNT and UNTIL
+  (`ical.EndOfRule`) decide what an expansion cannot see: an endless original (neither) needs an endless edited rule,
+  so one given an end, however far, or removed drops; a bounded original past the cap of one capped `ical.Expand` from
+  the horizon on (a huge stored COUNT, an UNTIL far ahead) needs its COUNT and UNTIL unchanged, so a new title keeps it
+  and a moved start, which shifts UNTIL, drops; a shorter one needs an edited occurrence from its last one on. A stored
+  COUNT of any size so costs about a page of `events_list`. A moved start, later or earlier, is allowed
   for by at most one period of the original (the gap between its last two occurrences, the first after the horizon included;
   none for a single one), each bound with two hours of slack for a zone change across differing daylight saving dates,
   so a postponement past an occurrence drops it. An occurrence change never drops; a series that cannot be expanded,
