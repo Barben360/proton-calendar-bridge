@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -66,6 +67,58 @@ func TestWriteAfterAnAccountSwitchIsRefused(t *testing.T) {
 	}
 	_, err = r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
 	wantAnotherAccount(t, err)
+	if n := r.sendCalls(); n != 0 {
+		t.Errorf("%d requests reached the sync endpoint", n)
+	}
+	if n := len(r.proton(t, "n@x")); n != 0 {
+		t.Errorf("Proton holds %d rows", n)
+	}
+}
+
+// The account check at the Sync call is the last one: a write whose session
+// ended on the Sync call, while another process logged in to another Proton
+// account, finds that account's session when it renews its own. It is
+// refused as an account switch, not sent with the other account's session,
+// and not reported as a renewal the person could retry past.
+//
+// The switch happens on the Sync call because the cache steps between the
+// UID listing and the send check the stored account themselves: a switch
+// any earlier is refused there, as pcb serve not running for the account.
+func TestWriteWhoseSessionRenewsIntoAnotherAccountIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil)
+	r.start(t)
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		if !r.isSync(req) {
+			return send()
+		}
+		mu.Lock()
+		attempts++
+		first := attempts == 1
+		mu.Unlock()
+		if first {
+			r.switchAccount(t)
+		}
+		// Proton answers 401 before it reads the body: the session ended.
+		body := `{"Code":401,"Error":"Invalid access token"}`
+		return &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Proto: req.Proto,
+			ProtoMajor: req.ProtoMajor, ProtoMinor: req.ProtoMinor, Request: req,
+			Header:        http.Header{"Content-Type": {"application/json"}},
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: int64(len(body))}, nil
+	})
+	_, err := r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+	wantAnotherAccount(t, err)
+	mu.Lock()
+	n := attempts
+	mu.Unlock()
+	if n != 2 { // the call, and its one resend after the token refresh
+		t.Errorf("%d Sync calls left pcb, want 2: the renewed session must not send", n)
+	}
 	if n := r.sendCalls(); n != 0 {
 		t.Errorf("%d requests reached the sync endpoint", n)
 	}
