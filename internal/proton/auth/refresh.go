@@ -102,5 +102,6 @@ func state(m *gpa.Manager) *managerState {
 	if !ok {
 		return nil
 	}
-	return v.(*managerState)
+	st, _ := v.(*managerState)
+	return st
 }

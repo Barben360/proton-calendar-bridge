@@ -43,11 +43,15 @@ func (h *noteHandler) Handle(_ context.Context, r slog.Record) error {
 	hint := ""
 	add := func(a slog.Attr) bool {
 		v := a.Value.Resolve()
+		var attrErr error
+		if v.Kind() == slog.KindAny {
+			attrErr, _ = v.Any().(error)
+		}
 		switch {
 		case a.Key == "hint":
 			hint = v.String()
-		case v.Kind() == slog.KindAny && isError(v.Any()):
-			fields = append(fields, a.Key+": "+errorText(v.Any().(error)))
+		case attrErr != nil:
+			fields = append(fields, a.Key+": "+errorText(attrErr))
 		case v.Kind() == slog.KindTime:
 			fields = append(fields, a.Key+": "+v.Time().UTC().Format(time.RFC3339))
 		case a.Key != "":
@@ -71,8 +75,6 @@ func (h *noteHandler) Handle(_ context.Context, r slog.Record) error {
 	_, err := fmt.Fprintln(h.w, line)
 	return err
 }
-
-func isError(v any) bool { _, ok := v.(error); return ok }
 
 // errorText is an error attribute as pcb words it, never a Go chain (ruling
 // A11): the message of an *exitcode.Error, which pcb wrote (as Run prints

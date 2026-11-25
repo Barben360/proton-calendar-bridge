@@ -27,6 +27,12 @@ func newLRU(capacity int) *lru {
 	return &lru{limit: capacity, order: list.New(), byKey: map[string]*list.Element{}}
 }
 
+// entryOf is the entry an element of c.order holds: the list takes only the
+// *lruEntry values put pushes, so the assertion cannot fail.
+func entryOf(el *list.Element) *lruEntry {
+	return el.Value.(*lruEntry) //nolint:forcetypeassert // c.order only ever holds *lruEntry (put)
+}
+
 // get returns the object rendered under etag. The bytes are shared: callers
 // must not modify them.
 func (c *lru) get(etag string) ([]byte, bool) {
@@ -37,7 +43,7 @@ func (c *lru) get(etag string) ([]byte, bool) {
 		return nil, false
 	}
 	c.order.MoveToFront(el)
-	return el.Value.(*lruEntry).data, true
+	return entryOf(el).data, true
 }
 
 // put keeps data under etag, evicting the least recently used entry beyond
@@ -46,7 +52,7 @@ func (c *lru) put(etag string, data []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.byKey[etag]; ok {
-		el.Value.(*lruEntry).data = data
+		entryOf(el).data = data
 		c.order.MoveToFront(el)
 		return
 	}
@@ -54,7 +60,7 @@ func (c *lru) put(etag string, data []byte) {
 	for c.order.Len() > c.limit {
 		old := c.order.Back()
 		c.order.Remove(old)
-		delete(c.byKey, old.Value.(*lruEntry).key)
+		delete(c.byKey, entryOf(old).key)
 	}
 }
 

@@ -428,7 +428,11 @@ func DeleteSealingKey(ctx context.Context, root string, kr Keyring) error {
 	if err != nil {
 		return err
 	}
-	if err := s.(*seal.SecretService).DeleteKey(ctx); err != nil {
+	ss, ok := s.(*seal.SecretService)
+	if !ok {
+		return errors.New("the sealer is not the Secret Service one")
+	}
+	if err := ss.DeleteKey(ctx); err != nil {
 		return mapError(err, keyringRef)
 	}
 	return nil

@@ -165,7 +165,12 @@ func Open(ctx context.Context, o Options) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostPort := "127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok { // a tcp4 listener always has one; never panic on it
+		_ = ln.Close()
+		return nil, errors.New("loginpage: the listener has no TCP address")
+	}
+	hostPort := "127.0.0.1:" + strconv.Itoa(addr.Port)
 	hub := o.Hub
 	p := &page{
 		o:        o,

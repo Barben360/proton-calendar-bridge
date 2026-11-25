@@ -3,6 +3,7 @@ linters:
   enable:
     - bodyclose
     - errorlint
+    - forcetypeassert
     - gocritic
     - misspell
     - nilerr
@@ -12,7 +13,9 @@ linters:
     - unparam
   # Tests (and their helpers, in _test.go files) use throwaway connections and
   # requests that the test's own cleanup closes: the context, body and error
-  # swallowing rules would only add noise there.
+  # swallowing rules would only add noise there. A failed type assertion on a
+  # decoded JSON reply panics and so fails the test, which is the point of the
+  # test: forcetypeassert would only force noise there.
   exclusions:
     rules:
       - path: _test\.go
@@ -20,6 +23,7 @@ linters:
           - bodyclose
           - nilerr
           - noctx
+          - forcetypeassert
   settings:
     errcheck:
       exclude-functions:
