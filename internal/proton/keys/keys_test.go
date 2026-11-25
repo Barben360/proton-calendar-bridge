@@ -182,6 +182,52 @@ func TestDeriveKeyPassWrongSalt(t *testing.T) {
 	}
 }
 
+// An address that lists a second, non-primary key before its primary one
+// (Options.ExtraAddressKey) opens with both: the key passphrase unlocks the
+// extra key through the token it shares with the primary key.
+func TestUnlockOpensANonPrimaryAddressKey(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{ExtraAddressKey: true})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	pass, err := keys.DeriveKeyPass(user, addrs, salts, []byte(f.Password))
+	if err != nil {
+		t.Fatalf("DeriveKeyPass: %v", err)
+	}
+	u, err := keys.Unlock(user, addrs, pass)
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	t.Cleanup(u.Close)
+	fp := func(kr *crypto.KeyRing) string { return kr.GetKeys()[0].GetFingerprint() }
+	primary, extra := fp(f.AddressKeyRing()), fp(f.ExtraAddressKeyRing())
+	first := addrs[0]
+	if len(first.Keys) != 2 || first.Keys[0].Primary || !first.Keys[1].Primary {
+		t.Fatalf("the first address lists %d keys (primary flags %v), want the extra key first, then the primary", len(first.Keys), primaryFlags(first.Keys))
+	}
+	listed, err := crypto.NewKey(first.Keys[0].PrivateKey)
+	if err != nil || listed.GetFingerprint() != extra {
+		t.Fatalf("the first listed key is not the extra key: %v", err)
+	}
+	var got []string
+	for _, k := range u.AddrKRs[first.ID].GetKeys() {
+		got = append(got, k.GetFingerprint())
+	}
+	if !slices.Equal(got, []string{extra, primary}) {
+		t.Errorf("the address keyring holds %v, want the extra key %s then the primary %s", got, extra, primary)
+	}
+	if kr := u.AddrKRs[addrs[1].ID]; kr == nil || len(kr.GetKeys()) != 1 {
+		t.Error("the second address does not hold its one key")
+	}
+}
+
+func primaryFlags(ks gpa.Keys) []bool {
+	out := make([]bool, len(ks))
+	for i, k := range ks {
+		out[i] = bool(k.Primary)
+	}
+	return out
+}
+
 func TestUnlockWrongPassphrase(t *testing.T) {
 	t.Parallel()
 	_, c, _ := login(t, protontest.Options{})
