@@ -117,6 +117,22 @@ func TestUpdateDryRunCountsDroppedOccurrences(t *testing.T) {
 		{name: "endless yearly renamed", start: base, rrule: "FREQ=YEARLY", f: service.EventFields{Summary: ptr("Renamed")}},
 		{name: "endless every ten years renamed", start: base, rrule: "FREQ=YEARLY;INTERVAL=10", f: service.EventFields{Summary: ptr("Renamed")}},
 		{name: "daily until 2100 renamed", start: base, rrule: "FREQ=DAILY;UNTIL=" + until(2100, 1, 1), f: service.EventFields{Summary: ptr("Renamed")}},
+		// An endless rule made sparser past the horizon loses occurrences
+		// there, though the window shows none lost: a series with a single
+		// occurrence in the window, or one wholly after it. A start
+		// postponed there loses some too. A series stored with a COUNT past
+		// the cap ends sooner when its start moves earlier.
+		{name: "every two years to every ten", start: now + 30*day, rrule: "FREQ=YEARLY;INTERVAL=2", f: service.EventFields{RRule: ptr("FREQ=YEARLY;INTERVAL=10")}, want: service.DroppedUnknown},
+		{name: "every two years to every ninety-nine", start: now + 30*day, rrule: "FREQ=YEARLY;INTERVAL=2", f: service.EventFields{RRule: ptr("FREQ=YEARLY;INTERVAL=99")}, want: service.DroppedUnknown},
+		{name: "every 25 months to every 1000", start: now + 30*day, rrule: "FREQ=MONTHLY;INTERVAL=25", f: service.EventFields{RRule: ptr("FREQ=MONTHLY;INTERVAL=1000")}, want: service.DroppedUnknown},
+		{name: "yearly to every two years, counted in the window", start: now + 30*day, rrule: "FREQ=YEARLY", f: service.EventFields{RRule: ptr("FREQ=YEARLY;INTERVAL=2")}, want: 1},
+		{name: "daily after the horizon to weekly", start: horizon + 10*day, rrule: "FREQ=DAILY", f: service.EventFields{RRule: ptr("FREQ=WEEKLY")}, want: service.DroppedUnknown},
+		{name: "daily after the horizon to every 99 years", start: horizon + 10*day, rrule: "FREQ=DAILY", f: service.EventFields{RRule: ptr("FREQ=YEARLY;INTERVAL=99")}, want: service.DroppedUnknown},
+		{name: "daily after the horizon postponed five years", start: horizon + 10*day, rrule: "FREQ=DAILY", f: service.EventFields{Start: timed(horizon + 10*day + 5*365*day)}, want: service.DroppedUnknown},
+		{name: "daily after the horizon renamed", start: horizon + 10*day, rrule: "FREQ=DAILY", f: service.EventFields{Summary: ptr("Renamed")}},
+		{name: "every two years renamed", start: now + 30*day, rrule: "FREQ=YEARLY;INTERVAL=2", f: service.EventFields{Summary: ptr("Renamed")}},
+		{name: "stored count past the cap, start a year earlier", start: base, rrule: "FREQ=DAILY;COUNT=2200", f: service.EventFields{Start: timed(base - 365*day)}, want: service.DroppedUnknown},
+		{name: "stored count past the cap renamed", start: base, rrule: "FREQ=DAILY;COUNT=2200", f: service.EventFields{Summary: ptr("Renamed")}},
 		{name: "zoned series shortened", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"), f: service.EventFields{RRule: ptr("FREQ=WEEKLY;COUNT=4")}, want: 6},
 		{name: "zoned series moved to another zone", start: zoned, lines: parisLines("FREQ=WEEKLY;COUNT=10"),
 			f: service.EventFields{Start: &service.EventTime{At: time.Date(2027, 3, 15, 9, 0, 0, 0, newYork), TZID: "America/New_York"}}},

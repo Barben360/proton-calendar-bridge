@@ -1542,11 +1542,13 @@ relayed to `pcb-ui` and remote `/mcp` with a token passed; its three defects are
   expansion `events_list` uses). It drops when fewer occurrences start in the window (from now to the original's last
   occurrence within two years, `DropHorizon`), or when the edited series ends before the original (it then counts the
   original's occurrences after the edited series' last one, the larger count winning), or when the original runs past
-  the horizon and the edited series ends sooner (`DroppedUnknown`). There the rules' own COUNT and UNTIL
-  (`ical.EndOfRule`) decide what an expansion cannot see: an endless original (neither) needs an endless edited rule,
-  so one given an end, however far, or removed drops; a bounded original past the cap of one capped `ical.Expand` from
-  the horizon on (a huge stored COUNT, an UNTIL far ahead) needs its COUNT and UNTIL unchanged, so a new title keeps it
-  and a moved start, which shifts UNTIL, drops; a shorter one needs an edited occurrence from its last one on. A stored
+  the horizon and the edited series ends sooner or thins out there (`DroppedUnknown` when the window counts none).
+  There the rules' own COUNT and UNTIL (`ical.EndOfRule`) decide what an expansion cannot see: an endless original
+  (neither) needs an endless edited rule, so one given an end, however far, or removed drops, and as many edited
+  occurrences as the original's over its capped expansion from the horizon on, so a sparser rule or a postponement
+  there drops; a bounded original past the cap of one capped `ical.Expand` from the horizon on (a huge stored COUNT, an
+  UNTIL far ahead) needs its COUNT and UNTIL unchanged, and for a COUNT no earlier start, so a new title keeps it and a
+  moved start, which shifts UNTIL or the COUNT's end, drops; a shorter one needs an edited occurrence from its last one on. A stored
   COUNT of any size so costs about a page of `events_list`. A moved start, later or earlier, is allowed
   for by at most one period of the original (the gap between its last two occurrences, the first after the horizon included;
   none for a single one), each bound with two hours of slack for a zone change across differing daylight saving dates,

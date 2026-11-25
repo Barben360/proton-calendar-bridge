@@ -90,10 +90,13 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 	}
 	late := min(max(shift, 0)+zoneSlackDrop, period)        // how much later the edited series may end
 	early := max(min(shift, late), -period) - zoneSlackDrop // how much earlier it may end
-	if beyond != nil && !endsNoSooner(bm, bo, am, ao, *beyond, early) {
-		return DroppedUnknown
-	}
+	// Past the horizon nothing is counted: a loss there makes the change
+	// drop, as DroppedUnknown when the window shows no loss of its own.
+	far := beyond != nil && !endsNoSooner(bm, bo, am, ao, *beyond, early, late)
 	if len(old) == 0 {
+		if far {
+			return DroppedUnknown
+		}
 		return 0
 	}
 	last := old[len(old)-1]
@@ -119,6 +122,9 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 			dropped = max(dropped, tail)
 		}
 	}
+	if far && dropped == 0 {
+		return DroppedUnknown
+	}
 	return dropped
 }
 
@@ -129,15 +135,19 @@ func droppedOccurrences(before, after []byte, scope EditScope, now time.Time) in
 //
 //   - an endless original (neither COUNT nor UNTIL) needs an endless
 //     edited rule: one given an end, or removed, ends sooner however dense;
+//     and over the original's capped expansion from beyond (moved by early,
+//     and by late at its end), at least as many edited occurrences: a
+//     sparser rule there (every ten years instead of two) loses some;
 //   - a bounded original with more than the cap from beyond to
 //     endlessProbe (a huge stored COUNT, an UNTIL far ahead) needs the
-//     edited rule's COUNT and UNTIL unchanged, so a new title keeps it;
+//     edited rule's COUNT and UNTIL unchanged, so a new title keeps it,
+//     and for a COUNT no start moved earlier, which ends it sooner;
 //   - a shorter one needs an edited occurrence from its last one (moved
 //     by early) on.
 //
 // At most one capped expansion of each decides: the cost of a page of
 // events_list, whatever a stored COUNT says.
-func endsNoSooner(bm ical.Component, bo []ical.Component, am ical.Component, ao []ical.Component, beyond time.Time, early time.Duration) bool {
+func endsNoSooner(bm ical.Component, bo []ical.Component, am ical.Component, ao []ical.Component, beyond time.Time, early, late time.Duration) bool {
 	be, _, ok := ruleEnd(bm)
 	if !ok {
 		return false
@@ -146,15 +156,19 @@ func endsNoSooner(bm ical.Component, bo []ical.Component, am ical.Component, ao 
 	if !ok {
 		return false
 	}
-	if be.Endless() {
-		return recurring && ae.Endless()
-	}
 	orig, cut, ok := startsCapped(bm, bo, beyond, endlessProbe)
 	if !ok || len(orig) == 0 {
 		return false
 	}
+	if be.Endless() {
+		if !recurring || !ae.Endless() {
+			return false
+		}
+		edited, editedCut, ok := startsCapped(am, ao, beyond.Add(early), orig[len(orig)-1].Add(late).Add(time.Second))
+		return ok && (editedCut || len(edited) >= len(orig))
+	}
 	if cut {
-		return recurring && ae == be
+		return recurring && ae == be && (be.Count == "" || early >= -zoneSlackDrop)
 	}
 	edited, editedCut, ok := startsCapped(am, ao, orig[len(orig)-1].Add(early), endlessProbe)
 	return ok && (len(edited) > 0 || editedCut)
