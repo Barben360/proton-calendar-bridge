@@ -45,6 +45,8 @@ gh attestation verify oci://ghcr.io/barben360/proton-calendar-bridge:X.Y.Z --rep
   --source-ref refs/tags/vX.Y.Z
 ```
 
+The image also carries an attested SPDX SBOM (its packages, read from the linux/amd64 image: the Go modules are the same on every platform). To check it, add `--predicate-type https://spdx.dev/Document/v2.3`; to read it, add `--format json`.
+
 A `sha-<12 hex>` development image is built from a branch: leave out `--source-ref`.
 
 ## Prepare `/data`

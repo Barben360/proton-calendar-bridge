@@ -27,7 +27,7 @@ Tests must bite: each fails when the behaviour it guards breaks. Write the faili
 
 ### Windows
 
-The Windows code compiles on Linux: `GOOS=windows go vet ./...` type-checks it (CI's `check` job runs it), and `make build GOOS=windows` cross-compiles `bin/pcb.exe`. Only the files that call Windows carry the `windows` build tag; the logic around them stays untagged, so the Linux tests cover it too. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
+The Windows code compiles on Linux: `GOOS=windows go vet ./...` type-checks it and `make lint` lints it in a second `GOOS=windows` pass (CI's `check` job runs both); only `cmd/pcb-ui`'s cgo Windows files (`gl_windows.go`, `platform_windows.go`, `platform_windows_test.go`) are linted by neither pass, and `make build GOOS=windows` cross-compiles `bin/pcb.exe`. Only the files that call Windows carry the `windows` build tag; the logic around them stays untagged, so the Linux tests cover it too. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
 
 ```sh
 make ui    # bin/pcb-ui.exe: a GUI binary (-H=windowsgui), with its icon and version
@@ -131,7 +131,7 @@ A refused tag that you keep still counts: a later run compares every `v*` tag to
 
 - Pinned: the Go toolchain (`toolchain go1.27.4` in `go.mod`, read by every `setup-go`; the image's Go is pinned by the Dockerfile's `golang` digest and built with `GOTOOLCHAIN=local`, so it never downloads another toolchain: the image follows its digest and the release archives follow go.mod's `toolchain` line, and the two can differ by a patch release; bump the `toolchain` line by hand when a new Go patch is wanted), the modules (`go.sum`, `go mod verify` in the image build), every action (by commit SHA), WiX (7.0.1), go-winres, syft (the SBOM's generator), and the CI's gitleaks and golangci-lint (each a version and the SHA-256 of its release archive in `.github/workflows/ci.yml`, checked before the binary runs).
 - Not pinned, only logged: the MSYS2 `gcc` that builds `pcb-ui.exe` (setup-msys2 installs the current packages; the release logs `gcc --version`), and Homebrew's `gnu-tar` on the macOS runners (the formula has no versioned variant). The runner images themselves (`ubuntu-latest`, `windows-latest`, `macos-latest`) move too. So `pcb-ui` and the Windows binaries are not reproducible bit for bit by someone else; `pcb` (static, no cgo) is.
-- The release attests every file's build provenance and an SPDX SBOM of the Go modules (`actions/attest-sbom`). The SBOM describes the source's Go modules (go.mod); it is not a scan of each archive. The image has provenance only: a BuildKit SBOM would turn the single-manifest image into an index with an attestation manifest, which the digest-based publish job does not handle.
+- The release attests every file's build provenance and an SPDX SBOM of the Go modules (`actions/attest-sbom`). The SBOM describes the source's Go modules (go.mod); it is not a scan of each archive. The image has both too: an unprivileged job scans the pushed image (linux/amd64) by digest, and a later job attests the SPDX SBOM to it as a registry referrer, not as a BuildKit SBOM, which would turn the image into an index the digest-based publish job does not handle.
 
 ### When a release run fails
 
@@ -141,10 +141,10 @@ The run's jobs, in order: checks, the builds, the archives, macOS, `image`, `rel
 |---|---|---|
 | before the `image` job | nothing | delete the tag, fix the cause, tag again |
 | in the `image` job or after it | the image, maybe its tags | fix what is outside the commit (a runner, the network, GitHub), then "Re-run failed jobs" on that run. "Re-run all jobs" and a re-pushed tag are refused: the image is already pushed. A cause in the code cannot be fixed this way: the version is burned, release the next one |
-| the image's attestation | the version tags, on an image without its attestation, and no Release | "Re-run failed jobs": it builds the same commit again and moves those tags onto the attested image |
+| the image's attestation (publish), or its SBOM (the `sbom` and `attest-sbom` jobs) | the version tags, on an image without its provenance or SBOM attestation, and no Release | "Re-run failed jobs": it re-runs the failed job and the jobs after it. A failed `publish` builds the same commit again and moves the tags onto the attested image; a failed `sbom` or `attest-sbom` scans or attests the image by its digest. The SBOM file is kept 7 days: if `attest-sbom` fails and is re-run later, it stops at the missing file, so re-run the `sbom` job first (from its run page: it re-runs the jobs after it, `attest-sbom` included) |
 | the last step, "The Release is published as decided" | everything: the Release is out | do not re-run; check the Release on GitHub and fix it there |
 
-Only the owner may re-run a release's `image` job: its build and publish jobs refuse anyone else before building or tagging, as checks does on the first run.
+Only the owner may re-run a release's `image` job: its build, publish, SBOM and SBOM attestation jobs refuse anyone else before building, tagging or attesting, as checks does on the first run.
 
 ### A development image
 

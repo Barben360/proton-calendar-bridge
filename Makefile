@@ -116,12 +116,16 @@ test:
 	env -u DBUS_SESSION_BUS_ADDRESS go test -race -timeout $(TEST_TIMEOUT) $(PKGS)
 
 # Formatting, vet, then golangci-lint, as CI runs it. golangci-lint sizes
-# its workers by the machine's cores, not by GOMAXPROCS.
+# its workers by the machine's cores, not by GOMAXPROCS. The second pass lints
+# the Windows-only files, which the first never compiles; CGO_ENABLED=0 as
+# cmd/pcb builds. cmd/pcb-ui's cgo Windows files (gl_windows.go,
+# platform_windows.go, platform_windows_test.go) are linted by neither pass.
 lint:
 	@files=$$(gofmt -l .); \
 		if [ -n "$$files" ]; then echo "gofmt: run gofmt -w on:"; echo "$$files"; exit 1; fi
 	go vet ./...
 	golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
+	GOOS=windows CGO_ENABLED=0 golangci-lint run --concurrency $(JOBS) --allow-parallel-runners
 
 # The container image (M5-Rpre7), stamped like make build. IMAGE_FLAGS adds
 # docker build flags (.github/workflows/image-build.yml pushes by digest).

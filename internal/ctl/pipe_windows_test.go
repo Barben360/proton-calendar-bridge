@@ -227,9 +227,9 @@ func TestSecondListenIsTaken(t *testing.T) {
 
 // openEnds connects a client to a listener on dir's pipe and closes the
 // listener: the pipe's name lives on in the server's end of that
-// connection, which the caller closes (and the client's, which never holds
-// the name).
-func openEnds(t *testing.T, dir string) (server, client net.Conn) {
+// connection, which the caller closes (the client's end, which never holds
+// the name, closes at cleanup).
+func openEnds(t *testing.T, dir string) (server net.Conn) {
 	t.Helper()
 	ln, err := ctl.Listen(filepath.Join(dir, "pcb.sock"))
 	if err != nil {
@@ -244,7 +244,7 @@ func openEnds(t *testing.T, dir string) (server, client net.Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err = winio.DialPipe(name, nil)
+	client, err := winio.DialPipe(name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func openEnds(t *testing.T, dir string) (server, client net.Conn) {
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return server, client
+	return server
 }
 
 // A restart on the same state: the previous server's end of a connection
@@ -270,7 +270,7 @@ func TestListenWaitsForThePreviousServerEnd(t *testing.T) {
 	// close would pass without waiting, so such a run is set up again.
 	for attempt := 1; attempt <= 3; attempt++ {
 		dir := t.TempDir()
-		server, _ := openEnds(t, dir)
+		server := openEnds(t, dir)
 		var closing atomic.Int64 // when the close began, in Unix nanoseconds
 		time.AfterFunc(100*time.Millisecond, func() {
 			closing.Store(time.Now().UnixNano())

@@ -9,6 +9,7 @@ linters:
     - gosec
     - misspell
     - nilerr
+    - nolintlint
     - noctx
     - revive
     - unconvert
@@ -60,6 +61,10 @@ linters:
         # (a calendar, a config file, a state root): by design, never from a
         # remote peer. The remaining rules stay on.
         - G304
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
     revive:
       rules:
         - name: exported

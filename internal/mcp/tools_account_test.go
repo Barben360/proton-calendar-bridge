@@ -430,7 +430,7 @@ func TestLoginToolResultHasNoSecret(t *testing.T) {
 		if len(q) != 1 {
 			t.Fatalf("asked %d", len(q))
 		}
-		if _, err := http.Get(q[0].URL); err == nil { //nolint:noctx // a probe
+		if _, err := http.Get(q[0].URL); err == nil { // a probe
 			t.Error("the declined page still serves")
 		}
 	})
@@ -570,7 +570,7 @@ func TestLoginToolReplacesTheSessionsPage(t *testing.T) {
 	if u1 == "" || u2 == "" || u1 == u2 {
 		t.Fatalf("URLs %q, %q", u1, u2)
 	}
-	if _, err := http.Get(u1); err == nil { //nolint:noctx // a probe
+	if _, err := http.Get(u1); err == nil { // a probe
 		t.Error("the first page still serves")
 	}
 	getPage(t, u2)

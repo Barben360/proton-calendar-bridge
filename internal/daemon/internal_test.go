@@ -43,7 +43,7 @@ func startTestServer(t *testing.T, h http.HandlerFunc) (srv *http.Server, url st
 }
 
 func get(url string, res chan<- error) {
-	resp, err := http.Get(url) //nolint:gosec,noctx // a test request to the test's own server
+	resp, err := http.Get(url) // a test request to the test's own server
 	if err == nil {
 		_, err = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()

@@ -34,7 +34,7 @@ func TestLogoutWithAnotherProcessHoldingTheCacheOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	old := cache.RemoveRetry
 	cache.RemoveRetry = 100 * time.Millisecond
 	defer func() { cache.RemoveRetry = old }()

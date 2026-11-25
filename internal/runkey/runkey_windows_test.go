@@ -39,7 +39,7 @@ func TestRunKeyWriteDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _, err := k.GetStringValue(runkey.Value)
-	k.Close()
+	_ = k.Close()
 	if err != nil || got != data {
 		t.Fatalf("registry value = %q, %v", got, err)
 	}
