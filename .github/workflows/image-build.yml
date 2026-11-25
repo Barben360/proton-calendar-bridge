@@ -3,7 +3,7 @@ name: image-build
 # image.yml (by hand: sha-<12 hex>) and release.yml (a release tag). Each
 # architecture builds on its native runner and is pushed untagged, by
 # digest; the tags go on one manifest list over both digests, then a build
-# provenance attestation is pushed beside it.
+# provenance attestation and an SBOM attestation are pushed beside it.
 #
 # The digests on the list are the ones smoke-tested, and no temporary tag is
 # ever pushed: each build job pushes its image by digest only (BuildKit's
@@ -80,7 +80,8 @@ jobs:
       # release.yml: "Re-run failed jobs" on a failed image job skips its
       # checks job, and with it the owner check; this one runs again,
       # before any code of inputs.ref is checked out.
-      # Same check: publish below, release.yml's checks and release jobs.
+      # Same check: publish, sbom and attest-sbom below, release.yml's
+      # checks and release jobs.
       - name: Refuse an image started by anyone but the owner
         if: inputs.owner-only
         run: |
@@ -156,8 +157,10 @@ jobs:
     # No checkout: this job holds id-token and attestations, so it runs no
     # code of any ref; its checks are inline.
     steps:
-      # "Re-run failed jobs" on a failed publish runs this job alone.
-      # Same check: the build job above, release.yml's checks and release jobs.
+      # "Re-run failed jobs" on a failed publish runs this job and the jobs
+      # after it (sbom, attest-sbom).
+      # Same check: the build job above, sbom and attest-sbom below,
+      # release.yml's checks and release jobs.
       - name: Refuse an image started by anyone but the owner
         if: inputs.owner-only
         run: |
@@ -252,7 +255,8 @@ jobs:
           name: image-sbom
           path: ${{ runner.temp }}/sbom/image.spdx.json
           if-no-files-found: error
-          retention-days: 1
+          # Kept for a delayed "Re-run failed jobs" of attest-sbom.
+          retention-days: 7
           overwrite: true
       - name: Log out
         if: always()

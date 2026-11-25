@@ -141,10 +141,10 @@ The run's jobs, in order: checks, the builds, the archives, macOS, `image`, `rel
 |---|---|---|
 | before the `image` job | nothing | delete the tag, fix the cause, tag again |
 | in the `image` job or after it | the image, maybe its tags | fix what is outside the commit (a runner, the network, GitHub), then "Re-run failed jobs" on that run. "Re-run all jobs" and a re-pushed tag are refused: the image is already pushed. A cause in the code cannot be fixed this way: the version is burned, release the next one |
-| the image's attestation (publish), or its SBOM (the `sbom` and `attest-sbom` jobs) | the version tags, on an image without its provenance or SBOM attestation, and no Release | "Re-run failed jobs": it re-runs only the failed jobs, and a re-run of `publish` moves the tags onto the attested image again. A failed `sbom` or `attest-sbom` is re-run alone, scanning the image by its digest |
+| the image's attestation (publish), or its SBOM (the `sbom` and `attest-sbom` jobs) | the version tags, on an image without its provenance or SBOM attestation, and no Release | "Re-run failed jobs": it re-runs the failed job and the jobs after it. A failed `publish` builds the same commit again and moves the tags onto the attested image; a failed `sbom` or `attest-sbom` scans or attests the image by its digest. The SBOM file is kept 7 days: if `attest-sbom` fails and is re-run later, it stops at the missing file, so re-run the `sbom` job first (from its run page: it re-runs the jobs after it, `attest-sbom` included) |
 | the last step, "The Release is published as decided" | everything: the Release is out | do not re-run; check the Release on GitHub and fix it there |
 
-Only the owner may re-run a release's `image` job: its build and publish jobs refuse anyone else before building or tagging, as checks does on the first run.
+Only the owner may re-run a release's `image` job: its build, publish, SBOM and SBOM attestation jobs refuse anyone else before building, tagging or attesting, as checks does on the first run.
 
 ### A development image
 
