@@ -65,9 +65,9 @@ Details: [Thunderbird](thunderbird.md#caldav-app-passwords).
 | Command | What it does |
 |---|---|
 | `pcb serve [--listen HOST:PORT] [--wait-for-login] [--log-level LEVEL]` | Sync loop, CalDAV listener and control socket until Ctrl-C ([Thunderbird](thunderbird.md#what-pcb-serve-does)). |
-| `pcb install [--system] [--plan]` | Runs `pcb serve` as a systemd service ([service](service.md)). |
-| `pcb uninstall [--delete-data] [--plan]` | Removes the service, and with `--delete-data` the data ([service](service.md#uninstall)). |
-| `pcb service start\|stop\|restart\|status\|logs [-f]` | Manages the installed service. |
+| `pcb install [--user\|--system] [--plan]` | Runs `pcb serve` as a systemd service: `--user` (the default) for the caller's systemd user manager, `--system` for the system service (runs as the pcb user; needs root); `--plan` prints the steps without changing anything ([service](service.md)). |
+| `pcb uninstall [--user\|--system] [--delete-data [--yes]] [--plan]` | Removes the service, and with `--delete-data` the data; `--yes` confirms `--delete-data` without asking; `--user` and `--system` pick the service as for `pcb install` ([service](service.md#uninstall)). |
+| `pcb service start\|stop\|restart\|status\|logs [-f] [--user\|--system]` | Manages the installed service: `--user` or `--system` picks it as for `pcb install`; `-f` (`--follow`) keeps `logs` open. |
 
 On Windows there is no service: `pcb install` and every `pcb service` command exit 20 with `no service on Windows`, hint `use pcb-ui; "Start at login" runs it at each login`. `pcb serve` runs in a terminal (Ctrl-C stops it). `pcb uninstall` stops nothing and refuses (exit 20) while `pcb-ui`, `pcb serve` or an agent session (`pcb mcp`) serves the state; it turns `pcb-ui`'s "Start at login" off (deletes its Run value) when that value starts the `pcb-ui.exe` beside this `pcb.exe` on the default directories, and keeps it otherwise, saying why. With `--delete-data` it also logs out and deletes the config and state directories, the sealing key included ([install](install.md#remove-it-from-windows)).
 
@@ -77,7 +77,7 @@ On Windows there is no service: `pcb install` and every `pcb service` command ex
 |---|---|
 | `pcb mcp [--profile full\|read-only] [--allow CAPS] [--account A]` | MCP for the agent that runs it, on stdin and stdout; `full`, the default, allows everything, `read-only` reading and starting a login ([agents](agents.md)). |
 | `pcb mcp token add NAME --allow read` | A remote agent's bearer token, printed once. `--allow` takes `freebusy`, `read`, `write`, `delete`, `unconfirmed-delete` (deletes without asking you, for a client that cannot ask). `--account ADDRESS` and `--calendar ID` (repeatable) narrow what it reaches, `--expires 30d` limits its life, `--plan` shows it without creating it. |
-| `pcb mcp token list`, `pcb mcp token remove NAME` | List the tokens (never their values), remove one. |
+| `pcb mcp token list`, `pcb mcp token remove NAME [--yes]` | List the tokens (never their values), remove one; `--yes` removes without asking (required without a terminal or with `--non-interactive`, exit 10). |
 
 ### Other
 
