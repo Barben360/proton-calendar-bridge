@@ -2,7 +2,6 @@ package keys_test
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -154,10 +153,8 @@ func TestDeriveKeyPassWrongSalt(t *testing.T) {
 		t.Fatalf("the fake lists no salt for the primary user key %s", primary)
 	}
 	real := salts[idx]
-	other := make([]byte, 16)
-	if _, err := rand.Read(other); err != nil {
-		t.Fatal(err)
-	}
+	// A fixed salt, so the leak check below never meets its text by chance.
+	other := []byte("another-salt-16b")
 	for _, tc := range []struct {
 		name   string
 		salts  gpa.Salts
@@ -175,8 +172,10 @@ func TestDeriveKeyPassWrongSalt(t *testing.T) {
 			if got := errors.Is(err, keys.ErrKeysLocked); got != tc.locked {
 				t.Errorf("err = %v, ErrKeysLocked %v, want %v", err, got, tc.locked)
 			}
-			if strings.Contains(err.Error(), f.Password) || strings.Contains(err.Error(), real.KeySalt) {
-				t.Error("the error leaks the password or the salt")
+			for _, secret := range []string{f.Password, real.KeySalt, tc.salts[0].KeySalt} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("the error %q leaks the password or a salt", err)
+				}
 			}
 		})
 	}
