@@ -270,8 +270,7 @@ func TestLoginPageExpires(t *testing.T) {
 		o := l.options(nil)
 		o.TTL = 100 * time.Millisecond
 		p := start(t, o)
-		time.Sleep(150 * time.Millisecond)
-		if !p.closed() {
+		if !p.closed() { // polls up to 2 s: the TTL (100 ms) must have closed it by then
 			t.Error("nobody came and the page still listens past its TTL")
 		}
 	})

@@ -1153,7 +1153,10 @@ func TestRestartWhileALoopParksServesAgain(t *testing.T) {
 		t.Errorf("Restart(a) = %+v, want not stopped", got)
 	}
 	// Room for a new loop that did not wait for the old one's end to
-	// report serving ahead of the old loop's stopped.
+	// report serving ahead of the old loop's stopped. A real-time bound on
+	// purpose: the waiting loop is blocked on a channel with nothing to
+	// observe, so no event marks the moment it would have reported (the
+	// order check after the release is the assertion that cannot flake).
 	time.Sleep(200 * time.Millisecond)
 	r.mu.Lock()
 	early := append([]service.ServeState(nil), r.states[a][before:]...)

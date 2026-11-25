@@ -511,6 +511,7 @@ func TestCallUnsentAsTheDaemonEndsMovesToTheProcess(t *testing.T) {
 		// The client's writer goroutine ends on that close: let it, so
 		// the request fails as unsent instead of being written to a
 		// closed connection (which the client retries on a new one).
+		// (net/http's own goroutine: no event to wait on, so a short bound.)
 		time.Sleep(50 * time.Millisecond)
 	}})
 

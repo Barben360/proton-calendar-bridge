@@ -127,7 +127,8 @@ func TestConcurrentRefreshAcrossProcessesRefreshesOnce(t *testing.T) {
 	for e.f.Calls("GET", "/core/v4/users") < users+2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond) // let both answers (401) arrive
+	// Both requests arrived carrying the expired token, so both are refused
+	// whenever they read the answer: nothing more to wait for.
 	unlock()
 	wg.Wait()
 	for i, err := range errs {
