@@ -73,6 +73,12 @@ type Options struct {
 	BadPassphraseSignature bool
 	// EmptyPassphraseSignature serves no signature at all (a stripped one).
 	EmptyPassphraseSignature bool
+	// ExtraAddressKey lists first, on every account's first address, a
+	// second key (ExtraAddressKeyRing): active, not primary, behind the
+	// primary key's token, so the key passphrase unlocks it too. The parts
+	// of a write must still be signed by the primary key: the fake checks
+	// them against it alone.
+	ExtraAddressKey bool
 	// ReplayedPassphraseSignature serves a genuine signature of our own
 	// address key over another plaintext (a replay from another calendar,
 	// research G): it verifies on its own, not on this passphrase.
@@ -875,6 +881,11 @@ func (f *Fake) fixResponse(resp *http.Response) error {
 		if route == "GET /core/v4/users" {
 			if err := f.relockUserKeys(body); err != nil {
 				return fmt.Errorf("protontest: re-locking the user keys: %w", err)
+			}
+		}
+		if route == "GET /core/v4/addresses" && f.o.ExtraAddressKey {
+			if err := addExtraAddressKey(body); err != nil {
+				return fmt.Errorf("protontest: adding the extra address key: %w", err)
 			}
 		}
 		if tok, ok := body["AccessToken"].(string); ok && (route == "POST /auth/v4" || route == "POST /auth/v4/refresh") {

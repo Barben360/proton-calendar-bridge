@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Barben360/proton-calendar-bridge/internal/exitcode"
@@ -71,6 +72,100 @@ func TestWriteAfterAnAccountSwitchIsRefused(t *testing.T) {
 	}
 	if n := len(r.proton(t, "n@x")); n != 0 {
 		t.Errorf("Proton holds %d rows", n)
+	}
+}
+
+// The account check at the Sync call is the last one before a write leaves
+// pcb: a login moved to another Proton account after the write's last cache
+// step (here at the plan's "write normalised" log line, which a client
+// COLOR triggers, past every check of the cache) is refused there, and no
+// Sync call leaves pcb on the other account's session.
+func TestWriteAfterAnAccountSwitchAtTheSendIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil)
+	r.start(t)
+	var (
+		mu       sync.Mutex
+		switched bool
+		syncs    int
+	)
+	r.logs.onWrite(func(line string) {
+		if !strings.Contains(line, "write normalised") {
+			return
+		}
+		mu.Lock()
+		first := !switched
+		switched = true
+		mu.Unlock()
+		if first {
+			r.switchAccount(t)
+		}
+	})
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		if r.isSync(req) {
+			mu.Lock()
+			syncs++
+			mu.Unlock()
+		}
+		return send()
+	})
+	body := vcal([]string{"UID:n@x", "DTSTAMP:20270101T000000Z", "DTSTART:" + stamp(base), "DTEND:" + stamp(base+3600), "SUMMARY:New", "COLOR:red"})
+	_, err := r.put(t, "n@x.ics", body, service.Precondition{IfNoneMatchAny: true})
+	mu.Lock()
+	seen, n := switched, syncs
+	mu.Unlock()
+	if !seen {
+		t.Fatalf("the write never logged \"write normalised\": the switch point moved (err %v)", err)
+	}
+	if n != 0 {
+		t.Errorf("%d Sync calls left pcb on the other account's session", n)
+	}
+	if n := len(r.proton(t, "n@x")); n != 0 {
+		t.Errorf("Proton holds %d rows", n)
+	}
+	wantAnotherAccount(t, err)
+}
+
+// The same check on its second run: a write whose session ended on the Sync
+// call, while another process logged in to another Proton account, finds
+// that account's session when it renews its own. It is refused as an account
+// switch, not reported as a renewal the person could retry past, and the
+// renewed session sends nothing. The hook answers every Sync itself, so the
+// Sync calls are counted where they leave pcb.
+func TestWriteWhoseSessionRenewsIntoAnotherAccountIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, protontest.Options{}, nil)
+	r.start(t)
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	r.tr.set(func(req *http.Request, send func() (*http.Response, error)) (*http.Response, error) {
+		if !r.isSync(req) {
+			return send()
+		}
+		mu.Lock()
+		attempts++
+		first := attempts == 1
+		mu.Unlock()
+		if first {
+			r.switchAccount(t)
+		}
+		// Proton answers 401 before it reads the body: the session ended.
+		body := `{"Code":401,"Error":"Invalid access token"}`
+		return &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Proto: req.Proto,
+			ProtoMajor: req.ProtoMajor, ProtoMinor: req.ProtoMinor, Request: req,
+			Header:        http.Header{"Content-Type": {"application/json"}},
+			Body:          io.NopCloser(strings.NewReader(body)),
+			ContentLength: int64(len(body))}, nil
+	})
+	_, err := r.put(t, "n@x.ics", newEvent("n@x", "New"), service.Precondition{IfNoneMatchAny: true})
+	wantAnotherAccount(t, err)
+	mu.Lock()
+	n := attempts
+	mu.Unlock()
+	if n != 2 { // the call, and its one resend after the token refresh
+		t.Errorf("%d Sync calls left pcb, want 2: the renewed session must not send", n)
 	}
 }
 

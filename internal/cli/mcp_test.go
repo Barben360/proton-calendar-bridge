@@ -252,9 +252,19 @@ func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 		"Content-Length: 1000\r\n\r\n{"); err != nil {
 		t.Fatal(err)
 	}
-	// A round trip on a second connection: the daemon has accepted the
-	// request's connection (accepted first) and moved on to this one.
-	socketStatus(t, r)
+	// The daemon counts a relay session: its handler has read the request's
+	// headers, admitted the grant and opened the session that reads the body,
+	// so the request is in flight. This relies on go-sdk v1.8.0's order: its
+	// streamable handler registers the session (connectStreamable, which
+	// LiveSessions counts) before the session's transport reads the body. An
+	// SDK that read first would hang this wait until its guard, never pass it.
+	deadline := time.Now().Add(30 * time.Second)
+	for st := socketStatus(t, r); st.MCP == nil || st.MCP.Sessions["relay"] != 1; st = socketStatus(t, r) {
+		if time.Now().After(deadline) { // a hang guard, not a deadline of the test
+			t.Fatalf("the daemon never counted the relay's session: mcp %+v\nstderr: %s", st.MCP, m.errb.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	start := time.Now()
 	m.stop()                // SIGTERM through Execute's context
 	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
