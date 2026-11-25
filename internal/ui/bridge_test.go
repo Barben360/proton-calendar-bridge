@@ -145,10 +145,11 @@ func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
 	t.Parallel()
 	l := newLab(t)
 	ended := make(chan struct{})
+	const half = "PROPFIND / HTTP/1.1\r\nHost: x\r\n" // no blank line: the headers go on
 	reading := make(chan struct{}, 1)
 	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, SessionEnd: ended, Listen: func(network, addr string) (net.Listener, error) {
 		ln, err := net.Listen(network, addr)
-		return &readWatch{Listener: ln, reading: reading}, err
+		return &readWatch{Listener: ln, reading: reading, want: len(half)}, err
 	}})
 	t.Cleanup(func() { _ = b.Stop() })
 	if err := b.Start(t.Context()); err != nil {
@@ -159,13 +160,13 @@ func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := io.WriteString(conn, "PROPFIND / HTTP/1.1\r\nHost: x\r\n"); err != nil {
+	if _, err := io.WriteString(conn, half); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case <-reading: // the server tracks the connection and reads it: it holds the Shutdown
+	case <-reading: // the server has read the half-sent headers and waits for the rest: it holds the Shutdown
 	case <-time.After(30 * time.Second): // a hang guard, not a deadline
-		t.Fatal("the server never read the connection")
+		t.Fatal("the server never read the half-sent headers")
 	}
 	close(ended)
 	start := time.Now()
@@ -497,11 +498,13 @@ func TestBridgeLogsTheCertificateWarning(t *testing.T) {
 	}
 }
 
-// readWatch signals on reading when the server first reads an accepted
-// connection: the server then tracks it, so a Shutdown waits for it.
+// readWatch signals on reading once the server has read want bytes of an
+// accepted connection: the bytes the client sent, so the server is past
+// them, reading the request, and a Shutdown waits for it.
 type readWatch struct {
 	net.Listener
 	reading chan struct{}
+	want    int
 }
 
 func (w *readWatch) Accept() (net.Conn, error) {
@@ -509,20 +512,25 @@ func (w *readWatch) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &readWatchConn{Conn: c, reading: w.reading}, nil
+	return &readWatchConn{Conn: c, reading: w.reading, want: w.want}, nil
 }
 
 type readWatchConn struct {
 	net.Conn
 	reading chan struct{}
+	want    int
+	read    atomic.Int64 // bytes read so far
 }
 
 func (c *readWatchConn) Read(p []byte) (int, error) {
-	select {
-	case c.reading <- struct{}{}:
-	default:
+	n, err := c.Conn.Read(p)
+	if c.read.Add(int64(n)) >= int64(c.want) {
+		select {
+		case c.reading <- struct{}{}:
+		default:
+		}
 	}
-	return c.Conn.Read(p)
+	return n, err
 }
 
 // dyingListener accepts nothing and fails its Accept when kill closes: the
