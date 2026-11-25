@@ -118,7 +118,8 @@ test:
 # Formatting, vet, then golangci-lint, as CI runs it. golangci-lint sizes
 # its workers by the machine's cores, not by GOMAXPROCS. The second pass lints
 # the Windows-only files, which the first never compiles; CGO_ENABLED=0 as
-# cmd/pcb builds (the cgo-only pcb-ui, linted by the first pass, is left out).
+# cmd/pcb builds. cmd/pcb-ui's cgo Windows files (gl_windows.go,
+# platform_windows.go, platform_windows_test.go) are linted by neither pass.
 lint:
 	@files=$$(gofmt -l .); \
 		if [ -n "$$files" ]; then echo "gofmt: run gofmt -w on:"; echo "$$files"; exit 1; fi
