@@ -26,13 +26,14 @@ Your [Proton Calendar](https://proton.me/calendar) in Thunderbird and in your AI
 
 - **Your calendars in Thunderbird**, read and write: create, edit, move and delete events, single occurrences included. Each change goes to Proton and is read back before Thunderbird gets its answer.
 - **Your calendars for AI agents**, through MCP: Claude Code or any MCP client lists, searches and, when you allow it, edits events. You decide per agent what it may do, and a delete asks you first, and is refused when the agent's client cannot ask, unless you allow it.
+- **Signs in the way Proton asks**: password, 2FA code, CAPTCHA, and the mailbox password of an account in Proton's two-password mode.
 - **Several Proton accounts in one bridge**, each with its own CalDAV address, passwords, cache and sync, so one account's problem never stops another.
 - **Keeps your secrets yours.** The cache is encrypted, the Proton session is sealed with a key held in your desktop keyring or a key file, and passwords never go through command-line arguments. Calendar apps sign in with app passwords you can revoke one by one.
 - **Looks after itself.** It follows Proton's change feed, survives restarts, and `pcb doctor` says what is wrong and how to fix it.
 
 ## The desktop app
 
-`pcb-ui` puts the bridge in your tray: add an account (password, 2FA code, CAPTCHA), copy the connection into Thunderbird, switch CalDAV or MCP per account, and get a notification when an account needs you. It follows your desktop's light or dark theme.
+`pcb-ui` puts the bridge in your tray: add an account (password, 2FA code, mailbox password for a two-password account, CAPTCHA), copy the connection into Thunderbird, switch CalDAV or MCP per account, and get a notification when an account needs you. It follows your desktop's light or dark theme.
 
 <p align="center">
 <img alt="pcb-ui showing an account: its adapters, its CalDAV connection to copy into Thunderbird, and its calendars" src="docs/assets/ui/account-light.png#gh-light-mode-only" width="720">
@@ -88,7 +89,7 @@ On GNOME, the tray icon needs the AppIndicator extension; without it, the window
 make install                 # pcb into ~/.local/bin
 pcb install                  # a user service running pcb serve; it waits for your login
 loginctl enable-linger "$USER"
-pcb login                    # username, password, 2FA code at a prompt
+pcb login                    # username, password, 2FA code (and mailbox password) at a prompt
 pcb client show              # the CalDAV URL, username and password for Thunderbird
 pcb doctor                   # every check, with the fix for each failure
 ```
