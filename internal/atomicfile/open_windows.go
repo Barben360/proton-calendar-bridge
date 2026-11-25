@@ -43,7 +43,8 @@ func Rename(from, to string) error {
 	deadline := time.Now().Add(RenameRetry)
 	for {
 		err := rename(from, to)
-		if err == nil || !(errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)) || !time.Now().Before(deadline) {
+		held := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || !held || !time.Now().Before(deadline) {
 			return err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -58,7 +59,9 @@ func Rename(from, to string) error {
 func dirTarget(from, to string) error {
 	fi, err := os.Lstat(to)
 	if err != nil || !fi.IsDir() {
-		return nil
+		// No target, or a file: nothing to refuse; a Lstat failure surfaces
+		// from the rename itself.
+		return nil //nolint:nilerr // the rename reports an unreadable target
 	}
 	ofi, err := os.Lstat(from)
 	if err != nil {

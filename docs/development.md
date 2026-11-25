@@ -27,7 +27,7 @@ Tests must bite: each fails when the behaviour it guards breaks. Write the faili
 
 ### Windows
 
-The Windows code compiles on Linux: `GOOS=windows go vet ./...` type-checks it (CI's `check` job runs it), and `make build GOOS=windows` cross-compiles `bin/pcb.exe`. Only the files that call Windows carry the `windows` build tag; the logic around them stays untagged, so the Linux tests cover it too. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
+The Windows code compiles on Linux: `GOOS=windows go vet ./...` type-checks it and `make lint` lints it in a second `GOOS=windows` pass (CI's `check` job runs both), and `make build GOOS=windows` cross-compiles `bin/pcb.exe`. Only the files that call Windows carry the `windows` build tag; the logic around them stays untagged, so the Linux tests cover it too. `pcb-ui.exe` needs cgo, so it is built on Windows itself, in an MSYS2 UCRT64 shell with `make`, `gcc` (mingw-w64) and Go:
 
 ```sh
 make ui    # bin/pcb-ui.exe: a GUI binary (-H=windowsgui), with its icon and version

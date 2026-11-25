@@ -24,7 +24,7 @@ func TestWriteSucceedsWhileOurReaderHoldsTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	start := time.Now()
 	if err := atomicfile.Write(p, []byte("v2")); err != nil {
 		t.Fatalf("Write while shared reader open: %v", err)
@@ -72,7 +72,7 @@ func TestWriteGivesUpAfterTwoSeconds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	start := time.Now()
 	if err := atomicfile.Write(p, []byte("v2")); err == nil {
 		t.Fatal("Write succeeded against a foreign reader held open")

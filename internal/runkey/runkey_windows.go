@@ -23,7 +23,7 @@ func (s store) Get() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	v, _, err := k.GetStringValue(Value)
 	if errors.Is(err, registry.ErrNotExist) {
 		return "", false, nil
@@ -34,16 +34,16 @@ func (s store) Get() (string, bool, error) {
 	return v, true, nil
 }
 
-func (s store) Set(data string) error {
+func (s store) Set(data string) (err error) {
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, s.key, registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
-	defer k.Close()
+	defer func() { err = errors.Join(err, k.Close()) }()
 	return k.SetStringValue(Value, data)
 }
 
-func (s store) Delete() error {
+func (s store) Delete() (err error) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, s.key, registry.SET_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
 		return nil
@@ -51,7 +51,7 @@ func (s store) Delete() error {
 	if err != nil {
 		return err
 	}
-	defer k.Close()
+	defer func() { err = errors.Join(err, k.Close()) }()
 	if err := k.DeleteValue(Value); err != nil && !errors.Is(err, registry.ErrNotExist) {
 		return err
 	}
