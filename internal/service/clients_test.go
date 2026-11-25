@@ -176,14 +176,14 @@ func TestCheckClientRecordsLastUseOffTheRequestPathAtMostOncePerMinute(t *testin
 		t.Fatalf("LastUsed = %v, want %v", list[0].LastUsed, first)
 	}
 	e.clk.advance(30 * time.Second)
-	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
-	next(t, h.done, "finished")                                 // the touch ran (and was throttled by the store)
+	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1")
+	next(t, h.done, "finished") // the touch ran (and was throttled by the store)
 	if list, _ := e.svc.Clients(t.Context()); !list[0].LastUsed.Equal(first) {
 		t.Errorf("LastUsed moved within a minute: %v", list[0].LastUsed)
 	}
 	// Finished touches free the client: a due one is recorded.
 	e.clk.advance(time.Minute)
-	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	e.svc.CheckClient(t.Context(), sec.Password, "127.0.0.1:1")
 	next(t, h.done, "finished once more")
 	if list, _ := e.svc.Clients(t.Context()); !list[0].LastUsed.Equal(e.clk.Now()) {
 		t.Errorf("LastUsed = %v, want %v after a minute", list[0].LastUsed, e.clk.Now())
@@ -250,7 +250,7 @@ func TestCloseWaitsForBackgroundTouches(t *testing.T) {
 	e.svc.SetTouchTimeout(time.Hour)                               // only Close can end the blocked touch in time
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second) // a synchronous touch ends by this
 	defer cancel()
-	e.svc.CheckClient(ctx, sec.Password, "127.0.0.1:1") //nolint:errcheck // result not under test
+	e.svc.CheckClient(ctx, sec.Password, "127.0.0.1:1")
 	next(t, h.started, "started")
 	closed := make(chan error, 1)
 	go func() { closed <- e.svc.Close() }()
@@ -825,7 +825,7 @@ func TestCorruptClientsFileAnswersARetryLogsOnceAndChargesNoLimiter(t *testing.T
 	if err := os.WriteFile(file, []byte(`{"version":99,"clients":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	svc.CheckClient(t.Context(), "x", "203.0.113.5:1") //nolint:errcheck // result not under test
+	svc.CheckClient(t.Context(), "x", "203.0.113.5:1")
 	if n := strings.Count(logs(), "clients.json cannot be loaded"); n != 2 {
 		t.Errorf("%d error lines after a second distinct failure, want 2", n)
 	}

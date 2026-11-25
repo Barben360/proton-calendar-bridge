@@ -16,7 +16,7 @@ func TryLock(path string) (unlock func(), ok bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { //nolint:gosec // fd fits an int
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { // fd fits an int
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, false, nil

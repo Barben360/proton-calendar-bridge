@@ -321,7 +321,7 @@ func TestNoSecretInAnyMCPOutput(t *testing.T) {
 	for _, root := range []string{r.dirs.State, r.dirs.Config} {
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || d.Type()&fs.ModeSocket != 0 {
-				return nil //nolint:nilerr // a file gone meanwhile
+				return nil // a file gone meanwhile
 			}
 			b, err := os.ReadFile(p)
 			if err == nil {

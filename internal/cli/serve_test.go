@@ -524,7 +524,7 @@ func TestNonLoopbackBindNeverServesPlainHTTP(t *testing.T) {
 					}
 				}
 				// TLS below 1.2 is refused.
-				old := &tls.Config{RootCAs: caPool(t, certPath), ServerName: "127.0.0.1", MaxVersion: tls.VersionTLS11} //nolint:gosec // the test checks it is refused
+				old := &tls.Config{RootCAs: caPool(t, certPath), ServerName: "127.0.0.1", MaxVersion: tls.VersionTLS11} // the test checks it is refused
 				if c, err := tls.Dial("tcp", addr, old); err == nil {
 					_ = c.Close()
 					t.Error("a TLS 1.1 handshake succeeded")
@@ -566,7 +566,7 @@ func TestNonLoopbackBindNeverServesPlainHTTP(t *testing.T) {
 		if resp := options(t, http.DefaultClient, "http://"+addr+"/"); resp.StatusCode != http.StatusOK {
 			t.Fatalf("plain OPTIONS on loopback = %d", resp.StatusCode)
 		}
-		if c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}); err == nil { //nolint:gosec // only whether TLS answers
+		if c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}); err == nil { // only whether TLS answers
 			_ = c.Close()
 			t.Error("loopback answered a TLS handshake")
 		}

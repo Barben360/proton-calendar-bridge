@@ -171,7 +171,7 @@ func (a *app) daemonAnswers(ctx context.Context, socket string) (bool, error) {
 	}
 	defer func() { _ = c.Close() }()
 	if _, err := c.Status(ctx); err != nil {
-		return false, nil //nolint:nilerr // stopping: the race decides
+		return false, nil // stopping: the race decides
 	}
 	return true, nil
 }
