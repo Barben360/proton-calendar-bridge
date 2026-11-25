@@ -40,7 +40,7 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
     # A switch over an enum with a default is exhaustive: the code base states
-    # the fallback of a state there (157 defaults), and listing every constant
+    # the fallback of a state there, and listing every constant
     # of a state it handles alike would only add dead cases. A switch with no
     # default must name every constant.
     exhaustive:
