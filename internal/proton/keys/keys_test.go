@@ -2,8 +2,11 @@ package keys_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,6 +132,53 @@ func TestDeriveKeyPassWrongPassword(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), f.Password) {
 		t.Fatal("the error leaks the password")
+	}
+}
+
+// The right password under the wrong salt derives no passphrase: another
+// salt for the primary user key unlocks nothing, a salt listed for another
+// key only is not borrowed, and a salt that is not one fails; none returns
+// a passphrase or names the password.
+func TestDeriveKeyPassWrongSalt(t *testing.T) {
+	t.Parallel()
+	f, c, m := login(t, protontest.Options{})
+	user, addrs, salts := fetchAll(t, c, elevator(f, c, m))
+	primary := user.Keys[0].ID
+	for _, k := range user.Keys {
+		if k.Primary {
+			primary = k.ID
+		}
+	}
+	idx := slices.IndexFunc(salts, func(s gpa.Salt) bool { return s.ID == primary })
+	if idx < 0 {
+		t.Fatalf("the fake lists no salt for the primary user key %s", primary)
+	}
+	real := salts[idx]
+	other := make([]byte, 16)
+	if _, err := rand.Read(other); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		salts  gpa.Salts
+		locked bool // ErrKeysLocked, not an earlier refusal
+	}{
+		{"another salt", gpa.Salts{{ID: primary, KeySalt: base64.StdEncoding.EncodeToString(other)}}, true},
+		{"only another key's salt", gpa.Salts{{ID: primary + "-other", KeySalt: real.KeySalt}}, false},
+		{"not a salt", gpa.Salts{{ID: primary, KeySalt: base64.StdEncoding.EncodeToString(other[:3])}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pass, err := keys.DeriveKeyPass(user, addrs, tc.salts, []byte(f.Password))
+			if err == nil || pass != nil {
+				t.Fatalf("DeriveKeyPass = %d bytes, %v; want an error and no passphrase", len(pass), err)
+			}
+			if got := errors.Is(err, keys.ErrKeysLocked); got != tc.locked {
+				t.Errorf("err = %v, ErrKeysLocked %v, want %v", err, got, tc.locked)
+			}
+			if strings.Contains(err.Error(), f.Password) || strings.Contains(err.Error(), real.KeySalt) {
+				t.Error("the error leaks the password or the salt")
+			}
+		})
 	}
 }
 
