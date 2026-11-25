@@ -295,17 +295,19 @@ func TestCreateOnceInAReadOnlyDirectory(t *testing.T) {
 }
 
 // A link that fails for another reason, or a directory that vanishes before
-// the in-place create, ends in an error wrapped as a key creation failure, with no key
-// and no temporary file left.
+// the in-place create, ends in an error wrapped as a key creation failure,
+// with no key left. The temporary file's cleanup is checked by the "link
+// fails" case, the only one whose directory survives.
 func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		link  func(dir string) func(o, n string) error
 		cause error
+		gone  bool // the directory no longer exists: nothing may recreate it
 	}{
 		{"link fails", func(string) func(o, n string) error {
 			return func(o, n string) error { return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EIO} }
-		}, syscall.EIO},
+		}, syscall.EIO, false},
 		{"in-place create fails", func(dir string) func(o, n string) error {
 			return func(o, n string) error {
 				if err := os.RemoveAll(dir); err != nil { // the directory is gone when the fallback opens the key
@@ -313,7 +315,7 @@ func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 				}
 				return &os.LinkError{Op: "link", Old: o, New: n, Err: syscall.EPERM}
 			}
-		}, fs.ErrNotExist},
+		}, fs.ErrNotExist, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := keyPath(t)
@@ -326,7 +328,17 @@ func TestCreateOnceFailuresLeaveNothing(t *testing.T) {
 			if _, statErr := os.Stat(path); statErr == nil {
 				t.Fatal("a key was created despite the error")
 			}
-			if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) != 0 {
+			if tc.gone {
+				if _, statErr := os.Stat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Fatalf("the directory was recreated: %v", statErr)
+				}
+				return
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
 				t.Fatalf("left in the directory: %v", entries)
 			}
 		})
