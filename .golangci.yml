@@ -3,6 +3,7 @@ linters:
   enable:
     - bodyclose
     - errorlint
+    - exhaustive
     - forcetypeassert
     - gocritic
     - misspell
@@ -30,6 +31,12 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+    # A switch over an enum with a default is exhaustive: the code base states
+    # the fallback of a state there (157 defaults), and listing every constant
+    # of a state it handles alike would only add dead cases. A switch with no
+    # default must name every constant.
+    exhaustive:
+      default-signifies-exhaustive: true
     revive:
       rules:
         - name: exported

@@ -70,6 +70,7 @@ func Listen(path string) (net.Listener, error) {
 				time.Sleep(goneStep)
 			}
 			goneSeen = true
+		case pipeBusy: // try again until the deadline
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("%w: %s", ErrPipeHeld, name)

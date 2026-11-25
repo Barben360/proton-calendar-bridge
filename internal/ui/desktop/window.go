@@ -292,6 +292,7 @@ func dotColor(s ui.TrayState) color.Color {
 		return color.NRGBA{R: 0xd9, G: 0x77, B: 0x06, A: 0xff}
 	case ui.TraySyncing:
 		return color.NRGBA{R: 0x3b, G: 0x82, B: 0xf6, A: 0xff}
+	case ui.TrayOK:
 	}
 	return color.NRGBA{R: 0x1f, G: 0x9d, B: 0x55, A: 0xff}
 }
@@ -330,6 +331,7 @@ func (w *Window) Update(v ui.View) {
 		w.showDefault()
 	case paneSettings:
 		w.settings.setListener(v.Listener)
+	case paneWizard: // keeps what the person is doing
 	}
 }
 

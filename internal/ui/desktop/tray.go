@@ -32,6 +32,7 @@ func trayIcon(s ui.TrayState) fyne.Resource {
 		return icon("attention")
 	case ui.TraySyncing:
 		return icon("syncing")
+	case ui.TrayOK:
 	}
 	return icon("ok")
 }

@@ -306,6 +306,8 @@ func (s *server) propfind(w http.ResponseWriter, r *http.Request, t target) {
 			return
 		}
 		s.ns.objectResource(c.ID, o.Name, o.ETag, o.Data, true).write(ms, q)
+	case kindNone, kindWellKnown:
+		// answered before the PROPFIND handler (a redirect, a 404)
 	}
 	ms.send(w)
 }

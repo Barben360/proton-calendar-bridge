@@ -264,6 +264,7 @@ func OpenHub(o HubOptions) (*Hub, error) {
 			continue
 		case dirSkip:
 			continue
+		case dirOpen: // opened below
 		}
 		l, err := h.newLocal(dir)
 		if err != nil {
@@ -880,6 +881,7 @@ func (h *Hub) logOutcome(msg string, args []any, id string, res LoginResult, err
 			outcome = "needs-2fa"
 		case StateNeedsMailboxPassword:
 			outcome = "needs-mailbox-password"
+		case StateReady, StateNeedsCaptcha: // the state's own name
 		}
 		args = append(args, "outcome", outcome)
 	} else if d, ok := loginWait(err); ok {

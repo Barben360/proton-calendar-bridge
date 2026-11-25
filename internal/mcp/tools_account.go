@@ -266,6 +266,7 @@ func (ss *session) loginAnswered(username, cli string, st loginpage.State) (logi
 	case loginpage.EndedExpired, loginpage.EndedStopped:
 		return loginOut{}, "", nil, refusedErr("the login page closed before the login ended ("+string(st.Ended)+"): nothing was logged in",
 			"call login again if the person still wants it, or they run: "+cli)
+	case loginpage.EndedReady: // answered above
 	}
 	out.State, out.Step, out.ExpiresInS = "waiting", string(st.Step), int(math.Ceil(st.Remaining.Seconds()))
 	text := fmt.Sprintf("The login page for %s is still open, on its %s step (%d s left): the person finishes there, never here.", username, st.Step, out.ExpiresInS)

@@ -191,6 +191,7 @@ func gateOf(ck *calKeys) (gate, reason string) {
 			return gtClosed, reasonNoWrite
 		}
 		return gtClosed, reasonBadSignature
+	case calendar.GateUndecided: // decided below, from the access
 	}
 	switch {
 	case a == nil:

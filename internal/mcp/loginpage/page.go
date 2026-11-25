@@ -340,6 +340,7 @@ func (p *page) post(w http.ResponseWriter, r *http.Request) {
 			clear(mb)
 		case loginflow.StepCaptcha:
 			_ = p.flow.CaptchaSolved(ctx)
+		case loginflow.StepDone: // nothing to submit
 		}
 	}
 	step := p.flow.Step()
