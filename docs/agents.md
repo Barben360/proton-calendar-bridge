@@ -29,7 +29,7 @@ That helps, but your controls are:
 
 - the grants below;
 - the ETags: an agent edits only what it just read, and only the fields it names (alarms, exceptions and anything else stay);
-- the delete confirmation.
+- the delete confirmation, which also covers a change that removes future occurrences of a series.
 
 ## On this machine (stdio)
 
@@ -104,9 +104,9 @@ The tools' input schemas (`tools/list`) carry the allowed values: `scope` is `oc
 |---|---|
 | `freebusy` | `status`, `calendars_list`, `free_busy` (busy times only) |
 | `read` (includes `freebusy`) | + `events_list`, `event_get`, `events_search` |
-| `write` (includes `read`) | + `event_create`, `event_update` |
-| `delete` (needs `write`) | + `event_delete` |
-| `unconfirmed-delete` (includes `delete`) | the same tools, and a delete or sign-out goes through even when the client cannot ask you to confirm it ([deletes](#deletes-and-sign-outs-ask-you)) |
+| `write` (includes `read`) | + `event_create`, `event_update` (except a change that removes future occurrences of a series, which needs `delete`) |
+| `delete` (needs `write`) | + `event_delete`, and an `event_update` that removes future occurrences of a series ([deletes](#deletes-and-sign-outs-ask-you)) |
+| `unconfirmed-delete` (includes `delete`) | the same tools, and a delete, a sign-out or a series change that removes future occurrences goes through even when the client cannot ask you to confirm it ([deletes](#deletes-and-sign-outs-ask-you)) |
 | `login` (stdio only) | `login` |
 | `manage` (stdio only) | `logout` |
 | `--profile full` (default) | all six |
@@ -208,7 +208,9 @@ Limits:
 
 When your client supports MCP form elicitation, a delete asks: `Delete the event on <date>: «title»?`. What goes comes first, and the title, which a third party may write, cannot rewrite the question. Declining deletes nothing. Sign-outs ask the same way.
 
-A client without form elicitation (none, or URL only) cannot ask you, so a delete or a sign-out is **refused**, with a hint naming both ways out: use a client that supports form elicitation, or give the agent `unconfirmed-delete`. It is refused before the event is read, whatever the etag. `unconfirmed-delete` includes `delete`: give it only to an agent you would let delete (and, over stdio with `manage`, sign an account out) unasked, because an instruction hidden in an invitation can make an agent call `event_delete` as easily as you can. A token created before this option existed has no `unconfirmed-delete`: it keeps working, and its deletes are refused when the client cannot ask; create it again with `--allow ...,unconfirmed-delete` to change that. A client that asks is asked whether or not the grant has it.
+A change to a series that leaves fewer occurrences after now is a delete too: an earlier end (`UNTIL`), fewer occurrences (`COUNT`), a sparser rule (daily to weekly) or no rule at all. pcb counts the occurrences it would remove, from now up to two years ahead, and asks: `Change the series starting on <date> so that 3 of its future occurrences are removed: «title»?`. It needs `delete`, and without a client that asks it is refused unless the agent has `unconfirmed-delete`, as a delete is. A change that keeps or adds occurrences (a later end, a denser rule, a moved start, a new title) needs `write` alone and asks nothing. A series that pcb cannot count is treated as losing occurrences. A dry run (`dry_run`) asks nothing and shows the count as `dropped_occurrences`.
+
+A client without form elicitation (none, or URL only) cannot ask you, so a delete or a sign-out is **refused**, with a hint naming both ways out: use a client that supports form elicitation, or give the agent `unconfirmed-delete`. A delete is refused before the event is read, whatever the etag. `unconfirmed-delete` includes `delete`: give it only to an agent you would let delete (and, over stdio with `manage`, sign an account out) unasked, because an instruction hidden in an invitation can make an agent call `event_delete` as easily as you can. A token created before this option existed has no `unconfirmed-delete`: it keeps working, and its deletes are refused when the client cannot ask; create it again with `--allow ...,unconfirmed-delete` to change that. A client that asks is asked whether or not the grant has it.
 
 Claude Code 2.1.325 asks; other clients are not known.
 

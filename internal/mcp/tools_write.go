@@ -25,7 +25,10 @@ import (
 // does, ruling R15) and that the calendar's write gate is open. A delete
 // is confirmed by the person through a form elicitation when the client
 // declares one; otherwise the grant must opt in (unconfirmed-delete), else
-// it is refused.
+// it is refused. An update that removes occurrences after now from a
+// series (an earlier UNTIL, a smaller COUNT, a sparser rule, the rule
+// removed: the agenda counts them) is a delete too: it needs the delete
+// grant and the same confirmation.
 
 func writeTools() []toolDef {
 	return []toolDef{
@@ -444,82 +447,179 @@ type updateOut struct {
 	EventZone  string      `json:"event_zone,omitempty" jsonschema:"the zone the event's start is kept in after the change (UTC for a UTC time): its own unless tz moved it; absent for an all-day or floating event. An end changed alone with tz takes tz's zone, apart from the start's"`
 	DryRun     bool        `json:"dry_run"`
 	Changed    []string    `json:"changed,omitempty" jsonschema:"dry run: the fields that would change"`
+	Dropped    int         `json:"dropped_occurrences,omitempty" jsonschema:"dry run: how many occurrences after now the change would remove from the series (-1: some, how many cannot be counted); such a change needs the delete grant and the person's confirmation"`
 	Before     *changeView `json:"before,omitempty"`
 	After      *changeView `json:"after,omitempty"`
 	Note       string      `json:"note,omitempty"`
 }
 
+// confirmUpdateKey names an update's question in InputRequests.
+const confirmUpdateKey = "confirm_update"
+
 func addEventUpdate(ss *session) {
-	addTool(ss, &sdkmcp.Tool{
+	t := &sdkmcp.Tool{
 		Name: "event_update",
 		Description: "Change an event, its whole series or one occurrence, if it is still as read (etag; else a conflict and nothing is written). " +
-			"A series change that would orphan its exceptions is refused. dry_run shows the change without writing.",
+			"A series change that would orphan its exceptions is refused. A series change that removes occurrences after now (an earlier UNTIL, " +
+			"a smaller COUNT, a sparser rule, rrule null) is a delete: it needs the delete grant, and the person may be asked to confirm it; " +
+			"declined, nothing is written. dry_run shows the change without writing.",
 		Annotations: writing("Update an event", false),
-	}, func(ctx context.Context, in updateIn) (updateOut, string, error) {
-		tgt, err := ss.event(ctx, in.EventID)
-		if err != nil {
-			return updateOut{}, "", err
+	}
+	t.Description += " " + untrustedNote
+	t.InputSchema = inputSchema[updateIn](t.Name, []tuner{scopeEnum, dateFields("changes"), alarmBounds("changes")})
+	sdkmcp.AddTool(ss.sdk, t, func(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn) (*sdkmcp.CallToolResult, updateOut, error) {
+		out, text, ask, err := ss.updateEvent(ctx, req, in)
+		switch {
+		case err != nil:
+			return nil, updateOut{}, toToolError(err)
+		case ask != nil:
+			return &sdkmcp.CallToolResult{InputRequests: sdkmcp.InputRequestMap{confirmUpdateKey: ask}}, updateOut{}, nil
 		}
-		scope, err := checkScope(in.Scope, tgt.ref)
-		if err == nil {
-			err = checkETag(in.ETag)
-		}
-		if err == nil && in.Changes.empty() {
-			err = refusedErr("changes is empty", "name the fields to change, as event_create takes them")
-		}
-		if err != nil {
-			return updateOut{}, "", err
-		}
-		loc, err := callZone(in.TZ, ss.srv.o.Zone)
-		if err != nil {
-			return updateOut{}, "", err
-		}
-		f, err := in.Changes.args().fields(loc, storeZone(loc))
-		if err != nil {
-			return updateOut{}, "", err
-		}
-		if err := ss.writable(ctx, tgt.info.ID, tgt.ref.CalendarID, noEvent(in.EventID), noEvent(in.EventID)); err != nil {
-			return updateOut{}, "", err
-		}
-		// New times keep the event's own zone unless tz names one: a series
-		// moved in its zone keeps its exceptions (design §5.6). The result
-		// names the zone the event keeps (M8-F1).
-		d, err := tgt.ag.Event(ctx, tgt.ref)
-		if err != nil {
-			return updateOut{}, "", writeError(err, in.EventID)
-		}
-		own := d.Data.Start
-		if in.TZ == "" && own.TZID != "" && own.Date == "" && !own.Floating {
-			for _, t := range []*service.EventTime{f.Start, f.End} {
-				if t != nil && t.Date == "" {
-					t.TZID = own.TZID
-				}
+		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: text}}}, out, nil
+	})
+}
+
+// updateEvent runs once, or twice when the person is asked (E19), as
+// deleteEvent does: an update the agenda's dry run finds removing
+// occurrences after now is held to a delete's rules before it writes.
+func (ss *session) updateEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn) (updateOut, string, *sdkmcp.ElicitParams, error) {
+	tgt, err := ss.event(ctx, in.EventID)
+	if err != nil {
+		return updateOut{}, "", nil, err
+	}
+	scope, err := checkScope(in.Scope, tgt.ref)
+	if err == nil {
+		err = checkETag(in.ETag)
+	}
+	if err == nil && in.Changes.empty() {
+		err = refusedErr("changes is empty", "name the fields to change, as event_create takes them")
+	}
+	if err != nil {
+		return updateOut{}, "", nil, err
+	}
+	loc, err := callZone(in.TZ, ss.srv.o.Zone)
+	if err != nil {
+		return updateOut{}, "", nil, err
+	}
+	f, err := in.Changes.args().fields(loc, storeZone(loc))
+	if err != nil {
+		return updateOut{}, "", nil, err
+	}
+	if err := ss.writable(ctx, tgt.info.ID, tgt.ref.CalendarID, noEvent(in.EventID), noEvent(in.EventID)); err != nil {
+		return updateOut{}, "", nil, err
+	}
+	// New times keep the event's own zone unless tz names one: a series
+	// moved in its zone keeps its exceptions (design §5.6). The result
+	// names the zone the event keeps (M8-F1).
+	d, err := tgt.ag.Event(ctx, tgt.ref)
+	if err != nil {
+		return updateOut{}, "", nil, writeError(err, in.EventID)
+	}
+	own := d.Data.Start
+	if in.TZ == "" && own.TZID != "" && own.Date == "" && !own.Floating {
+		for _, t := range []*service.EventTime{f.Start, f.End} {
+			if t != nil && t.Date == "" {
+				t.TZID = own.TZID
 			}
 		}
-		kept := eventZone(&own)
-		if f.Start != nil {
-			kept = eventZone(f.Start)
-		}
-		res, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, in.DryRun)
+	}
+	kept := eventZone(&own)
+	if f.Start != nil {
+		kept = eventZone(f.Start)
+	}
+	if !in.DryRun {
+		// The dry run counts what the change removes; the write that follows
+		// holds the same etag, so it writes what was counted or nothing.
+		preview, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, true)
 		if err != nil {
-			return updateOut{}, "", writeError(err, in.EventID)
+			return updateOut{}, "", nil, writeError(err, in.EventID)
 		}
-		out := updateOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, ETag: res.ETag, Zone: zoneLabel(loc, ss.srv.o.Now()),
-			EventZone: kept, DryRun: in.DryRun}
-		if in.DryRun {
-			before, after := res.Before, res.After
-			if scope == service.ScopeOccurrence {
-				before, after = occurrenceOf(before, *tgt.ref.RecurrenceID), occurrenceOf(after, *tgt.ref.RecurrenceID)
+		if preview.Dropped != 0 {
+			if ask, err := ss.mayDrop(req, d.Data, preview.Dropped); ask != nil || err != nil {
+				return updateOut{}, "", ask, err
 			}
-			out.Changed, out.Before, out.After = diffEvent(before, after)
-			return out, fmt.Sprintf("dry run, nothing written: %d fields would change", len(out.Changed)), nil
 		}
-		if res.ETag == "" {
-			out.Note = noETagNote
-			return out, "event updated; call event_get for its etag", nil
+	}
+	res, err := tgt.ag.UpdateEvent(ctx, tgt.ref, in.ETag, scope, f, in.DryRun)
+	if err != nil {
+		return updateOut{}, "", nil, writeError(err, in.EventID)
+	}
+	out := updateOut{EventID: in.EventID, Account: tgt.info.Address, CalendarID: tgt.ref.CalendarID, ETag: res.ETag, Zone: zoneLabel(loc, ss.srv.o.Now()),
+		EventZone: kept, DryRun: in.DryRun}
+	if in.DryRun {
+		before, after := res.Before, res.After
+		if scope == service.ScopeOccurrence {
+			before, after = occurrenceOf(before, *tgt.ref.RecurrenceID), occurrenceOf(after, *tgt.ref.RecurrenceID)
 		}
-		return out, "event updated (" + string(scope) + ")", nil
-	}, scopeEnum, dateFields("changes"), alarmBounds("changes"))
+		out.Changed, out.Before, out.After = diffEvent(before, after)
+		out.Dropped = res.Dropped
+		return out, fmt.Sprintf("dry run, nothing written: %d fields would change", len(out.Changed)), nil, nil
+	}
+	if res.ETag == "" {
+		out.Note = noETagNote
+		return out, "event updated; call event_get for its etag", nil, nil
+	}
+	return out, "event updated (" + string(scope) + ")", nil, nil
+}
+
+// reasonNeedsDelete is the refusal of an update that removes occurrences
+// under a grant that may not delete.
+const reasonNeedsDelete = "pcb:needs-delete"
+
+// mayDrop holds an update that removes dropped occurrences after now from
+// the series d (service.DroppedUnknown: some) to a delete's rules: the
+// grant must hold delete; then the person confirms it when the client can
+// ask (the question, or nil once accepted), else the grant must opt in
+// with unconfirmed-delete.
+func (ss *session) mayDrop(req *sdkmcp.CallToolRequest, d service.EventData, dropped int) (*sdkmcp.ElicitParams, error) {
+	removes := "removes future occurrences of the series (how many cannot be counted)"
+	switch {
+	case dropped == 1:
+		removes = "removes 1 future occurrence of the series"
+	case dropped > 1:
+		removes = fmt.Sprintf("removes %d future occurrences of the series", dropped)
+	}
+	if !ss.grant.has(CapDelete) {
+		return nil, &toolError{Class: classRefused, Reason: reasonNeedsDelete,
+			Message: "this change " + removes + ", which only a grant that may delete can do: nothing was changed",
+			Hint: "change the series without ending it early, or have the person allow deletes: re-create the token with pcb mcp token add NAME --allow ...,delete " +
+				"(pcb mcp --allow ...,delete for stdio); do not retry as is"}
+	}
+	if err := ss.mayActUnasked(req, "change, which "+removes+",", "changes that remove occurrences"); err != nil {
+		return nil, err
+	}
+	if !asksForm(req) {
+		return nil, nil
+	}
+	answer, asked := req.Params.InputResponses[confirmUpdateKey]
+	if !asked {
+		return &sdkmcp.ElicitParams{
+			Mode:            "form",
+			Message:         dropPrompt(d, dropped),
+			RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		}, nil
+	}
+	if r, ok := answer.(*sdkmcp.ElicitResult); !ok || r.Action != "accept" {
+		return nil, refusedErr("the change was not confirmed: nothing was changed",
+			"the person declined it; do not retry unless they ask for it again")
+	}
+	return nil, nil
+}
+
+// dropPrompt is the question about an update that removes occurrences: the
+// series and how many go first, from pcb; the third party's summary last,
+// as deletePrompt quotes it.
+func dropPrompt(d service.EventData, dropped int) string {
+	head := "Change the series starting on " + when(d.Start)
+	title := "«" + promptText(d.Summary) + "»?"
+	if dropped < 0 {
+		return head + ", which removes future occurrences pcb cannot count: " + title
+	}
+	what := fmt.Sprintf("%d of its future occurrences are removed", dropped)
+	if dropped == 1 {
+		what = "1 of its future occurrences is removed"
+	}
+	return head + " so that " + what + ": " + title
 }
 
 // sameTime: a and b name the same date, wall clock or instant.
@@ -640,28 +740,30 @@ func asksForm(req *sdkmcp.CallToolRequest) bool {
 	return caps.Elicitation.Form != nil || caps.Elicitation.URL == nil
 }
 
-// mayActUnasked refuses, first of all (before the event is read, so a stale
-// etag or a missing event reveals nothing), a destructive call the person
-// cannot confirm: the client declared no form elicitation and the grant
-// does not opt in with unconfirmed-delete. act is the call in words.
-func (ss *session) mayActUnasked(req *sdkmcp.CallToolRequest, act string) error {
+// mayActUnasked refuses a destructive call the person cannot confirm: the
+// client declared no form elicitation and the grant does not opt in with
+// unconfirmed-delete. A delete and a sign-out ask it first of all (before
+// the event is read, so a stale etag or a missing event reveals nothing).
+// act is the call in words, acts their plural.
+func (ss *session) mayActUnasked(req *sdkmcp.CallToolRequest, act, acts string) error {
 	if asksForm(req) || ss.grant.has(CapUnconfirmedDelete) {
 		return nil
 	}
 	return &toolError{Class: classRefused, Reason: reasonUnconfirmed,
 		Message: "this " + act + " needs the person's confirmation, which this client cannot ask for: nothing was changed",
-		Hint: "use a client that supports form elicitation, or have the person allow unconfirmed " + act + "s: re-create the token with pcb mcp token add NAME --allow ...,unconfirmed-delete " +
+		Hint: "use a client that supports form elicitation, or have the person allow unconfirmed " + acts + ": re-create the token with pcb mcp token add NAME --allow ...,unconfirmed-delete " +
 			"(pcb mcp --allow ...,unconfirmed-delete for stdio); do not retry as is"}
 }
 
-// reasonUnconfirmed is the refusal of a delete or sign-out nobody can confirm.
+// reasonUnconfirmed is the refusal of a delete, a sign-out or an update
+// removing occurrences that nobody can confirm.
 const reasonUnconfirmed = "pcb:unconfirmed-delete"
 
 // deleteEvent runs once, or twice when the person is asked (E19): the run
 // that asks only reads, and the answer is read on the next run, which
 // checks everything again before it deletes.
 func (ss *session) deleteEvent(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteIn) (deleteOut, *sdkmcp.ElicitParams, error) {
-	if err := ss.mayActUnasked(req, "delete"); err != nil {
+	if err := ss.mayActUnasked(req, "delete", "deletes"); err != nil {
 		return deleteOut{}, nil, err
 	}
 	tgt, err := ss.event(ctx, in.EventID)
