@@ -500,7 +500,12 @@ func TestUnknownAccountIs401(t *testing.T) {
 	for _, p := range []string{unknown.principal, unknown.root, unknown.home, space("00000000").home} {
 		want401(t, r.as(r.passA, remote, "PROPFIND", p, tbDetect, "Depth", "0"), "a's password on "+p, realmOf(strings.Split(p, "/")[2]))
 	}
-	for _, p := range []string{"/dav/zzzzzzzz/principals/me/", "/dav/" + strings.ToUpper(r.a) + "/principals/me/", "/dav/" + r.a + "0/principals/me/", "/dav/0f0f0f0/"} {
+	malformed := []string{"/dav/zzzzzzzz/principals/me/", "/dav/" + r.a + "0/principals/me/", "/dav/0f0f0f0/"}
+	// An ID of digits only has no upper case: that URL would be a's own.
+	if up := strings.ToUpper(r.a); up != r.a {
+		malformed = append(malformed, "/dav/"+up+"/principals/me/")
+	}
+	for _, p := range malformed {
 		want401(t, r.as("", "", "PROPFIND", p, tbDetect, "Depth", "0"), "no credentials on "+p, challenge)
 		if rec := r.as(r.passB, "", "PROPFIND", p, tbDetect, "Depth", "0"); rec.Code != http.StatusNotFound {
 			t.Errorf("b's password on %s: %d, want 404", p, rec.Code)
