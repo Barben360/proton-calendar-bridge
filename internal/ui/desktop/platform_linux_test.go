@@ -143,12 +143,21 @@ func TestNotifyIgnoresForgedSignals(t *testing.T) {
 	if err := evil.Emit("/org/freedesktop/Notifications", "org.freedesktop.Notifications.ActionInvoked", uint32(41), "default"); err != nil {
 		t.Fatal(err)
 	}
-	// the real server's later signal proves the forged one was processed first
+	// A round trip on the forger's own connection: the bus has read, and
+	// routed, its signal before the real server's follows.
+	if err := evil.BusObject().Call("org.freedesktop.DBus.Peer.Ping", 0).Err; err != nil {
+		t.Fatal(err)
+	}
 	emit(t, sc, "ActionInvoked", uint32(41), "default")
-	waitFor(t, "real click", func() bool { return len(got()) >= 1 })
-	time.Sleep(100 * time.Millisecond)
-	if g := got(); len(g) != 1 {
-		t.Fatalf("clicks = %v, want exactly the real one", g)
+	// A sentinel behind both: once its click lands, the forged signal has
+	// been handled (a click if it was trusted) and the real one with it.
+	if err := Notify(addr, ui.Notification{Account: "sentinel", Title: "t"}, click); err != nil { // id 42
+		t.Fatal(err)
+	}
+	emit(t, sc, "ActionInvoked", uint32(42), "default")
+	waitFor(t, "sentinel", func() bool { return slices.Contains(got(), "sentinel") })
+	if g := got(); !slices.Equal(g, []string{"a1", "sentinel"}) {
+		t.Fatalf("clicks = %v, want exactly the real one then the sentinel", g)
 	}
 }
 
@@ -157,9 +166,9 @@ func TestNotifyForgetsIdsWhenServerChanges(t *testing.T) {
 	_, sc := startFakeNotifier(t, addr)
 	t.Cleanup(closeNotifier)
 	var mu sync.Mutex
-	n := 0
-	click := func(string) { mu.Lock(); n++; mu.Unlock() }
-	count := func() int { mu.Lock(); defer mu.Unlock(); return n }
+	var clicked []string
+	click := func(a string) { mu.Lock(); clicked = append(clicked, a); mu.Unlock() }
+	got := func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(clicked) }
 	if err := Notify(addr, ui.Notification{Account: "a1"}, click); err != nil { // id 41
 		t.Fatal(err)
 	}
@@ -172,11 +181,10 @@ func TestNotifyForgetsIdsWhenServerChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	emit(t, sc2, "ActionInvoked", uint32(42), "default") // 42 was the old server's: stale
-	emit(t, sc2, "ActionInvoked", uint32(41), "default")
-	waitFor(t, "click", func() bool { return count() >= 1 })
-	time.Sleep(100 * time.Millisecond)
-	if count() != 1 {
-		t.Fatal("stale entry fired")
+	emit(t, sc2, "ActionInvoked", uint32(41), "default") // the sentinel behind it, from the same connection
+	waitFor(t, "click", func() bool { return len(got()) >= 1 })
+	if g := got(); !slices.Equal(g, []string{"a2"}) {
+		t.Fatalf("clicks = %v, want only a2: the stale entry fired", g)
 	}
 }
 
@@ -188,7 +196,15 @@ func TestNotifyNilOnClick(t *testing.T) {
 		t.Fatal(err)
 	}
 	emit(t, sc, "ActionInvoked", uint32(41), "default") // must not panic
-	time.Sleep(100 * time.Millisecond)
+	// A click handled after it, same connection and so in order, proves
+	// the nil one was handled and the listener is still alive.
+	var mu sync.Mutex
+	clicked := false
+	if err := Notify(addr, ui.Notification{Account: "a2"}, func(string) { mu.Lock(); clicked = true; mu.Unlock() }); err != nil { // id 42
+		t.Fatal(err)
+	}
+	emit(t, sc, "ActionInvoked", uint32(42), "default")
+	waitFor(t, "the click after the nil one", func() bool { mu.Lock(); defer mu.Unlock(); return clicked })
 }
 
 func TestNotifyWithoutBus(t *testing.T) {

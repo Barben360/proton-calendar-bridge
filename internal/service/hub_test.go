@@ -1257,6 +1257,9 @@ func TestRemoveWaitsForTheCallsInFlight(t *testing.T) {
 			_, err := a.AddClient(context.WithoutCancel(t.Context()), name)
 			adds <- err
 		}()
+		// Room for this add to enter and block on clients.lock: it blocks in
+		// a file lock, which nothing observes. Were it late, Remove would
+		// win and the add's error below would fail the test, never pass it.
 		time.Sleep(100 * time.Millisecond)
 	}
 	removed := make(chan error, 1)

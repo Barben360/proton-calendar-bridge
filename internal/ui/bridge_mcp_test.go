@@ -7,9 +7,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,8 +125,17 @@ func TestBridgeRaisesTheWizardForAnAgentLogin(t *testing.T) {
 // that login (review M5).
 func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	l := newLab(t)
-	var shown atomic.Int32
-	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, ShowLogin: func(string) { shown.Add(1) }})
+	var (
+		mu    sync.Mutex
+		shown []string
+		raise = make(chan struct{}, 4)
+	)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, ShowLogin: func(u string) {
+		mu.Lock()
+		shown = append(shown, u)
+		mu.Unlock()
+		raise <- struct{}{}
+	}})
 	t.Cleanup(func() { _ = b.Stop() })
 	if err := b.Start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -173,8 +182,23 @@ func TestBridgeRefusesAnAgentLoginWhileOneIsInFlight(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("control: the person's login: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond) // a ShowLogin runs on a goroutine of its own
-	if n := shown.Load(); n != 0 {
-		t.Errorf("ShowLogin called %d times during the person's login", n)
+	// ShowLogin runs on a goroutine of its own, so a refused call's would
+	// land at an unknown moment. Barrier instead: with the person's login
+	// over, a second agent login is let through and raises the wizard; the
+	// refused call's goroutine was started well before this one's, so it
+	// would almost surely have shown by then.
+	res, err = cs.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: "login", Arguments: map[string]any{"username": "dave@example.org"}})
+	if err != nil || res.IsError {
+		t.Fatalf("control: the login once the person's is over: %v %+v", err, res)
+	}
+	select {
+	case <-raise:
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
+		t.Fatal("control: ShowLogin was not called for the login let through")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(shown, []string{"dave@example.org"}) {
+		t.Errorf("ShowLogin got %q, want only the login let through (none during the person's login)", shown)
 	}
 }

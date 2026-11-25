@@ -145,7 +145,11 @@ func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
 	t.Parallel()
 	l := newLab(t)
 	ended := make(chan struct{})
-	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, SessionEnd: ended})
+	reading := make(chan struct{}, 1)
+	b := ui.NewBridge(ui.BridgeOptions{Env: l.env, SessionEnd: ended, Listen: func(network, addr string) (net.Listener, error) {
+		ln, err := net.Listen(network, addr)
+		return &readWatch{Listener: ln, reading: reading}, err
+	}})
 	t.Cleanup(func() { _ = b.Stop() })
 	if err := b.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -158,7 +162,11 @@ func TestSessionEndCutsTheBridgesDrain(t *testing.T) {
 	if _, err := io.WriteString(conn, "PROPFIND / HTTP/1.1\r\nHost: x\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond) // the server has read it: the connection is active
+	select {
+	case <-reading: // the server tracks the connection and reads it: it holds the Shutdown
+	case <-time.After(30 * time.Second): // a hang guard, not a deadline
+		t.Fatal("the server never read the connection")
+	}
 	close(ended)
 	start := time.Now()
 	if err := b.Stop(); err != nil {
@@ -487,6 +495,34 @@ func TestBridgeLogsTheCertificateWarning(t *testing.T) {
 	if !strings.Contains(out, "level=WARN") {
 		t.Errorf("the certificate warning is not at warn level:\n%s", out)
 	}
+}
+
+// readWatch signals on reading when the server first reads an accepted
+// connection: the server then tracks it, so a Shutdown waits for it.
+type readWatch struct {
+	net.Listener
+	reading chan struct{}
+}
+
+func (w *readWatch) Accept() (net.Conn, error) {
+	c, err := w.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &readWatchConn{Conn: c, reading: w.reading}, nil
+}
+
+type readWatchConn struct {
+	net.Conn
+	reading chan struct{}
+}
+
+func (c *readWatchConn) Read(p []byte) (int, error) {
+	select {
+	case c.reading <- struct{}{}:
+	default:
+	}
+	return c.Conn.Read(p)
 }
 
 // dyingListener accepts nothing and fails its Accept when kill closes: the

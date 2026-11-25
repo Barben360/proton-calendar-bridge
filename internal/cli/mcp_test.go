@@ -110,6 +110,25 @@ func (m *mcpRun) connect(version string) *sdkmcp.ClientSession {
 	return cs
 }
 
+// waitStderr polls pcb mcp's stderr until it holds sub (a hang guard, not a
+// deadline): the process has reached the step that logs it.
+func (m *mcpRun) waitStderr(sub string) {
+	m.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(m.errb.String(), sub) {
+		if time.Now().After(deadline) {
+			m.t.Fatalf("pcb mcp never logged %q\nstderr: %s", sub, m.errb.String())
+		}
+		select {
+		case c := <-m.code:
+			m.code <- c // the cleanup reads it again
+			m.t.Fatalf("pcb mcp exited %d before logging %q\nstderr: %s", c, sub, m.errb.String())
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // exit waits for pcb mcp to end and returns its exit code.
 func (m *mcpRun) exit() exitcode.Code {
 	m.t.Helper()
@@ -233,7 +252,9 @@ func TestMCPSessionDaemonDrainsTwoSecondsOnASessionEnd(t *testing.T) {
 		"Content-Length: 1000\r\n\r\n{"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond) // the handler reads the body: the request is in flight
+	// A round trip on a second connection: the daemon has accepted the
+	// request's connection (accepted first) and moved on to this one.
+	socketStatus(t, r)
 	start := time.Now()
 	m.stop()                // SIGTERM through Execute's context
 	sigs <- syscall.SIGTERM // the same SIGTERM through IO.Signals
@@ -446,7 +467,7 @@ func TestMCPStdioWaitsForARestartingUserUnit(t *testing.T) {
 
 	// The unit's daemon comes up during the wait: pcb mcp relays to it.
 	m := startMCPWith(t, r, nil, userUnitHost(t, r, "activating", "auto-restart", 30*time.Second))
-	time.Sleep(300 * time.Millisecond)
+	m.waitStderr("waiting for its daemon") // it is in its wait: the daemon comes up during it
 	s := startServe(t, r, nil, "--listen", "127.0.0.1:0")
 	s.listening()
 	cs := m.connect("2025-11-25")

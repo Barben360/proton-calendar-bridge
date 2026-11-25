@@ -25,3 +25,6 @@ func SetUnprotect(f func([]byte) ([]byte, error)) (restore func()) {
 	unprotectKey = f
 	return func() { unprotectKey = old }
 }
+
+// CreateOnce is createOnce.
+var CreateOnce = createOnce
