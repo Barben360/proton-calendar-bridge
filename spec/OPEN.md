@@ -38,9 +38,9 @@ State at v0.3.0 and the review-fix series that followed it (2026-11-22). M1 to M
 
 - E03: scope list for `Other`, the three other identity candidates.
 - E02: answered for short delays (2026-11-14, from the live runs' records): a solved token is accepted from a new process 1 to 6.5 minutes after its challenge (`E02-captcha-token.md` rows 2 to 5; row 1 dropped). Hours not measured; not worth logins.
-- E01: access token 24 h and both tokens rotated on every refresh (interim, 2026-11-14, `E01-session-lifetime.md`); the session lifetime under 6-hourly sampling is the 14-day timer, running until 2026-11-26 (then: record the end, remove the timer).
+- E01: answered (2026-11-26, `E01-session-lifetime.md`): access token 24 h, both tokens rotated on every refresh, a 6-hourly sampled session alive after 13 d 18 h (the whole window), a refresh token usable 54 h after issue; timer removed. Left: the other test-account sessions, whose revoke `pcb-lab probe sessions --revoke-others` cannot do (403, code 9101: needs the locked scope); the author revokes them in the web app.
 - Synthetic data set: not yet applied to the test account (`spec/experiments/DATASET.md`).
-- SPEC §5.2 markers on E01 and E02 stay `[assumed]` until then.
+- SPEC §5.2: E01's marker is `[verified]` since 2026-11-26; E02's hours stay unmeasured.
 
 ## Still open, later
 

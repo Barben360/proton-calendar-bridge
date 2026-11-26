@@ -331,9 +331,10 @@ needs-human: needs-captcha(url, token) | needs-2fa-code | needs-password | locke
   unseals the store owns the account, not just a session) was hard to read in a window, a ticked box refused a 2FA
   person's 6-digit code, and the one live unattended relogin met a CAPTCHA anyway (E02 row 5) [verified:
   `TestFlowLoginTurnsUnattendedReloginOff`, `TestWizardScreensFollowSteps`, `TestLoginPageOffersNoUnattendedRelogin`].
-- Session lifetime and refresh-token rotation rules [partly verified: live 2026-11-12/14, E01: the access token lives
-  24 h (`ExpiresIn` 86400), every refresh rotates both tokens, the long probe's session alive at 42 h; its 14-day
-  window ends 2026-11-26; the session's whole lifetime stays assumed → E01]: decide
+- Session lifetime and refresh-token rotation rules [verified: live 2026-11-12/26, E01: the access token lives
+  24 h (`ExpiresIn` 86400), every refresh rotates both tokens, a session refreshed about once a day is alive after
+  13 d 18 h (the 14-day window), and a refresh token is accepted 54 h after issue; an age limit beyond 14 days and
+  longer offline gaps are not measured]: decide
   how often the daemon refreshes and when it must relogin. M1 refreshes on demand, once across processes; the Proton answers it classifies as "session ended" or "credentials refused" are all `[assumed]` until the live session lists them (`HUMAN-CHECKS.md`, "signals to confirm").
 - Refresh request: `POST /auth/v4/refresh` with `UID`, `RefreshToken`,
   `ResponseType: token`, `GrantType: refresh_token`, `RedirectURI`, a random
