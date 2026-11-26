@@ -23,7 +23,7 @@ Tested offline against the shared fake (`internal/lab/probe/session_test.go`, `c
 
 ## Results
 
-One finding came first (below); then the long probe's interim figures (2026-11-14). The long probe runs until 2026-11-26.
+One finding came first (below); then the long probe's interim figures (2026-11-14) and its final result (2026-11-26): **the session survived the 14-day window**, alive at its last sample, 13 d 18 h after login.
 
 ### Live finding (2026-11-12): a refresh needs the access token
 
@@ -60,7 +60,23 @@ The dedicated session of HUMAN-CHECKS step 3 (login 2026-11-12 22:53:48Z, after 
 | `ExpiresIn` on each refresh | 86400 (86399) s: **the access token lives 24 h** |
 | Rotation | `rotated: true` on both: each refresh returns a new refresh token and a new access token |
 
-So far: the session is alive at 42 h with a refresh once a day; the refresh token rotates on every refresh. The old-token rule is the 2026-11-12 finding above (a rotated refresh token needs its pair's access token). Still to come: the end of the 14-day window (2026-11-26), with the first `ok:false` line or "survived 14 days of 6-hourly sampling"; then the timer is removed and `e01.jsonl` goes in `raw/E01/alive.jsonl`.
+So far: the session is alive at 42 h with a refresh once a day; the refresh token rotates on every refresh. The old-token rule is the 2026-11-12 finding above (a rotated refresh token needs its pair's access token). The final result follows.
+
+### Long probe, final (2026-11-26)
+
+The same session's whole `e01.jsonl`, copied to `raw/E01/alive.jsonl` (local only, git-ignored; no secrets in it) [verified: live 2026-11-12 to 2026-11-26]:
+
+| Samples | Result |
+|---|---|
+| 46, from 2026-11-12 22:53:55Z to 2026-11-26 17:00:11Z | every one `ok`, code 1000; **no `ok:false` line** |
+| Last sample | 2026-11-26 17:00:11Z, 13 d 18 h 06 min after the first; the next slot (23:00Z) falls after the 14-day window (22:53:55Z), so it is the last the probe could take |
+| Refreshes | 12, each at the first sample after the access token's 24 h ran out; every one `rotated: true`, `ExpiresIn` 86400 (once 86399) |
+| Missed slots | 11 of 56, while the workstation was off or asleep: 2026-11-15 23:00Z to 11-16 05:00Z (2), 11-17 23:00Z to 11-18 11:00Z (3), 11-23 11:00Z to 11-24 17:00Z (6). The `Persistent=true` catch-up did not fill them: the one the journal still holds (2026-11-24 18:43Z, at resume) failed on DNS before the network was up (exit 20, no line) |
+| Longest gap between refreshes | 54 h: the pair issued 2026-11-22 17:00Z was refreshed 2026-11-24 23:00Z, 30 h after its access token expired; accepted, rotated |
+
+Answer to question 4: **a session sampled every 6 hours, refreshed about once a day, lives at least 13 d 18 h**; nothing ended it, so no age limit up to that point. A refresh token stays usable at least 54 h after it was issued (30 h past its access token's expiry). Not measured: a longer offline gap, an age limit beyond 14 days.
+
+Close-out: the timer was removed on 2026-11-26. The revoke of the account's other sessions (`probe sessions --revoke-others --yes`, HUMAN-CHECKS step 3) was refused for all seven, HTTP 403, code 9101 "insufficient scope": revoking another session needs the locked scope, which `probe sessions` does not unlock. Those sessions and E01's own stay until the author revokes them in the web app (Security, Sessions).
 
 ## Pending live run (HUMAN-CHECKS steps 2 and 3)
 
