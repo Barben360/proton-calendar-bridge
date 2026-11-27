@@ -656,9 +656,10 @@ func TestCollectionReadOnlyFollowsTheGate(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t, protontest.Options{})
 		owner := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Owner"})
-		editor := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Editor", Permissions: 8})
-		viewer := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Viewer", Permissions: 2 | 4})
-		busy := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Busy", Permissions: 1})
+		// Proton's share members (issue #99): edit 112, view 96, availability 64.
+		editor := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Editor", Permissions: 112})
+		viewer := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Viewer", Permissions: 96})
+		busy := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Busy", Permissions: 64})
 		hol := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
 		sub := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Feed", Type: 1})
 		odd := e.f.AddCalendar(e.f.Username, protontest.Calendar{Name: "Odd", Type: 7})

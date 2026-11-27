@@ -145,7 +145,7 @@ func TestHealthReportsGatesWithReasons(t *testing.T) {
 	e.calendars(t) // the fake serves a calendar's member from its first bootstrap
 	e.f.SetPassphraseSignature(badSig, protontest.PassphraseSignedByStranger)
 	e.f.SetPassphraseSignature(noSig, protontest.PassphraseUnsigned)
-	e.f.SetPermissions(viewer, 7) // the Write bit (8) off
+	e.f.SetPermissions(viewer, 96) // a view share: the Write bit (16) off
 	s := e.serve(t)
 	s.next(t, true)
 

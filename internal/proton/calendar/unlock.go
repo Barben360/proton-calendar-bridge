@@ -28,11 +28,14 @@ type Settings struct {
 	DefaultFullDayNotifications []Notification
 }
 
-// PermissionWrite is the bit of a member's Permissions that allows writing.
-// The value comes from caloxide's constants and is not confirmed by Proton's
-// own sources [claim: caloxide] (research H); E14 settles it on the live
-// account (owner, edit and view shares).
-const PermissionWrite = 8
+// PermissionWrite is the bit of a member's Permissions that allows writing:
+// WRITE in Proton's CALENDAR_PERMISSIONS (SUPER_OWNER 1, OWNER 2, ADMIN 4,
+// READ_MEMBER_LIST 8, WRITE 16, READ 32, AVAILABILITY 64), the bit the web
+// app's getCanWrite tests [source: WebClients, read only] (E14). An owned
+// calendar's member is 127, an edit share 112, a view share 96. 8, the
+// member-list bit, was caloxide's guess and kept edit shares read only
+// (issue #99).
+const PermissionWrite = 16
 
 // keyFlagPrimary is the bit of a bootstrap calendar key's Flags that marks the
 // key new data is encrypted to (1 active, 2 primary; research B.3).
