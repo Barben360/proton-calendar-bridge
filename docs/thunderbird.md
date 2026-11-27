@@ -147,7 +147,7 @@ Thunderbird shows what Proton stored, which can differ from what it sent. The fu
 
 Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely:
 
-- **Calendars you may not write:** holidays and subscribed calendars, calendars where your member lacks write permission, calendars whose key signature does not check out. `pcb calendar list` shows them `read_only`.
+- **Calendars you may not write:** holidays and subscribed calendars, calendars shared with you view-only or as free/busy, calendars whose key signature does not check out. `pcb calendar list` shows them `read_only`. A calendar shared with you with edit rights is written like your own, except the events another member wrote: those you can delete but not edit (pcb cannot verify their author).
 - **Attendees:** adding or removing attendees, or an attendee on a new event. Invitations are not supported, and **pcb never notifies attendees** in v1: moving an occurrence of a meeting keeps its attendees but sends them nothing.
 - **Recurrence rules Proton cannot hold:** hourly or finer, a count above 49, an end after 2037-12-31, `RDATE`, `EXRULE`, "this and all future occurrences" sent as one change, and the other forms in the recurrence section of the [property mapping](../spec/mapping.md).
 - **A series whose start is not one of its own occurrences** (Proton would drop that start, Thunderbird show it): refused when a write creates one or changes the start or rule of an existing one; other edits pass. Put the start on one of the rule's days in that same edit, or delete the series and create it again.
@@ -162,6 +162,10 @@ Writes are refused (HTTP 403) when pcb cannot store them faithfully or safely:
 For a calendar without offline support, Thunderbird shows a generic error after a refused write and then **disables the calendar** until you enable it again. With offline support it keeps the change locally and retries it silently.
 
 Subscribe to pcb calendars with "Offline support" checked: the default in the New Calendar dialog, otherwise in the calendar's properties. To recover a disabled calendar, enable it again in its properties, and look for the `refused a CalDAV write` line to see why.
+
+### When a calendar stays read-only in Thunderbird
+
+Thunderbird remembers a calendar it once saw as read-only and never clears that by itself. If pcb now lets you write it (you were given edit rights, or an upgrade fixed it: before 0.7.1, calendars shared with you with edit rights were read-only), open the calendar's properties in Thunderbird, untick **Read Only**, and tick **Switch this calendar on** if it was disabled. `pcb calendar list` shows whether pcb lets you write it (`read_only` false).
 
 ### 503 and 412 answers
 

@@ -66,15 +66,17 @@ Success means:
 
 ## 3. Goals, non-goals, anti-goals
 
-Goals: CalDAV read/write for owned calendars; read-only for subscribed and
-holidays calendars; login with password, password + TOTP, or two-password mode (a mailbox
+Goals: CalDAV read/write for owned calendars and for calendars shared with the
+account with edit rights (issue #99: the write gate follows the member's Write
+bit; the other members' events are read, not edited, and not verified);
+read-only for subscribed and holidays calendars and for view-only shares; login with password, password + TOTP, or two-password mode (a mailbox
 password after the 2FA code, never stored) [decided 0010, 0021]; a CLI for everything about the bridge itself (install, service,
 login, status, doctor, CalDAV client credentials, uninstall); several Proton
 accounts in one process (M6, decision 0014); a desktop app for Linux, `pcb-ui` (M7, decision 0015: tray, account window, add-account wizard, notifications); an MCP adapter for agents (M8, decision 0016: stdio and remote, grants per agent, login finished by the person, §12); a container image; Linux amd64 and arm64, and Windows amd64: both binaries, `pcb-ui` started at login and `pcb` through it or on the files (decision 0018, live check `spec/HUMAN-CHECKS.md` step 12), from a zip or a per-user MSI (decision 0020). Those are the supported platforms; macOS gets `pcb` only
 (release archives, untested).
 
 Not planned (not designed here): REST API, `.ics` feeds, event
-commands in the CLI (Thunderbird is the client), auto-update (pcb only tells that a newer stable release exists, decision 0019), shared calendars, invitations,
+commands in the CLI (Thunderbird is the client), auto-update (pcb only tells that a newer stable release exists, decision 0019), managing shares (inviting, accepting, the member list), invitations,
 FIDO2, CardDAV, macOS/Windows service management, a GUI on macOS (`pcb-ui` runs on Linux and, since decision 0018, Windows). The desktop app
 `pcb-ui` is built (M7; "GUIs not planned" before M6, "planned" before M7), designed in
 `spec/designs/2026-11-12-multi-account-and-ui-design.md`. MCP is built (M8; "not planned"
@@ -415,7 +417,7 @@ the event shows as unverified.
 
 Member passphrase signature and the write gate [call] (research G, rulings
 R17, M4-R1, M4-R39, M4-R40). A calendar is written only when its type is
-normal, our member's `Permissions` has the Write bit (8 [assumed → E14]), the
+normal, our member's `Permissions` has the Write bit (16 [source: WebClients] → E14), the
 member passphrase signature verifies, over the decrypted passphrase, with our
 member's address keyring [assumed → E10], and both write keys exist (the
 calendar key flagged primary, the primary key of our member's address).
@@ -605,10 +607,11 @@ the key proof would find it; a DELETE is unaffected.
   key, the only recipient of new key packets), `MemberPassphrases[].Signature`
   (R17, §5.3), `Members[].Permissions`.
 - Member permissions and calendar type (normal 0, subscribed 1, holidays 2)
-  [verified for types: proton-cal]; the Write bit of `Permissions` is 8
-  [claim: caloxide; assumed → E14, `spec/experiments/E14-member-permissions.md`];
-  the bits of view-only and edit shares are not needed (shared calendars are
-  out of scope).
+  [verified for types: proton-cal]; the Write bit of `Permissions` is 16,
+  Proton's `CALENDAR_PERMISSIONS.WRITE` (owner 127, edit share 112, view share
+  96, availability share 64) [source: WebClients; caloxide's 8 is the
+  member-list bit and kept edit shares read only, issue #99; live → E14,
+  `spec/experiments/E14-member-permissions.md`].
 
 ### 5.5 Change feed
 Goal: incremental sync without re-listing. Source-based so far (third-party
@@ -2237,7 +2240,7 @@ Control socket (M5, `internal/ctl`; M5-Rpre1, R2, P2 to P5):
 | E11 | Does Thunderbird need VTIMEZONE? | C0 | answered from source inside E08 (§6.3, "Answers to SPEC questions"; no E11 file): **no** [source: E08]; the bridge emits none [verified: live 2026-11-14, E08 §6.3: the test account's TZID events land at the right instant in Thunderbird] |
 | E12 | Recurrence forms Proton refuses or alters | C0/C1 fidelity (M4) | `E12-recurrence-forms.md`: write each RRULE form and series operation through pcb, read back, compare in the web app and Thunderbird (HUMAN-CHECKS §6) |
 | E13 | Unknown iCal properties: kept, dropped or refused by Proton? | C1 codec (M4) | `E13-unknown-properties.md`: write X- and standard extras, read back, edit in the web app, read again (HUMAN-CHECKS §6) |
-| E14 | Member `Permissions`: the Write bit (owned calendars); view-only vs edit shares not planned | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
+| E14 | Member `Permissions`: the Write bit, 16 from WebClients (owned calendars live; edit and view shares need a second account) | M4 write gate | `E14-member-permissions.md`: `pcb calendar list` on the test account, the lab probe if needed (HUMAN-CHECKS §6) |
 | E15 | Secret sealing on a headless Linux host (systemd-creds, Secret Service) | C2 | try on a headless Debian 13 server |
 | E16 | RRULE library audit vs our own | C0 | done (M8): rrule-go v1.8.2 not adopted (DST gap and overlap instants differ from RFC 5545 §3.3.5); own expander over Proton's set, `E16-rrule.md` |
 | E17 | go-webdav audit: fit, bugs, client compatibility | A1 | done (M3): not adopted as server, test client only, `E17-go-webdav-audit.md` |
@@ -2520,7 +2523,8 @@ piece of logic is reused:
   for `internal/winzone`; fyne-io/oksvg and srwiley/rasterx (BSD-3-Clause) render the `.exe` icon and the go-winres tool (0BSD) writes its
   resource at build time. All credited in `README.md`.
 - ProtonMail/WebClients (GPL-3.0 [verified: GitHub licence 2026-11-10]:
-  read for understanding only, never copy code), go-proton-api, gopenpgp,
+  read for understanding only, never copy code: the client identity of E03
+  and the member permission bits of E14), go-proton-api, gopenpgp,
   go-srp (MIT, used as dependencies); rrule-go (MIT) audited in E16 and not
   adopted (M8 expands recurrences with its own code);
   modelcontextprotocol/go-sdk v1.8.0 (MIT moving to Apache-2.0, both fine for

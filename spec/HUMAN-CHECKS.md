@@ -163,7 +163,7 @@ Order, chosen so the author acts once:
    jq '.body.Calendars[] | {Type, Permissions: [.Members[].Permissions]}' "$LIVE"/lab/*calendar-list.json
    jq '[.body.Passphrase.MemberPassphrases[].Signature]' "$LIVE"/lab/*calendar-bootstrap.json   # first calendar only; the probe reads the v1 bootstrap, assumed to carry the same field as the v2 one pcb reads
    ```
-   Read it as: a `Permissions` value without the 8 bit → E14's bit is wrong; 8 set and a signature `<redacted:len=N>` with N > 0 → the signature does not verify with our address key (R17's assumption is wrong, E10); no signature (empty) → the gate stays undecided and every write would be 503. Record, then stop the write part (6.2, 6.3 writes); the read part of 6.3 can still run.
+   Read it as: a `Permissions` value without the 16 bit → E14's bit is wrong; 16 set and a signature `<redacted:len=N>` with N > 0 → the signature does not verify with our address key (R17's assumption is wrong, E10); no signature (empty) → the gate stays undecided and every write would be 503. Record, then stop the write part (6.2, 6.3 writes); the read part of 6.3 can still run.
 5. Variables and helpers for 6.2 (bash, in the same call as the commands that use them, since variables do not survive between agent calls; the `R`, `DB`, `LIVE` line of 1. goes first; `BASE` is the default calendar's CalDAV URL, its path segment being the first 16 hex digits of the SHA-256 of the calendar ID):
    ```sh
    CAL_ID=$(jq -r '.data.calendars[] | select(.default) | .id' "$LIVE/calendars.json")
