@@ -25,8 +25,9 @@ type Calendar struct {
 	BrokenPassphrase         bool // ... to an unrelated key (no address key decrypts it)
 	ExtraLockedKey           bool // another calendar key, no passphrase opens it, listed first
 	ForeignMemberFirst       bool // another member, listed first with its passphrase entry encrypted to an unrelated key
-	// Permissions is our member's bitmask (research H: 8 is Write); 0
-	// serves 127, every bit, as for an owned calendar.
+	// Permissions is our member's bitmask, Proton's CALENDAR_PERMISSIONS
+	// (16 is Write; an edit share is 112, a view share 96, availability 64);
+	// 0 serves 127, every bit, as for an owned calendar.
 	Permissions int
 	// NoPrimaryKey flags no calendar key primary; TwoPrimaryKeys flags the
 	// retired key primary too (anomalies a client must fail closed on).
@@ -120,7 +121,7 @@ func (c *calendarRec) permissions() int {
 
 // writable says whether our member may write events: a normal calendar and
 // the Write bit (research H).
-func (c *calendarRec) writable() bool { return c.def.Type == 0 && c.permissions()&8 != 0 }
+func (c *calendarRec) writable() bool { return c.def.Type == 0 && c.permissions()&16 != 0 }
 
 // newCalendarKey generates a calendar key (x25519) locked with pass.
 func (f *Fake) newCalendarKey(name string, pass []byte) calendarKey {

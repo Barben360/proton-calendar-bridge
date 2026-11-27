@@ -261,7 +261,7 @@ func TestRefusedWritesNeverReachProton(t *testing.T) {
 	r := newServingRig(t, func(f *protontest.Fake) {
 		work = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"})
 		hol = f.AddCalendar(f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
-		shared = f.AddCalendar(f.Username, protontest.Calendar{Name: "Shared", Permissions: 127 &^ 8})
+		shared = f.AddCalendar(f.Username, protontest.Calendar{Name: "Shared", Permissions: 96}) // a view share
 		f.AddEvent(hol, protontest.Event{UID: "ny@x", Start: base, End: base + 3600, Card: card("ny@x", "New year", base)})
 		f.AddEvent(shared, protontest.Event{UID: "s@x", Start: base, End: base + 3600, Color: green, Card: card("s@x", "Shared", base)})
 	})
@@ -334,7 +334,7 @@ func TestPrivilegesFollowTheWriteGate(t *testing.T) {
 	r := newServingRig(t, func(f *protontest.Fake) {
 		work = f.AddCalendar(f.Username, protontest.Calendar{Name: "Work"})
 		hol = f.AddCalendar(f.Username, protontest.Calendar{Name: "Holidays", Type: 2})
-		shared = f.AddCalendar(f.Username, protontest.Calendar{Name: "Shared", Permissions: 127 &^ 8})
+		shared = f.AddCalendar(f.Username, protontest.Calendar{Name: "Shared", Permissions: 96}) // a view share
 	})
 	ms := parseMS(t, r.do("PROPFIND", home, tbHomeSet, "Depth", "1"))
 	wantNames(t, "Work", privileges(t, ms.get(t, calPath(work)).prop(t, nsD, "current-user-privilege-set")),
@@ -826,7 +826,7 @@ func TestUndecidedWriteGateIs503(t *testing.T) {
 		holidays = hol
 		decided = f.AddCalendar(f.Username, protontest.Calendar{Name: "Viewer"})
 		f.AddEvent(decided, protontest.Event{UID: "a@x", Start: base, End: base + 3600, Color: green, Card: card("a@x", "A", base)})
-		f.SetPermissions(decided, 127&^8)
+		f.SetPermissions(decided, 96) // a view share: no Write bit (16)
 	})
 	ms := parseMS(t, r.do("PROPFIND", home, tbHomeSet, "Depth", "1"))
 	for id, what := range undecided {

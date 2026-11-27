@@ -355,8 +355,8 @@ func TestSeedTurnsTheDataSetIntoProtonRows(t *testing.T) {
 		t.Fatalf("seeded %+v, calendars %d, default %q; want 4 calendars, 364 rows (352 entries, 8 exceptions, a meeting, 3 shared), default My calendar",
 			n, len(r.cals), r.def)
 	}
-	if sh := r.cals[3]; sh.Permissions != 119 || !sh.ForeignMemberFirst || len(r.byCal[sh.Name]) != 3 {
-		t.Errorf("shared calendar %+v with %d rows: want Permissions 119 (no Write bit), another member first, 3 rows", sh, len(r.byCal[sh.Name]))
+	if sh := r.cals[3]; sh.Permissions != 96 || !sh.ForeignMemberFirst || len(r.byCal[sh.Name]) != 3 {
+		t.Errorf("shared calendar %+v with %d rows: want Permissions 96 (a view share, no Write bit), another member first, 3 rows", sh, len(r.byCal[sh.Name]))
 	}
 
 	// A timed series with an edit and a delete (s341, Europe/Paris).

@@ -355,8 +355,11 @@ func TestBadPassphraseSignatureLeavesTheCalendarReadOnly(t *testing.T) {
 	decrypts(t, a, f.EncryptToCalendar(id, []byte("probe"))) // still readable
 }
 
-// Would fail if Writable ignored the type, the Write bit (8), or the
-// verification, or accepted any non-zero permission.
+// Would fail if Writable ignored the type, the Write bit (16), or the
+// verification, read another bit as Write (8, the member-list bit, was the
+// old guess: issue #99), or accepted any non-zero permission. The values are
+// Proton's members: owner 127, edit share 112, view share 96, availability
+// share 64.
 func TestWritableNeedsTheWriteBit(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -367,12 +370,14 @@ func TestWritableNeedsTheWriteBit(t *testing.T) {
 		want  bool
 	}{
 		{"owner", 0, 0, false, true}, // the fake serves 127
-		{"write bit alone", 0, 8, false, true},
-		{"view only", 0, 2 | 4, false, false},
-		{"availability only", 0, 1, false, false},
-		{"admin without write", 0, 16 | 32, false, false},
-		{"write but a bad signature", 0, 8, true, false},
-		{"write but a subscribed calendar", 1, 8, false, false},
+		{"edit share", 0, 112, false, true},
+		{"write bit alone", 0, 16, false, true},
+		{"view share", 0, 96, false, false},
+		{"availability share", 0, 64, false, false},
+		{"member-list bit alone", 0, 8, false, false},
+		{"every bit but write", 0, 127 &^ 16, false, false},
+		{"edit share but a bad signature", 0, 112, true, false},
+		{"write but a subscribed calendar", 1, 112, false, false},
 		{"write but holidays", 2, 127, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -509,14 +514,14 @@ func TestSignerIsThePrimaryKeyOfTheAddress(t *testing.T) {
 func TestPermissionsAreOurOwnMembers(t *testing.T) {
 	t.Parallel()
 	f, c, u := session(t)
-	f.AddCalendar(f.Username, protontest.Calendar{ForeignMemberFirst: true, Permissions: 8})
+	f.AddCalendar(f.Username, protontest.Calendar{ForeignMemberFirst: true, Permissions: 112})
 	a, err := calendar.Unlock(t.Context(), c, u, firstCalendar(t, c))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if a.Permissions != 8 || !a.Writable() {
-		t.Errorf("Permissions = %d, writable %v; want our member's 8 and writable", a.Permissions, a.Writable())
+	if a.Permissions != 112 || !a.Writable() {
+		t.Errorf("Permissions = %d, writable %v; want our member's 112 (an edit share) and writable", a.Permissions, a.Writable())
 	}
 }
 
@@ -590,7 +595,8 @@ func TestGateVerdicts(t *testing.T) {
 	}{
 		{"writable", func(*calendar.Access) {}, calendar.Normal, calendar.GateOpen},
 		{"holidays", func(*calendar.Access) {}, calendar.ParseType("holidays"), calendar.GateClosed},
-		{"no Write bit", func(a *calendar.Access) { a.Permissions = 2 | 4 }, calendar.Normal, calendar.GateClosed},
+		{"edit share", func(a *calendar.Access) { a.Permissions = 112 }, calendar.Normal, calendar.GateOpen},
+		{"no Write bit", func(a *calendar.Access) { a.Permissions = 127 &^ 16 }, calendar.Normal, calendar.GateClosed},
 		{"checked, bad", func(a *calendar.Access) { a.PassphraseVerified = false }, calendar.Normal, calendar.GateClosed},
 		{"not checked", func(a *calendar.Access) { a.PassphraseChecked, a.PassphraseVerified = false, false }, calendar.Normal, calendar.GateUndecided},
 		{"no write key", func(a *calendar.Access) { a.Primary = nil }, calendar.Normal, calendar.GateUndecided},

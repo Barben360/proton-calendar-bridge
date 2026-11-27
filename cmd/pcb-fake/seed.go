@@ -107,9 +107,10 @@ func seedDataset(f seeder, username string, ds seed.Dataset) (seeded, error) {
 	n.add(def.i, m.UID, uids)
 	shared := addCalendar(protontest.Calendar{
 		Name: "Shared with me (view only)", Color: "#DB60D6",
-		// Every bit but Write (8, research H), another member listed first:
-		// a calendar someone else shares with the account, read-only.
-		Permissions: 127 &^ 8, ForeignMemberFirst: true,
+		// A view share (Proton's READ and AVAILABILITY, 96: no Write bit,
+		// 16), another member listed first: a calendar someone else shares
+		// with the account, read-only.
+		Permissions: 96, ForeignMemberFirst: true,
 	}, false)
 	for i, title := range []string{"Team offsite", "Quarterly planning", "Release party"} {
 		start := time.Date(2027, time.January, 11+7*i, 9, 0, 0, 0, time.UTC)
