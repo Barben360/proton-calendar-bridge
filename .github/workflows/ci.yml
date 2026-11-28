@@ -287,7 +287,7 @@ jobs:
             ~\go\pkg\mod
           key: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
           restore-keys: go-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
-      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+      - uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2.34.0
         with:
           msystem: UCRT64
           install: make mingw-w64-ucrt-x86_64-gcc
@@ -396,7 +396,7 @@ jobs:
             ~\go\pkg\mod
           key: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
           restore-keys: go-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
-      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+      - uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2.34.0
         with:
           msystem: UCRT64
           install: make mingw-w64-ucrt-x86_64-gcc
