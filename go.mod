@@ -5,14 +5,14 @@ go 1.27
 toolchain go1.27.4
 
 require (
-	fyne.io/fyne/v2 v2.8.2
+	fyne.io/fyne/v2 v2.8.3
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/ProtonMail/go-crypto v1.5.2-proton
 	github.com/ProtonMail/go-proton-api v0.0.0-20261022084531-3f8fbebac58d
 	github.com/ProtonMail/go-srp v0.0.7
 	github.com/ProtonMail/gopenpgp/v2 v2.11.1-proton
-	github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6
-	github.com/emersion/go-webdav v0.7.0
+	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
+	github.com/emersion/go-webdav v0.8.0
 	github.com/fyne-io/oksvg v0.2.1-0.20260918172519-a9af55fa95d9
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.2
 	github.com/go-resty/resty/v2 v2.17.2
@@ -27,7 +27,7 @@ require (
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (
@@ -52,7 +52,7 @@ require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/emersion/go-message v0.16.0 // indirect
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
-	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9 // indirect
+	github.com/emersion/go-vcard v0.0.0-20241024213814-c9703dde27ff // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fyne-io/gl-js v0.2.1-0.20260315212741-029c47fd27e8 // indirect
 	github.com/fyne-io/glfw-js v0.4.0 // indirect
